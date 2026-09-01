@@ -1,0 +1,18 @@
+[package]
+name = "rak-stdlib"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow = "1.0"
+ureq = "2.9"
+md-5 = "0.10"
+sha1 = "0.10"
+sha2 = "0.10"
+base64 = "0.22"
+urlencoding = "2.1"
+scraper = "0.20"
+serde_json = "1.0"

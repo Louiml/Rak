@@ -1,0 +1,40 @@
+[package]
+name = "rakc"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Rak language compiler - written for hackers and OSINT investigators"
+
+[dependencies]
+logos.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+
+# Standard library with real networking
+rak-stdlib = { path = "../stdlib" }
+
+# Parser - using chumsky for combinator approach
+chumsky = { version = "1.0.0-alpha.7", default-features = false, features = ["std"] }
+
+# Future backends
+# inkwell = { workspace = true, optional = true }
+# cranelift = { optional = true }
+
+[dev-dependencies]
+pretty_assertions = "1.4"
+
+[features]
+default = []
+llvm = [] # "inkwell"
+jit = []
+
+[[bin]]
+name = "rakc"
+path = "src/main.rs"
+
+[lib]
+name = "rakc"
+path = "src/lib.rs"

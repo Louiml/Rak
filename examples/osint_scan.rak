@@ -1,0 +1,54 @@
+// Rak OSINT Script - Full feature demo
+use net.http
+use recon.dns
+use web.html
+use crypto.hash
+
+let target = "127.0.0.1"
+
+// Port scan using scan_ports() function - returns array for for loops
+dump "=== Port Scan ==="
+for port in scan_ports(target, { range: [0x0016, 0x0050] }) {
+    dump fmt("Port 0x{:04X} open", port)
+}
+
+// HTML parsing
+dump "=== HTML Parsing ==="
+let html = "<html><title>Rak Test</title><a href='https://rak.dev'>Rak</a><a href='https://github.com'>GitHub</a></html>"
+dump html_title(html)
+for link in html_links(html) {
+    dump fmt("Link: {}", link)
+}
+
+// Hashing and encoding
+dump "=== Crypto ==="
+dump md5("password")
+dump sha256("secret")
+dump hex_encode("ABC")
+dump base64_encode("hello")
+
+// File operations
+dump "=== Files ==="
+file_write("output.txt", "Rak was here")
+dump file_read("output.txt")
+dump file_exists("output.txt")
+file_delete("output.txt")
+
+// JSON utilities
+dump "=== JSON ==="
+let json = "{\"user\": \"admin\", \"role\": \"superuser\"}"
+dump json_get(json, "user")
+dump json_keys(json)
+
+// Hex arithmetic
+let signature = 0xDEADBEEF
+let mask = 0xFF00FF00
+let result = signature & mask
+dump fmt("Masked: 0x{:08X}", result)
+
+// DNS lookup
+dump "=== DNS ==="
+let ips = dns_lookup("localhost")
+for ip in ips {
+    dump ip
+}

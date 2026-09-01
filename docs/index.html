@@ -1,0 +1,354 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Rak Language Documentation</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <nav class="sidebar">
+        <div class="logo">
+            <h1>Rak</h1>
+            <span>v0.1.0</span>
+        </div>
+        <ul class="nav-links">
+            <li><a href="#intro" class="active">Introduction</a></li>
+            <li><a href="#syntax">Syntax</a></li>
+            <li><a href="#types">Types</a></li>
+            <li><a href="#keywords">Keywords</a></li>
+            <li><a href="#hex">Hexadecimal</a></li>
+            <li><a href="#ops">Operators</a></li>
+            <li><a href="#stdlib">Standard Library</a></li>
+            <li><a href="#osint">OSINT & Hacking</a></li>
+            <li><a href="#html">HTML/CSS/JS Interop</a></li>
+            <li><a href="#examples">Examples</a></li>
+        </ul>
+    </nav>
+
+    <main class="content">
+        <section id="intro">
+            <h1>Rak Programming Language</h1>
+            <p class="subtitle">Built for hackers and OSINT investigators by Ryuzaki</p>
+            
+            <div class="highlight-box">
+                <p>Rak simplifies security research by combining English-readable syntax with first-class hexadecimal support. Write network scanners, web scrapers, and forensic tools without wrestling with boilerplate.</p>
+            </div>
+
+            <h2>Hello World</h2>
+            <pre><code>dump "Hello, World"</code></pre>
+
+            <h2>Quick Start</h2>
+            <pre><code>// Scan a target
+scan "192.168.1.1" {
+    range: [0x0016, 0x0050]
+} {
+    if open {
+        dump fmt("Port 0x{:04X}", port)
+    }
+}</code></pre>
+        </section>
+
+        <section id="syntax">
+            <h1>Syntax Overview</h1>
+            <p>Rak uses English keywords and treats hexadecimal as a native type. No semicolons required in blocks, but statements outside blocks need them.</p>
+            
+            <h2>Variables</h2>
+            <pre><code>let x = 0xFF
+let mut counter = 0
+counter = counter + 1</code></pre>
+
+            <h2>Functions</h2>
+            <pre><code>fn add(a, b) {
+    return a + b
+}
+
+let result = add(0x10, 0x20)</code></pre>
+
+            <h2>Control Flow</h2>
+            <pre><code>if x > 0x10 {
+    dump "Greater"
+} else {
+    dump "Smaller"
+}
+
+loop {
+    dump "Infinite"
+    break
+}
+
+while counter < 0x0A {
+    dump counter
+    counter = counter + 1
+}</code></pre>
+        </section>
+
+        <section id="types">
+            <h1>Type System</h1>
+            <table>
+                <thead>
+                    <tr><th>Type</th><th>Description</th><th>Example</th></tr>
+                </thead>
+                <tbody>
+                    <tr><td>hex8, hex16, hex32, hex64</td><td>Unsigned integers</td><td>0xFF, 0xABCD</td></tr>
+                    <tr><td>int</td><td>Decimal integer</td><td>42, 1000</td></tr>
+                    <tr><td>string</td><td>UTF-8 text</td><td>"hello"</td></tr>
+                    <tr><td>bytes</td><td>Raw byte array</td><td>b"\x48\x65\x6C\x6C\x6F"</td></tr>
+                    <tr><td>bool</td><td>Boolean</td><td>true, false</td></tr>
+                    <tr><td>nil</td><td>Null/void</td><td>nil</td></tr>
+                    <tr><td>[T]</td><td>Array</td><td>[1, 2, 3]</td></tr>
+                    <tr><td>{K: V}</td><td>Map</td><td>{"key": "value"}</td></tr>
+                </tbody>
+            </table>
+        </section>
+
+        <section id="keywords">
+            <h1>Keywords</h1>
+            <div class="keyword-grid">
+                <div class="keyword-card">
+                    <code>scan</code>
+                    <p>Port/network scanner</p>
+                </div>
+                <div class="keyword-card">
+                    <code>fetch</code>
+                    <p>HTTP/TCP request</p>
+                </div>
+                <div class="keyword-card">
+                    <code>dump</code>
+                    <p>Output to console/file</p>
+                </div>
+                <div class="keyword-card">
+                    <code>trace</code>
+                    <p>Inspect/debug output</p>
+                </div>
+                <div class="keyword-card">
+                    <code>let</code>
+                    <p>Variable declaration</p>
+                </div>
+                <div class="keyword-card">
+                    <code>mut</code>
+                    <p>Mutable modifier</p>
+                </div>
+                <div class="keyword-card">
+                    <code>fn</code>
+                    <p>Function definition</p>
+                </div>
+                <div class="keyword-card">
+                    <code>if / else</code>
+                    <p>Conditional</p>
+                </div>
+                <div class="keyword-card">
+                    <code>loop</code>
+                    <p>Infinite loop</p>
+                </div>
+                <div class="keyword-card">
+                    <code>while</code>
+                    <p>Conditional loop</p>
+                </div>
+                <div class="keyword-card">
+                    <code>for</code>
+                    <p>Iterator loop</p>
+                </div>
+                <div class="keyword-card">
+                    <code>return</code>
+                    <p>Return value</p>
+                </div>
+            </div>
+        </section>
+
+        <section id="hex">
+            <h1>Hexadecimal</h1>
+            <p>Hexadecimal is a first-class citizen in Rak. All memory addresses, port numbers, and byte sequences work naturally in hex.</p>
+            
+            <h2>Literals</h2>
+            <pre><code>let port = 0x0050      // 80 in decimal
+let signature = 0xDEADBEEF
+let mask = 0xFF00FF00</code></pre>
+
+            <h2>Arithmetic</h2>
+            <pre><code>let a = 0x10
+let b = 0x20
+let c = a + b           // 0x30
+let d = a & b           // 0x00
+let e = a | b           // 0x30
+let f = a ^ b           // 0x30</code></pre>
+
+            <h2>Formatting</h2>
+            <pre><code>dump fmt("0x{:04X}", port)    // 0x0050
+dump fmt("0x{:08X}", sig)     // 0xDEADBEEF</code></pre>
+        </section>
+
+        <section id="ops">
+            <h1>Operators</h1>
+            <table>
+                <thead>
+                    <tr><th>Operator</th><th>Description</th></tr>
+                </thead>
+                <tbody>
+                    <tr><td>+ - * / %</td><td>Arithmetic</td></tr>
+                    <tr><td>& | ^ ~ << >></td><td>Bitwise</td></tr>
+                    <tr><td>== != < > <= >=</td><td>Comparison</td></tr>
+                    <tr><td>&& || !</td><td>Logical</td></tr>
+                    <tr><td>= += -= *= /=</td><td>Assignment</td></tr>
+                    <tr><td>[] .</td><td>Index, Field access</td></tr>
+                </tbody>
+            </table>
+        </section>
+
+        <section id="stdlib">
+            <h1>Standard Library</h1>
+            
+            <h2>net</h2>
+            <pre><code>use net.http
+
+fetch "https://example.com" {
+    method: "GET",
+    headers: {"User-Agent": "Rak/0.1"}
+} {
+    dump headers
+    trace body
+}</code></pre>
+
+            <h2>recon</h2>
+            <pre><code>use recon.dns
+
+scan "target.com" {
+    range: [0x0016, 0x01F4]
+    threads: 0x64
+}</code></pre>
+
+            <h2>crypto</h2>
+            <pre><code>use crypto.hash
+
+let data = "password"
+let hash = md5(data)
+let hash2 = sha256(data)</code></pre>
+        </section>
+
+        <section id="osint">
+            <h1>OSINT & Hacking Modules</h1>
+            
+            <h2>Port Scanning</h2>
+            <pre><code>scan target {
+    range: [start_port, end_port],
+    threads: 0x64,
+    timeout: 0x1388
+} {
+    if open {
+        dump fmt("[+] Port {}", port)
+        dump fmt("[+] Banner: {}", banner)
+    }
+}</code></pre>
+
+            <h2>Web Reconnaissance</h2>
+            <pre><code>fetch url {
+    method: "GET",
+    follow_redirects: true
+} {
+    trace status
+    dump headers["Server"]
+    dump body
+}</code></pre>
+
+            <h2>Packet Analysis</h2>
+            <pre><code>let packet = b"\x45\x00\x00\x3C\x1C\x46..."
+let ip_version = packet[0] >> 4
+dump fmt("IP Version: {}", ip_version)</code></pre>
+        </section>
+
+        <section id="html">
+            <h1>HTML, CSS, JS Interop</h1>
+            <p>Rak integrates with web technologies for scraping, DOM parsing, and JavaScript execution.</p>
+
+            <h2>HTML Parsing</h2>
+            <pre><code>use web.html
+
+fetch "https://example.com" {
+    method: "GET"
+} {
+    let title = html.select("title").text()
+    let links = html.select_all("a[href]")
+    
+    for link in links {
+        dump link.attr("href")
+    }
+}</code></pre>
+
+            <h2>CSS Selectors</h2>
+            <pre><code>// Extract all images
+let images = html.select_all("img")
+for img in images {
+    dump img.attr("src")
+}
+
+// Extract forms
+let forms = html.select_all("form")
+for form in forms {
+    dump form.attr("action")
+    let inputs = form.select_all("input")
+    for input in inputs {
+        dump fmt("{} = {}", input.attr("name"), input.attr("value"))
+    }
+}</code></pre>
+
+            <h2>JavaScript Execution</h2>
+            <pre><code>use web.js
+
+let result = js.eval("JSON.stringify(document.cookie)")
+dump result
+
+let element = js.query("#username")
+js.click(element)
+js.type(element, "admin")</code></pre>
+        </section>
+
+        <section id="examples">
+            <h1>Example Scripts</h1>
+
+            <h2>Network Scanner</h2>
+            <pre><code>// Simple network reconnaissance
+let target = "192.168.1.1"
+let start = 0x0016   // 22 SSH
+let end = 0x01F4     // 500
+
+scan target {
+    range: [start, end],
+    threads: 0x64
+} {
+    if open {
+        dump fmt("[OPEN] {}:{}", target, port)
+        if port == 0x0050 {
+            dump "[HTTP] Checking web server..."
+            fetch fmt("http://{}/", target) {
+                method: "GET",
+                timeout: 0x1388
+            } {
+                trace headers
+            }
+        }
+    }
+}</code></pre>
+
+            <h2>Data Exfil Detection</h2>
+            <pre><code>// Monitor network for suspicious patterns
+let subnet = "10.0.0.0/24"
+let suspicious_ports = [0x1F90, 0x1388, 0x115C]  // 8080, 5000, 4444
+
+scan subnet {
+    ports: suspicious_ports
+} {
+    if open {
+        dump fmt("[ALERT] Suspicious port open: 0x{:04X}", port)
+        trace target
+    }
+}</code></pre>
+        </section>
+
+        <footer>
+            <p>Rak Language &copy; 2026 Ryuzaki. MIT License.</p>
+        </footer>
+    </main>
+
+    <script src="script.js"></script>
+</body>
+</html>

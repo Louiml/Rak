@@ -1,0 +1,34 @@
+[workspace]
+members = [
+    "rakc",
+    "ide/src-tauri",
+    "stdlib",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["Ryuzaki"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/ryuzaki/rak"
+
+[workspace.dependencies]
+# Common dependencies across crates
+thiserror = "1.0"
+anyhow = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = "0.3"
+
+# Compiler specific
+logos = "0.14"          # Lexer generator
+chumsky = "1.0"         # Parser combinator (or lalrpop / pest)
+# inkwell = { version = "0.2", features = ["llvm15-0"] } # LLVM backend (optional)
+
+# IDE / Tauri
+tauri = { version = "1.6", features = ["shell-open"] }
+serde_json = "1.0"
+tower-lsp = "0.20"       # LSP server implementation
+tokio-util = "0.7"

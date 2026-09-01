@@ -1,0 +1,25 @@
+[package]
+name = "app"
+version = "0.1.0"
+description = "Rak IDE - Integrated Development Environment for the Rak programming language"
+authors = ["Ryuzaki"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/ryuzaki/rak"
+edition = "2021"
+rust-version = "1.77.2"
+
+[lib]
+name = "app_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.6.3", features = [] }
+
+[dependencies]
+serde_json = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+log = "0.4"
+tauri = { version = "2.11.3", features = [] }
+tauri-plugin-log = "2"
+tauri-plugin-dialog = "2"
+rakc = { path = "../../rakc" }

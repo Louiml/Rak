@@ -1,0 +1,5 @@
+dump "=== Hello ==="
+dump md5("password")
+dump hex_encode("ABC")
+dump base64_encode("hello")
+dump fmt("0x{:04X}", 0x0050)
