@@ -3,352 +3,165 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Rak Language Documentation</title>
+    <meta name="description" content="Rak is a programming language for hackers and OSINT investigators — English-readable syntax, first-class hexadecimal. Documentation is still in progress.">
+    <title>Rak — A language for hackers and OSINT investigators</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%2306070a'/%3E%3Cpath d='M9 9l14 0 0 14-14 0z' fill='none' stroke='%2334d399' stroke-width='2.5'/%3E%3C/svg%3E">
     <link rel="stylesheet" href="style.css">
 </head>
-<body>
-    <nav class="sidebar">
-        <div class="logo">
-            <h1>Rak</h1>
-            <span>v0.1.0</span>
+<body class="landing">
+
+<header class="site-header">
+    <div class="container header-inner">
+        <a class="brand" href="index.html">
+            <span class="brand-mark">R</span>
+            <span class="brand-name">Rak</span>
+            <span class="brand-ver">v0.1.0</span>
+        </a>
+        <nav class="site-nav">
+            <a href="#status">Status</a>
+            <a href="#feel">Language</a>
+            <a href="docs.html">Docs</a>
+        </nav>
+        <div class="header-actions">
+            <a class="btn btn-ghost btn-sm" href="https://github.com/Louiml/Rak" target="_blank" rel="noopener">GitHub</a>
         </div>
-        <ul class="nav-links">
-            <li><a href="#intro" class="active">Introduction</a></li>
-            <li><a href="#syntax">Syntax</a></li>
-            <li><a href="#types">Types</a></li>
-            <li><a href="#keywords">Keywords</a></li>
-            <li><a href="#hex">Hexadecimal</a></li>
-            <li><a href="#ops">Operators</a></li>
-            <li><a href="#stdlib">Standard Library</a></li>
-            <li><a href="#osint">OSINT & Hacking</a></li>
-            <li><a href="#html">HTML/CSS/JS Interop</a></li>
-            <li><a href="#examples">Examples</a></li>
-        </ul>
-    </nav>
+    </div>
+</header>
 
-    <main class="content">
-        <section id="intro">
-            <h1>Rak Programming Language</h1>
-            <p class="subtitle">Built for hackers and OSINT investigators by Ryuzaki</p>
-            
-            <div class="highlight-box">
-                <p>Rak simplifies security research by combining English-readable syntax with first-class hexadecimal support. Write network scanners, web scrapers, and forensic tools without wrestling with boilerplate.</p>
+<main>
+
+    <section class="hero">
+        <div class="hero-inner reveal is-visible">
+            <span class="pill">
+                <span class="pill-dot" aria-hidden="true"></span>
+                v0.1.0
+                <code>/</code>
+                alpha — documentation in progress
+            </span>
+            <h1 class="hero-title"><span class="grad">Rak</span></h1>
+            <p class="lead">A programming language for hackers and OSINT investigators. English-readable syntax, first-class hexadecimal, and network primitives that reach across the wire without boilerplate.</p>
+            <div class="cta-row">
+                <a class="btn btn-primary" href="docs.html">
+                    Read the docs anyway
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg>
+                </a>
+                <a class="btn btn-ghost" href="#status">Project status</a>
+                <a class="text-link" href="#feel">See it in action <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg></a>
+            </div>
+        </div>
+    </section>
+
+    <section class="section" id="status">
+        <div class="container">
+            <div class="section-head reveal">
+                <p class="kicker">Project status</p>
+                <h2 class="section-title">A language being built in the open</h2>
+                <p class="section-sub">The interpreter, standard library, and IDE exist and run today. The hard documentation — the spec, the grammar, the guides — is still being written as the language settles.</p>
             </div>
 
-            <h2>Hello World</h2>
-            <pre><code>dump "Hello, World"</code></pre>
+            <div class="grid-2">
+                <div class="card reveal">
+                    <div class="card-head">
+                        <h3><span class="card-dot green" aria-hidden="true"></span> Shipped</h3>
+                    </div>
+                    <ul class="status-list">
+                        <li><span class="icon"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg></span><span><span class="label">Rust interpreter</span><br>Lexer, parser, tree-walking evaluator</span></li>
+                        <li><span class="icon"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg></span><span><span class="label">First-class hexadecimal</span><br>hex8 through hex64 with native arithmetic</span></li>
+                        <li><span class="icon"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg></span><span><span class="label">OSINT statements</span><br>scan and fetch with callback blocks</span></li>
+                        <li><span class="icon"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg></span><span><span class="label">Standard library</span><br>net, recon, crypto, encoding, web, file, json</span></li>
+                        <li><span class="icon"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg></span><span><span class="label">Desktop IDE</span><br>Tauri + Next.js editor with a dark hacker theme</span></li>
+                    </ul>
+                </div>
 
-            <h2>Quick Start</h2>
-            <pre><code>// Scan a target
-scan "192.168.1.1" {
-    range: [0x0016, 0x0050]
-} {
-    if open {
-        dump fmt("Port 0x{:04X}", port)
-    }
-}</code></pre>
-        </section>
-
-        <section id="syntax">
-            <h1>Syntax Overview</h1>
-            <p>Rak uses English keywords and treats hexadecimal as a native type. No semicolons required in blocks, but statements outside blocks need them.</p>
-            
-            <h2>Variables</h2>
-            <pre><code>let x = 0xFF
-let mut counter = 0
-counter = counter + 1</code></pre>
-
-            <h2>Functions</h2>
-            <pre><code>fn add(a, b) {
-    return a + b
-}
-
-let result = add(0x10, 0x20)</code></pre>
-
-            <h2>Control Flow</h2>
-            <pre><code>if x > 0x10 {
-    dump "Greater"
-} else {
-    dump "Smaller"
-}
-
-loop {
-    dump "Infinite"
-    break
-}
-
-while counter < 0x0A {
-    dump counter
-    counter = counter + 1
-}</code></pre>
-        </section>
-
-        <section id="types">
-            <h1>Type System</h1>
-            <table>
-                <thead>
-                    <tr><th>Type</th><th>Description</th><th>Example</th></tr>
-                </thead>
-                <tbody>
-                    <tr><td>hex8, hex16, hex32, hex64</td><td>Unsigned integers</td><td>0xFF, 0xABCD</td></tr>
-                    <tr><td>int</td><td>Decimal integer</td><td>42, 1000</td></tr>
-                    <tr><td>string</td><td>UTF-8 text</td><td>"hello"</td></tr>
-                    <tr><td>bytes</td><td>Raw byte array</td><td>b"\x48\x65\x6C\x6C\x6F"</td></tr>
-                    <tr><td>bool</td><td>Boolean</td><td>true, false</td></tr>
-                    <tr><td>nil</td><td>Null/void</td><td>nil</td></tr>
-                    <tr><td>[T]</td><td>Array</td><td>[1, 2, 3]</td></tr>
-                    <tr><td>{K: V}</td><td>Map</td><td>{"key": "value"}</td></tr>
-                </tbody>
-            </table>
-        </section>
-
-        <section id="keywords">
-            <h1>Keywords</h1>
-            <div class="keyword-grid">
-                <div class="keyword-card">
-                    <code>scan</code>
-                    <p>Port/network scanner</p>
-                </div>
-                <div class="keyword-card">
-                    <code>fetch</code>
-                    <p>HTTP/TCP request</p>
-                </div>
-                <div class="keyword-card">
-                    <code>dump</code>
-                    <p>Output to console/file</p>
-                </div>
-                <div class="keyword-card">
-                    <code>trace</code>
-                    <p>Inspect/debug output</p>
-                </div>
-                <div class="keyword-card">
-                    <code>let</code>
-                    <p>Variable declaration</p>
-                </div>
-                <div class="keyword-card">
-                    <code>mut</code>
-                    <p>Mutable modifier</p>
-                </div>
-                <div class="keyword-card">
-                    <code>fn</code>
-                    <p>Function definition</p>
-                </div>
-                <div class="keyword-card">
-                    <code>if / else</code>
-                    <p>Conditional</p>
-                </div>
-                <div class="keyword-card">
-                    <code>loop</code>
-                    <p>Infinite loop</p>
-                </div>
-                <div class="keyword-card">
-                    <code>while</code>
-                    <p>Conditional loop</p>
-                </div>
-                <div class="keyword-card">
-                    <code>for</code>
-                    <p>Iterator loop</p>
-                </div>
-                <div class="keyword-card">
-                    <code>return</code>
-                    <p>Return value</p>
+                <div class="card reveal">
+                    <div class="card-head">
+                        <h3><span class="card-dot amber" aria-hidden="true"></span> In progress</h3>
+                    </div>
+                    <ul class="status-list">
+                        <li class="wip"><span class="icon">*</span><span><span class="label">Formal spec &amp; grammar</span><br>The docs you&#8217;re about to read</span></li>
+                        <li class="wip"><span class="icon">*</span><span><span class="label">Package manager</span><br>Shareable Rak modules</span></li>
+                        <li class="wip"><span class="icon">*</span><span><span class="label">Compiler backend</span><br>Bytecode and a faster runtime</span></li>
+                        <li class="wip"><span class="icon">*</span><span><span class="label">Type checker</span><br>Static analysis on top of the AST</span></li>
+                        <li class="wip"><span class="icon">*</span><span><span class="label">JS execution</span><br>web.js interop for browser automation</span></li>
+                    </ul>
+                    <div class="status-pct">docs ~40% written</div>
+                    <div class="progress"><span data-width="40"></span></div>
                 </div>
             </div>
-        </section>
 
-        <section id="hex">
-            <h1>Hexadecimal</h1>
-            <p>Hexadecimal is a first-class citizen in Rak. All memory addresses, port numbers, and byte sequences work naturally in hex.</p>
-            
-            <h2>Literals</h2>
-            <pre><code>let port = 0x0050      // 80 in decimal
-let signature = 0xDEADBEEF
-let mask = 0xFF00FF00</code></pre>
+            <div class="card notice reveal">
+                <h3>Documentation is still being written</h3>
+                <p>Everything you read below is a living snapshot of a language that moves fast — a few sections lag the implementation, a few spell out plans before they exist. The core is real and runnable today. If you want to see what Rak actually looks like, we&#8217;ll show you what we have so far.</p>
+                <div class="btn-row">
+                    <a class="btn btn-primary" href="docs.html">
+                        See the current docs anyway
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg>
+                    </a>
+                    <a class="btn btn-ghost" href="https://github.com/Louiml/Rak" target="_blank" rel="noopener">Star on GitHub</a>
+                </div>
+            </div>
+        </div>
+    </section>
 
-            <h2>Arithmetic</h2>
-            <pre><code>let a = 0x10
-let b = 0x20
-let c = a + b           // 0x30
-let d = a & b           // 0x00
-let e = a | b           // 0x30
-let f = a ^ b           // 0x30</code></pre>
+    <section class="section" id="feel">
+        <div class="container">
+            <div class="section-head reveal">
+                <p class="kicker">The language</p>
+                <h2 class="section-title">English in, packets out</h2>
+                <p class="section-sub">No ceremony. Read it like a sentence, run it like a scanner.</p>
+            </div>
 
-            <h2>Formatting</h2>
-            <pre><code>dump fmt("0x{:04X}", port)    // 0x0050
-dump fmt("0x{:08X}", sig)     // 0xDEADBEEF</code></pre>
-        </section>
+            <div class="grid-2">
+                <figure class="codeblock reveal" data-title="hello.rak">
+                    <div class="codeblock-bar" aria-hidden="true">
+                        <span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-dot"></span>
+                        <span class="bar-title">hello.rak</span>
+                    </div>
+                    <pre><code data-lang="rak">dump "Hello, World"
 
-        <section id="ops">
-            <h1>Operators</h1>
-            <table>
-                <thead>
-                    <tr><th>Operator</th><th>Description</th></tr>
-                </thead>
-                <tbody>
-                    <tr><td>+ - * / %</td><td>Arithmetic</td></tr>
-                    <tr><td>& | ^ ~ << >></td><td>Bitwise</td></tr>
-                    <tr><td>== != < > <= >=</td><td>Comparison</td></tr>
-                    <tr><td>&& || !</td><td>Logical</td></tr>
-                    <tr><td>= += -= *= /=</td><td>Assignment</td></tr>
-                    <tr><td>[] .</td><td>Index, Field access</td></tr>
-                </tbody>
-            </table>
-        </section>
+let target = "192.168.1.1"
+let ports  = scan_ports(target, { range: [0x0016, 0x0050] })
 
-        <section id="stdlib">
-            <h1>Standard Library</h1>
-            
-            <h2>net</h2>
-            <pre><code>use net.http
-
-fetch "https://example.com" {
-    method: "GET",
-    headers: {"User-Agent": "Rak/0.1"}
-} {
-    dump headers
-    trace body
+for port in ports {
+    dump fmt("Open: 0x{:04X}", port)
 }</code></pre>
+                </figure>
 
-            <h2>recon</h2>
-            <pre><code>use recon.dns
-
-scan "target.com" {
-    range: [0x0016, 0x01F4]
-    threads: 0x64
-}</code></pre>
-
-            <h2>crypto</h2>
-            <pre><code>use crypto.hash
-
-let data = "password"
-let hash = md5(data)
-let hash2 = sha256(data)</code></pre>
-        </section>
-
-        <section id="osint">
-            <h1>OSINT & Hacking Modules</h1>
-            
-            <h2>Port Scanning</h2>
-            <pre><code>scan target {
-    range: [start_port, end_port],
-    threads: 0x64,
+                <figure class="codeblock reveal" data-title="osint_scan.rak">
+                    <div class="codeblock-bar" aria-hidden="true">
+                        <span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-dot"></span>
+                        <span class="bar-title">osint_scan.rak</span>
+                    </div>
+                    <pre><code data-lang="rak">scan "127.0.0.1" {
+    range: [0x0016, 0x01F4],
     timeout: 0x1388
 } {
     if open {
-        dump fmt("[+] Port {}", port)
-        dump fmt("[+] Banner: {}", banner)
+        dump fmt("[+] Port 0x{:04X} — {}", port, banner)
     }
-}</code></pre>
-
-            <h2>Web Reconnaissance</h2>
-            <pre><code>fetch url {
-    method: "GET",
-    follow_redirects: true
-} {
-    trace status
-    dump headers["Server"]
-    dump body
-}</code></pre>
-
-            <h2>Packet Analysis</h2>
-            <pre><code>let packet = b"\x45\x00\x00\x3C\x1C\x46..."
-let ip_version = packet[0] >> 4
-dump fmt("IP Version: {}", ip_version)</code></pre>
-        </section>
-
-        <section id="html">
-            <h1>HTML, CSS, JS Interop</h1>
-            <p>Rak integrates with web technologies for scraping, DOM parsing, and JavaScript execution.</p>
-
-            <h2>HTML Parsing</h2>
-            <pre><code>use web.html
-
-fetch "https://example.com" {
-    method: "GET"
-} {
-    let title = html.select("title").text()
-    let links = html.select_all("a[href]")
-    
-    for link in links {
-        dump link.attr("href")
-    }
-}</code></pre>
-
-            <h2>CSS Selectors</h2>
-            <pre><code>// Extract all images
-let images = html.select_all("img")
-for img in images {
-    dump img.attr("src")
 }
 
-// Extract forms
-let forms = html.select_all("form")
-for form in forms {
-    dump form.attr("action")
-    let inputs = form.select_all("input")
-    for input in inputs {
-        dump fmt("{} = {}", input.attr("name"), input.attr("value"))
-    }
-}</code></pre>
-
-            <h2>JavaScript Execution</h2>
-            <pre><code>use web.js
-
-let result = js.eval("JSON.stringify(document.cookie)")
-dump result
-
-let element = js.query("#username")
-js.click(element)
-js.type(element, "admin")</code></pre>
-        </section>
-
-        <section id="examples">
-            <h1>Example Scripts</h1>
-
-            <h2>Network Scanner</h2>
-            <pre><code>// Simple network reconnaissance
-let target = "192.168.1.1"
-let start = 0x0016   // 22 SSH
-let end = 0x01F4     // 500
-
-scan target {
-    range: [start, end],
-    threads: 0x64
+fetch "https://target.com" {
+    method: "GET",
+    headers: { "User-Agent": "Rak-OSINT/0.1" }
 } {
-    if open {
-        dump fmt("[OPEN] {}:{}", target, port)
-        if port == 0x0050 {
-            dump "[HTTP] Checking web server..."
-            fetch fmt("http://{}/", target) {
-                method: "GET",
-                timeout: 0x1388
-            } {
-                trace headers
-            }
-        }
-    }
+    dump headers["Server"]
+    trace body
 }</code></pre>
+                </figure>
+            </div>
+        </div>
+    </section>
 
-            <h2>Data Exfil Detection</h2>
-            <pre><code>// Monitor network for suspicious patterns
-let subnet = "10.0.0.0/24"
-let suspicious_ports = [0x1F90, 0x1388, 0x115C]  // 8080, 5000, 4444
+</main>
 
-scan subnet {
-    ports: suspicious_ports
-} {
-    if open {
-        dump fmt("[ALERT] Suspicious port open: 0x{:04X}", port)
-        trace target
-    }
-}</code></pre>
-        </section>
+<footer>
+    <div class="container footer-inner">
+        <p>Rak &copy; 2026 Louiml &middot; MIT License</p>
+        <p><a href="docs.html">Documentation</a> &middot; <a href="https://github.com/Louiml/Rak" target="_blank" rel="noopener">GitHub</a></p>
+    </div>
+</footer>
 
-        <footer>
-            <p>Rak Language &copy; 2026 Ryuzaki. MIT License.</p>
-        </footer>
-    </main>
-
-    <script src="script.js"></script>
+<script src="script.js"></script>
 </body>
 </html>
