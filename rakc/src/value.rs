@@ -38,6 +38,11 @@ pub enum Value {
         captures: Arc<Env>,
     },
     NativeFn(Arc<str>, Arc<dyn Fn(&[Value]) -> Result<Value, String> + Send + Sync>),
+    Closure {
+        code: Arc<crate::bytecode::Chunk>,
+        nparams: usize,
+        name: Arc<str>,
+    },
     Result(Option<Box<Value>>, Option<Box<Value>>),
     Option(Option<Box<Value>>),
     Channel(Arc<crate::vm::ChannelHandle>),
@@ -69,6 +74,7 @@ impl Value {
             Value::Enum { .. } => "enum",
             Value::Function { .. } => "function",
             Value::NativeFn(..) => "native_fn",
+            Value::Closure { .. } => "closure",
             Value::Result(..) => "result",
             Value::Option(..) => "option",
             Value::Channel(_) => "channel",
@@ -211,6 +217,7 @@ impl fmt::Display for Value {
             }
             Value::Function { .. } => write!(f, "<function>"),
             Value::NativeFn(name, _) => write!(f, "<native {}>", name),
+            Value::Closure { name, .. } => write!(f, "<closure {}>", name),
             Value::Result(Some(ok), _) => write!(f, "Ok({})", ok),
             Value::Result(_, Some(err)) => write!(f, "Err({})", err),
             Value::Result(None, None) => write!(f, "Ok(nil)"),

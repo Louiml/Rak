@@ -10,10 +10,12 @@ fn print_usage() {
     eprintln!("Usage: rakc <command> [file]");
     eprintln!();
     eprintln!("Commands:");
-    eprintln!("  run <file>     Run a Rak script");
-    eprintln!("  lex <file>     Tokenize and print tokens");
-    eprintln!("  parse <file>   Parse and print AST");
-    eprintln!("  version        Print version");
+        eprintln!("  run <file>     Run a Rak script (interpreter)");
+        eprintln!("  vm <file>      Run a Rak script on the bytecode VM");
+        eprintln!("  bench <file>   Benchmark interpreter vs VM");
+        eprintln!("  lex <file>     Tokenize and print tokens");
+        eprintln!("  parse <file>   Parse and print AST");
+        eprintln!("  version        Print version");
     eprintln!();
     eprintln!("Use - for file to read from stdin");
 }
@@ -92,6 +94,49 @@ fn main() {
                 }
                 Err(e) => eprintln!("Lexer error: {}", e),
             }
+        }
+        "vm" => {
+            match rakc::lexer::tokenize(&source) {
+                Ok(tokens) => {
+                    match rakc::parser::parse(&tokens) {
+                        Ok(ast) => {
+                            match rakc::compiler::compile_module(&ast) {
+                                Ok(chunk) => {
+                                    let mut vm = rakc::vm::Vm::new();
+                                    match vm.run(&chunk) {
+                                        Ok(out) => {
+                                            for line in &out {
+                                                println!("{}", line);
+                                            }
+                                        }
+                                        Err(e) => {
+                                            eprintln!("VM error: {}", e);
+                                            std::process::exit(1);
+                                        }
+                                    }
+                                }
+                                Err(e) => eprintln!("Compile error: {}", e),
+                            }
+                        }
+                        Err(e) => eprintln!("Parser error: {}", e),
+                    }
+                }
+                Err(e) => eprintln!("Lexer error: {}", e),
+            }
+        }
+        "bench" => {
+            let tokens = rakc::lexer::tokenize(&source).expect("lex");
+            let ast = rakc::parser::parse(&tokens).expect("parse");
+            let t0 = std::time::Instant::now();
+            let _ = rakc::eval(&source);
+            let interp_ms = t0.elapsed().as_millis();
+            let chunk = rakc::compiler::compile_module(&ast).expect("compile");
+            let t1 = std::time::Instant::now();
+            let mut vm = rakc::vm::Vm::new();
+            vm.run(&chunk).expect("vm run");
+            let vm_ms = t1.elapsed().as_millis();
+            println!("interpreter: {} ms", interp_ms);
+            println!("vm:           {} ms", vm_ms);
         }
         _ => {
             eprintln!("Unknown command: {}", cmd);

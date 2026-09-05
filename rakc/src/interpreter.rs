@@ -146,6 +146,8 @@ pub struct Interpreter {
     env: Env,
     output: Vec<String>,
     base_dir: String,
+    returning: bool,
+    return_value: Value,
 }
 
 impl Interpreter {
@@ -154,6 +156,8 @@ impl Interpreter {
             env: Env::new(),
             output: vec![],
             base_dir: ".".to_string(),
+            returning: false,
+            return_value: Value::Nil,
         }
     }
 
@@ -162,6 +166,8 @@ impl Interpreter {
             env: Env::new(),
             output: vec![],
             base_dir,
+            returning: false,
+            return_value: Value::Nil,
         }
     }
 
@@ -255,7 +261,8 @@ impl Interpreter {
                     Some(e) => self.eval_expr(e)?,
                     None => Value::Nil,
                 };
-                self.env.define("__return__", val);
+                self.return_value = val;
+                self.returning = true;
             }
             Stmt::If { cond, then_branch, else_branch } => {
                 let val = self.eval_expr(cond)?;
@@ -263,12 +270,18 @@ impl Interpreter {
                     self.env.push_scope();
                     for s in then_branch {
                         self.exec_stmt(s)?;
+                        if self.returning {
+                            break;
+                        }
                     }
                     self.env.pop_scope();
                 } else if let Some(else_stmts) = else_branch {
                     self.env.push_scope();
                     for s in else_stmts {
                         self.exec_stmt(s)?;
+                        if self.returning {
+                            break;
+                        }
                     }
                     self.env.pop_scope();
                 }
@@ -278,6 +291,13 @@ impl Interpreter {
                     self.env.push_scope();
                     for s in body {
                         self.exec_stmt(s)?;
+                        if self.returning {
+                            break;
+                        }
+                    }
+                    if self.returning {
+                        self.env.pop_scope();
+                        break;
                     }
                     if self.check_break_reset() {
                         self.env.pop_scope();
@@ -295,6 +315,13 @@ impl Interpreter {
                     self.env.push_scope();
                     for s in body {
                         self.exec_stmt(s)?;
+                        if self.returning {
+                            break;
+                        }
+                    }
+                    if self.returning {
+                        self.env.pop_scope();
+                        break;
                     }
                     let broke = self.check_break_reset();
                     let _ = self.check_continue_reset();
@@ -400,6 +427,9 @@ impl Interpreter {
                         }
                         for s in body {
                             self.exec_stmt(s)?;
+                            if self.returning {
+                                break;
+                            }
                         }
                         self.env.pop_scope();
                         return Ok(());
@@ -410,10 +440,10 @@ impl Interpreter {
                 self.env.push_scope();
                 let result: crate::Result<()> = (|| {
                     for s in body {
-                        let _ = s;
-                    }
-                    for s in body {
                         self.exec_stmt(s)?;
+                        if self.returning {
+                            break;
+                        }
                     }
                     Ok(())
                 })();
@@ -459,11 +489,14 @@ impl Interpreter {
             self.env.define(name, item);
             for s in body {
                 self.exec_stmt(s)?;
+                if self.returning {
+                    break;
+                }
             }
             let broke = self.check_break_reset();
             let _ = self.check_continue_reset();
             self.env.pop_scope();
-            if broke {
+            if self.returning || broke {
                 break;
             }
         }
@@ -816,6 +849,9 @@ impl Interpreter {
                         } else {
                             self.exec_stmt(s)?;
                         }
+                        if self.returning {
+                            break;
+                        }
                     }
                     self.env.pop_scope();
                     Ok(last)
@@ -827,6 +863,9 @@ impl Interpreter {
                             last = self.eval_expr(e)?;
                         } else {
                             self.exec_stmt(s)?;
+                        }
+                        if self.returning {
+                            break;
                         }
                     }
                     self.env.pop_scope();
@@ -854,6 +893,9 @@ impl Interpreter {
                             } else {
                                 self.exec_stmt(s)?;
                             }
+                            if self.returning {
+                                break;
+                            }
                         }
                         self.env.pop_scope();
                         return Ok(last);
@@ -869,6 +911,9 @@ impl Interpreter {
                         last = self.eval_expr(e)?;
                     } else {
                         self.exec_stmt(s)?;
+                    }
+                    if self.returning {
+                        break;
                     }
                 }
                 self.env.pop_scope();
@@ -996,6 +1041,8 @@ impl Interpreter {
     fn call_function(&mut self, params: &[Param], body: &[Stmt], closure: &Env, is_async: bool, args: &[Expr]) -> crate::Result<Value> {
         let _ = is_async;
         let arg_vals: Vec<Value> = args.iter().map(|a| self.eval_expr(a)).collect::<crate::Result<_>>()?;
+        let saved_returning = self.returning;
+        self.returning = false;
         self.env.push_scope();
         for (k, v) in &closure.scopes[0] {
             self.env.define(k, v.clone());
@@ -1005,10 +1052,17 @@ impl Interpreter {
         }
         for s in body {
             self.exec_stmt(s)?;
+            if self.returning {
+                break;
+            }
         }
-        let ret = self.env.get("__return__").unwrap_or(Value::Nil);
-        self.env.assign("__return__", Value::Nil).ok();
+        let ret = if self.returning {
+            std::mem::replace(&mut self.return_value, Value::Nil)
+        } else {
+            Value::Nil
+        };
         self.env.pop_scope();
+        self.returning = saved_returning;
         Ok(ret)
     }
 
@@ -1674,5 +1728,12 @@ mod tests {
         assert!(output.iter().any(|l| l.contains("HELLO")));
         assert!(output.iter().any(|l| l.contains("[DUMP] 3")));
         assert!(output.iter().any(|l| l.contains("true")));
+    }
+
+    #[test]
+    fn test_interpreter_recursive_fib() {
+        let mut interp = Interpreter::new();
+        let output = interp.run_source("fn fib(n) { if n < 2 { return n } return fib(n - 1) + fib(n - 2) } dump fib(15);").unwrap();
+        assert!(output.iter().any(|l| l.contains("[DUMP] 610")));
     }
 }
