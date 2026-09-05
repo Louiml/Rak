@@ -2,17 +2,22 @@
 
 import React, { useState, useRef, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { listen, UnlistenFn } from '@tauri-apps/api/event';
 import { open } from '@tauri-apps/plugin-dialog';
 import FileExplorer from './components/FileExplorer';
 import TabBar, { Tab } from './components/TabBar';
 import CodeEditor from './components/CodeEditor';
 import TitleBar from './components/TitleBar';
+import ExamplesMenu from './components/ExamplesMenu';
+import { Example } from './components/examples';
 
 interface ConsoleOutput {
   type: 'output' | 'error';
   content: string;
   timestamp: Date;
 }
+
+type RunMode = 'interp' | 'vm' | 'bench';
 
 const DEFAULT_CODE = `// Rak OSINT Script
 use net.http
@@ -56,11 +61,35 @@ export default function IDE() {
   const [workspaceOpen, setWorkspaceOpen] = useState(false);
   const [consoleOutput, setConsoleOutput] = useState<ConsoleOutput[]>([]);
   const [isRunning, setIsRunning] = useState(false);
+  const [runMode, setRunMode] = useState<RunMode>('interp');
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [consoleOpen, setConsoleOpen] = useState(true);
   const consoleRef = useRef<HTMLDivElement>(null);
+  const unlistenRef = useRef<UnlistenFn | null>(null);
 
   const activeTab = tabs.find((t) => t.id === activeTabId) || null;
+
+  useEffect(() => {
+    const setup = async () => {
+      const u1 = await listen<{ stream: string; text: string }>('rak-output', (e) => {
+        const isErr = e.payload.stream === 'stderr';
+        setConsoleOutput((prev) => [
+          ...prev,
+          { type: isErr ? 'error' : 'output', content: e.payload.text, timestamp: new Date() },
+        ]);
+      });
+      const u2 = await listen('rak-done', () => {
+        setIsRunning(false);
+        setConsoleOutput((prev) => [
+          ...prev,
+          { type: 'output', content: '> Finished', timestamp: new Date() },
+        ]);
+      });
+      unlistenRef.current = () => { u1(); u2(); };
+    };
+    setup();
+    return () => { unlistenRef.current?.(); };
+  }, []);
 
   useEffect(() => {
     if (consoleRef.current) {
@@ -196,23 +225,47 @@ export default function IDE() {
     setIsRunning(true);
     setConsoleOutput((prev) => [
       ...prev,
-      { type: 'output', content: `> Running ${activeTab.name}...`, timestamp: new Date() },
+      { type: 'output', content: `> Running ${activeTab.name} (${runMode})...`, timestamp: new Date() },
     ]);
 
     try {
-      const result: string[] = await invoke('run_rak', { source: activeTab.content });
-      setConsoleOutput((prev) => [
-        ...prev,
-        ...result.map((line) => ({ type: 'output' as const, content: line, timestamp: new Date() })),
-        { type: 'output', content: `> Finished (${result.length} lines)`, timestamp: new Date() },
-      ]);
+      await invoke('run_rak', { mode: runMode, source: activeTab.content });
     } catch (error) {
       setConsoleOutput((prev) => [
         ...prev,
         { type: 'error', content: String(error), timestamp: new Date() },
       ]);
+      setIsRunning(false);
+    }
+  };
+
+  const handleStop = async () => {
+    try {
+      await invoke('stop_rak');
+      setConsoleOutput((prev) => [
+        ...prev,
+        { type: 'error', content: '> Stopped', timestamp: new Date() },
+      ]);
+    } catch (error) {
+      setConsoleOutput((prev) => [
+        ...prev,
+        { type: 'error', content: `Stop error: ${error}`, timestamp: new Date() },
+      ]);
     }
     setIsRunning(false);
+  };
+
+  const handleOpenExample = (ex: Example) => {
+    const id = `ex_${ex.filename}_${Date.now()}`;
+    const newTab: Tab = {
+      id,
+      name: ex.filename,
+      path: '',
+      content: ex.source,
+      isDirty: false,
+    };
+    setTabs((prev) => [...prev, newTab]);
+    setActiveTabId(id);
   };
 
   const handleClearConsole = () => setConsoleOutput([]);
@@ -301,6 +354,7 @@ export default function IDE() {
           >
             Save
           </button>
+          <ExamplesMenu onOpen={handleOpenExample} />
         </div>
         <div className="flex items-center gap-1">
           <button
@@ -310,10 +364,30 @@ export default function IDE() {
           >
             Console
           </button>
+          <select
+            value={runMode}
+            onChange={(e) => setRunMode(e.target.value as RunMode)}
+            disabled={isRunning}
+            title="Run mode"
+            className="ml-2 bg-zinc-800 text-zinc-300 text-xs px-2 py-1 rounded border border-zinc-700 outline-none focus:border-emerald-500 disabled:opacity-50"
+          >
+            <option value="interp">Interpreter</option>
+            <option value="vm">VM</option>
+            <option value="bench">Bench</option>
+          </select>
+          {isRunning && (
+            <button
+              onClick={handleStop}
+              className="px-4 py-1 bg-red-600 hover:bg-red-500 text-white font-semibold rounded flex items-center gap-2 ml-1"
+              title="Stop"
+            >
+              Stop
+            </button>
+          )}
           <button
             onClick={handleRun}
             disabled={isRunning || !activeTab}
-            className="px-4 py-1 bg-emerald-600 hover:bg-emerald-500 disabled:bg-zinc-700 text-white font-semibold rounded flex items-center gap-2 ml-2"
+            className="px-4 py-1 bg-emerald-600 hover:bg-emerald-500 disabled:bg-zinc-700 text-white font-semibold rounded flex items-center gap-2 ml-1"
           >
             {isRunning ? (
               <>
@@ -396,8 +470,8 @@ export default function IDE() {
       {/* Status Bar */}
       <div className="flex items-center justify-between px-4 py-1 bg-zinc-900 border-t border-zinc-800 text-[10px] text-zinc-500">
         <div className="flex items-center gap-4">
-          <span className="text-emerald-500">Rak v0.1.0</span>
-          <span>Interpreter Mode</span>
+          <span className="text-emerald-500">Rak v0.2</span>
+          <span>{runMode === 'vm' ? 'VM Mode' : runMode === 'bench' ? 'Bench Mode' : 'Interpreter Mode'}</span>
           {activeTab?.isDirty && <span className="text-yellow-500">Unsaved changes</span>}
           {currentPath && <span className="truncate max-w-[300px]">{currentPath}</span>}
         </div>

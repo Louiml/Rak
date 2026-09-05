@@ -40,7 +40,7 @@ export default function TitleBar() {
       <div data-tauri-drag-region className="flex items-center gap-2 px-3">
         <span className="text-emerald-500 font-bold text-sm">R</span>
         <span className="text-zinc-400 text-xs">Rak IDE</span>
-        <span className="text-zinc-700 text-[10px]">v0.1.0</span>
+        <span className="text-zinc-700 text-[10px]">v0.2</span>
       </div>
 
       {/* Center: Spacer (draggable) */}

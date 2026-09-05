@@ -13,19 +13,24 @@ const KEYWORDS = [
   'scan', 'fetch', 'dump', 'trace', 'loop', 'if', 'else', 'fn', 'let', 'mut',
   'return', 'use', 'mod', 'pub', 'struct', 'enum', 'impl', 'match', 'for',
   'while', 'break', 'continue', 'true', 'false', 'nil', 'in',
+  'try', 'catch', 'raise', 'throw', 'trait', 'async', 'await', 'spawn', 'as', 'type',
 ];
 
 const KEYWORD_SET = new Set(KEYWORDS);
 
-const TYPES = ['hex8', 'hex16', 'hex32', 'hex64', 'int', 'string', 'bytes', 'bool'];
+const TYPES = [
+  'hex8', 'hex16', 'hex32', 'hex64', 'int', 'string', 'bytes', 'bool',
+  'i8', 'i16', 'i32', 'i64', 'u8', 'u16', 'u32', 'u64', 'f32', 'f64',
+  'Option', 'Result',
+];
 const TYPE_SET = new Set(TYPES);
 
 const BUILTINS = [
   'fmt', 'md5', 'sha1', 'sha256', 'xor', 'rot13', 'hex_encode', 'hex_decode',
   'base64_encode', 'base64_decode', 'url_encode', 'url_decode', 'dns_lookup',
   'subdomain_enum', 'reverse_dns', 'len', 'split', 'join', 'contains',
-  'to_hex', 'from_hex', 'int', 'string', 'bytes', 'upper', 'lower', 'trim',
-  'push', 'read', 'write', 'array', 'map',
+  'to_hex', 'from_hex', 'int', 'string', 'bytes', 'float', 'upper', 'lower', 'trim',
+  'push', 'read', 'write', 'array', 'map', 'keys', 'values', 'has', 'get', 'sort',
   'file_read', 'file_write', 'file_append', 'file_exists', 'file_size',
   'file_list', 'file_delete', 'file_mkdir', 'file_copy', 'file_rename',
   'file_ext', 'file_basename', 'file_dirname',
@@ -34,6 +39,11 @@ const BUILTINS = [
   'html_count', 'html_headers',
   'json_parse', 'json_get', 'json_path', 'json_keys', 'json_len', 'json_find_all',
   'scan_ports', 'scan_subdomains',
+  'net_listen', 'net_accept', 'net_connect', 'net_local_addr',
+  'tcp_read', 'tcp_write', 'tcp_read_line', 'tcp_close',
+  'spawn', 'thread_join', 'channel', 'chan_send', 'chan_recv',
+  'sleep', 'now_ms', 'args', 'env_get', 'ord', 'chr', 'substr', 'print', 'dbg', 'exit',
+  'Some', 'None', 'Ok', 'Err',
 ];
 
 const ALL_SUGGESTIONS = [...KEYWORDS, ...TYPES, ...BUILTINS];
@@ -44,7 +54,7 @@ const BRACKETS: Record<string, string> = {
 const CLOSING_BRACKETS = new Set([')', ']', '}']);
 
 interface Token {
-  type: 'keyword' | 'type' | 'hex' | 'number' | 'string' | 'comment' | 'bytes' | 'ident' | 'op' | 'ws';
+  type: 'keyword' | 'type' | 'hex' | 'number' | 'float' | 'typedint' | 'interp' | 'string' | 'comment' | 'bytes' | 'ident' | 'op' | 'ws';
   value: string;
 }
 
@@ -70,9 +80,30 @@ function tokenizeLine(line: string): Token[] {
       tokens.push({ type: 'hex', value: hex });
       continue;
     }
+    if (line[i] === 'f' && line[i + 1] === '"') {
+      let str = 'f"';
+      i += 2;
+      while (i < line.length && line[i] !== '"') {
+        if (line[i] === '\\' && i + 1 < line.length) { str += line[i] + line[i + 1]; i += 2; }
+        else { str += line[i]; i++; }
+      }
+      if (i < line.length) { str += '"'; i++; }
+      tokens.push({ type: 'interp', value: str });
+      continue;
+    }
     if (/[0-9]/.test(line[i])) {
       let num = '';
       while (i < line.length && /[0-9]/.test(line[i])) { num += line[i]; i++; }
+      if (line[i] === '.' && /[0-9]/.test(line[i + 1] || '')) {
+        num += '.';
+        i++;
+        while (i < line.length && /[0-9]/.test(line[i])) { num += line[i]; i++; }
+        if (line[i] === 'f' && (line[i + 1] === '3' || line[i + 1] === '6')) { num += 'f' + line[i + 1]; i += 2; }
+        tokens.push({ type: 'float', value: num });
+        continue;
+      }
+      const suf = line.slice(i).match(/^(i8|i16|i32|i64|u8|u16|u32|u64|f32|f64)/);
+      if (suf) { num += suf[0]; i += suf[0].length; tokens.push({ type: 'typedint', value: num }); continue; }
       tokens.push({ type: 'number', value: num });
       continue;
     }
@@ -106,11 +137,15 @@ function tokenizeLine(line: string): Token[] {
       else tokens.push({ type: 'ident', value: ident });
       continue;
     }
+    const threeChar = line.slice(i, i + 3);
+    if (['...'].includes(threeChar)) {
+      tokens.push({ type: 'op', value: threeChar }); i += 3; continue;
+    }
     const twoChar = line.slice(i, i + 2);
-    if (['==', '!=', '<=', '>=', '<<', '>>', '&&', '||', '->', '=>', '+=', '-=', '*=', '/=', '%='].includes(twoChar)) {
+    if (['==', '!=', '<=', '>=', '<<', '>>', '&&', '||', '->', '=>', '+=', '-=', '*=', '/=', '%=', '::', '..'].includes(twoChar)) {
       tokens.push({ type: 'op', value: twoChar }); i += 2; continue;
     }
-    if ('+-*/%&|^!~<>=.,:;()[]{}'.includes(line[i])) {
+    if ('+-*/%&|^!~<>=.,:;()[]{}?'.includes(line[i])) {
       tokens.push({ type: 'op', value: line[i] }); i++; continue;
     }
     tokens.push({ type: 'ident', value: line[i] }); i++;
@@ -124,6 +159,9 @@ function getColorClass(type: Token['type']): string {
     case 'type': return 'text-cyan-400';
     case 'hex': return 'text-orange-400 font-semibold';
     case 'number': return 'text-orange-300';
+    case 'float': return 'text-orange-300';
+    case 'typedint': return 'text-orange-300';
+    case 'interp': return 'text-green-400';
     case 'string': return 'text-green-400';
     case 'bytes': return 'text-yellow-400';
     case 'comment': return 'text-zinc-600 italic';
