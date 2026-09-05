@@ -3,8 +3,8 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta name="description" content="Rak is a programming language for hackers and OSINT investigators — English-readable syntax, first-class hexadecimal. Documentation is still in progress.">
-    <title>Rak — A language for hackers and OSINT investigators</title>
+    <meta name="description" content="Rak is a programming language for hackers and OSINT investigators. English-readable syntax, first-class hexadecimal. Documentation is still in progress.">
+    <title>Rak: A language for hackers and OSINT investigators</title>
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%2306070a'/%3E%3Cpath d='M9 9l14 0 0 14-14 0z' fill='none' stroke='%2334d399' stroke-width='2.5'/%3E%3C/svg%3E">
     <link rel="stylesheet" href="style.css">
 </head>
@@ -32,14 +32,8 @@
 
     <section class="hero">
         <div class="hero-inner reveal is-visible">
-            <span class="pill">
-                <span class="pill-dot" aria-hidden="true"></span>
-                v0.1.0
-                <code>/</code>
-                alpha — documentation in progress
-            </span>
             <h1 class="hero-title"><span class="grad">Rak</span></h1>
-            <p class="lead">A programming language for hackers and OSINT investigators. English-readable syntax, first-class hexadecimal, and network primitives that reach across the wire without boilerplate.</p>
+            <p class="lead">A programming language for hackers and OSINT investigators. English-readable syntax, first-class hexadecimal, and HTTP and TCP scanning without boilerplate.</p>
             <div class="cta-row">
                 <a class="btn btn-primary" href="docs.html">
                     Read the docs anyway
@@ -55,8 +49,8 @@
         <div class="container">
             <div class="section-head reveal">
                 <p class="kicker">Project status</p>
-                <h2 class="section-title">A language being built in the open</h2>
-                <p class="section-sub">The interpreter, standard library, and IDE exist and run today. The hard documentation — the spec, the grammar, the guides — is still being written as the language settles.</p>
+                <h2 class="section-title">Built in the open. Docs lagging behind.</h2>
+                <p class="section-sub">The interpreter, standard library, and IDE all run today. The spec, grammar, and guides aren't done yet, and this site will trail the code until they are.</p>
             </div>
 
             <div class="grid-2">
@@ -78,7 +72,7 @@
                         <h3><span class="card-dot amber" aria-hidden="true"></span> In progress</h3>
                     </div>
                     <ul class="status-list">
-                        <li class="wip"><span class="icon">*</span><span><span class="label">Formal spec &amp; grammar</span><br>The docs you&#8217;re about to read</span></li>
+                        <li class="wip"><span class="icon">*</span><span><span class="label">Formal spec &amp; grammar</span><br>The docs you're about to read</span></li>
                         <li class="wip"><span class="icon">*</span><span><span class="label">Package manager</span><br>Shareable Rak modules</span></li>
                         <li class="wip"><span class="icon">*</span><span><span class="label">Compiler backend</span><br>Bytecode and a faster runtime</span></li>
                         <li class="wip"><span class="icon">*</span><span><span class="label">Type checker</span><br>Static analysis on top of the AST</span></li>
@@ -91,7 +85,7 @@
 
             <div class="card notice reveal">
                 <h3>Documentation is still being written</h3>
-                <p>Everything you read below is a living snapshot of a language that moves fast — a few sections lag the implementation, a few spell out plans before they exist. The core is real and runnable today. If you want to see what Rak actually looks like, we&#8217;ll show you what we have so far.</p>
+                <p>Some sections of the current docs lag the implementation, and one describes a plan that doesn't exist yet. The core is real and runnable today. If you want to see what Rak actually looks like, the current docs are one page away.</p>
                 <div class="btn-row">
                     <a class="btn btn-primary" href="docs.html">
                         See the current docs anyway
@@ -137,7 +131,7 @@ for port in ports {
     timeout: 0x1388
 } {
     if open {
-        dump fmt("[+] Port 0x{:04X} — {}", port, banner)
+        dump fmt("[+] Port 0x{:04X}: {}", port, banner)
     }
 }
 
