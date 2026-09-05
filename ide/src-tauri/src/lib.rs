@@ -107,21 +107,29 @@ fn run_rak(app: AppHandle, mode: String, source: String) -> Result<(), String> {
     }
 
     let app3 = app.clone();
-    std::thread::spawn(move || {
-        let done = {
+    std::thread::spawn(move || loop {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let finished = {
             let mut guard = RUNNING.lock().unwrap();
-            if let Some(child) = guard.as_mut() {
-                let _ = child.wait();
-                true
-            } else {
-                false
+            match guard.as_mut() {
+                Some(child) => match child.try_wait() {
+                    Ok(Some(_)) => {
+                        *guard = None;
+                        true
+                    }
+                    Ok(None) => false,
+                    Err(_) => {
+                        *guard = None;
+                        true
+                    }
+                },
+                None => true,
             }
         };
-        if done {
-            let mut guard = RUNNING.lock().unwrap();
-            *guard = None;
+        if finished {
+            let _ = app3.emit("rak-done", ());
+            break;
         }
-        let _ = app3.emit("rak-done", ());
     });
 
     Ok(())
