@@ -1,5 +1,5 @@
 # Rak
-
+## Work inn progress
 A programming language built for hackers, OSINT investigators, and now general-purpose systems programming: build **backend SQL servers**, **desktop TCP services**, and **self-host** the compiler — all in Rak.
 
 English-readable syntax with first-class hexadecimal, a bytecode VM, real concurrency, and a SQL engine written in Rak itself.
