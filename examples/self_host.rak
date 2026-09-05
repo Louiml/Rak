@@ -1,0 +1,624 @@
+fn r_is_digit(c) {
+    return c == "0" || c == "1" || c == "2" || c == "3" || c == "4" || c == "5" || c == "6" || c == "7" || c == "8" || c == "9"
+}
+
+fn r_is_alpha(c) {
+    let code = ord(c)
+    return (code >= 65 && code <= 90) || (code >= 97 && code <= 122) || c == "_"
+}
+
+fn r_is_alnum(c) {
+    return r_is_alpha(c) || r_is_digit(c)
+}
+
+fn r_lex(src) {
+    let toks = []
+    let i = 0
+    let n = len(src)
+    while i < n {
+        let c = src[i]
+        if c == " " || c == "\n" || c == "\t" || c == "\r" {
+            i = i + 1
+        } else if c == "/" && i + 1 < n && src[i + 1] == "/" {
+            while i < n && src[i] != "\n" {
+                i = i + 1
+            }
+        } else if c == "\"" {
+            i = i + 1
+            let buf = ""
+            while i < n && src[i] != "\"" {
+                buf = buf + src[i]
+                i = i + 1
+            }
+            i = i + 1
+            toks = push(toks, {ty: "str", value: buf})
+        } else if r_is_digit(c) {
+            let buf = ""
+            while i < n && r_is_digit(src[i]) {
+                buf = buf + src[i]
+                i = i + 1
+            }
+            toks = push(toks, {ty: "num", value: buf})
+        } else if r_is_alpha(c) {
+            let buf = ""
+            while i < n && (r_is_alnum(src[i]) || src[i] == "_") {
+                buf = buf + src[i]
+                i = i + 1
+            }
+            toks = push(toks, {ty: "ident", value: buf})
+        } else if c == "+" || c == "-" || c == "*" || c == "/" || c == "%" || c == "=" || c == "<" || c == ">" || c == "!" {
+            let two = ""
+            if i + 1 < n {
+                two = src[i] + src[i + 1]
+            }
+            if two == "==" || two == "!=" || two == "<=" || two == ">=" {
+                toks = push(toks, {ty: "op", value: two})
+                i = i + 2
+            } else if two == "&&" || two == "||" {
+                toks = push(toks, {ty: "op", value: two})
+                i = i + 2
+            } else {
+                toks = push(toks, {ty: "op", value: c})
+                i = i + 1
+            }
+        } else if c == "(" || c == ")" || c == "{" || c == "}" || c == "," || c == ";" {
+            toks = push(toks, {ty: "punct", value: c})
+            i = i + 1
+        } else {
+            i = i + 1
+        }
+    }
+    return toks
+}
+
+fn r_tok(toks, i) {
+    if i < len(toks) {
+        return toks[i]
+    }
+    return {ty: "eof", value: ""}
+}
+
+fn r_peek() {
+    return r_tok(g_toks, g_pos)
+}
+
+fn r_next() {
+    let t = r_peek()
+    g_pos = g_pos + 1
+    return t
+}
+
+fn r_is_punct(v) {
+    let t = r_peek()
+    return t.ty == "punct" && t.value == v
+}
+
+fn r_is_op(v) {
+    let t = r_peek()
+    return t.ty == "op" && t.value == v
+}
+
+fn r_is_kw(v) {
+    let t = r_peek()
+    return t.ty == "ident" && t.value == v
+}
+
+fn r_expect_punct(v) {
+    if r_is_punct(v) {
+        g_pos = g_pos + 1
+        return true
+    }
+    return false
+}
+
+fn r_parse_primary() {
+    let t = r_peek()
+    if t.ty == "num" {
+        r_next()
+        return {kind: "num", value: t.value}
+    }
+    if t.ty == "str" {
+        r_next()
+        return {kind: "str", value: t.value}
+    }
+    if t.ty == "ident" {
+        r_next()
+        let e = {kind: "ident", name: t.value}
+        let cont = true
+        while cont {
+            if r_is_punct("(") {
+                r_next()
+                let args = []
+                while !r_is_punct(")") && r_peek().ty != "eof" {
+                    args = push(args, r_parse_expr())
+                    if r_is_punct(",") {
+                        r_next()
+                    }
+                }
+                r_expect_punct(")")
+                e = {kind: "call", callee: e, args: args}
+            } else {
+                cont = false
+            }
+        }
+        return e
+    }
+    if r_is_punct("(") {
+        r_next()
+        let e = r_parse_expr()
+        r_expect_punct(")")
+        return e
+    }
+    return {kind: "nil"}
+}
+
+fn r_parse_unary() {
+    if r_is_op("-") {
+        r_next()
+        return {kind: "unary", op: "-", e: r_parse_unary()}
+    }
+    if r_is_op("!") {
+        r_next()
+        return {kind: "unary", op: "!", e: r_parse_unary()}
+    }
+    return r_parse_primary()
+}
+
+fn r_parse_mul() {
+    let left = r_parse_unary()
+    while r_is_op("*") || r_is_op("/") || r_is_op("%") {
+        let op = r_next().value
+        let right = r_parse_unary()
+        left = {kind: "bin", op: op, l: left, r: right}
+    }
+    return left
+}
+
+fn r_parse_add() {
+    let left = r_parse_mul()
+    while r_is_op("+") || r_is_op("-") {
+        let op = r_next().value
+        let right = r_parse_mul()
+        left = {kind: "bin", op: op, l: left, r: right}
+    }
+    return left
+}
+
+fn r_parse_cmp() {
+    let left = r_parse_add()
+    while r_is_op("<") || r_is_op(">") || r_is_op("<=") || r_is_op(">=") {
+        let op = r_next().value
+        let right = r_parse_add()
+        left = {kind: "bin", op: op, l: left, r: right}
+    }
+    return left
+}
+
+fn r_parse_eq() {
+    let left = r_parse_cmp()
+    while r_is_op("==") || r_is_op("!=") {
+        let op = r_next().value
+        let right = r_parse_cmp()
+        left = {kind: "bin", op: op, l: left, r: right}
+    }
+    return left
+}
+
+fn r_parse_and() {
+    let left = r_parse_eq()
+    while r_is_op("&&") || r_is_op("||") {
+        let op = r_next().value
+        let right = r_parse_eq()
+        left = {kind: "bin", op: op, l: left, r: right}
+    }
+    return left
+}
+
+fn r_parse_expr() {
+    return r_parse_and()
+}
+
+fn r_parse_block() {
+    r_expect_punct("{")
+    let stmts = []
+    while !r_is_punct("}") && r_peek().ty != "eof" {
+        stmts = push(stmts, r_parse_stmt())
+    }
+    r_expect_punct("}")
+    return stmts
+}
+
+fn r_parse_stmt() {
+    if r_is_kw("let") {
+        r_next()
+        let name = r_next().value
+        if r_is_op("=") {
+            r_next()
+        }
+        let v = r_parse_expr()
+        if r_is_punct(";") {
+            r_next()
+        }
+        return {kind: "let", name: name, value: v}
+    }
+    if r_is_kw("fn") {
+        r_next()
+        let name = r_next().value
+        r_expect_punct("(")
+        let params = []
+        while !r_is_punct(")") {
+            params = push(params, r_next().value)
+            if r_is_punct(",") {
+                r_next()
+            }
+        }
+        r_expect_punct(")")
+        let body = r_parse_block()
+        return {kind: "fn", name: name, params: params, body: body}
+    }
+    if r_is_kw("if") {
+        r_next()
+        let cond = r_parse_expr()
+        let then_b = r_parse_block()
+        let else_b = []
+        if r_is_kw("else") {
+            r_next()
+            else_b = r_parse_block()
+        }
+        return {kind: "if", cond: cond, then: then_b, else_branch: else_b}
+    }
+    if r_is_kw("while") {
+        r_next()
+        let cond = r_parse_expr()
+        let body = r_parse_block()
+        return {kind: "while", cond: cond, body: body}
+    }
+    if r_is_kw("return") {
+        r_next()
+        let v = {kind: "nil"}
+        if !r_is_punct("}") && r_peek().ty != "eof" {
+            v = r_parse_expr()
+        }
+        if r_is_punct(";") {
+            r_next()
+        }
+        return {kind: "return", value: v}
+    }
+    if r_is_kw("dump") {
+        r_next()
+        let v = r_parse_expr()
+        if r_is_punct(";") {
+            r_next()
+        }
+        return {kind: "dump", value: v}
+    }
+    let e = r_parse_expr()
+    if r_is_punct(";") {
+        r_next()
+    }
+    return {kind: "expr", value: e}
+}
+
+fn r_parse(src) {
+    g_toks = r_lex(src)
+    g_pos = 0
+    let prog = []
+    while r_peek().ty != "eof" {
+        prog = push(prog, r_parse_stmt())
+    }
+    return prog
+}
+
+fn r_env_push() {
+    g_scopes = push(g_scopes, {})
+}
+
+fn r_env_pop() {
+    let n = len(g_scopes)
+    g_scopes = r_slice(g_scopes, 0, n - 1)
+}
+
+fn r_slice(arr, start, end) {
+    let out = []
+    let i = start
+    while i < end {
+        out = push(out, arr[i])
+        i = i + 1
+    }
+    return out
+}
+
+fn r_define(name, v) {
+    let n = len(g_scopes)
+    g_scopes[n - 1][name] = v
+}
+
+fn r_lookup(name) {
+    let i = len(g_scopes) - 1
+    while i >= 0 {
+        if has(g_scopes[i], name) {
+            return g_scopes[i][name]
+        }
+        i = i - 1
+    }
+    return nil
+}
+
+fn r_truthy(v) {
+    if v == nil {
+        return false
+    }
+    if v.kind == "num" {
+        return int(v.value) != 0
+    }
+    if v.kind == "str" {
+        return v.value != ""
+    }
+    return true
+}
+
+fn r_to_str(v) {
+    if v == nil {
+        return "nil"
+    }
+    if v.kind == "num" {
+        return v.value
+    }
+    if v.kind == "str" {
+        return v.value
+    }
+    if v.kind == "fn" {
+        return "<fn>"
+    }
+    return "?"
+}
+
+fn r_num(v) {
+    if v == nil {
+        return 0
+    }
+    if v.kind == "num" {
+        return int(v.value)
+    }
+    return 0
+}
+
+fn r_bool(b) {
+    if b {
+        return 1
+    }
+    return 0
+}
+
+fn r_num_eq(a, b) {
+    if a.kind == "str" && b.kind == "str" {
+        return r_bool(a.value == b.value)
+    }
+    return r_bool(r_num(a) == r_num(b))
+}
+
+fn r_eval_bin(op, a, b) {
+    if op == "+" {
+        if a.kind == "str" || b.kind == "str" {
+            return {kind: "str", value: r_to_str(a) + r_to_str(b)}
+        }
+        return {kind: "num", value: r_num(a) + r_num(b)}
+    }
+    let an = r_num(a)
+    let bn = r_num(b)
+    if op == "-" {
+        return {kind: "num", value: an - bn}
+    }
+    if op == "*" {
+        return {kind: "num", value: an * bn}
+    }
+    if op == "/" {
+        if bn == 0 {
+            return {kind: "num", value: 0}
+        }
+        return {kind: "num", value: an / bn}
+    }
+    if op == "%" {
+        if bn == 0 {
+            return {kind: "num", value: 0}
+        }
+        return {kind: "num", value: an - (an / bn) * bn}
+    }
+    if op == "==" {
+        return {kind: "num", value: r_num_eq(a, b)}
+    }
+    if op == "!=" {
+        return {kind: "num", value: 1 - r_num_eq(a, b)}
+    }
+    if op == "<" {
+        return {kind: "num", value: r_bool(an < bn)}
+    }
+    if op == ">" {
+        return {kind: "num", value: r_bool(an > bn)}
+    }
+    if op == "<=" {
+        return {kind: "num", value: r_bool(an <= bn)}
+    }
+    if op == ">=" {
+        return {kind: "num", value: r_bool(an >= bn)}
+    }
+    if op == "&&" {
+        return {kind: "num", value: r_bool(r_truthy(a) && r_truthy(b))}
+    }
+    if op == "||" {
+        return {kind: "num", value: r_bool(r_truthy(a) || r_truthy(b))}
+    }
+    return {kind: "nil"}
+}
+
+fn r_eval(e) {
+    let k = e.kind
+    if k == "num" {
+        return e
+    }
+    if k == "str" {
+        return e
+    }
+    if k == "nil" {
+        return e
+    }
+    if k == "ident" {
+        return r_lookup(e.name)
+    }
+    if k == "bin" {
+        let a = r_eval(e.l)
+        let b = r_eval(e.r)
+        return r_eval_bin(e.op, a, b)
+    }
+    if k == "unary" {
+        let v = r_eval(e.e)
+        if e.op == "-" {
+            return {kind: "num", value: 0 - r_num(v)}
+        }
+        if e.op == "!" {
+            return {kind: "num", value: r_bool(!r_truthy(v))}
+        }
+        return v
+    }
+    if k == "call" {
+        return r_eval_call(e)
+    }
+    return {kind: "nil"}
+}
+
+fn r_eval_call(e) {
+    let callee = e.callee
+    if callee.kind == "ident" {
+        let f = r_lookup(callee.name)
+        if f != nil && f.kind == "fn" {
+            return r_call(f, e.args)
+        }
+    }
+    return {kind: "nil"}
+}
+
+fn r_call(f, arg_exprs) {
+    let args = []
+    for a in arg_exprs {
+        args = push(args, r_eval(a))
+    }
+    r_env_push()
+    let i = 0
+    while i < len(f.params) {
+        if i < len(args) {
+            r_define(f.params[i], args[i])
+        } else {
+            r_define(f.params[i], {kind: "nil"})
+        }
+        i = i + 1
+    }
+    let saved_ret = g_ret
+    let saved_ret_flag = g_returning
+    g_returning = false
+    for s in f.body {
+        r_exec(s)
+        if g_returning {
+            break
+        }
+    }
+    let result = g_ret
+    if !g_returning {
+        result = {kind: "nil"}
+    }
+    g_returning = saved_ret_flag
+    g_ret = saved_ret
+    r_env_pop()
+    return result
+}
+
+fn r_exec(s) {
+    let k = s.kind
+    if k == "let" {
+        r_define(s.name, r_eval(s.value))
+        return
+    }
+    if k == "fn" {
+        r_define(s.name, s)
+        return
+    }
+    if k == "expr" {
+        r_eval(s.value)
+        return
+    }
+    if k == "dump" {
+        print(r_to_str(r_eval(s.value)))
+        return
+    }
+    if k == "return" {
+        g_ret = r_eval(s.value)
+        g_returning = true
+        return
+    }
+    if k == "if" {
+        if r_truthy(r_eval(s.cond)) {
+            r_env_push()
+            for st in s.then {
+                r_exec(st)
+                if g_returning {
+                    break
+                }
+            }
+            r_env_pop()
+        } else {
+            r_env_push()
+            for st in s.else_branch {
+                r_exec(st)
+                if g_returning {
+                    break
+                }
+            }
+            r_env_pop()
+        }
+        return
+    }
+    if k == "while" {
+        while r_truthy(r_eval(s.cond)) {
+            r_env_push()
+            for st in s.body {
+                r_exec(st)
+                if g_returning {
+                    break
+                }
+            }
+            r_env_pop()
+            if g_returning {
+                break
+            }
+        }
+        return
+    }
+}
+
+fn r_run(src) {
+    let prog = r_parse(src)
+    r_env_push()
+    for s in prog {
+        r_exec(s)
+    }
+    r_env_pop()
+}
+
+let g_pos = 0
+let g_toks = []
+let g_scopes = []
+let g_ret = nil
+let g_returning = false
+
+print("=== Rak self-hosting demo ===")
+print("A Rak interpreter (lexer + parser + tree-walker) written in Rak.")
+print("It reads Rak source and executes it.")
+print("")
+let demo = "dump 1 + 2 * 3"
+print("Source: " + demo)
+print("Output:")
+r_run(demo)
+print("")
+let demo2 = "let x = 5; let y = 7; dump x * y - 1"
+print("Source: " + demo2)
+print("Output:")
+r_run(demo2)
