@@ -1495,6 +1495,21 @@ impl Interpreter {
                     Err(crate::RakError::Runtime("keys() requires a map".to_string()))
                 }
             }
+            "has" => {
+                let m = args.first();
+                let k = self.val_to_string(args.get(1))?;
+                match m {
+                    Some(Value::Map(map)) => Ok(Value::Bool(map.contains_key(&k))),
+                    _ => Ok(Value::Bool(false)),
+                }
+            }
+            "get" => {
+                let k = self.val_to_string(args.get(1))?;
+                match args.first() {
+                    Some(Value::Map(map)) => Ok(map.get(&k).cloned().unwrap_or_else(|| args.get(2).cloned().unwrap_or(Value::Nil))),
+                    _ => Ok(args.get(2).cloned().unwrap_or(Value::Nil)),
+                }
+            }
             "values" => {
                 if let Some(Value::Map(m)) = args.first() {
                     Ok(Value::Array(m.values().cloned().collect()))
