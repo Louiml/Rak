@@ -32,7 +32,7 @@ pub enum Value {
     Function {
         params: Vec<Param>,
         body: Vec<Stmt>,
-        closure: Env,
+        closure: Arc<Env>,
         is_async: bool,
     },
     EnumDef {
@@ -501,7 +501,14 @@ impl Interpreter {
                     }
                     Err(e) => {
                         self.env.pop_scope();
-                        return Err(e);
+                        self.env.push_scope();
+                        if let Some(cn) = catch_name {
+                            self.env.define(cn, Value::String(e.to_string()));
+                        }
+                        for s in catch_body {
+                            self.exec_stmt(s)?;
+                        }
+                        self.env.pop_scope();
                     }
                 }
             }
@@ -780,6 +787,25 @@ impl Interpreter {
                 }
             }
             Expr::Binary(op, l, r) => {
+                match op {
+                    BinOp::And => {
+                        let lv = self.eval_expr(l)?;
+                        if !is_truthy(&lv) {
+                            return Ok(Value::Bool(false));
+                        }
+                        let rv = self.eval_expr(r)?;
+                        return Ok(Value::Bool(is_truthy(&rv)));
+                    }
+                    BinOp::Or => {
+                        let lv = self.eval_expr(l)?;
+                        if is_truthy(&lv) {
+                            return Ok(Value::Bool(true));
+                        }
+                        let rv = self.eval_expr(r)?;
+                        return Ok(Value::Bool(is_truthy(&rv)));
+                    }
+                    _ => {}
+                }
                 let lv = self.eval_expr(l)?;
                 let rv = self.eval_expr(r)?;
                 self.eval_binary(op, &lv, &rv)
@@ -788,6 +814,42 @@ impl Interpreter {
                 let val = self.eval_expr(value)?;
                 self.env.assign(name, val.clone())?;
                 Ok(val)
+            }
+            Expr::IndexAssign { obj, idx, value } => {
+                let v = self.eval_expr(value)?;
+                let mut container = self.eval_expr(obj)?;
+                let idx_val = self.eval_expr(idx)?;
+                match &mut container {
+                    Value::Array(a) => {
+                        if let Value::Int(i) = idx_val {
+                            let i = i as usize;
+                            if i < a.len() {
+                                a[i] = v.clone();
+                            }
+                        }
+                    }
+                    Value::Map(m) => {
+                        m.insert(idx_val.to_string(), v.clone());
+                    }
+                    _ => return Err(crate::RakError::Runtime("cannot index-assign this value".to_string())),
+                }
+                self.store_back(obj, container)?;
+                Ok(v)
+            }
+            Expr::FieldAssign { obj, field, value } => {
+                let v = self.eval_expr(value)?;
+                let mut container = self.eval_expr(obj)?;
+                match &mut container {
+                    Value::Map(m) => {
+                        m.insert(field.clone(), v.clone());
+                    }
+                    Value::Struct { fields, .. } => {
+                        fields.insert(field.clone(), v.clone());
+                    }
+                    _ => return Err(crate::RakError::Runtime("cannot field-assign this value".to_string())),
+                }
+                self.store_back(obj, container)?;
+                Ok(v)
             }
             Expr::CompoundAssign(op, name, value) => {
                 let cur = self.env.get(name).ok_or_else(|| crate::RakError::Runtime(format!("Undefined: {}", name)))?;
@@ -862,7 +924,7 @@ impl Interpreter {
                 Ok(Value::Function {
                     params: params.clone(),
                     body: body.clone(),
-                    closure: self.env.clone(),
+                    closure: Arc::new(self.env.clone()),
                     is_async: *is_async,
                 })
             }
@@ -871,7 +933,7 @@ impl Interpreter {
                 Ok(Value::Function {
                     params: params.clone(),
                     body: vec![single],
-                    closure: self.env.clone(),
+                    closure: Arc::new(self.env.clone()),
                     is_async: false,
                 })
             }
@@ -996,6 +1058,48 @@ impl Interpreter {
         }
     }
 
+    fn store_back(&mut self, target: &Expr, value: Value) -> crate::Result<()> {
+        match target {
+            Expr::Ident(name) => {
+                self.env.assign(name, value)?;
+                Ok(())
+            }
+            Expr::FieldAccess(obj, field) => {
+                let mut container = self.eval_expr(obj)?;
+                match &mut container {
+                    Value::Map(m) => {
+                        m.insert(field.clone(), value);
+                    }
+                    Value::Struct { fields, .. } => {
+                        fields.insert(field.clone(), value);
+                    }
+                    _ => return Err(crate::RakError::Runtime("cannot field-assign this value".to_string())),
+                }
+                self.store_back(obj, container)
+            }
+            Expr::Index(obj, idx) => {
+                let mut container = self.eval_expr(obj)?;
+                let idx_val = self.eval_expr(idx)?;
+                match &mut container {
+                    Value::Array(a) => {
+                        if let Value::Int(i) = idx_val {
+                            let i = i as usize;
+                            if i < a.len() {
+                                a[i] = value;
+                            }
+                        }
+                    }
+                    Value::Map(m) => {
+                        m.insert(idx_val.to_string(), value);
+                    }
+                    _ => return Err(crate::RakError::Runtime("cannot index-assign this value".to_string())),
+                }
+                self.store_back(obj, container)
+            }
+            _ => Err(crate::RakError::Runtime("invalid assignment target".to_string())),
+        }
+    }
+
     fn eval_ident(&mut self, name: &str) -> crate::Result<Value> {
         if let Some(v) = self.env.get(name) {
             return Ok(v);
@@ -1076,7 +1180,7 @@ impl Interpreter {
         Err(crate::RakError::Runtime("Cannot call non-function".to_string()))
     }
 
-    fn call_function(&mut self, params: &[Param], body: &[Stmt], closure: &Env, is_async: bool, args: &[Expr]) -> crate::Result<Value> {
+    fn call_function(&mut self, params: &[Param], body: &[Stmt], closure: &Arc<Env>, is_async: bool, args: &[Expr]) -> crate::Result<Value> {
         let _ = is_async;
         let arg_vals: Vec<Value> = args.iter().map(|a| self.eval_expr(a)).collect::<crate::Result<_>>()?;
         let saved_returning = self.returning;
@@ -1146,6 +1250,13 @@ impl Interpreter {
     }
 
     fn eval_binary(&mut self, op: &BinOp, left: &Value, right: &Value) -> crate::Result<Value> {
+        match op {
+            BinOp::And => return Ok(Value::Bool(is_truthy(left) && is_truthy(right))),
+            BinOp::Or => return Ok(Value::Bool(is_truthy(left) || is_truthy(right))),
+            BinOp::Eq => return Ok(Value::Bool(left == right)),
+            BinOp::NotEq => return Ok(Value::Bool(left != right)),
+            _ => {}
+        }
         match (op, left, right) {
             (BinOp::Add, Value::String(a), b) => Ok(Value::String(format!("{}{}", a, b))),
             (BinOp::Add, Value::Array(a), Value::Array(b)) => {
@@ -1614,7 +1725,7 @@ impl Interpreter {
                         let closure = closure.clone();
                         let handle: JoinHandle<Value> = std::thread::spawn(move || {
                             let mut interp = Interpreter::new();
-                            interp.env = closure.clone();
+                            interp.env = (*closure).clone();
                             interp.env.push_scope();
                             for s in &body {
                                 let _ = interp.exec_stmt(s);
@@ -1690,6 +1801,48 @@ impl Interpreter {
             "env_get" => {
                 let k = self.val_to_string(args.first())?;
                 Ok(std::env::var(&k).map(Value::String).unwrap_or(Value::Nil))
+            }
+            "ord" => {
+                let s = self.val_to_string(args.first())?;
+                Ok(Value::Int(s.chars().next().map(|c| c as i64).unwrap_or(0)))
+            }
+            "chr" => {
+                let n = args.first().and_then(|v| v.as_i64()).unwrap_or(0) as u32;
+                Ok(Value::String(char::from_u32(n).map(|c| c.to_string()).unwrap_or_default()))
+            }
+            "substr" => {
+                let s = self.val_to_string(args.first())?;
+                let start = args.get(1).and_then(|v| v.as_i64()).unwrap_or(0) as usize;
+                let length = args.get(2).and_then(|v| v.as_i64()).unwrap_or(0) as usize;
+                let chars: Vec<char> = s.chars().collect();
+                let end = (start + length).min(chars.len());
+                let s2 = start.min(chars.len());
+                Ok(Value::String(chars[s2..end].iter().collect()))
+            }
+            "sort" => {
+                if let Some(Value::Array(a)) = args.first().cloned() {
+                    let mut a = a;
+                    a.sort_by(|x, y| x.to_string().cmp(&y.to_string()));
+                    Ok(Value::Array(a))
+                } else {
+                    Err(crate::RakError::Runtime("sort() requires an array".to_string()))
+                }
+            }
+            "exit" => {
+                let code = args.first().and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+                std::process::exit(code);
+            }
+            "print" => {
+                let s = self.val_to_string(args.first())?;
+                println!("{}", s);
+                use std::io::Write;
+                std::io::stdout().flush().ok();
+                Ok(Value::Nil)
+            }
+            "dbg" => {
+                let s = self.val_to_string(args.first())?;
+                eprintln!("[dbg] {}", s);
+                Ok(Value::Nil)
             }
             _ => Err(crate::RakError::Runtime(format!("Unknown function: {}", name))),
         }

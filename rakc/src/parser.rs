@@ -386,6 +386,8 @@ impl<'a> Parser<'a> {
         self.expect(Token::Return)?;
         if self.match_token(&Token::Semi) {
             Ok(Stmt::Return(None))
+        } else if self.check(&Token::RBrace) || self.peek().is_none() {
+            Ok(Stmt::Return(None))
         } else {
             let expr = self.parse_expr()?;
             self.semi()?;
@@ -889,10 +891,23 @@ impl<'a> Parser<'a> {
         let mut expr = self.parse_or()?;
         if self.match_token(&Token::Eq) {
             let value = self.parse_expr()?;
-            if let Expr::Ident(name) = expr {
-                expr = Expr::Assign(name, Box::new(value));
-            } else {
-                return Err(RakError::Parser("Invalid assignment target".to_string()));
+            match expr {
+                Expr::Ident(name) => expr = Expr::Assign(name, Box::new(value)),
+                Expr::Index(obj, idx) => {
+                    expr = Expr::IndexAssign {
+                        obj,
+                        idx,
+                        value: Box::new(value),
+                    };
+                }
+                Expr::FieldAccess(obj, field) => {
+                    expr = Expr::FieldAssign {
+                        obj,
+                        field,
+                        value: Box::new(value),
+                    };
+                }
+                _ => return Err(RakError::Parser("Invalid assignment target".to_string())),
             }
         } else if self.match_token(&Token::PlusEq) {
             let value = self.parse_expr()?;

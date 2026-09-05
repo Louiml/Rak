@@ -1,0 +1,18 @@
+fn query(sql) {
+    let s = net_connect("127.0.0.1:18393")
+    tcp_write(s, sql + "\n")
+    let resp = tcp_read_line(s)
+    tcp_close(s)
+    return resp
+}
+
+dump query("CREATE TABLE users (id int, name text, age int)")
+dump query("INSERT INTO users (id, name, age) VALUES (1, 'Rak', 7)")
+dump query("INSERT INTO users (id, name, age) VALUES (2, 'Ada', 9)")
+dump query("INSERT INTO users (id, name, age) VALUES (3, 'Lin', 42)")
+dump query("SELECT * FROM users")
+dump query("SELECT name, age FROM users WHERE age > 8")
+dump query("UPDATE users SET age = 10 WHERE name = 'Rak'")
+dump query("SELECT * FROM users WHERE age >= 10")
+dump query("DELETE FROM users WHERE id = 2")
+dump query("SELECT * FROM users")

@@ -1,7 +1,7 @@
 use logos::Logos;
 
 #[derive(Logos, Clone, Debug, PartialEq)]
-#[logos(skip r"[ \t\n\f]+")]
+#[logos(skip r"[ \t\r\n\f]+")]
 #[logos(skip r"//[^\n]*\n?")]
 pub enum Token {
     #[token("scan")]
@@ -72,18 +72,10 @@ pub enum Token {
     Await,
     #[token("spawn")]
     Spawn,
-    #[token("chan")]
-    Chan,
     #[token("as")]
     As,
-    #[token("is")]
-    Is,
-    #[token("where")]
-    Where,
     #[token("type")]
     Type,
-    #[token("self")]
-    Self_,
 
     #[regex(r"0x[0-9A-Fa-f]+", |lex| hex_to_u64(lex.slice()))]
     Hex(u64),

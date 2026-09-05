@@ -21,6 +21,16 @@ pub enum Expr {
     Binary(BinOp, Box<Expr>, Box<Expr>),
     Assign(String, Box<Expr>),
     CompoundAssign(CompoundOp, String, Box<Expr>),
+    IndexAssign {
+        obj: Box<Expr>,
+        idx: Box<Expr>,
+        value: Box<Expr>,
+    },
+    FieldAssign {
+        obj: Box<Expr>,
+        field: String,
+        value: Box<Expr>,
+    },
     FieldAccess(Box<Expr>, String),
     Index(Box<Expr>, Box<Expr>),
     Range(Option<Box<Expr>>, Option<Box<Expr>>),
