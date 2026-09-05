@@ -1,12 +1,9 @@
 use logos::Logos;
 
-/// Tokens for the Rak programming language.
-/// Keywords are English words. Hexadecimal is first-class.
 #[derive(Logos, Clone, Debug, PartialEq)]
 #[logos(skip r"[ \t\n\f]+")]
 #[logos(skip r"//[^\n]*\n?")]
 pub enum Token {
-    // --- English Keywords ---
     #[token("scan")]
     Scan,
     #[token("fetch")]
@@ -60,28 +57,61 @@ pub enum Token {
     #[token("nil")]
     Nil,
 
-    // --- Literals ---
-    /// Hexadecimal integer: 0x1A2B, 0x00FF
+    #[token("try")]
+    Try,
+    #[token("catch")]
+    Catch,
+    #[token("raise")]
+    #[token("throw")]
+    Raise,
+    #[token("trait")]
+    Trait,
+    #[token("async")]
+    Async,
+    #[token("await")]
+    Await,
+    #[token("spawn")]
+    Spawn,
+    #[token("chan")]
+    Chan,
+    #[token("as")]
+    As,
+    #[token("is")]
+    Is,
+    #[token("where")]
+    Where,
+    #[token("type")]
+    Type,
+    #[token("self")]
+    Self_,
+
     #[regex(r"0x[0-9A-Fa-f]+", |lex| hex_to_u64(lex.slice()))]
     Hex(u64),
 
-    /// Decimal integer
-    #[regex(r"[0-9]+", |lex| lex.slice().parse::<u64>().ok())]
-    Int(u64),
+    #[regex(r"[0-9]+\.[0-9]+([eE][+-]?[0-9]+)?", |lex| lex.slice().parse::<f64>().ok())]
+    Float(f64),
 
-    /// String literal: "hello" or "hex:\x48\x65\x6C\x6C\x6F"
+    #[regex(r"[0-9]+\.[0-9]+([eE][+-]?[0-9]+)?f32", |lex| lex.slice()[..lex.slice().len()-3].parse::<f32>().ok())]
+    Float32(f32),
+
+    #[regex(r"[0-9]+(i8|i16|i32|i64|u8|u16|u32|u64)", |lex| parse_typed_int(lex.slice()))]
+    TypedInt(TypedIntData),
+
+    #[regex(r"[0-9]+", |lex| lex.slice().parse::<i64>().ok())]
+    Int(i64),
+
     #[regex(r#""([^"\\]|\\.)*""#, |lex| parse_string(lex.slice()))]
     String(String),
 
-    /// Byte string / raw bytes: b"\x00\xFF"
+    #[regex(r#"f"([^"\\]|\\.)*""#, |lex| parse_interp(lex.slice()))]
+    Interp(String),
+
     #[regex(r#"b"([^"\\]|\\.)*""#, |lex| parse_bytes(lex.slice()))]
     Bytes(Vec<u8>),
 
-    // --- Identifiers ---
     #[regex(r"[a-zA-Z_][a-zA-Z0-9_]*", |lex| lex.slice().to_string())]
     Ident(String),
 
-    // --- Operators & Punctuation ---
     #[token("+")]
     Plus,
     #[token("-")]
@@ -138,12 +168,19 @@ pub enum Token {
     #[token("||")]
     OrOr,
 
+    #[token("?")]
+    Question,
+
     #[token(".")]
     Dot,
+    #[token("..")]
+    DotDot,
     #[token(",")]
     Comma,
     #[token(":")]
     Colon,
+    #[token("::")]
+    ColonColon,
     #[token(";")]
     Semi,
     #[token("->")]
@@ -151,7 +188,6 @@ pub enum Token {
     #[token("=>")]
     FatArrow,
 
-    // --- Delimiters ---
     #[token("(")]
     LParen,
     #[token(")")]
@@ -166,12 +202,54 @@ pub enum Token {
     RBrace,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct TypedIntData {
+    pub value: i64,
+    pub kind: IntKind,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum IntKind {
+    I8,
+    I16,
+    I32,
+    I64,
+    U8,
+    U16,
+    U32,
+    U64,
+}
+
 fn hex_to_u64(s: &str) -> Option<u64> {
     u64::from_str_radix(&s[2..], 16).ok()
 }
 
+fn parse_typed_int(s: &str) -> Option<TypedIntData> {
+    let (num, suffix) = if let Some(p) = s.find(|c: char| c == 'i' || c == 'u') {
+        (&s[..p], &s[p..])
+    } else {
+        return None;
+    };
+    let kind = match suffix {
+        "i8" => IntKind::I8,
+        "i16" => IntKind::I16,
+        "i32" => IntKind::I32,
+        "i64" => IntKind::I64,
+        "u8" => IntKind::U8,
+        "u16" => IntKind::U16,
+        "u32" => IntKind::U32,
+        "u64" => IntKind::U64,
+        _ => return None,
+    };
+    num.parse::<i64>().ok().map(|v| TypedIntData { value: v, kind })
+}
+
 fn parse_string(s: &str) -> Option<String> {
     let inner = &s[1..s.len() - 1];
+    unescape(inner)
+}
+
+pub fn unescape(inner: &str) -> Option<String> {
     let mut result = String::new();
     let mut chars = inner.chars();
     while let Some(c) = chars.next() {
@@ -200,6 +278,11 @@ fn parse_string(s: &str) -> Option<String> {
         }
     }
     Some(result)
+}
+
+fn parse_interp(s: &str) -> Option<String> {
+    let inner = &s[2..s.len() - 1];
+    unescape(inner)
 }
 
 fn parse_bytes(s: &str) -> Option<Vec<u8>> {
@@ -275,5 +358,14 @@ mod tests {
                 Token::Fn,
             ]
         );
+    }
+
+    #[test]
+    fn test_float_and_typed_int() {
+        let toks = tokenize("3.14 42i32 10u8 7").unwrap();
+        assert_eq!(toks[0], Token::Float(3.14));
+        assert_eq!(toks[1], Token::TypedInt(TypedIntData { value: 42, kind: IntKind::I32 }));
+        assert_eq!(toks[2], Token::TypedInt(TypedIntData { value: 10, kind: IntKind::U8 }));
+        assert_eq!(toks[3], Token::Int(7));
     }
 }

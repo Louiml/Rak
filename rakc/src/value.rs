@@ -289,6 +289,13 @@ pub fn type_of(t: &Type) -> String {
         Type::Array(_) => "array".to_string(),
         Type::Map(_, _) => "map".to_string(),
         Type::Function(_, _) => "function".to_string(),
+        Type::Option(_) => "option".to_string(),
+        Type::Result(_, _) => "result".to_string(),
+        Type::Generic(g) => g.clone(),
+        Type::Tuple(_) => "tuple".to_string(),
         Type::Custom(c) => c.clone(),
+        Type::I8 | Type::I16 | Type::I32 | Type::I64 => "int".to_string(),
+        Type::U8 | Type::U16 | Type::U32 | Type::U64 => "uint".to_string(),
+        Type::F32 | Type::F64 => "float".to_string(),
     }
 }

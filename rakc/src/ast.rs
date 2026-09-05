@@ -1,130 +1,178 @@
-/// Abstract Syntax Tree for Rak.
-/// Simple, expression-oriented, with OSINT-specific statement types.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
-    /// 0x1A2B
     Hex(u64),
-    /// 42
-    Int(u64),
-    /// "hello"
+    Int(i64),
+    Float(f64),
+    Float32(f32),
+    TypedInt(i64, IntKind),
     String(String),
-    /// b"\x00\xFF"
+    Interp {
+        template: String,
+        parts: Vec<Expr>,
+    },
     Bytes(Vec<u8>),
-    /// variable_name
     Ident(String),
-    /// true, false
     Bool(bool),
-    /// nil
     Nil,
-    /// -expr, !expr, ~expr
+    Tuple(Vec<Expr>),
+    Array(Vec<Expr>),
+    Map(Vec<(Expr, Expr)>),
     Unary(UnOp, Box<Expr>),
-    /// a + b, a == b
     Binary(BinOp, Box<Expr>, Box<Expr>),
-    /// a = b
     Assign(String, Box<Expr>),
-    /// fn(params) -> Type { body }
+    CompoundAssign(CompoundOp, String, Box<Expr>),
+    FieldAccess(Box<Expr>, String),
+    Index(Box<Expr>, Box<Expr>),
+    Range(Option<Box<Expr>>, Option<Box<Expr>>),
     Function {
         params: Vec<Param>,
         return_type: Option<Type>,
         body: Vec<Stmt>,
+        captures: Vec<String>,
+        is_async: bool,
     },
-    /// call(args)
     Call {
         callee: Box<Expr>,
         args: Vec<Expr>,
     },
-    /// struct.field
-    FieldAccess(Box<Expr>, String),
-    /// arr[idx]
-    Index(Box<Expr>, Box<Expr>),
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum Stmt {
-    /// let x = 5
-    Let {
-        name: String,
-        mutable: bool,
-        value: Box<Expr>,
-        type_hint: Option<Type>,
-    },
-    /// expr;
-    Expr(Box<Expr>),
-    /// return expr;
-    Return(Option<Box<Expr>>),
-    /// if cond { block } else { block }
     If {
         cond: Box<Expr>,
         then_branch: Vec<Stmt>,
         else_branch: Option<Vec<Stmt>>,
     },
-    /// loop { block }
+    Match {
+        value: Box<Expr>,
+        arms: Vec<(Pattern, Option<Expr>, Vec<Stmt>)>,
+    },
+    Block(Vec<Stmt>),
+    Lambda {
+        params: Vec<Param>,
+        body: Box<Expr>,
+        captures: Vec<String>,
+    },
+    TryExpr(Box<Expr>),
+    Await(Box<Expr>),
+    Spawn(Box<Expr>),
+    Raise(Box<Expr>),
+    Path(Vec<String>),
+    StructLit {
+        name: String,
+        fields: Vec<(String, Expr)>,
+    },
+    As(Box<Expr>, Type),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum CompoundOp {
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Rem,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Stmt {
+    Let {
+        name: String,
+        pattern: Option<Pattern>,
+        mutable: bool,
+        value: Box<Expr>,
+        type_hint: Option<Type>,
+    },
+    Expr(Box<Expr>),
+    Return(Option<Box<Expr>>),
+    If {
+        cond: Box<Expr>,
+        then_branch: Vec<Stmt>,
+        else_branch: Option<Vec<Stmt>>,
+    },
     Loop(Vec<Stmt>),
-    /// while cond { block }
     While {
         cond: Box<Expr>,
         body: Vec<Stmt>,
     },
-    /// for item in iterable { block }
     For {
         name: String,
         iterable: Box<Expr>,
         body: Vec<Stmt>,
     },
-    /// scan target { ... }
-    /// OSINT-specific: port scan, web scan, etc.
     Scan {
         target: Box<Expr>,
         options: Vec<(String, Expr)>,
         body: Option<Vec<Stmt>>,
     },
-    /// fetch url { ... }
-    /// OSINT-specific: HTTP/TCP fetch with response handling
     Fetch {
         target: Box<Expr>,
         options: Vec<(String, Expr)>,
         body: Option<Vec<Stmt>>,
     },
-    /// dump expr;
-    /// OSINT-specific: output data to file/network/stdout
     Dump {
         value: Box<Expr>,
         target: Option<Box<Expr>>,
     },
-    /// trace expr;
-    /// OSINT-specific: trace packet/header/response
     Trace {
         value: Box<Expr>,
     },
-    /// break;
     Break,
-    /// continue;
     Continue,
-    /// mod name { ... }
     Mod {
         name: String,
         items: Vec<Stmt>,
     },
-    /// struct Name { fields }
     Struct {
         name: String,
+        type_params: Vec<String>,
         fields: Vec<Param>,
     },
-    /// enum Name { variants }
     Enum {
         name: String,
-        variants: Vec<String>,
+        type_params: Vec<String>,
+        variants: Vec<EnumVariant>,
     },
-    /// impl Type { methods }
     Impl {
         target: String,
+        trait_name: Option<String>,
         methods: Vec<Stmt>,
     },
-    /// match expr { arms }
+    Trait {
+        name: String,
+        methods: Vec<TraitMethod>,
+    },
     Match {
         value: Box<Expr>,
-        arms: Vec<(Pattern, Vec<Stmt>)>,
+        arms: Vec<(Pattern, Option<Expr>, Vec<Stmt>)>,
     },
+    Try {
+        body: Vec<Stmt>,
+        catch_name: Option<String>,
+        catch_body: Vec<Stmt>,
+    },
+    Raise(Box<Expr>),
+    TypeAlias {
+        name: String,
+        alias: Type,
+    },
+    Use {
+        path: Vec<String>,
+        is_file: bool,
+        alias: Option<String>,
+    },
+    Async(Vec<Stmt>),
+    Export(Box<Stmt>),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct EnumVariant {
+    pub name: String,
+    pub fields: Vec<Type>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TraitMethod {
+    pub name: String,
+    pub params: Vec<Param>,
+    pub return_type: Option<Type>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -132,34 +180,47 @@ pub enum Pattern {
     Wild,
     Ident(String),
     Hex(u64),
-    Int(u64),
+    Int(i64),
     String(String),
     Bool(bool),
     Nil,
+    Tuple(Vec<Pattern>),
+    Array(Vec<Pattern>),
+    Struct(String, Vec<(String, Pattern)>),
+    Range(Box<Pattern>, Box<Pattern>),
+    Or(Vec<Pattern>),
+    Some(Box<Pattern>),
+    None,
+    Ok(Box<Pattern>),
+    Err(Box<Pattern>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Type {
-    /// hex8, hex16, hex32, hex64
     Hex(usize),
-    /// int
     Int,
-    /// string
+    I8,
+    I16,
+    I32,
+    I64,
+    U8,
+    U16,
+    U32,
+    U64,
+    F32,
+    F64,
     String,
-    /// bytes
     Bytes,
-    /// bool
     Bool,
-    /// nil / void
     Nil,
-    /// [T]
     Array(Box<Type>),
-    /// {K: V}
+    Tuple(Vec<Type>),
     Map(Box<Type>, Box<Type>),
-    /// fn(A, B) -> C
     Function(Vec<Type>, Box<Type>),
-    /// user-defined
     Custom(String),
+    Generic(String),
+    Option(Box<Type>),
+    Result(Box<Type>, Box<Type>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -197,7 +258,18 @@ pub enum BinOp {
     GtEq,
 }
 
-/// A complete Rak source file.
+#[derive(Debug, Clone, PartialEq)]
+pub enum IntKind {
+    I8,
+    I16,
+    I32,
+    I64,
+    U8,
+    U16,
+    U32,
+    U64,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Module {
     pub imports: Vec<Import>,
@@ -207,5 +279,6 @@ pub struct Module {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Import {
     pub path: Vec<String>,
+    pub is_file: bool,
     pub alias: Option<String>,
 }

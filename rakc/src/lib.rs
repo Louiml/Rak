@@ -17,6 +17,8 @@ pub enum RakError {
     Parser(String),
     #[error("Runtime error: {0}")]
     Runtime(String),
+    #[error("Raised: {0}")]
+    Raise(String),
 }
 
 pub type Result<T> = std::result::Result<T, RakError>;
