@@ -2,7 +2,7 @@ use std::env;
 use std::fs;
 use std::io::{self, Read};
 
-const VERSION: &str = "0.1.0";
+const VERSION: &str = "0.2.0";
 
 fn print_usage() {
     eprintln!("rakc {} - Rak language compiler", VERSION);
