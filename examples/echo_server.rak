@@ -1,0 +1,20 @@
+let listener = net_listen("127.0.0.1:18391")
+dump "echo server listening on 127.0.0.1:18391"
+
+fn handle_client(stream) {
+    let line = tcp_read_line(stream)
+    dump f"got: {line}"
+    tcp_write(stream, f"echo: {line}\n")
+    tcp_close(stream)
+}
+
+let i = 0
+while i < 3 {
+    let conn = net_accept(listener)
+    let stream = conn.0
+    dump f"connection from {conn.1}"
+    let h = spawn(fn() { handle_client(stream) })
+    i = i + 1
+}
+
+dump "done"

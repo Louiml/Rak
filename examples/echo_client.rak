@@ -1,0 +1,8 @@
+let client = net_listen("127.0.0.1:0")
+let _ = client
+
+let s = net_connect("127.0.0.1:18392")
+tcp_write(s, "hello rak server\n")
+let reply = tcp_read_line(s)
+dump f"reply: {reply}"
+tcp_close(s)

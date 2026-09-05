@@ -2,8 +2,11 @@ use crate::ast::*;
 use std::collections::HashMap;
 use std::fmt;
 use std::path::Path;
+use std::sync::{Arc, Mutex};
+use std::sync::mpsc;
+use std::thread::JoinHandle;
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone)]
 pub enum Value {
     Hex(u64),
     Int(i64),
@@ -39,6 +42,36 @@ pub enum Value {
         fields: Vec<Param>,
     },
     Module(HashMap<String, Value>),
+    TcpListener(Arc<Mutex<std::net::TcpListener>>),
+    TcpStream(Arc<Mutex<std::net::TcpStream>>),
+    JoinHandle(Arc<Mutex<Option<JoinHandle<Value>>>>),
+    Sender(Arc<Mutex<mpsc::Sender<Value>>>),
+    Receiver(Arc<Mutex<mpsc::Receiver<Value>>>),
+}
+
+impl fmt::Debug for Value {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self)
+    }
+}
+
+impl PartialEq for Value {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Value::Hex(a), Value::Hex(b)) => a == b,
+            (Value::Int(a), Value::Int(b)) => a == b,
+            (Value::Float(a), Value::Float(b)) => a == b,
+            (Value::String(a), Value::String(b)) => a == b,
+            (Value::Bytes(a), Value::Bytes(b)) => a == b,
+            (Value::Bool(a), Value::Bool(b)) => a == b,
+            (Value::Nil, Value::Nil) => true,
+            (Value::Tuple(a), Value::Tuple(b)) => a == b,
+            (Value::Array(a), Value::Array(b)) => a == b,
+            (Value::Map(a), Value::Map(b)) => a == b,
+            (Value::Option(a), Value::Option(b)) => a == b,
+            _ => std::mem::discriminant(self) == std::mem::discriminant(other),
+        }
+    }
 }
 
 impl fmt::Display for Value {
@@ -90,6 +123,11 @@ impl fmt::Display for Value {
             Value::EnumDef { .. } => write!(f, "<enum def>"),
             Value::StructDef { .. } => write!(f, "<struct def>"),
             Value::Module(_) => write!(f, "<module>"),
+            Value::TcpListener(_) => write!(f, "<tcp-listener>"),
+            Value::TcpStream(_) => write!(f, "<tcp-stream>"),
+            Value::JoinHandle(_) => write!(f, "<thread>"),
+            Value::Sender(_) => write!(f, "<sender>"),
+            Value::Receiver(_) => write!(f, "<receiver>"),
         }
     }
 }
@@ -1463,6 +1501,195 @@ impl Interpreter {
                     }
                 }
                 Ok(Value::Array(results))
+            }
+            "net_listen" => {
+                let addr = self.val_to_string(args.first())?;
+                match std::net::TcpListener::bind(&addr) {
+                    Ok(l) => {
+                        l.set_nonblocking(false).ok();
+                        Ok(Value::TcpListener(Arc::new(Mutex::new(l))))
+                    }
+                    Err(e) => Err(crate::RakError::Runtime(format!("net_listen: {}", e))),
+                }
+            }
+            "net_accept" => {
+                match args.first() {
+                    Some(Value::TcpListener(l)) => {
+                        let accepted = l.lock().unwrap().accept();
+                        match accepted {
+                            Ok((stream, addr)) => Ok(Value::Tuple(vec![
+                                Value::TcpStream(Arc::new(Mutex::new(stream))),
+                                Value::String(addr.to_string()),
+                            ])),
+                            Err(e) => Err(crate::RakError::Runtime(format!("net_accept: {}", e))),
+                        }
+                    }
+                    _ => Err(crate::RakError::Runtime("net_accept requires a listener".to_string())),
+                }
+            }
+            "net_connect" => {
+                let addr = self.val_to_string(args.first())?;
+                match std::net::TcpStream::connect(&addr) {
+                    Ok(s) => Ok(Value::TcpStream(Arc::new(Mutex::new(s)))),
+                    Err(e) => Err(crate::RakError::Runtime(format!("net_connect: {}", e))),
+                }
+            }
+            "net_local_addr" => {
+                match args.first() {
+                    Some(Value::TcpListener(l)) => {
+                        Ok(Value::String(l.lock().unwrap().local_addr().map(|a| a.to_string()).unwrap_or_default()))
+                    }
+                    _ => Err(crate::RakError::Runtime("net_local_addr requires a listener".to_string())),
+                }
+            }
+            "tcp_write" => {
+                match (args.first(), args.get(1)) {
+                    (Some(Value::TcpStream(s)), Some(v)) => {
+                        let data = self.val_to_bytes(Some(v))?;
+                        let n = {
+                            let mut st = s.lock().unwrap();
+                            use std::io::Write;
+                            st.write(&data).map_err(|e| crate::RakError::Runtime(format!("tcp_write: {}", e)))?
+                        };
+                        Ok(Value::Int(n as i64))
+                    }
+                    _ => Err(crate::RakError::Runtime("tcp_write(stream, data)".to_string())),
+                }
+            }
+            "tcp_read" => {
+                match (args.first(), args.get(1)) {
+                    (Some(Value::TcpStream(s)), Some(v)) => {
+                        let n = v.as_u64().unwrap_or(1024) as usize;
+                        let mut buf = vec![0u8; n];
+                        let read = {
+                            use std::io::Read;
+                            let mut st = s.lock().unwrap();
+                            st.read(&mut buf).map_err(|e| crate::RakError::Runtime(format!("tcp_read: {}", e)))?
+                        };
+                        buf.truncate(read);
+                        Ok(Value::Bytes(buf))
+                    }
+                    _ => Err(crate::RakError::Runtime("tcp_read(stream, n)".to_string())),
+                }
+            }
+            "tcp_read_line" => {
+                match args.first() {
+                    Some(Value::TcpStream(s)) => {
+                        let s = s.clone();
+                        let mut out = Vec::new();
+                        use std::io::Read;
+                        loop {
+                            let mut byte = [0u8; 1];
+                            let r = { s.lock().unwrap().read(&mut byte) };
+                            match r {
+                                Ok(0) => break,
+                                Ok(_) => {
+                                    if byte[0] == b'\n' { break; }
+                                    if byte[0] != b'\r' { out.push(byte[0]); }
+                                }
+                                Err(e) => return Err(crate::RakError::Runtime(format!("tcp_read_line: {}", e))),
+                            }
+                        }
+                        Ok(Value::String(String::from_utf8_lossy(&out).to_string()))
+                    }
+                    _ => Err(crate::RakError::Runtime("tcp_read_line(stream)".to_string())),
+                }
+            }
+            "tcp_close" => {
+                match args.first() {
+                    Some(Value::TcpStream(s)) => {
+                        use std::io::Write;
+                        let _ = s.lock().unwrap().shutdown(std::net::Shutdown::Both);
+                        let _ = s.lock().unwrap().flush();
+                        Ok(Value::Nil)
+                    }
+                    _ => Err(crate::RakError::Runtime("tcp_close(stream)".to_string())),
+                }
+            }
+            "spawn" => {
+                match args.first() {
+                    Some(Value::Function { params, body, closure, .. }) => {
+                        let params = params.clone();
+                        let body = body.clone();
+                        let closure = closure.clone();
+                        let handle: JoinHandle<Value> = std::thread::spawn(move || {
+                            let mut interp = Interpreter::new();
+                            interp.env = closure.clone();
+                            interp.env.push_scope();
+                            for s in &body {
+                                let _ = interp.exec_stmt(s);
+                                if interp.returning {
+                                    break;
+                                }
+                            }
+                            let ret = if interp.returning {
+                                std::mem::replace(&mut interp.return_value, Value::Nil)
+                            } else {
+                                Value::Nil
+                            };
+                            ret
+                        });
+                        let _ = params;
+                        Ok(Value::JoinHandle(Arc::new(Mutex::new(Some(handle)))))
+                    }
+                    _ => Err(crate::RakError::Runtime("spawn requires a function".to_string())),
+                }
+            }
+            "thread_join" => {
+                match args.first() {
+                    Some(Value::JoinHandle(h)) => {
+                        let handle_opt = h.lock().unwrap().take();
+                        if let Some(handle) = handle_opt {
+                            match handle.join() {
+                                Ok(v) => Ok(v),
+                                Err(_) => Err(crate::RakError::Runtime("thread panicked".to_string())),
+                            }
+                        } else {
+                            Err(crate::RakError::Runtime("already joined".to_string()))
+                        }
+                    }
+                    _ => Err(crate::RakError::Runtime("thread_join requires a thread handle".to_string())),
+                }
+            }
+            "channel" => {
+                let (tx, rx) = mpsc::channel::<Value>();
+                Ok(Value::Tuple(vec![
+                    Value::Sender(Arc::new(Mutex::new(tx))),
+                    Value::Receiver(Arc::new(Mutex::new(rx))),
+                ]))
+            }
+            "chan_send" => {
+                match (args.first(), args.get(1)) {
+                    (Some(Value::Sender(tx)), Some(v)) => {
+                        tx.lock().unwrap().send(v.clone()).map(|_| Value::Bool(true)).map_err(|_| crate::RakError::Runtime("chan_send failed".to_string()))
+                    }
+                    _ => Err(crate::RakError::Runtime("chan_send(tx, v)".to_string())),
+                }
+            }
+            "chan_recv" => {
+                match args.first() {
+                    Some(Value::Receiver(rx)) => {
+                        match rx.lock().unwrap().recv() {
+                            Ok(v) => Ok(Value::Option(Some(Box::new(v)))),
+                            Err(_) => Ok(Value::Option(None)),
+                        }
+                    }
+                    _ => Err(crate::RakError::Runtime("chan_recv(rx)".to_string())),
+                }
+            }
+            "sleep" => {
+                let ms = args.first().and_then(|v| v.as_u64()).unwrap_or(0);
+                std::thread::sleep(std::time::Duration::from_millis(ms));
+                Ok(Value::Nil)
+            }
+            "now_ms" => Ok(Value::Int(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0))),
+            "args" => {
+                let a: Vec<Value> = std::env::args().skip(1).map(Value::String).collect();
+                Ok(Value::Array(a))
+            }
+            "env_get" => {
+                let k = self.val_to_string(args.first())?;
+                Ok(std::env::var(&k).map(Value::String).unwrap_or(Value::Nil))
             }
             _ => Err(crate::RakError::Runtime(format!("Unknown function: {}", name))),
         }
