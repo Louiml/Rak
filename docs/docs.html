@@ -3,8 +3,8 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta name="description" content="Rak language reference — syntax, types, hexadecimal, standard library, OSINT statements, and examples.">
-    <title>Rak Documentation — Language Reference</title>
+    <meta name="description" content="Rak language reference: syntax, types, hexadecimal, standard library, OSINT statements, and examples.">
+    <title>Rak Documentation: Language Reference</title>
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%2306070a'/%3E%3Cpath d='M9 9l14 0 0 14-14 0z' fill='none' stroke='%2334d399' stroke-width='2.5'/%3E%3C/svg%3E">
     <link rel="stylesheet" href="style.css">
 </head>
@@ -56,11 +56,11 @@
             <article class="doc">
 
                 <section id="intro" class="doc-section">
-                    <h1>Rak Language Reference</h1>
-                    <p class="doc-intro">Rak simplifies security research by combining English-readable syntax with first-class hexadecimal support. Write network scanners, web scrapers, and forensic tools without wrestling with boilerplate.</p>
+                    <h1>Rak language reference</h1>
+<p class="doc-intro">Rak is for security research. Hex literals are a real type, syntax reads like English, and the standard library covers the network, HTML, and crypto work you'd otherwise hand-roll. Network scanners, web scrapers, and forensic tools end up shorter and easier to read.</p>
 
                     <div class="highlight-box">
-                        <p>This reference is a work in progress. The language is evolving quickly — some sections may lag the implementation. The examples below are real and runnable.</p>
+                        <p>This reference is a work in progress. Some sections lag the implementation, and a couple spell out plans before they exist. The examples are real and runnable.</p>
                     </div>
 
                     <h3>Hello, World</h3>
@@ -72,7 +72,7 @@
                         <pre><code data-lang="rak">dump "Hello, World"</code></pre>
                     </figure>
 
-                    <h3>Quick start — scan a target</h3>
+                    <h3>Quick start: scan a target</h3>
                     <figure class="codeblock" data-title="quick.rak">
                         <div class="codeblock-bar" aria-hidden="true">
                             <span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-dot"></span>
@@ -89,8 +89,8 @@
                 </section>
 
                 <section id="syntax" class="doc-section">
-                    <h2>Syntax Overview</h2>
-                    <p>Rak uses English keywords and treats hexadecimal as a native type. No semicolons are required inside blocks, but statements outside blocks need them.</p>
+                    <h2>Syntax overview</h2>
+                    <p>Rak uses English keywords, and hex is a real type rather than a formatting trick. No semicolons required inside blocks; statements outside blocks need them.</p>
 
                     <h3>Variables</h3>
                     <figure class="codeblock" data-title="syntax.rak">
@@ -141,7 +141,7 @@ while counter < 0x0A {
                 </section>
 
                 <section id="types" class="doc-section">
-                    <h2>Type System</h2>
+                    <h2>Type system</h2>
                     <table>
                         <thead>
                             <tr><th>Type</th><th>Description</th><th>Example</th></tr>
@@ -179,7 +179,7 @@ while counter < 0x0A {
 
                 <section id="hex" class="doc-section">
                     <h2>Hexadecimal</h2>
-                    <p>Hexadecimal is a first-class citizen in Rak. Memory addresses, port numbers, and byte sequences all work naturally in hex.</p>
+                    <p>Hex is a real type in Rak. You write memory addresses, port numbers, and byte sequences in it directly.</p>
 
                     <h3>Literals</h3>
                     <figure class="codeblock" data-title="hex_literals.rak">
@@ -235,7 +235,7 @@ dump fmt("0x{:08X}", sig)     // 0xDEADBEEF</code></pre>
                 </section>
 
                 <section id="stdlib" class="doc-section">
-                    <h2>Standard Library</h2>
+                    <h2>Standard library</h2>
 
                     <h3>net</h3>
                     <figure class="codeblock" data-title="net.rak">
@@ -283,7 +283,7 @@ let hash2 = sha256(data)</code></pre>
                 </section>
 
                 <section id="osint" class="doc-section">
-                    <h2>OSINT &amp; Hacking Modules</h2>
+                    <h2>OSINT and hacking modules</h2>
 
                     <h3>Port scanning</h3>
                     <figure class="codeblock" data-title="osint_scan.rak">
@@ -396,7 +396,7 @@ js.type(element, "admin")</code></pre>
                 </section>
 
                 <section id="examples" class="doc-section">
-                    <h2>Example Scripts</h2>
+                    <h2>Example scripts</h2>
 
                     <h3>Network scanner</h3>
                     <figure class="codeblock" data-title="net_scan.rak">
