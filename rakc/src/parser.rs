@@ -17,37 +17,51 @@ fn map_int_kind(k: crate::lexer::IntKind) -> IntKind {
     }
 }
 
-pub fn parse(tokens: &[Token]) -> Result<Module> {
-    let mut parser = Parser::new(tokens);
+pub fn parse(tokens: &[(Token, usize)], source: &str) -> Result<Module> {
+    let mut parser = Parser::new(tokens, source);
     parser.parse_module()
 }
 
 pub fn parse_expr_str(source: &str) -> Result<Expr> {
     let tokens = tokenize(source)?;
-    let mut p = Parser::new(&tokens);
+    let mut p = Parser::new(&tokens, source);
     p.parse_expr()
 }
 
 struct Parser<'a> {
-    tokens: &'a [Token],
+    tokens: &'a [(Token, usize)],
+    source: &'a str,
     pos: usize,
 }
 
 impl<'a> Parser<'a> {
-    fn new(tokens: &'a [Token]) -> Self {
-        Parser { tokens, pos: 0 }
+    fn new(tokens: &'a [(Token, usize)], source: &'a str) -> Self {
+        Parser { tokens, source, pos: 0 }
     }
 
     fn peek(&self) -> Option<&Token> {
-        self.tokens.get(self.pos)
+        self.tokens.get(self.pos).map(|(t, _)| t)
     }
 
     fn peek_n(&self, n: usize) -> Option<&Token> {
-        self.tokens.get(self.pos + n)
+        self.tokens.get(self.pos + n).map(|(t, _)| t)
+    }
+
+    fn cur_off(&self) -> usize {
+        self.tokens.get(self.pos).map(|(_, o)| *o).unwrap_or(self.source.len())
+    }
+
+    fn span_here(&self) -> (usize, usize) {
+        crate::lexer::offset_to_line_col(self.source, self.cur_off())
+    }
+
+    fn perr(&self, msg: String) -> RakError {
+        let (line, col) = self.span_here();
+        RakError::Parser(format!("{} at line {}, col {}", msg, line, col))
     }
 
     fn advance(&mut self) -> Option<&Token> {
-        let tok = self.tokens.get(self.pos);
+        let tok = self.tokens.get(self.pos).map(|(t, _)| t);
         if tok.is_some() {
             self.pos += 1;
         }
@@ -59,14 +73,8 @@ impl<'a> Parser<'a> {
             Some(tok) if std::mem::discriminant(tok) == std::mem::discriminant(&expected) => {
                 Ok(self.advance().unwrap())
             }
-            Some(tok) => Err(RakError::Parser(format!(
-                "Expected {:?}, found {:?}",
-                expected, tok
-            ))),
-            None => Err(RakError::Parser(format!(
-                "Expected {:?}, found end of file",
-                expected
-            ))),
+            Some(tok) => Err(self.perr(format!("Expected {:?}, found {:?}", expected, tok))),
+            None => Err(self.perr(format!("Expected {:?}, found end of file", expected))),
         }
     }
 
@@ -127,14 +135,14 @@ impl<'a> Parser<'a> {
             path.push(name.clone());
             self.advance();
         } else {
-            return Err(RakError::Parser("Expected import path".to_string()));
+            return Err(self.perr("Expected import path".to_string()));
         }
         while self.match_token(&Token::Dot) || self.match_token(&Token::ColonColon) {
             if let Some(Token::Ident(name)) = self.peek() {
                 path.push(name.clone());
                 self.advance();
             } else {
-                return Err(RakError::Parser("Expected identifier after path separator".to_string()));
+                return Err(self.perr("Expected identifier after path separator".to_string()));
             }
         }
         let alias = if self.match_token(&Token::As) {
@@ -235,7 +243,7 @@ impl<'a> Parser<'a> {
                 self.advance();
                 n
             }
-            _ => return Err(RakError::Parser("Expected variable name after 'let'".to_string())),
+            _ => return Err(self.perr("Expected variable name after 'let'".to_string())),
         };
 
         let type_hint = if self.match_token(&Token::Colon) {
@@ -302,7 +310,7 @@ impl<'a> Parser<'a> {
                 self.advance();
                 n
             }
-            _ => return Err(RakError::Parser("Expected variable name after 'for'".to_string())),
+            _ => return Err(self.perr("Expected variable name after 'for'".to_string())),
         };
         self.expect(Token::In)?;
         let iterable = self.parse_expr()?;
@@ -403,7 +411,7 @@ impl<'a> Parser<'a> {
                 self.advance();
                 n
             }
-            _ => return Err(RakError::Parser("Expected function name".to_string())),
+            _ => return Err(self.perr("Expected function name".to_string())),
         };
         let (params, type_params) = self.parse_params_with_generics()?;
         let return_type = if self.match_token(&Token::Arrow) {
@@ -572,7 +580,7 @@ impl<'a> Parser<'a> {
                 self.advance();
                 Ok(n)
             }
-            _ => Err(RakError::Parser("Expected identifier".to_string())),
+            _ => Err(self.perr("Expected identifier".to_string())),
         }
     }
 
@@ -710,7 +718,7 @@ impl<'a> Parser<'a> {
                     _ => Type::Custom(name),
                 }
             }
-            _ => return Err(RakError::Parser("Expected type".to_string())),
+            _ => return Err(self.perr("Expected type".to_string())),
         };
         if self.match_token(&Token::LBracket) {
             self.expect(Token::RBracket)?;
@@ -879,7 +887,7 @@ impl<'a> Parser<'a> {
                 self.expect(Token::RBracket)?;
                 Ok(Pattern::Array(inner))
             }
-            _ => Err(RakError::Parser("Expected pattern".to_string())),
+            _ => Err(self.perr("Expected pattern".to_string())),
         }
     }
 
@@ -907,7 +915,7 @@ impl<'a> Parser<'a> {
                         value: Box::new(value),
                     };
                 }
-                _ => return Err(RakError::Parser("Invalid assignment target".to_string())),
+                _ => return Err(self.perr("Invalid assignment target".to_string())),
             }
         } else if self.match_token(&Token::PlusEq) {
             let value = self.parse_expr()?;
@@ -1136,7 +1144,7 @@ impl<'a> Parser<'a> {
                 let mut path = match expr {
                     Expr::Path(p) => p,
                     Expr::Ident(n) => vec![n],
-                    other => return Err(RakError::Parser(format!("Invalid path base: {:?}", other))),
+                    other => return Err(self.perr(format!("Invalid path base: {:?}", other))),
                 };
                 path.push(seg);
                 expr = Expr::Path(path);
@@ -1198,7 +1206,7 @@ impl<'a> Parser<'a> {
                 self.advance();
                 let parts = parse_interp_parts(&template)?;
                 Ok(Expr::Interp {
-                    template: template.replace("{{", "{").replace("}}", "}"),
+                    template,
                     parts,
                 })
             }
@@ -1282,11 +1290,8 @@ impl<'a> Parser<'a> {
                 }
                 Ok(Expr::Ident(name))
             }
-            Some(tok) => Err(RakError::Parser(format!(
-                "Unexpected token in expression: {:?}",
-                tok
-            ))),
-            None => Err(RakError::Parser("Unexpected end of input".to_string())),
+            Some(tok) => Err(self.perr(format!("Unexpected token in expression: {:?}", tok))),
+            None => Err(self.perr("Unexpected end of input".to_string())),
         }
     }
 
@@ -1428,7 +1433,7 @@ mod tests {
     fn test_parse_simple_let() {
         let source = "let x = 0x1A;";
         let tokens = tokenize(source).unwrap();
-        let module = parse(&tokens).unwrap();
+        let module = parse(&tokens, source).unwrap();
         assert_eq!(module.items.len(), 1);
         match &module.items[0] {
             Stmt::Let { name, value, .. } => {
@@ -1443,7 +1448,7 @@ mod tests {
     fn test_parse_binop() {
         let source = "let sig = 0xDEAD & 0xFF00;";
         let tokens = tokenize(source).unwrap();
-        let module = parse(&tokens).unwrap();
+        let module = parse(&tokens, source).unwrap();
         match &module.items[0] {
             Stmt::Let { value, .. } => {
                 assert!(matches!(**value, Expr::Binary(BinOp::BitAnd, _, _)));
@@ -1456,7 +1461,7 @@ mod tests {
     fn test_parse_scan() {
         let source = "scan target { range: [0x0010, 0x0050] }";
         let tokens = tokenize(source).unwrap();
-        let module = parse(&tokens).unwrap();
+        let module = parse(&tokens, source).unwrap();
         assert_eq!(module.items.len(), 1);
         assert!(matches!(&module.items[0], Stmt::Scan { .. }));
     }
@@ -1465,7 +1470,7 @@ mod tests {
     fn test_parse_float() {
         let source = "let x = 3.14;";
         let tokens = tokenize(source).unwrap();
-        let module = parse(&tokens).unwrap();
+        let module = parse(&tokens, source).unwrap();
         match &module.items[0] {
             Stmt::Let { value, .. } => assert!(matches!(**value, Expr::Float(_))),
             _ => panic!(),
@@ -1476,7 +1481,7 @@ mod tests {
     fn test_parse_tuple() {
         let source = "let p = (1, 2, 3);";
         let tokens = tokenize(source).unwrap();
-        let module = parse(&tokens).unwrap();
+        let module = parse(&tokens, source).unwrap();
         match &module.items[0] {
             Stmt::Let { value, .. } => assert!(matches!(&**value, Expr::Tuple(t) if t.len() == 3)),
             _ => panic!(),
@@ -1487,7 +1492,7 @@ mod tests {
     fn test_parse_interp() {
         let source = "let x = f\"hello {name}!\";";
         let tokens = tokenize(source).unwrap();
-        let module = parse(&tokens).unwrap();
+        let module = parse(&tokens, source).unwrap();
         match &module.items[0] {
             Stmt::Let { value, .. } => assert!(matches!(**value, Expr::Interp { .. })),
             _ => panic!(),
@@ -1498,7 +1503,7 @@ mod tests {
     fn test_parse_if_expr() {
         let source = "let x = if true { 1 } else { 2 };";
         let tokens = tokenize(source).unwrap();
-        let module = parse(&tokens).unwrap();
+        let module = parse(&tokens, source).unwrap();
         match &module.items[0] {
             Stmt::Let { value, .. } => assert!(matches!(**value, Expr::If { .. })),
             _ => panic!(),
@@ -1509,7 +1514,7 @@ mod tests {
     fn test_parse_struct_lit() {
         let source = "let p = Point { x: 1, y: 2 };";
         let tokens = tokenize(source).unwrap();
-        let module = parse(&tokens).unwrap();
+        let module = parse(&tokens, source).unwrap();
         match &module.items[0] {
             Stmt::Let { value, .. } => assert!(matches!(**value, Expr::StructLit { .. })),
             _ => panic!(),

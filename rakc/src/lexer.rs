@@ -308,21 +308,40 @@ fn parse_bytes(s: &str) -> Option<Vec<u8>> {
     Some(result)
 }
 
-pub fn tokenize(source: &str) -> crate::Result<Vec<Token>> {
+pub fn tokenize(source: &str) -> crate::Result<Vec<(Token, usize)>> {
     let mut lex = Token::lexer(source);
     let mut tokens = Vec::new();
     while let Some(token) = lex.next() {
         match token {
-            Ok(tok) => tokens.push(tok),
+            Ok(tok) => tokens.push((tok, lex.span().start)),
             Err(_) => {
+                let off = lex.span().start;
+                let (line, col) = offset_to_line_col(source, off);
                 return Err(crate::RakError::Lexer(format!(
-                    "Unexpected character at offset {}",
-                    lex.span().start
-                )))
+                    "Unexpected character at line {}, col {}",
+                    line, col
+                )));
             }
         }
     }
     Ok(tokens)
+}
+
+pub fn offset_to_line_col(source: &str, offset: usize) -> (usize, usize) {
+    let mut line = 1usize;
+    let mut col = 1usize;
+    for (i, c) in source.char_indices() {
+        if i >= offset {
+            break;
+        }
+        if c == '\n' {
+            line += 1;
+            col = 1;
+        } else {
+            col += 1;
+        }
+    }
+    (line, col)
 }
 
 #[cfg(test)]
@@ -332,22 +351,25 @@ mod tests {
     #[test]
     fn test_hex_token() {
         let toks = tokenize("0xDEAD 0xBEEF").unwrap();
-        assert_eq!(toks, vec![Token::Hex(0xDEAD), Token::Hex(0xBEEF)]);
+        assert_eq!(toks.len(), 2);
+        assert_eq!(toks[0].0, Token::Hex(0xDEAD));
+        assert_eq!(toks[1].0, Token::Hex(0xBEEF));
     }
 
     #[test]
     fn test_keywords() {
         let toks = tokenize("scan fetch dump trace if else fn").unwrap();
+        let kinds: Vec<&Token> = toks.iter().map(|(t, _)| t).collect();
         assert_eq!(
-            toks,
+            kinds,
             vec![
-                Token::Scan,
-                Token::Fetch,
-                Token::Dump,
-                Token::Trace,
-                Token::If,
-                Token::Else,
-                Token::Fn,
+                &Token::Scan,
+                &Token::Fetch,
+                &Token::Dump,
+                &Token::Trace,
+                &Token::If,
+                &Token::Else,
+                &Token::Fn,
             ]
         );
     }
@@ -355,9 +377,9 @@ mod tests {
     #[test]
     fn test_float_and_typed_int() {
         let toks = tokenize("3.14 42i32 10u8 7").unwrap();
-        assert_eq!(toks[0], Token::Float(3.14));
-        assert_eq!(toks[1], Token::TypedInt(TypedIntData { value: 42, kind: IntKind::I32 }));
-        assert_eq!(toks[2], Token::TypedInt(TypedIntData { value: 10, kind: IntKind::U8 }));
-        assert_eq!(toks[3], Token::Int(7));
+        assert_eq!(toks[0].0, Token::Float(3.14));
+        assert_eq!(toks[1].0, Token::TypedInt(TypedIntData { value: 42, kind: IntKind::I32 }));
+        assert_eq!(toks[2].0, Token::TypedInt(TypedIntData { value: 10, kind: IntKind::U8 }));
+        assert_eq!(toks[3].0, Token::Int(7));
     }
 }

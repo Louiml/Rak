@@ -221,7 +221,7 @@ impl Interpreter {
 
     pub fn run_source(&mut self, source: &str) -> crate::Result<Vec<String>> {
         let tokens = crate::lexer::tokenize(source)?;
-        let module = crate::parser::parse(&tokens)?;
+        let module = crate::parser::parse(&tokens, source)?;
         self.run(&module)
     }
 
@@ -240,7 +240,7 @@ impl Interpreter {
                 crate::RakError::Runtime(format!("Cannot import '{}': {}", full, e))
             })?;
             let tokens = crate::lexer::tokenize(&source)?;
-            let module = crate::parser::parse(&tokens)?;
+            let module = crate::parser::parse(&tokens, &source)?;
             let saved_base = self.base_dir.clone();
             if let Some(parent) = Path::new(&full).parent() {
                 self.base_dir = parent.to_string_lossy().to_string();

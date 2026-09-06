@@ -275,13 +275,38 @@ impl Vm {
                         (Value::Array(a), Value::I64(i)) => {
                             frame.push(a.get(*i as usize).cloned().unwrap_or(Value::Nil));
                         }
+                        (Value::Tuple(t), Value::I64(i)) => {
+                            frame.push(t.get(*i as usize).cloned().unwrap_or(Value::Nil));
+                        }
                         (Value::String(s), Value::I64(i)) => {
                             frame.push(s.chars().nth(*i as usize).map(|c| Value::String(Arc::from(c.to_string().as_str()))).unwrap_or(Value::Nil));
+                        }
+                        (Value::Map(m), Value::String(k)) => {
+                            frame.push(m.get(k.as_ref()).cloned().unwrap_or(Value::Nil));
                         }
                         _ => { frame.push(Value::Nil); }
                     }
                 }
-                Op::FieldGet => { frame.pop(); frame.push(Value::Nil); }
+                Op::FieldGet => {
+                    let field = frame.pop();
+                    let obj = frame.pop();
+                    match (&obj, &field) {
+                        (Value::Map(m), Value::String(k)) => {
+                            frame.push(m.get(k.as_ref()).cloned().unwrap_or(Value::Nil));
+                        }
+                        (Value::Struct { fields, .. }, Value::String(k)) => {
+                            frame.push(fields.get(k.as_ref()).cloned().unwrap_or(Value::Nil));
+                        }
+                        (Value::Tuple(t), Value::String(k)) => {
+                            if let Ok(i) = k.parse::<usize>() {
+                                frame.push(t.get(i).cloned().unwrap_or(Value::Nil));
+                            } else {
+                                frame.push(Value::Nil);
+                            }
+                        }
+                        _ => { frame.push(Value::Nil); }
+                    }
+                }
                 Op::Closure => {}
                 Op::GetUpvalue | Op::SetUpvalue => {}
                 Op::LoopBegin | Op::LoopEnd => {}
@@ -382,7 +407,7 @@ mod tests {
 
     fn run(src: &str) -> Vec<String> {
         let tokens = crate::lexer::tokenize(src).unwrap();
-        let module = crate::parser::parse(&tokens).unwrap();
+        let module = crate::parser::parse(&tokens, src).unwrap();
         let chunk = compile_module(&module).unwrap();
         let mut vm = Vm::new();
         vm.run(&chunk).unwrap()
@@ -416,5 +441,35 @@ mod tests {
     fn test_vm_fib() {
         let out = run("fn fib(n) { if n < 2 { return n } return fib(n - 1) + fib(n - 2) } dump fib(20)");
         assert!(out.iter().any(|l| l.contains("[DUMP] 6765")));
+    }
+
+    #[test]
+    fn test_vm_array_index() {
+        let out = run("let a = [10, 20, 30] dump a[1]");
+        assert!(out.iter().any(|l| l.contains("[DUMP] 20")));
+    }
+
+    #[test]
+    fn test_vm_tuple() {
+        let out = run("let t = (1, 2, 3) dump t.0");
+        assert!(out.iter().any(|l| l.contains("[DUMP] 1")));
+    }
+
+    #[test]
+    fn test_vm_map() {
+        let out = run("let m = {x: 5, y: 7} dump m.y");
+        assert!(out.iter().any(|l| l.contains("[DUMP] 7")));
+    }
+
+    #[test]
+    fn test_vm_interp() {
+        let out = run("let n = 42 dump f\"n={n}\"");
+        assert!(out.iter().any(|l| l.contains("[DUMP] n=42")));
+    }
+
+    #[test]
+    fn test_vm_match() {
+        let out = run("let x = 2; match x { 1 => { dump \"one\" }, 2 => { dump \"two\" }, _ => { dump \"other\" } }");
+        assert!(out.iter().any(|l| l.contains("[DUMP] two")));
     }
 }

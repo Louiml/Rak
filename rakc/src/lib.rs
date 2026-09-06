@@ -26,7 +26,7 @@ pub type Result<T> = std::result::Result<T, RakError>;
 /// Compile a Rak source file into an executable or intermediate representation.
 pub fn compile(source: &str) -> Result<()> {
     let tokens = lexer::tokenize(source)?;
-    let ast = parser::parse(&tokens)?;
+    let ast = parser::parse(&tokens, source)?;
     let _ = ast;
     Ok(())
 }

@@ -203,8 +203,8 @@ impl Compiler {
                 self.emit_jump_back(loop_start);
             }
             Stmt::For { name, iterable, body } => self.compile_for(name, iterable, body)?,
-            _ => {
-                self.emit_op(Op::Nil);
+            other => {
+                return Err(format!("VM does not support statement: {:?}", other));
             }
         }
         Ok(())
@@ -484,15 +484,194 @@ impl Compiler {
             Expr::Block(stmts) => {
                 self.compile_block_value(stmts)?;
             }
-            Expr::Match { .. } => {
-                self.emit_op(Op::Nil);
+            Expr::Tuple(items) => {
+                for e in items {
+                    self.compile_expr(e)?;
+                }
+                self.load_const(Value::I64(items.len() as i64));
+                self.emit_op(Op::NewTuple);
             }
-            _ => {
-                self.emit_op(Op::Nil);
+            Expr::Map(pairs) => {
+                for (k, v) in pairs {
+                    self.compile_expr(k)?;
+                    self.compile_expr(v)?;
+                }
+                self.load_const(Value::I64(pairs.len() as i64));
+                self.emit_op(Op::NewMap);
+            }
+            Expr::Index(obj, idx) => {
+                self.compile_expr(obj)?;
+                self.compile_expr(idx)?;
+                self.emit_op(Op::IndexGet);
+            }
+            Expr::FieldAccess(obj, field) => {
+                self.compile_expr(obj)?;
+                let ci = self.const_str(field);
+                self.emit_op(Op::LoadConst);
+                self.emit_u16(ci);
+                self.emit_op(Op::FieldGet);
+            }
+            Expr::Interp { template, parts } => {
+                let fmt_str = interp_to_fmt(template);
+                let fmt_ci = self.const_str("fmt");
+                let tpl_ci = self.const_str(&fmt_str);
+                self.emit_op(Op::LoadGlobal);
+                self.emit_u16(fmt_ci);
+                self.emit_op(Op::LoadConst);
+                self.emit_u16(tpl_ci);
+                for p in parts {
+                    self.compile_expr(p)?;
+                }
+                self.emit_op(Op::Call);
+                self.emit_byte((1 + parts.len()) as u8);
+            }
+            Expr::Match { value, arms } => {
+                self.compile_match(value, arms)?;
+            }
+            other => {
+                return Err(format!("VM does not support expression: {:?}", other));
             }
         }
         Ok(())
     }
+
+    fn compile_match(&mut self, value: &Expr, arms: &[(Pattern, Option<Expr>, Vec<Stmt>)]) -> Result<(), String> {
+        self.compile_expr(value)?;
+        let v_slot = self.add_local("__match_v".to_string());
+        self.emit_op(Op::StoreLocal);
+        self.emit_byte(v_slot);
+        let mut end_jumps: Vec<usize> = Vec::new();
+        for (pattern, guard, body) in arms {
+            self.emit_op(Op::LoadLocal);
+            self.emit_byte(v_slot);
+            let bind = self.compile_pattern(pattern)?;
+            let jnext = self.emit_jump(Op::JumpIfFalse);
+            self.emit_op(Op::Pop);
+            if let Some(name) = bind {
+                self.begin_scope();
+                let slot = self.add_local(name);
+                self.emit_op(Op::LoadLocal);
+                self.emit_byte(v_slot);
+                self.emit_op(Op::StoreLocal);
+                self.emit_byte(slot);
+            } else {
+                self.begin_scope();
+            }
+            if let Some(g) = guard {
+                self.compile_expr(g)?;
+                let jg = self.emit_jump(Op::JumpIfFalse);
+                self.emit_op(Op::Pop);
+                self.compile_block_value(body)?;
+                self.end_scope_for_match();
+                let jend = self.emit_jump(Op::Jump);
+                end_jumps.push(jend);
+                self.patch_jump(jg);
+                self.emit_op(Op::Pop);
+                self.patch_jump(jnext);
+                let _ = jg;
+            } else {
+                self.compile_block_value(body)?;
+                self.end_scope_for_match();
+                let jend = self.emit_jump(Op::Jump);
+                end_jumps.push(jend);
+                self.patch_jump(jnext);
+            }
+        }
+        self.emit_op(Op::Nil);
+        for j in end_jumps {
+            self.patch_jump(j);
+        }
+        Ok(())
+    }
+
+    fn end_scope_for_match(&mut self) {
+        while let Some((_, d)) = self.locals.last() {
+            if *d > self.scope_depth {
+                self.locals.pop();
+            } else {
+                break;
+            }
+        }
+    }
+
+    fn compile_pattern(&mut self, pattern: &Pattern) -> Result<Option<String>, String> {
+        match pattern {
+            Pattern::Wild => {
+                self.emit_op(Op::Pop);
+                self.emit_op(Op::True);
+                Ok(None)
+            }
+            Pattern::Ident(n) => {
+                self.emit_op(Op::Pop);
+                self.emit_op(Op::True);
+                Ok(Some(n.clone()))
+            }
+            Pattern::Int(i) => {
+                self.load_const(Value::I64(*i));
+                self.emit_op(Op::Eq);
+                Ok(None)
+            }
+            Pattern::Hex(h) => {
+                self.load_const(Value::Hex(*h, 64));
+                self.emit_op(Op::Eq);
+                Ok(None)
+            }
+            Pattern::String(s) => {
+                let ci = self.const_str(s);
+                self.emit_op(Op::LoadConst);
+                self.emit_u16(ci);
+                self.emit_op(Op::Eq);
+                Ok(None)
+            }
+            Pattern::Bool(b) => {
+                self.emit_op(if *b { Op::True } else { Op::False });
+                self.emit_op(Op::Eq);
+                Ok(None)
+            }
+            Pattern::Nil => {
+                self.emit_op(Op::Nil);
+                self.emit_op(Op::Eq);
+                Ok(None)
+            }
+            other => Err(format!("VM match does not support pattern: {:?}", other)),
+        }
+    }
+}
+
+fn interp_to_fmt(template: &str) -> String {
+    let mut out = String::new();
+    let mut chars = template.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '{' {
+            if chars.peek() == Some(&'{') {
+                chars.next();
+                out.push_str("{{");
+            } else {
+                out.push_str("{}");
+                let mut depth = 1;
+                while let Some(c2) = chars.next() {
+                    if c2 == '{' {
+                        depth += 1;
+                    } else if c2 == '}' {
+                        depth -= 1;
+                        if depth == 0 {
+                            break;
+                        }
+                    }
+                }
+            }
+        } else if c == '}' {
+            if chars.peek() == Some(&'}') {
+                chars.next();
+                out.push_str("}}");
+            } else {
+                out.push('}');
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 pub fn compile_module(module: &Module) -> Result<Chunk, String> {

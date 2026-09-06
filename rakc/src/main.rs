@@ -13,6 +13,7 @@ fn print_usage() {
         eprintln!("  run <file>     Run a Rak script (interpreter)");
         eprintln!("  vm <file>      Run a Rak script on the bytecode VM");
         eprintln!("  bench <file>   Benchmark interpreter vs VM");
+        eprintln!("  check <file>   Lex + parse, print diagnostics");
         eprintln!("  lex <file>     Tokenize and print tokens");
         eprintln!("  parse <file>   Parse and print AST");
         eprintln!("  version        Print version");
@@ -74,6 +75,21 @@ fn main() {
                 }
             }
         }
+        "check" => {
+            match rakc::lexer::tokenize(&source) {
+                Ok(tokens) => match rakc::parser::parse(&tokens, &source) {
+                    Ok(_) => println!("{}: no errors", file),
+                    Err(e) => {
+                        eprintln!("{}", e);
+                        std::process::exit(1);
+                    }
+                },
+                Err(e) => {
+                    eprintln!("{}", e);
+                    std::process::exit(1);
+                }
+            }
+        }
         "lex" => {
             match rakc::lexer::tokenize(&source) {
                 Ok(tokens) => {
@@ -87,7 +103,7 @@ fn main() {
         "parse" => {
             match rakc::lexer::tokenize(&source) {
                 Ok(tokens) => {
-                    match rakc::parser::parse(&tokens) {
+                    match rakc::parser::parse(&tokens, &source) {
                         Ok(ast) => println!("{:#?}", ast),
                         Err(e) => eprintln!("Parser error: {}", e),
                     }
@@ -98,7 +114,7 @@ fn main() {
         "vm" => {
             match rakc::lexer::tokenize(&source) {
                 Ok(tokens) => {
-                    match rakc::parser::parse(&tokens) {
+                    match rakc::parser::parse(&tokens, &source) {
                         Ok(ast) => {
                             match rakc::compiler::compile_module(&ast) {
                                 Ok(chunk) => {
@@ -126,7 +142,7 @@ fn main() {
         }
         "bench" => {
             let tokens = rakc::lexer::tokenize(&source).expect("lex");
-            let ast = rakc::parser::parse(&tokens).expect("parse");
+            let ast = rakc::parser::parse(&tokens, &source).expect("parse");
             let t0 = std::time::Instant::now();
             let _ = rakc::eval(&source);
             let interp_ms = t0.elapsed().as_millis();
