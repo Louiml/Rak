@@ -1591,8 +1591,12 @@ impl Interpreter {
             "html_count" => Ok(Value::Int(rak_stdlib::web::html_count(&self.val_to_string(args.first())?, &self.val_to_string(args.get(1))?) as i64)),
             "html_headers" => Ok(Value::Array(rak_stdlib::web::html_headers(&self.val_to_string(args.first())?).into_iter().map(Value::String).collect())),
             "json_parse" => match rak_stdlib::js::json_parse(&self.val_to_string(args.first())?) {
-                Ok(v) => Ok(Value::String(v.to_string())),
+                Ok(v) => Ok(json_to_value(v)),
                 Err(e) => Err(crate::RakError::Runtime(format!("{}", e))),
+            },
+            "json_stringify" => {
+                let v = args.first().cloned().unwrap_or(Value::Nil);
+                Ok(Value::String(value_to_json(&v).to_string()))
             },
             "json_get" => match rak_stdlib::js::json_get(&self.val_to_string(args.first())?, &self.val_to_string(args.get(1))?) {
                 Ok(v) => Ok(Value::String(v)),
@@ -1878,6 +1882,92 @@ impl Interpreter {
                 eprintln!("[dbg] {}", s);
                 Ok(Value::Nil)
             }
+            // --- String methods ---
+            "replace" => {
+                let s = self.val_to_string(args.first())?;
+                let from = self.val_to_string(args.get(1))?;
+                let to = self.val_to_string(args.get(2))?;
+                Ok(Value::String(s.replace(&from, &to)))
+            }
+            "find" => {
+                let s = self.val_to_string(args.first())?;
+                let needle = self.val_to_string(args.get(1))?;
+                Ok(s.find(&needle).map(|i| Value::Int(i as i64)).unwrap_or(Value::Int(-1)))
+            }
+            "starts_with" => {
+                let s = self.val_to_string(args.first())?;
+                let p = self.val_to_string(args.get(1))?;
+                Ok(Value::Bool(s.starts_with(&p)))
+            }
+            "ends_with" => {
+                let s = self.val_to_string(args.first())?;
+                let p = self.val_to_string(args.get(1))?;
+                Ok(Value::Bool(s.ends_with(&p)))
+            }
+            "slice" => {
+                let s = self.val_to_string(args.first())?;
+                let start = args.get(1).and_then(|v| v.as_i64()).unwrap_or(0).max(0) as usize;
+                let end = args.get(2).and_then(|v| v.as_i64()).unwrap_or(s.len() as i64).max(0) as usize;
+                let chars: Vec<char> = s.chars().collect();
+                let e = end.min(chars.len());
+                let st = start.min(chars.len());
+                Ok(Value::String(chars[st..e].iter().collect()))
+            }
+            "repeat" => {
+                let s = self.val_to_string(args.first())?;
+                let n = args.get(1).and_then(|v| v.as_i64()).unwrap_or(1).max(0) as usize;
+                Ok(Value::String(s.repeat(n)))
+            }
+            "trim_start" => Ok(Value::String(self.val_to_string(args.first())?.trim_start().to_string())),
+            "trim_end" => Ok(Value::String(self.val_to_string(args.first())?.trim_end().to_string())),
+            "reverse" => {
+                if let Some(Value::Array(a)) = args.first().cloned() {
+                    let mut a = a;
+                    a.reverse();
+                    Ok(Value::Array(a))
+                } else if let Some(Value::String(s)) = args.first().cloned() {
+                    Ok(Value::String(s.chars().rev().collect()))
+                } else {
+                    Err(crate::RakError::Runtime("reverse() requires array or string".to_string()))
+                }
+            }
+            "min" => {
+                let nums: Vec<i64> = args.iter().filter_map(|v| v.as_i64()).collect();
+                if nums.is_empty() { return Ok(Value::Nil); }
+                Ok(Value::Int(*nums.iter().min().unwrap()))
+            }
+            "max" => {
+                let nums: Vec<i64> = args.iter().filter_map(|v| v.as_i64()).collect();
+                if nums.is_empty() { return Ok(Value::Nil); }
+                Ok(Value::Int(*nums.iter().max().unwrap()))
+            }
+            "sum" => {
+                if let Some(Value::Array(a)) = args.first() {
+                    let mut total = 0i64;
+                    for v in a.iter() { if let Some(n) = v.as_i64() { total += n; } else if v.as_f64().is_some() { return Ok(Value::Float(a.iter().filter_map(|v| v.as_f64()).sum())); } }
+                    Ok(Value::Int(total))
+                } else { Ok(Value::Int(0)) }
+            }
+            "abs" => Ok(Value::Int(args.first().and_then(|v| v.as_i64()).unwrap_or(0).abs())),
+            "sqrt" => Ok(Value::Float(args.first().and_then(|v| v.as_f64()).unwrap_or(0.0).sqrt())),
+            "pow" => {
+                let base = args.first().and_then(|v| v.as_f64()).unwrap_or(0.0);
+                let exp = args.get(1).and_then(|v| v.as_f64()).unwrap_or(0.0);
+                Ok(Value::Float(base.powf(exp)))
+            }
+            "clamp" => {
+                let v = args.first().and_then(|v| v.as_i64()).unwrap_or(0);
+                let lo = args.get(1).and_then(|v| v.as_i64()).unwrap_or(0);
+                let hi = args.get(2).and_then(|v| v.as_i64()).unwrap_or(0);
+                Ok(Value::Int(v.max(lo).min(hi)))
+            }
+            "env_set" => {
+                let k = self.val_to_string(args.first())?;
+                let v = self.val_to_string(args.get(1))?;
+                std::env::set_var(k, v);
+                Ok(Value::Nil)
+            }
+            "to_string" => Ok(Value::String(self.val_to_string(args.first())?)),
             _ => Err(crate::RakError::Runtime(format!("Unknown function: {}", name))),
         }
     }
@@ -1967,6 +2057,60 @@ impl Value {
             Value::Float(f) => Some(*f),
             _ => None,
         }
+    }
+}
+
+fn json_to_value(j: serde_json::Value) -> Value {
+    use serde_json::Value as J;
+    match j {
+        J::Null => Value::Nil,
+        J::Bool(b) => Value::Bool(b),
+        J::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                Value::Int(i)
+            } else if let Some(f) = n.as_f64() {
+                Value::Float(f)
+            } else {
+                Value::Nil
+            }
+        }
+        J::String(s) => Value::String(s),
+        J::Array(a) => Value::Array(a.into_iter().map(json_to_value).collect()),
+        J::Object(o) => Value::Map(o.into_iter().map(|(k, v)| (k, json_to_value(v))).collect()),
+    }
+}
+
+fn value_to_json(v: &Value) -> serde_json::Value {
+    use serde_json::Value as J;
+    match v {
+        Value::Nil => J::Null,
+        Value::Bool(b) => J::Bool(*b),
+        Value::Int(i) => serde_json::json!(*i),
+        Value::Hex(h) => serde_json::json!(*h),
+        Value::Float(f) => serde_json::json!(*f),
+        Value::String(s) => J::String(s.clone()),
+        Value::Bytes(b) => J::String(String::from_utf8_lossy(b).to_string()),
+        Value::Array(a) => J::Array(a.iter().map(value_to_json).collect()),
+        Value::Tuple(t) => J::Array(t.iter().map(value_to_json).collect()),
+        Value::Map(m) => {
+            let mut o = serde_json::Map::new();
+            for (k, val) in m.iter() {
+                o.insert(k.clone(), value_to_json(val));
+            }
+            J::Object(o)
+        }
+        Value::Struct { fields, .. } => {
+            let mut o = serde_json::Map::new();
+            for (k, val) in fields.iter() {
+                o.insert(k.clone(), value_to_json(val));
+            }
+            J::Object(o)
+        }
+        Value::Option(Some(v)) => value_to_json(v),
+        Value::Option(None) => J::Null,
+        Value::Result(Some(v), _) => value_to_json(v),
+        Value::Result(_, Some(e)) => value_to_json(e),
+        _ => J::Null,
     }
 }
 
@@ -2149,5 +2293,26 @@ mod tests {
         let mut interp = Interpreter::new();
         let output = interp.run_source("fn fib(n) { if n < 2 { return n } return fib(n - 1) + fib(n - 2) } dump fib(15);").unwrap();
         assert!(output.iter().any(|l| l.contains("[DUMP] 610")));
+    }
+
+    #[test]
+    fn test_interpreter_json_roundtrip() {
+        let mut interp = Interpreter::new();
+        let output = interp.run_source("let j = json_parse(\"{\\\"a\\\": 1, \\\"b\\\": [2, 3]}\") dump j.a dump j.b[1] dump json_stringify(j)").unwrap();
+        assert!(output.iter().any(|l| l.contains("[DUMP] 1")));
+        assert!(output.iter().any(|l| l.contains("[DUMP] 3")));
+        assert!(output.iter().any(|l| l.contains("\"a\"")));
+    }
+
+    #[test]
+    fn test_interpreter_string_stdlib() {
+        let mut interp = Interpreter::new();
+        let output = interp.run_source("dump replace(\"hello\", \"l\", \"L\"); dump starts_with(\"hello\", \"he\"); dump slice(\"hello\", 1, 3); dump reverse(\"abc\"); dump sum([1, 2, 3, 4]); dump max(3, 9, 2);").unwrap();
+        assert!(output.iter().any(|l| l.contains("heLLo")));
+        assert!(output.iter().any(|l| l.contains("true")));
+        assert!(output.iter().any(|l| l.contains("[DUMP] el")));
+        assert!(output.iter().any(|l| l.contains("[DUMP] cba")));
+        assert!(output.iter().any(|l| l.contains("[DUMP] 10")));
+        assert!(output.iter().any(|l| l.contains("[DUMP] 9")));
     }
 }
