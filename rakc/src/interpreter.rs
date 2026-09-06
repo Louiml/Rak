@@ -132,14 +132,24 @@ impl fmt::Display for Value {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Default)]
+#[derive(Clone)]
 pub struct Env {
+    global: Arc<Mutex<HashMap<String, Value>>>,
     scopes: Vec<HashMap<String, Value>>,
+}
+
+impl Default for Env {
+    fn default() -> Self {
+        Env::new()
+    }
 }
 
 impl Env {
     pub fn new() -> Self {
-        Env { scopes: vec![HashMap::new()] }
+        Env {
+            global: Arc::new(Mutex::new(HashMap::new())),
+            scopes: Vec::new(),
+        }
     }
 
     pub fn push_scope(&mut self) {
@@ -147,13 +157,17 @@ impl Env {
     }
 
     pub fn pop_scope(&mut self) {
-        if self.scopes.len() > 1 {
+        if !self.scopes.is_empty() {
             self.scopes.pop();
         }
     }
 
     pub fn define(&mut self, name: &str, value: Value) {
-        self.scopes.last_mut().unwrap().insert(name.to_string(), value);
+        if let Some(scope) = self.scopes.last_mut() {
+            scope.insert(name.to_string(), value);
+        } else {
+            self.global.lock().unwrap().insert(name.to_string(), value);
+        }
     }
 
     pub fn get(&self, name: &str) -> Option<Value> {
@@ -162,7 +176,7 @@ impl Env {
                 return Some(val.clone());
             }
         }
-        None
+        self.global.lock().unwrap().get(name).cloned()
     }
 
     pub fn assign(&mut self, name: &str, value: Value) -> crate::Result<()> {
@@ -172,6 +186,12 @@ impl Env {
                 return Ok(());
             }
         }
+        let mut g = self.global.lock().unwrap();
+        if g.contains_key(name) {
+            g.insert(name.to_string(), value);
+            return Ok(());
+        }
+        drop(g);
         Err(crate::RakError::Runtime(format!("Undefined variable: {}", name)))
     }
 
@@ -1185,10 +1205,9 @@ impl Interpreter {
         let arg_vals: Vec<Value> = args.iter().map(|a| self.eval_expr(a)).collect::<crate::Result<_>>()?;
         let saved_returning = self.returning;
         self.returning = false;
+        let saved_env = self.env.clone();
+        self.env = (**closure).clone();
         self.env.push_scope();
-        for (k, v) in &closure.scopes[0] {
-            self.env.define(k, v.clone());
-        }
         for (p, a) in params.iter().zip(arg_vals.iter()) {
             self.env.define(&p.name, a.clone());
         }
@@ -1203,7 +1222,7 @@ impl Interpreter {
         } else {
             Value::Nil
         };
-        self.env.pop_scope();
+        self.env = saved_env;
         self.returning = saved_returning;
         Ok(ret)
     }
