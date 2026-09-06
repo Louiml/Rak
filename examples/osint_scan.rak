@@ -14,7 +14,7 @@ for port in scan_ports(target, { range: [0x0016, 0x0050] }) {
 
 // HTML parsing
 dump "=== HTML Parsing ==="
-let html = "<html><title>Rak Test</title><a href='https://rak.dev'>Rak</a><a href='https://github.com'>GitHub</a></html>"
+let html = "<html><title>Rak Test</title><a href='https://louiml.github.io/Rak/'>Rak</a><a href='https://github.com'>GitHub</a></html>"
 dump html_title(html)
 for link in html_links(html) {
     dump fmt("Link: {}", link)
