@@ -2793,6 +2793,7 @@ dependencies = [
  "pretty_assertions",
  "rak-stdlib",
  "serde",
+ "serde_json",
  "thiserror 1.0.69",
 ]
 
