@@ -61,6 +61,7 @@ export default function IDE() {
   const unlistenRef = useRef<UnlistenFn | null>(null);
   const toastIdRef = useRef(0);
   const resizeRef = useRef<{ type: 'terminal' | 'sidebar'; startY: number; startH: number; startW: number; startX: number } | null>(null);
+  const recentOutputs = useRef(new Map<string, number>());
 
   const activeTab = tabs.find((t) => t.id === activeTabId) || null;
 
@@ -73,6 +74,11 @@ export default function IDE() {
 useEffect(() => {
     const setup = async () => {
       const u1 = await listen<{ stream: string; text: string }>('rak-output', (e) => {
+        const key = `${e.payload.stream}:${e.payload.text}`;
+        const now = Date.now();
+        const last = recentOutputs.current.get(key) ?? 0;
+        if (now - last < 100) return;
+        recentOutputs.current.set(key, now);
         setConsoleOutput(prev => [...prev, { type: e.payload.stream === 'stderr' ? 'error' : 'output', content: e.payload.text, timestamp: new Date() }]);
       });
       const u2 = await listen('rak-done', () => {

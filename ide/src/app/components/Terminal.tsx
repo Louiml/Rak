@@ -26,10 +26,16 @@ export default function Terminal({ cwd, height }: TerminalProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const unlistenRef = useRef<UnlistenFn | null>(null);
+  const recentOutputs = useRef(new Map<string, number>());
 
   useEffect(() => {
     const setup = async () => {
       const u1 = await listen<{ stream: string; text: string }>('shell-output', (e) => {
+        const key = `${e.payload.stream}:${e.payload.text}`;
+        const now = Date.now();
+        const last = recentOutputs.current.get(key) ?? 0;
+        if (now - last < 100) return;
+        recentOutputs.current.set(key, now);
         setLines((prev) => [...prev, { type: e.payload.stream === 'stderr' ? 'stderr' : 'stdout', text: e.payload.text }]);
       });
       const u2 = await listen('shell-done', () => { setRunning(false); });
