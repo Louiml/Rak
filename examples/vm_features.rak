@@ -1,0 +1,31 @@
+// vm_features.rak — features that now work on the bytecode VM (`rakc vm`).
+
+// tuples + indexing
+let t = (1, 2, 3)
+dump t.0
+dump t.2
+
+// maps + field access
+let m = {x: 5, y: 7}
+dump m.x
+dump m.y
+
+// array indexing
+let a = [10, 20, 30]
+dump a[1]
+
+// string interpolation (compiled to fmt)
+let name = "Rak"
+dump f"hello {name}! v2"
+
+// match (runs on the VM)
+let x = 2
+match x {
+    1 => { dump "one" },
+    2 => { dump "two" },
+    _ => { dump "other" }
+}
+
+// recursion on the VM
+fn fib(n) { if n < 2 { return n } return fib(n - 1) + fib(n - 2) }
+dump fib(20)

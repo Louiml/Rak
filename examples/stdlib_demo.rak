@@ -1,0 +1,26 @@
+// stdlib_demo.rak — new string / array / math builtins.
+
+dump "=== strings ==="
+dump replace("hello", "l", "L")
+dump find("hello", "lo")
+dump find("hello", "z")
+dump starts_with("hello", "he")
+dump ends_with("hello", "lo")
+dump slice("hello", 1, 4)
+dump repeat("ab", 3)
+dump trim_start("   hi")
+dump trim_end("hi   ")
+dump reverse("abc")
+
+dump "=== arrays ==="
+dump reverse([1, 2, 3])
+dump sum([1, 2, 3, 4, 5])
+dump max(3, 9, 2)
+dump min(3, 9, 2)
+dump len([1, 2, 3])
+
+dump "=== math ==="
+dump abs(-5)
+dump sqrt(16)
+dump pow(2, 10)
+dump clamp(15, 0, 10)

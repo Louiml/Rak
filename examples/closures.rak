@@ -1,0 +1,16 @@
+// closures.rak — lexical closures and recursion via `let f = fn ...`.
+
+dump "=== recursive closure (works now) ==="
+let fact = fn(n) {
+    if n <= 1 { return 1 }
+    return n * fact(n - 1)
+}
+dump fact(6)
+dump fact(10)
+
+dump "=== fib via closure ==="
+let fib = fn(n) {
+    if n < 2 { return n }
+    return fib(n - 1) + fib(n - 2)
+}
+dump fib(12)

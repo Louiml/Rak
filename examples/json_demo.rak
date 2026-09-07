@@ -1,0 +1,18 @@
+// json_demo.rak — real JSON: parse to native values, stringify back.
+
+let src = "{\"user\": \"admin\", \"id\": 7, \"roles\": [\"a\", \"b\"], \"active\": true}"
+dump "=== parse ==="
+let j = json_parse(src)
+dump j.user
+dump j.id
+dump j.roles[0]
+dump j.active
+
+dump "=== mutate + stringify ==="
+j.id = 99
+j.roles = push(j.roles, "c")
+dump json_stringify(j)
+
+dump "=== from values ==="
+let v = {name: "Rak", nums: [1, 2, 3]}
+dump json_stringify(v)
