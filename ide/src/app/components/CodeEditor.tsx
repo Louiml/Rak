@@ -7,7 +7,21 @@ interface CodeEditorProps {
   value: string;
   onChange: (value: string) => void;
   onRun?: () => void;
+  onCursorChange?: (pos: { line: number; col: number }) => void;
 }
+
+interface Snippet { trigger: string; label: string; body: string; }
+
+const SNIPPETS: Snippet[] = [
+  { trigger: 'fn', label: 'function', body: 'fn name(params) {\n    \n}' },
+  { trigger: 'if', label: 'if', body: 'if cond {\n    \n}' },
+  { trigger: 'for', label: 'for', body: 'for item in iterable {\n    \n}' },
+  { trigger: 'while', label: 'while', body: 'while cond {\n    \n}' },
+  { trigger: 'match', label: 'match', body: 'match value {\n    pattern => {\n        \n    },\n    _ => {}\n}' },
+  { trigger: 'struct', label: 'struct', body: 'struct Name {\n    field: type\n}' },
+  { trigger: 'enum', label: 'enum', body: 'enum Name {\n    Variant\n}' },
+  { trigger: 'let', label: 'let', body: 'let name = value' },
+];
 
 const KEYWORDS = [
   'scan', 'fetch', 'dump', 'trace', 'loop', 'if', 'else', 'fn', 'let', 'mut',
@@ -46,7 +60,20 @@ const BUILTINS = [
   'Some', 'None', 'Ok', 'Err',
 ];
 
-const ALL_SUGGESTIONS = [...KEYWORDS, ...TYPES, ...BUILTINS];
+interface Suggestion {
+  label: string;
+  kind: 'keyword' | 'type' | 'builtin' | 'snippet';
+  body?: string;
+}
+
+const ALL_SUGGESTIONS: Suggestion[] = [
+  ...SNIPPETS.map((s) => ({ label: s.trigger, kind: 'snippet' as const, body: s.body })),
+  ...KEYWORDS.map((k) => ({ label: k, kind: 'keyword' as const })),
+  ...TYPES.map((t) => ({ label: t, kind: 'type' as const })),
+  ...BUILTINS.map((b) => ({ label: b, kind: 'builtin' as const })),
+];
+
+const KIND_ICON = { keyword: '🔑', type: '📦', builtin: '⚡', snippet: '📝' };
 
 const BRACKETS: Record<string, string> = {
   '(': ')', '[': ']', '{': '}',
@@ -179,7 +206,7 @@ function renderLine(line: string): React.ReactNode {
   ));
 }
 
-export default function CodeEditor({ value, onChange, onRun }: CodeEditorProps) {
+export default function CodeEditor({ value, onChange, onRun, onCursorChange }: CodeEditorProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const highlightRef = useRef<HTMLPreElement>(null);
   const lines = value.split('\n');
@@ -194,9 +221,11 @@ export default function CodeEditor({ value, onChange, onRun }: CodeEditorProps) 
   const findInputRef = useRef<HTMLInputElement>(null);
 
   // Autocomplete state
-  const [suggestions, setSuggestions] = useState<string[]>([]);
+  const [suggestions, setSuggestions] = useState<Suggestion[]>([]);
   const [suggestionIndex, setSuggestionIndex] = useState(0);
   const [showSuggestions, setShowSuggestions] = useState(false);
+  const [suggestionTop, setSuggestionTop] = useState(0);
+  const [suggestionLeft, setSuggestionLeft] = useState(0);
 
   // Context menu state
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
@@ -284,36 +313,50 @@ export default function CodeEditor({ value, onChange, onRun }: CodeEditorProps) 
     const wordMatch = before.match(/[a-zA-Z_][a-zA-Z0-9_]*$/);
     if (wordMatch && wordMatch[0].length >= 1) {
       const prefix = wordMatch[0].toLowerCase();
-      const matches = ALL_SUGGESTIONS.filter(s => s.toLowerCase().startsWith(prefix)).slice(0, 8);
-      if (matches.length > 0 && matches[0] !== prefix) {
+      const matches = ALL_SUGGESTIONS.filter(s => s.label.toLowerCase().startsWith(prefix)).slice(0, 8);
+      if (matches.length > 0 && (matches.length > 1 || matches[0].label !== wordMatch[0])) {
         setSuggestions(matches);
         setSuggestionIndex(0);
         setShowSuggestions(true);
+        // compute caret pixel position (monospace: text-sm 14px, leading-6 24px, p-4)
+        const lines = before.split('\n');
+        const lineIdx = lines.length - 1;
+        const col = lines[lineIdx].length;
+        const scrollTop = ta.scrollTop;
+        const scrollLeft = ta.scrollLeft;
+        setSuggestionTop(16 + (lineIdx + 1) * 24 - scrollTop);
+        setSuggestionLeft(16 + (col + 1) * 8.4 - scrollLeft);
         return;
       }
     }
     setShowSuggestions(false);
   }, [value]);
 
-  const insertSuggestion = (suggestion: string) => {
+  const insertSuggestion = (suggestion: Suggestion) => {
     if (!textareaRef.current) return;
     const ta = textareaRef.current;
     const pos = ta.selectionStart;
     const before = value.substring(0, pos);
     const after = value.substring(pos);
     const wordMatch = before.match(/[a-zA-Z_][a-zA-Z0-9_]*$/);
-    if (wordMatch) {
-      const newBefore = before.substring(0, before.length - wordMatch[0].length);
-      const newValue = newBefore + suggestion + after;
-      onChange(newValue);
-      setTimeout(() => {
-        if (textareaRef.current) {
-          const newPos = newBefore.length + suggestion.length;
-          textareaRef.current.selectionStart = textareaRef.current.selectionEnd = newPos;
-          textareaRef.current.focus();
-        }
-      }, 0);
+    if (!wordMatch) return;
+    const newBefore = before.substring(0, before.length - wordMatch[0].length);
+    const inserted = suggestion.body ?? suggestion.label;
+    const newValue = newBefore + inserted + after;
+    onChange(newValue);
+    // Position cursor inside snippet body (between first "{" matching "}" or at end)
+    let cursorOffset = newBefore.length + inserted.length;
+    const openBrace = inserted.indexOf('{');
+    if (suggestion.body && openBrace !== -1 && inserted.indexOf('\n') > openBrace) {
+      const firstNewlineAfter = inserted.indexOf('\n', openBrace);
+      cursorOffset = newBefore.length + firstNewlineAfter + 1 + 4; // after indent
     }
+    setTimeout(() => {
+      if (textareaRef.current) {
+        textareaRef.current.selectionStart = textareaRef.current.selectionEnd = cursorOffset;
+        textareaRef.current.focus();
+      }
+    }, 0);
     setShowSuggestions(false);
   };
 
@@ -348,7 +391,131 @@ export default function CodeEditor({ value, onChange, onRun }: CodeEditorProps) 
     return null;
   };
 
+  const reportCursor = useCallback(() => {
+    const ta = textareaRef.current;
+    if (!ta || !onCursorChange) return;
+    const before = value.substring(0, ta.selectionStart);
+    const lines = before.split('\n');
+    onCursorChange({ line: lines.length, col: lines[lines.length - 1].length + 1 });
+  }, [value, onCursorChange]);
+
+  const getLineBounds = (): { start: number; end: number } => {
+    const start = textareaRef.current?.selectionStart ?? 0;
+    const lineStart = value.lastIndexOf('\n', start - 1) + 1;
+    let lineEnd = value.indexOf('\n', start);
+    if (lineEnd === -1) lineEnd = value.length;
+    return { start: lineStart, end: lineEnd };
+  };
+
+  const toggleComment = () => {
+    const { start, end } = getLineBounds();
+    const line = value.substring(start, end);
+    if (line.trimStart().startsWith('//')) {
+      const newLine = line.replace(/^\s*\/\/\s?/, '');
+      onChange(value.substring(0, start) + newLine + value.substring(end));
+    } else {
+      onChange(value.substring(0, start) + '// ' + line + value.substring(end));
+    }
+  };
+
+  const duplicateLine = () => {
+    const { start, end } = getLineBounds();
+    const line = value.substring(start, end) + (end < value.length ? '\n' : '');
+    const newValue = value.substring(0, end) + '\n' + line + value.substring(end - (line.endsWith('\n') ? 1 : 0));
+    // simpler: insert the line + newline at the end of the line
+    onChange(value.substring(0, start) + (value.substring(start, end)) + '\n' + value.substring(start, end) + value.substring(end));
+  };
+
+  const deleteLine = () => {
+    const { start, end } = getLineBounds();
+    const newValue = value.substring(0, start) + value.substring(Math.min(end + 1, value.length));
+    onChange(newValue);
+  };
+
+  const moveLine = (dir: number) => {
+    const lines = value.split('\n');
+    const ta = textareaRef.current;
+    if (!ta) return;
+    const before = value.substring(0, ta.selectionStart);
+    const lineIdx = before.split('\n').length - 1;
+    const target = lineIdx + dir;
+    if (target < 0 || target >= lines.length) return;
+    const [line] = lines.splice(lineIdx, 1);
+    lines.splice(target, 0, line);
+    onChange(lines.join('\n'));
+  };
+
+  const goToLine = (n: number) => {
+    const lines = value.split('\n');
+    const idx = Math.max(0, Math.min(n - 1, lines.length - 1));
+    const charPos = lines.slice(0, idx).join('\n').length + (idx > 0 ? 1 : 0);
+    const ta = textareaRef.current;
+    if (ta) {
+      ta.focus();
+      ta.selectionStart = ta.selectionEnd = charPos;
+      const lineHeight = 24;
+      ta.scrollTop = Math.max(0, idx * lineHeight);
+      syncScroll();
+    }
+  };
+
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    const mod = e.ctrlKey || e.metaKey;
+    // Ctrl+/ - Toggle comment
+    if (mod && e.key === '/') {
+      e.preventDefault();
+      toggleComment();
+      return;
+    }
+    // Ctrl+D - Duplicate line
+    if (mod && e.key === 'd' && !e.shiftKey) {
+      e.preventDefault();
+      duplicateLine();
+      return;
+    }
+    // Ctrl+Shift+K - Delete line
+    if (mod && e.shiftKey && e.key === 'K') {
+      e.preventDefault();
+      deleteLine();
+      return;
+    }
+    // Alt+Up / Alt+Down - Move line
+    if (e.altKey && e.key === 'ArrowUp') {
+      e.preventDefault();
+      moveLine(-1);
+      return;
+    }
+    if (e.altKey && e.key === 'ArrowDown') {
+      e.preventDefault();
+      moveLine(1);
+      return;
+    }
+    // Ctrl+G - Go to line
+    if (mod && e.key === 'g' && !e.shiftKey) {
+      e.preventDefault();
+      const n = prompt('Go to line:');
+      if (n && !isNaN(Number(n))) {
+        goToLine(Number(n));
+      }
+      return;
+    }
+    // Auto-close brackets and quotes
+    const autoClose: Record<string, string> = { '(': ')', '[': ']', '{': '}', '"': '"', "'": "'" };
+    if (!mod && !e.altKey && autoClose[e.key] && !e.key.startsWith('Arrow')) {
+      const start = e.currentTarget.selectionStart;
+      const end = e.currentTarget.selectionEnd;
+      if (start === end) {
+        e.preventDefault();
+        const insert = e.key + autoClose[e.key];
+        onChange(value.substring(0, start) + insert + value.substring(end));
+        setTimeout(() => {
+          if (textareaRef.current) {
+            textareaRef.current.selectionStart = textareaRef.current.selectionEnd = start + 1;
+          }
+        }, 0);
+        return;
+      }
+    }
     // Ctrl+F - Find
     if ((e.ctrlKey || e.metaKey) && e.key === 'f') {
       e.preventDefault();
@@ -423,6 +590,7 @@ export default function CodeEditor({ value, onChange, onRun }: CodeEditorProps) 
 
   const handleKeyUp = () => {
     updateSuggestions();
+    reportCursor();
   };
 
   const bracketMatch = getMatchingBracket();
@@ -491,18 +659,23 @@ export default function CodeEditor({ value, onChange, onRun }: CodeEditorProps) 
 
         {/* Autocomplete dropdown */}
         {showSuggestions && suggestions.length > 0 && (
-          <div className="absolute z-20 bg-zinc-800 border border-zinc-700 rounded-lg shadow-xl py-1 max-h-48 overflow-y-auto text-xs">
+          <div
+            className="absolute z-20 bg-zinc-800 border border-zinc-700 rounded-lg shadow-xl py-1 max-h-48 overflow-y-auto text-xs"
+            style={{ top: suggestionTop, left: suggestionLeft, minWidth: 180 }}
+          >
             {suggestions.map((s, i) => (
               <div
-                key={s}
+                key={s.label + s.kind}
                 onClick={() => insertSuggestion(s)}
-                className={`px-3 py-1 cursor-pointer ${
+                className={`px-3 py-1 cursor-pointer flex items-center gap-2 ${
                   i === suggestionIndex ? 'bg-emerald-600 text-white' : 'text-zinc-300 hover:bg-zinc-700'
-                } ${KEYWORD_SET.has(s) ? 'font-semibold' : ''}`}
+                }`}
               >
-                <span className={KEYWORD_SET.has(s) ? 'text-purple-400' : TYPE_SET.has(s) ? 'text-cyan-400' : 'text-zinc-400'}>
-                  {s}
+                <span className="text-[10px] w-4 text-center">{KIND_ICON[s.kind]}</span>
+                <span className={s.kind === 'keyword' ? 'text-purple-400' : s.kind === 'type' ? 'text-cyan-400' : s.kind === 'builtin' ? 'text-yellow-400' : 'text-green-400'}>
+                  {s.label}
                 </span>
+                {s.kind === 'snippet' && <span className="text-[10px] text-zinc-500 ml-auto">⇥</span>}
               </div>
             ))}
           </div>
@@ -527,7 +700,8 @@ export default function CodeEditor({ value, onChange, onRun }: CodeEditorProps) 
           onKeyDown={handleKeyDown}
           onKeyUp={handleKeyUp}
           onScroll={syncScroll}
-          onClick={() => setShowSuggestions(false)}
+          onClick={() => { setShowSuggestions(false); reportCursor(); }}
+          onSelect={reportCursor}
           onContextMenu={(e) => {
             e.preventDefault();
             setContextMenu({ x: e.clientX, y: e.clientY });
@@ -613,6 +787,25 @@ export default function CodeEditor({ value, onChange, onRun }: CodeEditorProps) 
                 setFindOpen(true);
                 setReplaceOpen(true);
                 setTimeout(() => findInputRef.current?.focus(), 0);
+              },
+            },
+            { separator: true },
+            {
+              label: 'Toggle Comment',
+              icon: '💬',
+              action: toggleComment,
+            },
+            {
+              label: 'Duplicate Line',
+              icon: '⧉',
+              action: duplicateLine,
+            },
+            {
+              label: 'Go to Line...',
+              icon: '📏',
+              action: () => {
+                const n = prompt('Go to line:');
+                if (n && !isNaN(Number(n))) goToLine(Number(n));
               },
             },
             { separator: true },

@@ -14,9 +14,10 @@ interface FileExplorerProps {
   currentPath: string;
   onPathChange: (path: string) => void;
   activeFile: string | null;
+  onToast: (msg: string, type?: 'success' | 'error' | 'info') => void;
 }
 
-export default function FileExplorer({ onFileSelect, currentPath, onPathChange, activeFile }: FileExplorerProps) {
+export default function FileExplorer({ onFileSelect, currentPath, onPathChange, activeFile, onToast }: FileExplorerProps) {
   const [entries, setEntries] = useState<FileEntry[]>([]);
   const [expandedDirs, setExpandedDirs] = useState<Set<string>>(new Set());
   const [isLoading, setIsLoading] = useState(false);
@@ -24,6 +25,7 @@ export default function FileExplorer({ onFileSelect, currentPath, onPathChange, 
   const [newItemMode, setNewItemMode] = useState<'file' | 'dir' | null>(null);
   const [newItemName, setNewItemName] = useState('');
   const [newItemParent, setNewItemParent] = useState('');
+  const [renaming, setRenaming] = useState<{ path: string; name: string } | null>(null);
 
   const loadDir = useCallback(async (path: string) => {
     setIsLoading(true);
@@ -75,12 +77,61 @@ export default function FileExplorer({ onFileSelect, currentPath, onPathChange, 
       try {
         await invoke('delete_file', { path: contextMenu.path });
         loadDir(currentPath);
+        onToast('Deleted', 'success');
       } catch (error) {
-        console.error('Delete failed:', error);
+        onToast(`Delete failed: ${error}`, 'error');
       }
     }
     setContextMenu(null);
   };
+
+  const handleRename = async () => {
+    if (!contextMenu) return;
+    setRenaming({ path: contextMenu.path, name: contextMenu.path.split(/[\\\/]/).pop() || contextMenu.path });
+    setContextMenu(null);
+  };
+
+  const submitRename = async () => {
+    if (!renaming || !renaming.name.trim()) { setRenaming(null); return; }
+    const parts = renaming.path.split(/[\\\/]/);
+    parts[parts.length - 1] = renaming.name;
+    const newPath = parts.join('\\');
+    try {
+      await invoke('rename_file', { oldPath: renaming.path, newPath });
+      loadDir(currentPath);
+      onToast('Renamed', 'success');
+    } catch (e) {
+      onToast(`Rename failed: ${e}`, 'error');
+    }
+    setRenaming(null);
+  };
+
+  const handleDuplicate = async () => {
+    if (!contextMenu) return;
+    try {
+      await invoke('duplicate_file', { src: contextMenu.path });
+      loadDir(currentPath);
+      onToast('Duplicated', 'success');
+    } catch (e) {
+      onToast(`Duplicate failed: ${e}`, 'error');
+    }
+    setContextMenu(null);
+  };
+
+  const handleCopyPath = async () => {
+    if (!contextMenu) return;
+    try { await navigator.clipboard.writeText(contextMenu.path); onToast('Path copied', 'success'); } catch {}
+    setContextMenu(null);
+  };
+
+  const handleReveal = async () => {
+    if (!contextMenu) return;
+    const target = contextMenu.isDir ? contextMenu.path : contextMenu.path.split(/[\\\/]/).slice(0, -1).join('\\');
+    try { await invoke('open_in_explorer', { path: target }); } catch (e) { onToast(`Reveal failed: ${e}`, 'error'); }
+    setContextMenu(null);
+  };
+
+  const handleRefresh = () => { loadDir(currentPath); };
 
   const handleNewItem = (type: 'file' | 'dir', parentPath: string) => {
     setNewItemMode(type);
@@ -144,6 +195,13 @@ export default function FileExplorer({ onFileSelect, currentPath, onPathChange, 
           >
             ⬆️
           </button>
+          <button 
+            onClick={handleRefresh}
+            className="text-zinc-400 hover:text-zinc-200 text-xs px-1"
+            title="Refresh"
+          >
+            🔄
+          </button>
         </div>
       </div>
 
@@ -165,6 +223,26 @@ export default function FileExplorer({ onFileSelect, currentPath, onPathChange, 
               onBlur={() => newItemName.trim() && submitNewItem()}
               placeholder={newItemMode === 'file' ? 'filename.rak' : 'foldername'}
               className="flex-1 bg-zinc-800 text-zinc-200 text-xs px-1 py-0.5 rounded outline-none border border-zinc-700 focus:border-emerald-500"
+            />
+          </div>
+        </div>
+      )}
+
+      {/* Rename Input */}
+      {renaming && (
+        <div className="px-2 py-1 border-b border-zinc-800 border-emerald-500">
+          <div className="flex items-center gap-1">
+            <span className="text-xs">✏️</span>
+            <input
+              autoFocus
+              value={renaming.name}
+              onChange={(e) => setRenaming((r) => r ? { ...r, name: e.target.value } : r)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') submitRename();
+                if (e.key === 'Escape') setRenaming(null);
+              }}
+              onBlur={submitRename}
+              className="flex-1 bg-zinc-800 text-zinc-200 text-xs px-1 py-0.5 rounded outline-none border border-emerald-600"
             />
           </div>
         </div>
@@ -203,27 +281,60 @@ export default function FileExplorer({ onFileSelect, currentPath, onPathChange, 
             onClick={() => setContextMenu(null)} 
           />
           <div
-            className="fixed z-50 bg-zinc-800 border border-zinc-700 rounded shadow-lg py-1 min-w-[120px]"
-            style={{ left: contextMenu.x, top: contextMenu.y }}
+            className="fixed z-50 bg-zinc-800 border border-zinc-700 rounded shadow-lg py-1 min-w-[150px] max-h-80 overflow-y-auto"
+            style={{ left: Math.min(contextMenu.x, window.innerWidth - 170), top: Math.min(contextMenu.y, window.innerHeight - 300) }}
           >
             <button
               onClick={() => handleNewItem('file', contextMenu.isDir ? contextMenu.path : currentPath)}
-              className="w-full text-left px-3 py-1.5 text-xs text-zinc-300 hover:bg-zinc-700"
+              className="w-full text-left px-3 py-1.5 text-xs text-zinc-300 hover:bg-emerald-600 hover:text-white"
             >
-              New File
+              📄 New File
             </button>
             <button
               onClick={() => handleNewItem('dir', contextMenu.isDir ? contextMenu.path : currentPath)}
+              className="w-full text-left px-3 py-1.5 text-xs text-zinc-300 hover:bg-emerald-600 hover:text-white"
+            >
+              📁 New Folder
+            </button>
+            <div className="border-t border-zinc-700 my-1" />
+            {!contextMenu.isDir && (
+              <button
+                onClick={handleDuplicate}
+                className="w-full text-left px-3 py-1.5 text-xs text-zinc-300 hover:bg-zinc-700"
+              >
+                ⧉ Duplicate
+              </button>
+            )}
+            <button
+              onClick={handleRename}
               className="w-full text-left px-3 py-1.5 text-xs text-zinc-300 hover:bg-zinc-700"
             >
-              New Folder
+              ✏️ Rename
+            </button>
+            <button
+              onClick={handleCopyPath}
+              className="w-full text-left px-3 py-1.5 text-xs text-zinc-300 hover:bg-zinc-700"
+            >
+              📋 Copy Path
+            </button>
+            <button
+              onClick={handleReveal}
+              className="w-full text-left px-3 py-1.5 text-xs text-zinc-300 hover:bg-zinc-700"
+            >
+              📁 Reveal in Explorer
+            </button>
+            <button
+              onClick={handleRefresh}
+              className="w-full text-left px-3 py-1.5 text-xs text-zinc-300 hover:bg-zinc-700"
+            >
+              🔄 Refresh
             </button>
             <div className="border-t border-zinc-700 my-1" />
             <button
               onClick={handleDelete}
-              className="w-full text-left px-3 py-1.5 text-xs text-red-400 hover:bg-zinc-700"
+              className="w-full text-left px-3 py-1.5 text-xs text-red-400 hover:bg-red-600 hover:text-white"
             >
-              Delete
+              🗑 Delete
             </button>
           </div>
         </>

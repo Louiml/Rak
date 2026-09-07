@@ -19,6 +19,7 @@ struct RakLine {
 }
 
 static RUNNING: Mutex<Option<Child>> = Mutex::new(None);
+static SHELL: Mutex<Option<Child>> = Mutex::new(None);
 
 fn rakc_binary() -> Option<String> {
     let candidates = [
@@ -113,15 +114,9 @@ fn run_rak(app: AppHandle, mode: String, source: String) -> Result<(), String> {
             let mut guard = RUNNING.lock().unwrap();
             match guard.as_mut() {
                 Some(child) => match child.try_wait() {
-                    Ok(Some(_)) => {
-                        *guard = None;
-                        true
-                    }
+                    Ok(Some(_)) => { *guard = None; true }
                     Ok(None) => false,
-                    Err(_) => {
-                        *guard = None;
-                        true
-                    }
+                    Err(_) => { *guard = None; true }
                 },
                 None => true,
             }
@@ -138,6 +133,82 @@ fn run_rak(app: AppHandle, mode: String, source: String) -> Result<(), String> {
 #[tauri::command]
 fn stop_rak() -> Result<(), String> {
     let mut guard = RUNNING.lock().unwrap();
+    if let Some(mut child) = guard.take() {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn run_shell(app: AppHandle, cmd: String, cwd: String) -> Result<(), String> {
+    let shell = if cfg!(windows) { "cmd" } else { "sh" };
+    let flag = if cfg!(windows) { "/C" } else { "-c" };
+
+    let mut child = Command::new(shell)
+        .arg(flag)
+        .arg(&cmd)
+        .current_dir(if cwd.is_empty() { "." } else { &cwd })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| e.to_string())?;
+
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+
+    {
+        let mut guard = SHELL.lock().unwrap();
+        if let Some(mut prev) = guard.take() {
+            let _ = prev.kill();
+            let _ = prev.wait();
+        }
+        *guard = Some(child);
+    }
+
+    if let Some(out) = stdout {
+        let app2 = app.clone();
+        std::thread::spawn(move || {
+            for line in BufReader::new(out).lines().flatten() {
+                let _ = app2.emit("shell-output", RakLine { stream: "stdout".into(), text: line });
+            }
+        });
+    }
+    if let Some(err) = stderr {
+        let app2 = app.clone();
+        std::thread::spawn(move || {
+            for line in BufReader::new(err).lines().flatten() {
+                let _ = app2.emit("shell-output", RakLine { stream: "stderr".into(), text: line });
+            }
+        });
+    }
+
+    let app3 = app.clone();
+    std::thread::spawn(move || loop {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let finished = {
+            let mut guard = SHELL.lock().unwrap();
+            match guard.as_mut() {
+                Some(child) => match child.try_wait() {
+                    Ok(Some(_)) => { *guard = None; true }
+                    Ok(None) => false,
+                    Err(_) => { *guard = None; true }
+                },
+                None => true,
+            }
+        };
+        if finished {
+            let _ = app3.emit("shell-done", ());
+            break;
+        }
+    });
+
+    Ok(())
+}
+
+#[tauri::command]
+fn shell_stop() -> Result<(), String> {
+    let mut guard = SHELL.lock().unwrap();
     if let Some(mut child) = guard.take() {
         let _ = child.kill();
         let _ = child.wait();
@@ -187,6 +258,36 @@ fn list_dir(path: String) -> Result<Vec<FileEntry>, String> {
 }
 
 #[tauri::command]
+fn list_files_recursive(path: String, ext: String) -> Result<Vec<FileEntry>, String> {
+    let mut results = Vec::new();
+    fn walk(dir: &PathBuf, ext: &str, results: &mut Vec<FileEntry>) {
+        if let Ok(read_dir) = fs::read_dir(dir) {
+            for entry in read_dir.flatten() {
+                if let Ok(metadata) = entry.metadata() {
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    if name.starts_with('.') || name == "node_modules" || name == "target" || name == "out" {
+                        continue;
+                    }
+                    let path = entry.path();
+                    if metadata.is_dir() {
+                        walk(&path, ext, results);
+                    } else if ext.is_empty() || name.ends_with(&ext) {
+                        results.push(FileEntry {
+                            name,
+                            path: path.to_string_lossy().to_string(),
+                            is_dir: false,
+                        });
+                    }
+                }
+            }
+        }
+    }
+    walk(&PathBuf::from(&path), &ext, &mut results);
+    results.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    Ok(results)
+}
+
+#[tauri::command]
 fn current_dir() -> Result<String, String> {
     std::env::current_dir()
         .map(|p| p.to_string_lossy().to_string())
@@ -213,6 +314,44 @@ fn delete_file(path: String) -> Result<(), String> {
     }
 }
 
+#[tauri::command]
+fn rename_file(old_path: String, new_path: String) -> Result<(), String> {
+    fs::rename(&old_path, &new_path).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn duplicate_file(src: String) -> Result<(), String> {
+    let src_path = PathBuf::from(&src);
+    let stem = src_path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+    let ext = src_path.extension().map(|s| format!(".{}", s.to_string_lossy())).unwrap_or_default();
+    let parent = src_path.parent().map(|p| p.to_path_buf()).unwrap_or_default();
+    let mut dst = parent.join(format!("{}_copy{}", stem, ext));
+    let mut i = 2;
+    while dst.exists() {
+        dst = parent.join(format!("{}_copy{}{}", stem, i, ext));
+        i += 1;
+    }
+    fs::copy(&src, &dst).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+fn open_in_explorer(path: String) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        Command::new("explorer.exe").arg(&path).spawn().map_err(|e| e.to_string())?;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        Command::new("open").arg(&path).spawn().map_err(|e| e.to_string())?;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        Command::new("xdg-open").arg(&path).spawn().map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -228,8 +367,11 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            run_rak, stop_rak, rakc_version, save_file, read_file, list_dir, current_dir,
-            create_file, create_dir, delete_file
+            run_rak, stop_rak, rakc_version,
+            run_shell, shell_stop,
+            save_file, read_file, list_dir, list_files_recursive, current_dir,
+            create_file, create_dir, delete_file,
+            rename_file, duplicate_file, open_in_explorer
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

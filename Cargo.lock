@@ -85,7 +85,7 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
 name = "app"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "log",
  "serde",
@@ -2770,7 +2770,7 @@ checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
 name = "rak-stdlib"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -2785,7 +2785,7 @@ dependencies = [
 
 [[package]]
 name = "rakc"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "chumsky",
