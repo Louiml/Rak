@@ -70,7 +70,7 @@ export default function IDE() {
     setTimeout(() => setToasts(prev => prev.filter(t => t.id !== id)), 3000);
   }, []);
 
-  useEffect(() => {
+useEffect(() => {
     const setup = async () => {
       const u1 = await listen<{ stream: string; text: string }>('rak-output', (e) => {
         setConsoleOutput(prev => [...prev, { type: e.payload.stream === 'stderr' ? 'error' : 'output', content: e.payload.text, timestamp: new Date() }]);
