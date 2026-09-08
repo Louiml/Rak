@@ -36,45 +36,80 @@ impl GuiManager {
 
         std::thread::spawn(move || {
             use tao::event::{Event, WindowEvent};
-            use tao::event_loop::{ControlFlow, EventLoopBuilder};
-            use tao::platform::windows::EventLoopBuilderExtWindows;
+            use tao::event_loop::ControlFlow;
             use tao::window::WindowBuilder;
             use wry::WebViewBuilder;
 
-            let mut builder = EventLoopBuilder::<()>::new();
-            builder.with_any_thread(true);
-            let event_loop = builder.build();
-            let window = WindowBuilder::new()
-                .with_title(win_title.clone())
-                .with_inner_size(tao::dpi::LogicalSize::new(width, height))
-                .build(&event_loop)
-                .expect("Failed to create window");
+            #[cfg(target_os = "windows")]
+            {
+                use tao::event_loop::EventLoopBuilder;
+                use tao::platform::windows::EventLoopBuilderExtWindows;
+                let mut builder = EventLoopBuilder::<()>::new();
+                builder.with_any_thread(true);
+                let event_loop = builder.build();
+                let window = WindowBuilder::new()
+                    .with_title(win_title.clone())
+                    .with_inner_size(tao::dpi::LogicalSize::new(width, height))
+                    .build(&event_loop)
+                    .expect("Failed to create window");
 
-            let webview = WebViewBuilder::new()
-                .with_html(win_html.clone())
-                .with_ipc_handler(move |request: wry::http::Request<String>| {
-                    let _body = request.body();
-                    // JS -> Rak bridge: messages arrive in request body
-                })
-                .build(&window)
-                .expect("Failed to create webview");
+                let webview = WebViewBuilder::new()
+                    .with_html(win_html.clone())
+                    .with_ipc_handler(move |request: wry::http::Request<String>| {
+                        let _body = request.body();
+                    })
+                    .build(&window)
+                    .expect("Failed to create webview");
 
-            let _ = webview;
-
-            event_loop.run(move |event, _, control_flow| {
-                *control_flow = ControlFlow::Wait;
-                match event {
-                    Event::WindowEvent {
-                        event: WindowEvent::CloseRequested,
-                        ..
-                    } => {
-                        let mut wins = windows_clone.lock().unwrap();
-                        wins.remove(&win_id);
-                        *control_flow = ControlFlow::Exit;
+                let _ = webview;
+                event_loop.run(move |event, _, control_flow| {
+                    *control_flow = ControlFlow::Wait;
+                    match event {
+                        Event::WindowEvent {
+                            event: WindowEvent::CloseRequested, ..
+                        } => {
+                            let mut wins = windows_clone.lock().unwrap();
+                            wins.remove(&win_id);
+                            *control_flow = ControlFlow::Exit;
+                        }
+                        _ => {}
                     }
-                    _ => {}
-                }
-            });
+                });
+            }
+
+            #[cfg(not(target_os = "windows"))]
+            {
+                use tao::event_loop::EventLoop;
+                let event_loop: EventLoop<()> = EventLoop::new();
+                let window = WindowBuilder::new()
+                    .with_title(win_title.clone())
+                    .with_inner_size(tao::dpi::LogicalSize::new(width, height))
+                    .build(&event_loop)
+                    .expect("Failed to create window (Linux: GTK may require main thread)");
+
+                let webview = WebViewBuilder::new()
+                    .with_html(win_html.clone())
+                    .with_ipc_handler(move |request: wry::http::Request<String>| {
+                        let _body = request.body();
+                    })
+                    .build(&window)
+                    .expect("Failed to create webview");
+
+                let _ = webview;
+                event_loop.run(move |event, _, control_flow| {
+                    *control_flow = ControlFlow::Wait;
+                    match event {
+                        Event::WindowEvent {
+                            event: WindowEvent::CloseRequested, ..
+                        } => {
+                            let mut wins = windows_clone.lock().unwrap();
+                            wins.remove(&win_id);
+                            *control_flow = ControlFlow::Exit;
+                        }
+                        _ => {}
+                    }
+                });
+            }
         });
 
         self.windows.lock().unwrap().insert(id, ());

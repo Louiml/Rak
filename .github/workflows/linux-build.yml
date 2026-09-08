@@ -1,0 +1,89 @@
+name: Linux Build
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf
+
+      - name: Build rakc (with GUI)
+        run: cargo build --release --bin rakc --features gui
+
+      - name: Build rakpkg
+        run: cargo build --release --bin rakpkg
+
+      - name: Install IDE dependencies
+        run: cd ide && npm install
+
+      - name: Build IDE (Tauri)
+        run: cd ide && npx tauri build
+        env:
+          CI: true
+
+      - name: Make binaries executable
+        run: |
+          chmod +x target/release/rakc
+          chmod +x target/release/rakpkg
+
+      - name: Upload rakc
+        uses: actions/upload-artifact@v4
+        with:
+          name: rakc-linux
+          path: target/release/rakc
+
+      - name: Upload rakpkg
+        uses: actions/upload-artifact@v4
+        with:
+          name: rakpkg-linux
+          path: target/release/rakpkg
+
+      - name: Upload .deb
+        uses: actions/upload-artifact@v4
+        with:
+          name: rak-ide-deb
+          path: target/release/bundle/deb/*.deb
+
+      - name: Upload .AppImage
+        uses: actions/upload-artifact@v4
+        with:
+          name: rak-ide-appimage
+          path: target/release/bundle/appimage/*.AppImage
+
+      - name: Attach to release (if tag)
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          TAG=${GITHUB_REF##*/}
+          for f in target/release/rakc target/release/rakpkg target/release/bundle/deb/*.deb target/release/bundle/appimage/*.AppImage; do
+            if [ -f "$f" ]; then
+              NAME=$(basename "$f")
+              echo "Uploading $NAME to release $TAG..."
+              curl -s -X POST \
+                -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+                -H "Content-Type: application/octet-stream" \
+                --data-binary @"$f" \
+                "https://uploads.github.com/repos/${{ github.repository }}/releases/tags/$TAG/assets?name=$NAME"
+            fi
+          done

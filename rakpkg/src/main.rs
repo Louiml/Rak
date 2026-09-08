@@ -254,15 +254,16 @@ fn cmd_remove(name: &str) {
 }
 
 fn find_rakc() -> String {
-    let candidates = [
-        "rakc".to_string(),
-        env::current_exe()
-            .ok()
-            .and_then(|p| p.parent().map(|d| d.join("rakc.exe").to_string_lossy().to_string()))
-            .unwrap_or_default(),
-        "target/release/rakc.exe".to_string(),
-        "target/debug/rakc.exe".to_string(),
-    ];
+    let ext = if cfg!(target_os = "windows") { ".exe" } else { "" };
+    let mut candidates = vec!["rakc".to_string()];
+    if let Ok(exe) = env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            candidates.push(parent.join("rakc").to_string_lossy().to_string());
+            candidates.push(parent.join(format!("rakc{}", ext)).to_string_lossy().to_string());
+        }
+    }
+    candidates.push(format!("target/release/rakc{}", ext));
+    candidates.push(format!("target/debug/rakc{}", ext));
     for c in &candidates {
         if Command::new(c).arg("--version").output().is_ok() {
             return c.clone();

@@ -22,17 +22,20 @@ static RUNNING: Mutex<Option<Child>> = Mutex::new(None);
 static SHELL: Mutex<Option<Child>> = Mutex::new(None);
 
 fn rakc_binary() -> Option<String> {
-    let candidates = [
-        "rakc".to_string(),
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../target/release/rakc.exe")
-            .to_string_lossy()
-            .to_string(),
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../target/debug/rakc.exe")
-            .to_string_lossy()
-            .to_string(),
-    ];
+    let ext = if cfg!(target_os = "windows") { ".exe" } else { "" };
+    let mut candidates = vec!["rakc".to_string()];
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            candidates.push(parent.join("rakc").to_string_lossy().to_string());
+            candidates.push(parent.join(format!("rakc{}", ext)).to_string_lossy().to_string());
+        }
+    }
+    candidates.push(PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join(format!("../../target/release/rakc{}", ext))
+        .to_string_lossy().to_string());
+    candidates.push(PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join(format!("../../target/debug/rakc{}", ext))
+        .to_string_lossy().to_string());
     for c in candidates {
         if Command::new(&c)
             .arg("--version")

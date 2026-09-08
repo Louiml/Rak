@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "rak-ide",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "identifier": "com.ryuzaki.rak-ide",
   "build": {
     "frontendDist": "../out",
@@ -30,11 +30,16 @@
   "bundle": {
     "active": true,
     "targets": "all",
-    "resources": { "../../target/release/rakc.exe": "rakc.exe" },
+    "resources": ["resources/rakc", "resources/rakpkg"],
     "windows": {
       "nsis": {
         "installMode": "currentUser",
         "installerHooks": "nsis/installer-hooks.nsh"
+      }
+    },
+    "linux": {
+      "deb": {
+        "depends": ["libwebkit2gtk-4.1-0", "libgtk-3-0"]
       }
     },
     "icon": [

@@ -15,7 +15,7 @@ fn print_usage() {
     eprintln!("  run <file>     Run a Rak script (interpreter)");
     eprintln!("  vm <file>      Run a Rak script on the bytecode VM");
     eprintln!("  bench <file>   Benchmark interpreter vs VM");
-    eprintln!("  build <file>   Build a standalone .exe from a Rak script");
+    eprintln!("  build <file>   Build a standalone executable from a Rak script");
     eprintln!("  check <file>   Lex + parse, print diagnostics");
     eprintln!("  lex <file>     Tokenize and print tokens");
     eprintln!("  parse <file>   Parse and print AST");
@@ -47,8 +47,8 @@ fn check_embedded_payload() -> Option<String> {
     }
     let len_bytes = &data[data.len() - 16..data.len() - 8];
     let source_len = u64::from_be_bytes(len_bytes.try_into().ok()?) as usize;
-    let payload_start = data.len() - 16 - source_len;
-    if payload_start < 0 || payload_start >= data.len() {
+    let payload_start = data.len().saturating_sub(16 + source_len);
+    if payload_start >= data.len() {
         return None;
     }
     let payload = &data[payload_start..data.len() - 16];
@@ -63,17 +63,19 @@ fn build_exe(source_path: &str) {
             std::process::exit(1);
         }
     };
-    let exe_path = env::current_exe().unwrap_or_else(|_| PathBuf::from("rakc.exe"));
+    let exe_name = if cfg!(windows) { "rakc.exe" } else { "rakc" };
+    let exe_path = env::current_exe().unwrap_or_else(|_| PathBuf::from(exe_name));
     let exe_data = fs::read(&exe_path).unwrap_or_else(|e| {
         eprintln!("Error reading rakc binary: {}", e);
         std::process::exit(1);
     });
     let source_bytes = source.as_bytes();
     let source_len = source_bytes.len() as u64;
+    let ext = if cfg!(windows) { ".exe" } else { "" };
     let output_name = if source_path.ends_with(".rak") {
-        format!("{}.exe", &source_path[..source_path.len() - 4])
+        format!("{}{}", &source_path[..source_path.len() - 4], ext)
     } else {
-        format!("{}.exe", source_path)
+        format!("{}{}", source_path, ext)
     };
     let mut output = fs::File::create(&output_name).unwrap_or_else(|e| {
         eprintln!("Error creating output: {}", e);
@@ -84,6 +86,12 @@ fn build_exe(source_path: &str) {
     output.write_all(&source_len.to_be_bytes()).unwrap();
     output.write_all(&PAYLOAD_MAGIC.to_be_bytes()).unwrap();
     output.flush().unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = fs::Permissions::from_mode(0o755);
+        let _ = output.set_permissions(perms);
+    }
     println!("Built: {} ({} bytes)", output_name, exe_data.len() + source_bytes.len() + 16);
     println!("  Source embedded: {} bytes", source_bytes.len());
 }
