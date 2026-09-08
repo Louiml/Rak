@@ -1,6 +1,6 @@
 # Rak
 ## Work in progress
-A programming language built for hackers, OSINT investigators, and now general-purpose systems programming: build **backend SQL servers**, **desktop TCP services**, and **self-host** the compiler — all in Rak.
+A programming language built for hackers, OSINT investigators, and general-purpose systems programming: build **desktop GUI apps**, **backend SQL servers**, **shareable packages**, and **self-host** the compiler — all in Rak.
 
 English-readable syntax with first-class hexadecimal, a bytecode VM, real concurrency, and a SQL engine written in Rak itself.
 
@@ -40,6 +40,50 @@ Rak grew up into a general-purpose language:
 - **VM honesty + more features** — `rakc vm` now **errors clearly** on unsupported features instead of silently returning `nil`, and supports **Map, Tuple, Index, FieldAccess, string interpolation, and `match`** in the bytecode VM.
 - **Real JSON** — `json_parse(str)` returns native `Array`/`Map`/`Int`/`Float`/`Bool`/`Nil` (not a string); `json_stringify(value)` → JSON string.
 - **String / array / math stdlib** — `replace`, `find`, `starts_with`, `ends_with`, `slice`, `repeat`, `trim_start`/`trim_end`, `reverse`, `min`, `max`, `sum`, `abs`, `sqrt`, `pow`, `clamp`, `env_set`, `to_string`.
+
+## What's New (v0.3.0)
+
+- **`rakc build`** — compile any `.rak` script into a **standalone .exe** that runs on any Windows machine (no Rak needed). The source is embedded as a payload in the binary.
+- **GUI windows** (Windows-only, `--features gui`) — create native desktop windows with HTML/CSS/JS using `gui_open(title, html, width, height)`, `gui_update(id, html)`, `gui_wait()`, and a JS→Rak callback bridge via `window.rak_call(fn, args)`. Uses WebView2 (ships with Edge).
+- **Package manager** (`rakpkg`) — a CLI for Git-based shareable Rak packages. `rakpkg init`, `rakpkg add user/repo`, `rakpkg install`, `rakpkg run`, `rakpkg build`, `rakpkg list`, `rakpkg remove`. Manifest is `package.rak` (Rak let-bindings).
+- **Version bumped to 0.3.0.**
+
+### Build a standalone .exe
+
+```bash
+rakc build examples/hello.rak   # → hello.exe (standalone, ~4 MB)
+./hello.exe                      # → [DUMP] Hello, World
+```
+
+### Create a GUI window (requires `--features gui`)
+
+```rak
+let html = "<h1 style='color:#22c55e;text-align:center;margin-top:40px'>Hello from Rak!</h1>
+<button onclick=\"window.rak_call('clicked')\" style='display:block;margin:20px auto;padding:10px 30px;font-size:18px;background:#22c55e;color:white;border:none;border-radius:8px;cursor:pointer'>Click me</button>"
+
+let win = gui_open("Rak GUI Demo", html, 600, 400)
+gui_wait()
+```
+
+### Package manager
+
+```bash
+rakpkg init mylib           # creates package.rak + lib.rak
+rakpkg add user/repo        # Git-clone into .rak/packages/
+rakpkg install              # install all deps from package.rak
+rakpkg run                  # run the entry point (rakc run)
+rakpkg build                # build to standalone .exe (rakc build)
+rakpkg list                 # list installed packages
+rakpkg remove mylib         # remove a package
+```
+
+**package.rak manifest:**
+```rak
+let name = "mylib"
+let version = "0.1.0"
+let deps = { net: "user/rak-net", crypto: "user/rak-crypto" }
+let entry = "lib.rak"
+```
 
 ### Using the new features
 
@@ -227,13 +271,22 @@ dump html_links(html)
 ## CLI
 
 ```bash
-rakc run <file>     Run on the tree-walking interpreter
+rakc run <file>     Run a Rak script (interpreter)
 rakc vm <file>      Run on the bytecode VM (Map/Tuple/Index/Field/interp/match supported)
+rakc build <file>   Build a standalone .exe from a Rak script
 rakc bench <file>   Benchmark interpreter vs VM
 rakc check <file>   Lex + parse, print diagnostics (with line/col)
 rakc lex <file>     Print tokens
 rakc parse <file>   Print AST
 rakc --version
+
+rakpkg init [name]       Create a new package
+rakpkg add <user/repo>   Add a Git package
+rakpkg install           Install all deps
+rakpkg run               Run entry point (rakc run)
+rakpkg build             Build to .exe (rakc build)
+rakpkg list              List installed packages
+rakpkg remove <name>     Remove a package
 ```
 
 ## Project Structure
