@@ -19,6 +19,8 @@ fn print_usage() {
     eprintln!("  repl            Start an interactive REPL");
     #[cfg(feature = "lsp")]
     eprintln!("  lsp             Start the language server (stdio)");
+    #[cfg(feature = "bindgen")]
+    eprintln!("  bindgen <h> -o <out>  Generate Rak bindings from a C header");
     eprintln!("  check <file>   Lex + parse, print diagnostics");
     eprintln!("  lex <file>     Tokenize and print tokens");
     eprintln!("  parse <file>   Parse and print AST");
@@ -140,6 +142,25 @@ fn main() {
         "lsp" => {
             let rt = tokio::runtime::Runtime::new().unwrap();
             rt.block_on(rakc::lsp::start());
+            return;
+        }
+        #[cfg(feature = "bindgen")]
+        "bindgen" => {
+            if args.len() < 3 {
+                eprintln!("Usage: rakc bindgen <header.h> [-o output.rak]");
+                std::process::exit(1);
+            }
+            let header = &args[2];
+            let mut output = "-".to_string();
+            for i in 3..args.len() {
+                if args[i] == "-o" && i + 1 < args.len() {
+                    output = args[i + 1].clone();
+                }
+            }
+            if let Err(e) = rakc::bindgen::generate(header, &output) {
+                eprintln!("bindgen error: {}", e);
+                std::process::exit(1);
+            }
             return;
         }
         _ => {}

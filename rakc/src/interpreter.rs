@@ -1974,6 +1974,13 @@ impl Interpreter {
                 Ok(Value::Nil)
             }
             "to_string" => Ok(Value::String(self.val_to_string(args.first())?)),
+            "extern_call" => {
+                let fname = self.val_to_string(args.get(0))?;
+                Err(crate::RakError::Runtime(format!(
+                    "extern_call(\"{}\"): C FFI bindings are not linked into this build. Link the generated Rust wrapper to enable it.",
+                    fname
+                )))
+            }
             #[cfg(feature = "gui")]
             "gui_open" => {
                 let title = self.val_to_string(args.get(0))?;

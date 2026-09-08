@@ -1,0 +1,103 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Rak",
+  "scopeName": "source.rak",
+  "patterns": [
+    {
+      "include": "#comments"
+    },
+    {
+      "include": "#strings"
+    },
+    {
+      "include": "#keywords"
+    },
+    {
+      "include": "#types"
+    },
+    {
+      "include": "#hex"
+    },
+    {
+      "include": "#numbers"
+    },
+    {
+      "include": "#operators"
+    }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.line.double-slash.rak",
+          "match": "//.*$"
+        }
+      ]
+    },
+    "strings": {
+      "patterns": [
+        {
+          "name": "string.quoted.double.rak",
+          "begin": "\"",
+          "end": "\"",
+          "patterns": [
+            { "name": "constant.character.escape.rak", "match": "\\\\." }
+          ]
+        },
+        {
+          "name": "string.interpolated.rak",
+          "begin": "f\"",
+          "end": "\""
+        }
+      ]
+    },
+    "keywords": {
+      "patterns": [
+        {
+          "name": "keyword.control.rak",
+          "match": "\\b(if|else|for|while|loop|break|continue|return|match|try|catch|raise|throw|spawn|await|async|as|type)\\b"
+        },
+        {
+          "name": "keyword.other.rak",
+          "match": "\\b(let|mut|fn|struct|enum|impl|trait|mod|pub|use|export|scan|fetch|dump|trace)\\b"
+        },
+        {
+          "name": "constant.language.rak",
+          "match": "\\b(true|false|nil|Some|None|Ok|Err)\\b"
+        }
+      ]
+    },
+    "types": {
+      "patterns": [
+        {
+          "name": "storage.type.rak",
+          "match": "\\b(i8|i16|i32|i64|u8|u16|u32|u64|f32|f64|hex8|hex16|hex32|hex64|int|string|bytes|bool|Option|Result)\\b"
+        }
+      ]
+    },
+    "hex": {
+      "patterns": [
+        {
+          "name": "constant.numeric.hex.rak",
+          "match": "\\b0[xX][0-9A-Fa-f]+\\b"
+        }
+      ]
+    },
+    "numbers": {
+      "patterns": [
+        {
+          "name": "constant.numeric.rak",
+          "match": "\\b[0-9]+(\\.[0-9]+)?([eE][+-]?[0-9]+)?(i8|i16|i32|i64|u8|u16|u32|u64|f32|f64)?\\b"
+        }
+      ]
+    },
+    "operators": {
+      "patterns": [
+        {
+          "name": "keyword.operator.rak",
+          "match": "(->|=>|::|==|!=|<=|>=|<<|>>|&&|\\|\\||\\+=|-=|\\*=|/=|%=|\\+|-|\\*|/|%|&|\\||\\^|!|~|<|>|=)"
+        }
+      ]
+    }
+  }
+}

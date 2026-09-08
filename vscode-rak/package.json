@@ -1,0 +1,29 @@
+{
+  "name": "rak",
+  "displayName": "Rak",
+  "description": "Rak language support: syntax highlighting and diagnostics",
+  "version": "0.3.0",
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "rak",
+        "aliases": ["Rak", "rak"],
+        "extensions": [".rak"],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "rak",
+        "scopeName": "source.rak",
+        "path": "./syntaxes/rak.tmLanguage.json"
+      }
+    ]
+  }
+}
