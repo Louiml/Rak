@@ -17,6 +17,8 @@ fn print_usage() {
     eprintln!("  bench <file>   Benchmark interpreter vs VM");
     eprintln!("  build <file>   Build a standalone executable from a Rak script");
     eprintln!("  repl            Start an interactive REPL");
+    #[cfg(feature = "lsp")]
+    eprintln!("  lsp             Start the language server (stdio)");
     eprintln!("  check <file>   Lex + parse, print diagnostics");
     eprintln!("  lex <file>     Tokenize and print tokens");
     eprintln!("  parse <file>   Parse and print AST");
@@ -132,6 +134,12 @@ fn main() {
         }
         "repl" => {
             rakc::repl::run();
+            return;
+        }
+        #[cfg(feature = "lsp")]
+        "lsp" => {
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            rt.block_on(rakc::lsp::start());
             return;
         }
         _ => {}
