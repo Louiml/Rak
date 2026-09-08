@@ -6,9 +6,14 @@ pub mod value;
 pub mod bytecode;
 pub mod compiler;
 pub mod vm;
+pub mod repl;
 
 #[cfg(feature = "gui")]
 pub mod gui;
+#[cfg(feature = "lsp")]
+pub mod lsp;
+#[cfg(feature = "bindgen")]
+pub mod bindgen;
 
 use thiserror::Error;
 

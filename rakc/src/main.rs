@@ -16,6 +16,7 @@ fn print_usage() {
     eprintln!("  vm <file>      Run a Rak script on the bytecode VM");
     eprintln!("  bench <file>   Benchmark interpreter vs VM");
     eprintln!("  build <file>   Build a standalone executable from a Rak script");
+    eprintln!("  repl            Start an interactive REPL");
     eprintln!("  check <file>   Lex + parse, print diagnostics");
     eprintln!("  lex <file>     Tokenize and print tokens");
     eprintln!("  parse <file>   Parse and print AST");
@@ -127,6 +128,10 @@ fn main() {
         }
         "--help" | "-h" | "help" => {
             print_usage();
+            return;
+        }
+        "repl" => {
+            rakc::repl::run();
             return;
         }
         _ => {}

@@ -24,6 +24,16 @@ chumsky = { version = "1.0.0-alpha.7", default-features = false, features = ["st
 wry = { version = "0.55", optional = true }
 tao = { version = "0.35", optional = true }
 
+# REPL
+rustyline = "15"
+
+# LSP
+tower-lsp = { version = "0.20", optional = true }
+tokio = { version = "1", features = ["full"], optional = true }
+
+# Bindgen
+bindgen = { version = "0.70", optional = true }
+
 # Future backends
 # inkwell = { workspace = true, optional = true }
 # cranelift = { optional = true }
@@ -36,6 +46,8 @@ default = []
 llvm = [] # "inkwell"
 jit = []
 gui = ["dep:wry", "dep:tao"]
+lsp = ["dep:tower-lsp", "dep:tokio"]
+bindgen = ["dep:bindgen"]
 
 [[bin]]
 name = "rakc"
