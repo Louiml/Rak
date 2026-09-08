@@ -35,6 +35,13 @@ jobs:
       - name: Build rakpkg
         run: cargo build --release --bin rakpkg
 
+      - name: Copy binaries for IDE bundling
+        run: |
+          mkdir -p ide/src-tauri/resources
+          cp target/release/rakc ide/src-tauri/resources/rakc
+          cp target/release/rakpkg ide/src-tauri/resources/rakpkg
+          chmod +x ide/src-tauri/resources/rakc ide/src-tauri/resources/rakpkg
+
       - name: Install IDE dependencies
         run: cd ide && npm install
 
