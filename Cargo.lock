@@ -3068,6 +3068,7 @@ dependencies = [
  "logos",
  "pretty_assertions",
  "rak-stdlib",
+ "regex",
  "rustyline",
  "serde",
  "serde_json",

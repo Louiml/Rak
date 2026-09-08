@@ -1,0 +1,12 @@
+// pipeline.rak -- the |> pipeline operator (runs on both interpreter and VM).
+//
+// `x |> f`        desugars to  `f(x)`
+// `x |> f(a, b)`  desugars to  `f(x, a, b)`
+
+fn inc(n) { return n + 1 }
+fn dbl(n) { return n * 2 }
+fn add(a, b) { return a + b }
+
+dump 5 |> inc |> dbl          // dbl(inc(5)) = 12
+dump 3 |> add(10)             // add(3, 10) = 13
+dump [1, 2, 3, 4] |> sum      // sum([1,2,3,4]) = 10

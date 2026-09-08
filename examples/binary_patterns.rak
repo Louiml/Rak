@@ -1,0 +1,26 @@
+// binary_patterns.rak -- binary pattern matching over byte slices.
+//
+// `match` over a `bytes` value with byte literals (hex, int, or char) and a
+// trailing `..` to match the rest. Magic-number sniffing for file formats.
+
+fn sniff(data: bytes) {
+    match data {
+        [0x89, 'P', 'N', 'G', ..] => { return "png" },
+        [0xFF, 0xD8, 0xFF, ..] => { return "jpeg" },
+        [0x47, 0x49, 0x46, '8', ..] => { return "gif" },
+        ['%', 'P', 'D', 'F', ..] => { return "pdf" },
+        _ => { return "unknown" },
+    }
+}
+
+dump sniff(b"\x89PNG\x0d\x0a\x1a\x0a")
+dump sniff(b"\xFF\xD8\xFF\xE0")
+dump sniff(b"\x47\x49\x46\x38\x39\x61")
+dump sniff(b"%PDF-1.4")
+dump sniff(b"random bytes")
+
+// Exact-length byte patterns (no rest) also work via array patterns:
+match b"\x00\x01" {
+    [0x00, 0x01] => { dump "little-endian marker" },
+    _ => { dump "other" },
+}

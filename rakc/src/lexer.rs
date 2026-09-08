@@ -101,6 +101,13 @@ pub enum Token {
     #[regex(r#"b"([^"\\]|\\.)*""#, |lex| parse_bytes(lex.slice()))]
     Bytes(Vec<u8>),
 
+    #[regex(r"'([^'\\]|\\x[0-9a-fA-F]{2}|\\.)'", |lex| parse_char(lex.slice()))]
+    Char(char),
+
+    /// A regular-expression literal `/pattern/flags`. Never produced
+    /// directly by logos; synthesized in `tokenize()` after the fact.
+    Regex((String, String)),
+
     #[regex(r"[a-zA-Z_][a-zA-Z0-9_]*", |lex| lex.slice().to_string())]
     Ident(String),
 
@@ -118,6 +125,8 @@ pub enum Token {
     Ampersand,
     #[token("|")]
     Pipe,
+    #[token("|>")]
+    PipeGt,
     #[token("^")]
     Caret,
     #[token("!")]
@@ -308,15 +317,69 @@ fn parse_bytes(s: &str) -> Option<Vec<u8>> {
     Some(result)
 }
 
+fn parse_char(s: &str) -> Option<char> {
+    let inner = &s[1..s.len() - 1];
+    let mut chars = inner.chars();
+    match chars.next() {
+        Some('\\') => match chars.next() {
+            Some('n') => Some('\n'),
+            Some('t') => Some('\t'),
+            Some('r') => Some('\r'),
+            Some('0') => Some('\0'),
+            Some('\\') => Some('\\'),
+            Some('\'') => Some('\''),
+            Some('"') => Some('"'),
+            Some('x') => {
+                let hex: String = chars.by_ref().take(2).collect();
+                u8::from_str_radix(&hex, 16).ok().map(|n| n as char)
+            }
+            _ => None,
+        },
+        Some(c) => Some(c),
+        None => None,
+    }
+}
+
 pub fn tokenize(source: &str) -> crate::Result<Vec<(Token, usize)>> {
     let mut lex = Token::lexer(source);
-    let mut tokens = Vec::new();
+    // Collect logos output as `Option<Token>`: `None` marks a span that logos
+    // could not match (a "gap"). Gaps that fall inside a regex literal are
+    // consumed by `postprocess_regexes`; any gap that survives is a genuine
+    // lexer error.
+    let mut raw: Vec<(Option<Token>, usize)> = Vec::new();
     while let Some(token) = lex.next() {
         match token {
-            Ok(tok) => tokens.push((tok, lex.span().start)),
-            Err(_) => {
-                let off = lex.span().start;
-                let (line, col) = offset_to_line_col(source, off);
+            Ok(tok) => raw.push((Some(tok), lex.span().start)),
+            Err(_) => raw.push((None, lex.span().start)),
+        }
+    }
+    postprocess_regexes(source, raw)
+}
+
+/// Rewrite the token stream so that a `/` appearing in operand position
+/// (where a value may not legally end) is treated as the start of a regex
+/// literal `/pattern/flags`. Division is otherwise untouched.
+fn postprocess_regexes(source: &str, raw: Vec<(Option<Token>, usize)>) -> crate::Result<Vec<(Token, usize)>> {
+    let mut out: Vec<(Token, usize)> = Vec::with_capacity(raw.len());
+    let mut i = 0;
+    while i < raw.len() {
+        match &raw[i] {
+            (Some(tok), off) => {
+                let off = *off;
+                if *tok == Token::Slash && is_regex_context(out.last().map(|(t, _)| t)) {
+                    if let Some((pattern, flags, end)) = scan_regex(source, off) {
+                        out.push((Token::Regex((pattern, flags)), off));
+                        while i < raw.len() && raw[i].1 < end {
+                            i += 1;
+                        }
+                        continue;
+                    }
+                }
+                out.push((tok.clone(), off));
+                i += 1;
+            }
+            (None, off) => {
+                let (line, col) = offset_to_line_col(source, *off);
                 return Err(crate::RakError::Lexer(format!(
                     "Unexpected character at line {}, col {}",
                     line, col
@@ -324,7 +387,95 @@ pub fn tokenize(source: &str) -> crate::Result<Vec<(Token, usize)>> {
             }
         }
     }
-    Ok(tokens)
+    Ok(out)
+}
+
+/// True when a `/` placed after `prev` cannot be a division operator.
+fn is_regex_context(prev: Option<&Token>) -> bool {
+    match prev {
+        None => true,
+        Some(t) => !can_end_expr(t),
+    }
+}
+
+fn can_end_expr(t: &Token) -> bool {
+    matches!(
+        t,
+        Token::Ident(_)
+            | Token::Int(_)
+            | Token::Float(_)
+            | Token::Float32(_)
+            | Token::TypedInt(_)
+            | Token::String(_)
+            | Token::Interp(_)
+            | Token::Bytes(_)
+            | Token::Hex(_)
+            | Token::Char(_)
+            | Token::Regex(_)
+            | Token::True
+            | Token::False
+            | Token::Nil
+            | Token::RParen
+            | Token::RBracket
+            | Token::RBrace
+            | Token::Question
+    )
+}
+
+/// Scan a `/pattern/flags` literal starting at byte offset `start` (which must
+/// point at the leading `/`). Returns `(pattern, flags, end_offset)` where
+/// `end_offset` is the byte offset just past the closing flags.
+fn scan_regex(source: &str, start: usize) -> Option<(String, String, usize)> {
+    let b = source.as_bytes();
+    if start >= b.len() || b[start] != b'/' {
+        return None;
+    }
+    let mut i = start + 1;
+    let mut pattern = String::new();
+    let mut in_class = false;
+    while i < b.len() {
+        let c = source[i..].chars().next()?;
+        match c {
+            '\\' => {
+                pattern.push('\\');
+                let mut it = source[i..].chars();
+                let _ = it.next();
+                if let Some(nc) = it.next() {
+                    pattern.push(nc);
+                    i += 1 + nc.len_utf8();
+                } else {
+                    i += 1;
+                }
+            }
+            '[' => {
+                in_class = true;
+                pattern.push('[');
+                i += 1;
+            }
+            ']' => {
+                in_class = false;
+                pattern.push(']');
+                i += 1;
+            }
+            '/' if !in_class => {
+                break;
+            }
+            other => {
+                pattern.push(other);
+                i += other.len_utf8();
+            }
+        }
+    }
+    if i >= b.len() {
+        return None;
+    }
+    i += 1; // skip closing '/'
+    let flags_start = i;
+    while i < b.len() && b[i].is_ascii_alphabetic() {
+        i += 1;
+    }
+    let flags = source[flags_start..i].to_string();
+    Some((pattern, flags, i))
 }
 
 pub fn offset_to_line_col(source: &str, offset: usize) -> (usize, usize) {
@@ -381,5 +532,46 @@ mod tests {
         assert_eq!(toks[1].0, Token::TypedInt(TypedIntData { value: 42, kind: IntKind::I32 }));
         assert_eq!(toks[2].0, Token::TypedInt(TypedIntData { value: 10, kind: IntKind::U8 }));
         assert_eq!(toks[3].0, Token::Int(7));
+    }
+
+    #[test]
+    fn test_pipe_token() {
+        let toks = tokenize("x |> f").unwrap();
+        let kinds: Vec<&Token> = toks.iter().map(|(t, _)| t).collect();
+        assert_eq!(kinds, vec![&Token::Ident("x".to_string()), &Token::PipeGt, &Token::Ident("f".to_string())]);
+    }
+
+    #[test]
+    fn test_char_token() {
+        let toks = tokenize("'P' '\\n' '\\x41'").unwrap();
+        assert_eq!(toks[0].0, Token::Char('P'));
+        assert_eq!(toks[1].0, Token::Char('\n'));
+        assert_eq!(toks[2].0, Token::Char('A'));
+    }
+
+    #[test]
+    fn test_regex_in_operand_context() {
+        // After `=`, `/` begins a regex literal.
+        let toks = tokenize("let r = /\\d+/g;").unwrap();
+        let regex = toks.iter().find(|(t, _)| matches!(t, Token::Regex(_)));
+        assert!(regex.is_some(), "expected a Regex token");
+        if let Some((Token::Regex((pat, flags)), _)) = regex {
+            assert_eq!(pat, "\\d+");
+            assert_eq!(flags, "g");
+        }
+    }
+
+    #[test]
+    fn test_division_not_regex() {
+        // After an identifier, `/` is division, not a regex.
+        let toks = tokenize("a / b").unwrap();
+        assert!(toks.iter().all(|(t, _)| !matches!(t, Token::Regex(_))));
+        assert!(toks.iter().any(|(t, _)| matches!(t, Token::Slash)));
+    }
+
+    #[test]
+    fn test_regex_after_paren() {
+        let toks = tokenize("dump(/foo/i)").unwrap();
+        assert!(toks.iter().any(|(t, _)| matches!(t, Token::Regex((ref p, ref f)) if p == "foo" && f == "i")));
     }
 }

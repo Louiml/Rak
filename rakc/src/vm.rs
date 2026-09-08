@@ -80,6 +80,36 @@ impl Vm {
         self.insert_native("to_hex", |args| {
             Ok(Value::String(Arc::from(format!("0x{:X}", args.first().and_then(|v| v.as_u64()).unwrap_or(0)).as_str())))
         });
+        // --- Regex ---
+        self.insert_native("regex_new", |args| {
+            let pattern = native_str(args.first());
+            let flags = native_str(args.get(1));
+            build_vm_regex(&pattern, &flags).map(Value::Regex)
+        });
+        self.insert_native("regex_match", |args| {
+            let re = vm_regex(args.first())?;
+            let hay = native_str(args.get(1));
+            Ok(Value::Bool(re.is_match(&hay)))
+        });
+        self.insert_native("regex_find", |args| {
+            let re = vm_regex(args.first())?;
+            let hay = native_str(args.get(1));
+            Ok(re.find(&hay).map(|m| Value::String(Arc::from(m.as_str()))).unwrap_or(Value::Nil))
+        });
+        self.insert_native("regex_find_all", |args| {
+            let re = vm_regex(args.first())?;
+            let hay = native_str(args.get(1));
+            Ok(Value::Array(Arc::from(
+                re.find_iter(&hay).map(|m| Value::String(Arc::from(m.as_str()))).collect::<Vec<_>>(),
+            )))
+        });
+        self.insert_native("regex_replace", |args| {
+            let re = vm_regex(args.first())?;
+            let hay = native_str(args.get(1));
+            let rep = native_str(args.get(2));
+            let cow = re.replace_all(&hay, rep.as_str());
+            Ok(Value::String(Arc::from(&*cow)))
+        });
     }
 
     fn insert_native(&mut self, name: &str, f: impl Fn(&[Value]) -> Result<Value, String> + Send + Sync + 'static) {
@@ -369,6 +399,39 @@ fn native_bytes(v: Option<&Value>) -> Vec<u8> {
     }
 }
 
+/// Compile a regex pattern+flags into a shared `RegexValue` for the VM.
+fn build_vm_regex(pattern: &str, flags: &str) -> Result<Arc<crate::value::RegexValue>, String> {
+    let mut b = regex::RegexBuilder::new(pattern);
+    for f in flags.chars() {
+        match f {
+            'i' | 'I' => b.case_insensitive(true),
+            'm' | 'M' => b.multi_line(true),
+            's' | 'S' => b.dot_matches_new_line(true),
+            'x' | 'X' => b.ignore_whitespace(true),
+            'g' | 'G' => continue,
+            _ => return Err(format!("unknown regex flag '{}'", f)),
+        };
+    }
+    let re = b.build().map_err(|e| format!("invalid regex /{}/{}: {}", pattern, flags, e))?;
+    Ok(Arc::new(crate::value::RegexValue {
+        pattern: pattern.to_string(),
+        flags: flags.to_string(),
+        re,
+    }))
+}
+
+/// Borrow the compiled regex from a `Value::Regex`, or build one from a string.
+fn vm_regex(v: Option<&Value>) -> Result<regex::Regex, String> {
+    match v {
+        Some(Value::Regex(r)) => Ok(r.re.clone()),
+        Some(Value::String(s)) => {
+            let rv = build_vm_regex(s, "")?;
+            Ok(rv.re.clone())
+        }
+        _ => Err("expected a regex or pattern string".to_string()),
+    }
+}
+
 fn format_rak(fmt: &str, args: &[Value]) -> String {
     let mut result = String::new();
     let mut idx = 0;
@@ -471,5 +534,25 @@ mod tests {
     fn test_vm_match() {
         let out = run("let x = 2; match x { 1 => { dump \"one\" }, 2 => { dump \"two\" }, _ => { dump \"other\" } }");
         assert!(out.iter().any(|l| l.contains("[DUMP] two")));
+    }
+
+    #[test]
+    fn test_vm_pipeline() {
+        // `|>` desugars to a call, so the VM runs it for free.
+        let out = run("fn inc(n) { return n + 1 } fn dbl(n) { return n * 2 } dump 5 |> inc |> dbl");
+        assert!(out.iter().any(|l| l.contains("[DUMP] 12")));
+    }
+
+    #[test]
+    fn test_vm_regex_literal() {
+        let out = run(r#"let re = /\d+/g; dump regex_match(re, "abc123")"#);
+        assert!(out.iter().any(|l| l.contains("true")));
+    }
+
+    #[test]
+    fn test_vm_regex_find_all() {
+        let out = run(r#"let re = /[a-z]+/g; dump regex_find_all(re, "a1bc2def")"#);
+        // Value::Display does not quote strings inside arrays.
+        assert!(out.iter().any(|l| l.contains("[DUMP] [a, bc, def]")));
     }
 }

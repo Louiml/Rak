@@ -528,6 +528,12 @@ impl Compiler {
             Expr::Match { value, arms } => {
                 self.compile_match(value, arms)?;
             }
+            Expr::Regex(pattern, flags) => {
+                let v = make_regex_value(pattern, flags)?;
+                let ci = self.emit_const(v);
+                self.emit_op(Op::LoadConst);
+                self.emit_u16(ci);
+            }
             other => {
                 return Err(format!("VM does not support expression: {:?}", other));
             }
@@ -677,4 +683,26 @@ fn interp_to_fmt(template: &str) -> String {
 pub fn compile_module(module: &Module) -> Result<Chunk, String> {
     let mut c = Compiler::new();
     c.compile(module)
+}
+
+/// Build a `Value::Regex` constant, compiling the pattern at compile time so
+/// the VM never pays for regex construction at runtime.
+fn make_regex_value(pattern: &str, flags: &str) -> Result<Value, String> {
+    let mut b = regex::RegexBuilder::new(pattern);
+    for f in flags.chars() {
+        match f {
+            'i' | 'I' => b.case_insensitive(true),
+            'm' | 'M' => b.multi_line(true),
+            's' | 'S' => b.dot_matches_new_line(true),
+            'x' | 'X' => b.ignore_whitespace(true),
+            'g' | 'G' => continue,
+            _ => return Err(format!("unknown regex flag '{}'", f)),
+        };
+    }
+    let re = b.build().map_err(|e| format!("invalid regex /{}/{}: {}", pattern, flags, e))?;
+    Ok(Value::Regex(Arc::new(crate::value::RegexValue {
+        pattern: pattern.to_string(),
+        flags: flags.to_string(),
+        re,
+    })))
 }

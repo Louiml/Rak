@@ -841,6 +841,15 @@ impl<'a> Parser<'a> {
                 self.advance();
                 Ok(Pattern::Int(i))
             }
+            Some(Token::Char(c)) => {
+                let c = *c;
+                self.advance();
+                if c as u32 > 0xFF {
+                    Err(self.perr("Char pattern out of byte range".to_string()))
+                } else {
+                    Ok(Pattern::Byte(c as u8))
+                }
+            }
             Some(Token::Float(f)) => {
                 let f = *f;
                 self.advance();
@@ -877,6 +886,9 @@ impl<'a> Parser<'a> {
             }
             Some(Token::LBracket) => {
                 self.advance();
+                if self.peek_rest_in_brackets() {
+                    return self.parse_bytes_pattern();
+                }
                 let mut inner = vec![];
                 while !self.check(&Token::RBracket) && self.peek().is_some() {
                     inner.push(self.parse_pattern()?);
@@ -891,8 +903,81 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// True if the bracket list starting at the current position contains a
+    /// top-level `..` rest marker, signalling a binary bytes pattern.
+    fn peek_rest_in_brackets(&self) -> bool {
+        let mut depth = 1usize;
+        let mut i = self.pos;
+        while i < self.tokens.len() {
+            match &self.tokens[i].0 {
+                Token::LBracket => depth += 1,
+                Token::RBracket => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return false;
+                    }
+                }
+                Token::DotDot if depth == 1 => return true,
+                _ => {}
+            }
+            i += 1;
+        }
+        false
+    }
+
+    /// Parse a binary bytes pattern `[b0, b1, ..]` where each element is a byte
+    /// literal (hex, int, or char) and a trailing `..` matches the remainder.
+    fn parse_bytes_pattern(&mut self) -> Result<Pattern> {
+        let mut parts: Vec<BytesPat> = vec![];
+        while !self.check(&Token::RBracket) && self.peek().is_some() {
+            if self.match_token(&Token::DotDot) {
+                parts.push(BytesPat::Rest);
+                break;
+            }
+            let byte = match self.peek().cloned() {
+                Some(Token::Hex(h)) => {
+                    self.advance();
+                    if h > 0xFF {
+                        return Err(self.perr("Byte value out of range in bytes pattern".to_string()));
+                    }
+                    h as u8
+                }
+                Some(Token::Int(i)) => {
+                    self.advance();
+                    if !(0..=255).contains(&i) {
+                        return Err(self.perr("Byte value out of range in bytes pattern".to_string()));
+                    }
+                    i as u8
+                }
+                Some(Token::Char(c)) => {
+                    self.advance();
+                    if c as u32 > 0xFF {
+                        return Err(self.perr("Char out of byte range in bytes pattern".to_string()));
+                    }
+                    c as u8
+                }
+                _ => return Err(self.perr("Expected byte literal in bytes pattern".to_string())),
+            };
+            parts.push(BytesPat::Byte(byte));
+            if !self.match_token(&Token::Comma) {
+                break;
+            }
+        }
+        self.expect(Token::RBracket)?;
+        Ok(Pattern::Bytes(parts))
+    }
+
     fn parse_expr(&mut self) -> Result<Expr> {
-        self.parse_assignment()
+        self.parse_pipeline()
+    }
+
+    fn parse_pipeline(&mut self) -> Result<Expr> {
+        let mut left = self.parse_assignment()?;
+        while self.match_token(&Token::PipeGt) {
+            let right = self.parse_assignment()?;
+            left = desugar_pipe(left, right);
+        }
+        Ok(left)
     }
 
     fn parse_assignment(&mut self) -> Result<Expr> {
@@ -1214,6 +1299,16 @@ impl<'a> Parser<'a> {
                 self.advance();
                 Ok(Expr::Bytes(b))
             }
+            Some(Token::Char(c)) => {
+                self.advance();
+                Ok(Expr::Int(c as i64))
+            }
+            Some(Token::Regex((pattern, flags))) => {
+                let pattern = pattern.clone();
+                let flags = flags.clone();
+                self.advance();
+                Ok(Expr::Regex(pattern, flags))
+            }
             Some(Token::True) => {
                 self.advance();
                 Ok(Expr::Bool(true))
@@ -1379,6 +1474,23 @@ impl<'a> Parser<'a> {
     }
 }
 
+/// Desugar the pipeline operator `a |> b` into a call expression.
+///
+/// `x |> f`              becomes  `f(x)`
+/// `x |> f(a, b)`         becomes  `f(x, a, b)`
+/// `x |> SomeIdent`       becomes  `SomeIdent(x)`
+fn desugar_pipe(left: Expr, right: Expr) -> Expr {
+    match right {
+        Expr::Call { callee, mut args } => {
+            let mut new_args = Vec::with_capacity(args.len() + 1);
+            new_args.push(left);
+            new_args.append(&mut args);
+            Expr::Call { callee, args: new_args }
+        }
+        other => Expr::Call { callee: Box::new(other), args: vec![left] },
+    }
+}
+
 fn parse_interp_parts(template: &str) -> Result<Vec<Expr>> {
     let mut parts = vec![];
     let mut chars = template.chars().peekable();
@@ -1517,6 +1629,90 @@ mod tests {
         let module = parse(&tokens, source).unwrap();
         match &module.items[0] {
             Stmt::Let { value, .. } => assert!(matches!(**value, Expr::StructLit { .. })),
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn test_parse_pipeline_desugars_to_call() {
+        let source = "let y = x |> f;";
+        let tokens = tokenize(source).unwrap();
+        let module = parse(&tokens, source).unwrap();
+        match &module.items[0] {
+            Stmt::Let { value, .. } => match &**value {
+                Expr::Call { callee, args } => {
+                    assert!(matches!(callee.as_ref(), Expr::Ident(n) if n == "f"));
+                    assert_eq!(args.len(), 1);
+                    assert!(matches!(&args[0], Expr::Ident(n) if n == "x"));
+                }
+                other => panic!("expected Call, got {:?}", other),
+            },
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn test_parse_pipeline_with_args() {
+        let source = "let y = x |> f(1, 2);";
+        let tokens = tokenize(source).unwrap();
+        let module = parse(&tokens, source).unwrap();
+        match &module.items[0] {
+            Stmt::Let { value, .. } => match &**value {
+                Expr::Call { args, .. } => assert_eq!(args.len(), 3),
+                other => panic!("expected Call, got {:?}", other),
+            },
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn test_parse_regex_literal() {
+        let source = "let r = /\\d+/g;";
+        let tokens = tokenize(source).unwrap();
+        let module = parse(&tokens, source).unwrap();
+        match &module.items[0] {
+            Stmt::Let { value, .. } => match &**value {
+                Expr::Regex(pat, flags) => {
+                    assert_eq!(pat, "\\d+");
+                    assert_eq!(flags, "g");
+                }
+                other => panic!("expected Regex, got {:?}", other),
+            },
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn test_parse_bytes_pattern_rest() {
+        let source = "match b { [0x89, 'P', 'N', 'G', ..] => { dump \"png\" } }";
+        let tokens = tokenize(source).unwrap();
+        let module = parse(&tokens, source).unwrap();
+        // Statement-level `match` is wrapped in Stmt::Expr(Expr::Match).
+        let arms = match &module.items[0] {
+            Stmt::Expr(e) => match &**e {
+                Expr::Match { arms, .. } => arms,
+                other => panic!("expected Expr::Match, got {:?}", other),
+            },
+            other => panic!("expected Stmt::Expr, got {:?}", other),
+        };
+        match &arms[0].0 {
+            Pattern::Bytes(parts) => {
+                assert_eq!(parts.len(), 5);
+                assert!(matches!(&parts[0], BytesPat::Byte(0x89)));
+                assert!(matches!(&parts[1], BytesPat::Byte(b'P')));
+                assert!(matches!(&parts[4], BytesPat::Rest));
+            }
+            other => panic!("expected Bytes pattern, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_char_expr() {
+        let source = "let c = 'A';";
+        let tokens = tokenize(source).unwrap();
+        let module = parse(&tokens, source).unwrap();
+        match &module.items[0] {
+            Stmt::Let { value, .. } => assert!(matches!(&**value, Expr::Int(65))),
             _ => panic!(),
         }
     }

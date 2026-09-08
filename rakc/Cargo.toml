@@ -34,6 +34,9 @@ tokio = { version = "1", features = ["full"], optional = true }
 # Bindgen
 bindgen = { version = "0.70", optional = true }
 
+# Regex literals (/pattern/flags)
+regex = "1.10"
+
 # Future backends
 # inkwell = { workspace = true, optional = true }
 # cranelift = { optional = true }

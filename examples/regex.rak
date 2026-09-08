@@ -1,0 +1,18 @@
+// regex.rak -- regex literals and matching (interpreter with method syntax,
+// also usable on the VM via the regex_* builtins).
+//
+// Flags: i (case-insensitive), m (multi-line), s (dotall), x (extended), g (no-op).
+
+let re = /\d+/g
+dump re.is_match("abc123")            // true
+dump re.find_all("a1 b22 c333")       // [1, 22, 333]
+dump re.find("no digits here")        // nil
+
+let ws = /\s+/g
+dump ws.replace("a  b   c", "_")      // a_b_c
+
+let host = /https?:\/\/([^/]+)/i
+dump host.find("Visit https://example.com/path")  // https://example.com
+
+// Free-function form (works on the VM too):
+dump regex_find_all(/[a-z]+/g, "a1bc2def")         // [a, bc, def]

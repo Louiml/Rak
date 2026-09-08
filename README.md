@@ -26,7 +26,9 @@ The language started as an OSINT scripting tool. It grew into something bigger.
 
 **Bytecode VM.** `rakc vm` runs bytecode. Benchmarks show about 6x speedup over the tree-walking interpreter. Run `rakc bench file.rak` to see both.
 
-**Type system.** Signed and unsigned ints (i8 through i64, u8 through u64), floats (f32, f64), typed literals like `42i32` and `3.14f64`, tuples, Result/Option, modules, closures with lexical scoping, generics, traits, pattern matching, and string interpolation with `f"hello {name}"`.
+**Data pipelines.** A `|>` pipeline operator, regex literals (`/\d+/g`) with method syntax, and binary pattern matching over byte slices — built for OSINT log and PCAP triage.
+
+**Type system.** Signed and unsigned ints (i8 through i64, u8 through u64), floats (f32, f64), typed literals like `42i32` and `3.14f64`, tuples, Result/Option, modules, closures with lexical scoping, generics, traits with method dispatch, pattern matching (including binary byte-pattern matching), and string interpolation with `f"hello {name}"`.
 
 **Concurrency.** `spawn` launches a thread, `thread_join` waits for it, `channel()` gives you a sender/receiver pair. TCP networking built in with `net_listen`, `net_accept`, `tcp_read`, `tcp_write`.
 
@@ -193,6 +195,82 @@ match 2 {
 }
 ```
 
+### Pipeline operator
+
+`x |> f` desugars to `f(x)`, and `x |> f(a, b)` to `f(x, a, b)`. Chaining is
+left-associative, so `data |> parse |> load` is `load(parse(data))`. Works on
+both the interpreter and the bytecode VM.
+
+```rak
+fn inc(n) { return n + 1 }
+fn dbl(n) { return n * 2 }
+dump 5 |> inc |> dbl          // 12
+dump 3 |> add(10)             // 13
+```
+
+### Regex literals
+
+`/pattern/flags` with flags `i` (case-insensitive), `m` (multi-line), `s`
+(dotall), `x` (extended). A `/` after a value is division; a `/` in operand
+position starts a regex, so `a / b` and `let r = /\d+/g` both work.
+
+```rak
+let re = /\d+/g
+dump re.is_match("abc123")            // true
+dump re.find_all("a1 b22 c333")       // [1, 22, 333]
+dump (/\s+/g).replace("a  b   c", "_") // a_b_c
+
+// Free-function form (also works on the VM):
+dump regex_find_all(/[a-z]+/g, "a1bc2def")   // [a, bc, def]
+```
+
+### Binary pattern matching
+
+Match a `bytes` value against byte literals (hex, int, or char) with a
+trailing `..` to match the rest. Useful for magic-number sniffing.
+
+```rak
+fn sniff(data: bytes) {
+    match data {
+        [0x89, 'P', 'N', 'G', ..] => { return "png" },
+        [0xFF, 0xD8, 0xFF, ..] => { return "jpeg" },
+        ['%', 'P', 'D', 'F', ..] => { return "pdf" },
+        _ => { return "unknown" },
+    }
+}
+dump sniff(b"\x89PNG\x0d\x0a\x1a\x0a")  // png
+```
+
+### Traits (Display, Iterable, Index, IndexMut)
+
+The receiver is passed as the first argument of each method. `Display::fmt`
+drives `dump`, `Iterable::iter` drives `for x in target`, `Index::index` /
+`IndexMut::set` drive `obj[key]` reads and writes.
+
+```rak
+struct Point { x: int, y: int }
+impl Display for Point {
+    fn fmt(self) { return fmt("({}, {})", self.x, self.y) }
+}
+dump Point { x: 3, y: 4 }   // (3, 4)
+
+struct Range { lo: int, hi: int }
+impl Iterable for Range {
+    fn iter(self) {
+        let out = []; let i = self.lo
+        while i <= self.hi { out = push(out, i); i = i + 1 }
+        return out
+    }
+}
+let s = 0
+for n in Range { lo: 1, hi: 5 } { s = s + n }
+dump s   // 15
+```
+
+The full design and implementation plan for these plus FFI, memory-mapped
+files, macros, an async event loop, raw sockets, and DNS/TLS/PCAP parsers is
+in [`docs/rak-features-spec.md`](docs/rak-features-spec.md).
+
 ## Standard library
 
 ### TCP networking
@@ -356,6 +434,10 @@ Rak/
 │   ├── json_demo.rak       JSON parse and stringify
 │   ├── closures.rak        Lexical closures and recursion
 │   ├── vm_features.rak     Map, tuple, index, interp, match on the VM
+│   ├── pipeline.rak        Pipeline operator (|>)
+│   ├── regex.rak           Regex literals and matching
+│   ├── binary_patterns.rak Binary byte-pattern matching
+│   ├── traits.rak          Display/Iterable/Index trait protocols
 │   └── stdlib_demo.rak     String, array, and math builtins
 ```
 

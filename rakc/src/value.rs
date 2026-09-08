@@ -3,6 +3,13 @@ use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
 
+/// A compiled regular expression, shared cheaply via `Arc`.
+pub struct RegexValue {
+    pub pattern: String,
+    pub flags: String,
+    pub re: regex::Regex,
+}
+
 #[derive(Clone)]
 pub enum Value {
     I8(i8),
@@ -47,6 +54,7 @@ pub enum Value {
     Option(Option<Box<Value>>),
     Channel(Arc<crate::vm::ChannelHandle>),
     Future(Arc<crate::vm::FutureHandle>),
+    Regex(Arc<RegexValue>),
 }
 
 impl Value {
@@ -79,6 +87,7 @@ impl Value {
             Value::Option(..) => "option",
             Value::Channel(_) => "channel",
             Value::Future(_) => "future",
+            Value::Regex(_) => "regex",
         }
     }
 
@@ -162,6 +171,9 @@ impl PartialEq for Value {
             (Value::Array(a), Value::Array(b)) => a == b,
             (Value::Map(a), Value::Map(b)) => a == b,
             (Value::Option(a), Value::Option(b)) => a == b,
+            (Value::Regex(a), Value::Regex(b)) => a.pattern == b.pattern && a.flags == b.flags,
+            (Value::Closure { code: a, .. }, Value::Closure { code: b, .. }) => Arc::ptr_eq(a, b),
+            (Value::NativeFn(na, _), Value::NativeFn(nb, _)) => na == nb,
             _ => std::mem::discriminant(self) == std::mem::discriminant(other),
         }
     }
@@ -225,6 +237,7 @@ impl fmt::Display for Value {
             Value::Option(None) => write!(f, "None"),
             Value::Channel(_) => write!(f, "<channel>"),
             Value::Future(_) => write!(f, "<future>"),
+            Value::Regex(r) => write!(f, "/{}/{}", r.pattern, r.flags),
         }
     }
 }

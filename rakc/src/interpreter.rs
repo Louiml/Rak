@@ -6,6 +6,14 @@ use std::sync::{Arc, Mutex};
 use std::sync::mpsc;
 use std::thread::JoinHandle;
 
+/// A compiled regular expression value. Stored behind an `Arc` so it can be
+/// cloned cheaply inside `Value`.
+pub struct RegexValue {
+    pub pattern: String,
+    pub flags: String,
+    pub re: regex::Regex,
+}
+
 #[derive(Clone)]
 pub enum Value {
     Hex(u64),
@@ -47,6 +55,7 @@ pub enum Value {
     JoinHandle(Arc<Mutex<Option<JoinHandle<Value>>>>),
     Sender(Arc<Mutex<mpsc::Sender<Value>>>),
     Receiver(Arc<Mutex<mpsc::Receiver<Value>>>),
+    Regex(Arc<RegexValue>),
 }
 
 impl fmt::Debug for Value {
@@ -69,6 +78,7 @@ impl PartialEq for Value {
             (Value::Array(a), Value::Array(b)) => a == b,
             (Value::Map(a), Value::Map(b)) => a == b,
             (Value::Option(a), Value::Option(b)) => a == b,
+            (Value::Regex(a), Value::Regex(b)) => a.pattern == b.pattern && a.flags == b.flags,
             _ => std::mem::discriminant(self) == std::mem::discriminant(other),
         }
     }
@@ -128,6 +138,7 @@ impl fmt::Display for Value {
             Value::JoinHandle(_) => write!(f, "<thread>"),
             Value::Sender(_) => write!(f, "<sender>"),
             Value::Receiver(_) => write!(f, "<receiver>"),
+            Value::Regex(r) => write!(f, "/{}/{}", r.pattern, r.flags),
         }
     }
 }
@@ -208,6 +219,11 @@ pub struct Interpreter {
     return_value: Value,
     #[cfg(feature = "gui")]
     gui: Option<crate::gui::GuiManager>,
+    /// (trait, type, method) -> function. trait == "" for inherent impls.
+    trait_impls: HashMap<(String, String, String), Value>,
+    /// (type, method) -> function, used for `obj.method(...)` call syntax.
+    /// Populated from both inherent and trait impls.
+    methods: HashMap<(String, String), Value>,
 }
 
 impl Interpreter {
@@ -220,6 +236,8 @@ impl Interpreter {
             return_value: Value::Nil,
             #[cfg(feature = "gui")]
             gui: None,
+            trait_impls: HashMap::new(),
+            methods: HashMap::new(),
         }
     }
 
@@ -232,6 +250,8 @@ impl Interpreter {
             return_value: Value::Nil,
             #[cfg(feature = "gui")]
             gui: None,
+            trait_impls: HashMap::new(),
+            methods: HashMap::new(),
         }
     }
 
@@ -397,19 +417,37 @@ impl Interpreter {
             }
             Stmt::For { name, iterable, body } => {
                 let iter = self.eval_expr(iterable)?;
-                match iter {
-                    Value::Array(arr) => self.run_for_loop(name, arr, body)?,
-                    Value::Tuple(t) => self.run_for_loop(name, t, body)?,
-                    Value::String(s) => {
-                        let chars: Vec<Value> = s.chars().map(|c| Value::String(c.to_string())).collect();
-                        self.run_for_loop(name, chars, body)?;
+                let tn = iter.type_name();
+                if let Some(func) = self
+                    .trait_impls
+                    .get(&("Iterable".to_string(), tn.clone(), "iter".to_string()))
+                    .cloned()
+                {
+                    let produced = self.call_method_value(func, iter, &[])?;
+                    match produced {
+                        Value::Array(items) => self.run_for_loop(name, items, body)?,
+                        other => {
+                            return Err(crate::RakError::Runtime(format!(
+                                "Iterable::iter must return an array, got {}",
+                                other.type_name()
+                            )))
+                        }
                     }
-                    Value::Map(m) => {
-                        let entries: Vec<Value> = m.into_iter().map(|(k, v)| Value::Tuple(vec![Value::String(k), v])).collect();
-                        self.run_for_loop(name, entries, body)?;
+                } else {
+                    match iter {
+                        Value::Array(arr) => self.run_for_loop(name, arr, body)?,
+                        Value::Tuple(t) => self.run_for_loop(name, t, body)?,
+                        Value::String(s) => {
+                            let chars: Vec<Value> = s.chars().map(|c| Value::String(c.to_string())).collect();
+                            self.run_for_loop(name, chars, body)?;
+                        }
+                        Value::Map(m) => {
+                            let entries: Vec<Value> = m.into_iter().map(|(k, v)| Value::Tuple(vec![Value::String(k), v])).collect();
+                            self.run_for_loop(name, entries, body)?;
+                        }
+                        Value::Option(Some(v)) => self.run_for_loop(name, vec![*v], body)?,
+                        _ => return Err(crate::RakError::Runtime("Cannot iterate over this value".to_string())),
                     }
-                    Value::Option(Some(v)) => self.run_for_loop(name, vec![*v], body)?,
-                    _ => return Err(crate::RakError::Runtime("Cannot iterate over this value".to_string())),
                 }
             }
             Stmt::Scan { target, options, body } => self.exec_scan(target, options, body)?,
@@ -420,7 +458,8 @@ impl Interpreter {
                     let target_val = self.eval_expr(t)?;
                     match &target_val {
                         Value::String(path) => {
-                            match std::fs::write(path, val.to_string()) {
+                            let s = self.display_value(&val)?;
+                            match std::fs::write(path, s) {
                                 Ok(_) => self.output.push(format!("[DUMP] Written to {}", path)),
                                 Err(e) => self.output.push(format!("[DUMP] File error: {}", e)),
                             }
@@ -428,12 +467,14 @@ impl Interpreter {
                         _ => self.output.push(format!("[DUMP] {} -> {}", val, target_val)),
                     }
                 } else {
-                    self.output.push(format!("[DUMP] {}", val));
+                    let s = self.display_value(&val)?;
+                    self.output.push(format!("[DUMP] {}", s));
                 }
             }
             Stmt::Trace { value } => {
                 let val = self.eval_expr(value)?;
-                self.output.push(format!("[TRACE] {:?}", val));
+                let s = self.debug_value(&val)?;
+                self.output.push(format!("[TRACE] {}", s));
             }
             Stmt::Break => {
                 self.env.define("__break__", Value::Bool(true));
@@ -462,12 +503,23 @@ impl Interpreter {
             Stmt::Enum { name, type_params: _, variants } => {
                 self.env.define(name, Value::EnumDef { variants: variants.clone() });
             }
-            Stmt::Impl { target, trait_name: _, methods } => {
+            Stmt::Impl { target, trait_name, methods } => {
+                // Parser stores `impl <A> for <B>` as target=A (trait), trait_name=B (type).
+                // For an inherent `impl <Type>` (no `for`), trait_name is None.
+                let (trait_str, type_name) = match trait_name {
+                    Some(ty) => (target.clone(), ty.clone()),
+                    None => (String::new(), target.clone()),
+                };
                 for method in methods {
                     if let Stmt::Let { name: mname, value, .. } = method {
                         let method_name = format!("{}.{}", target, mname);
                         let val = self.eval_expr(value)?;
-                        self.env.define(&method_name, val);
+                        self.env.define(&method_name, val.clone());
+                        self.trait_impls.insert(
+                            (trait_str.clone(), type_name.clone(), mname.clone()),
+                            val.clone(),
+                        );
+                        self.methods.insert((type_name.clone(), mname.clone()), val);
                     }
                 }
             }
@@ -739,6 +791,10 @@ impl Interpreter {
             }),
             Expr::String(s) => Ok(Value::String(s.clone())),
             Expr::Bytes(b) => Ok(Value::Bytes(b.clone())),
+            Expr::Regex(pattern, flags) => {
+                let r = self.build_regex(pattern, flags)?;
+                Ok(Value::Regex(r))
+            }
             Expr::Bool(b) => Ok(Value::Bool(*b)),
             Expr::Nil => Ok(Value::Nil),
             Expr::Ident(name) => self.eval_ident(name),
@@ -843,8 +899,21 @@ impl Interpreter {
             }
             Expr::IndexAssign { obj, idx, value } => {
                 let v = self.eval_expr(value)?;
-                let mut container = self.eval_expr(obj)?;
+                let container = self.eval_expr(obj)?;
                 let idx_val = self.eval_expr(idx)?;
+                let tn = container.type_name();
+                if let Some(func) = self
+                    .trait_impls
+                    .get(&("IndexMut".to_string(), tn, "set".to_string()))
+                    .cloned()
+                {
+                    // IndexMut::set returns the updated container (functional
+                    // update semantics), which we store back to the target.
+                    let updated = self.call_method_with_values(func, container, vec![idx_val, v.clone()])?;
+                    self.store_back(obj, updated)?;
+                    return Ok(v);
+                }
+                let mut container = container;
                 match &mut container {
                     Value::Array(a) => {
                         if let Value::Int(i) = idx_val {
@@ -913,6 +982,14 @@ impl Interpreter {
             Expr::Index(obj, idx) => {
                 let obj_val = self.eval_expr(obj)?;
                 let idx_val = self.eval_expr(idx)?;
+                let tn = obj_val.type_name();
+                if let Some(func) = self
+                    .trait_impls
+                    .get(&("Index".to_string(), tn.clone(), "index".to_string()))
+                    .cloned()
+                {
+                    return self.call_method_with_values(func, obj_val, vec![idx_val]);
+                }
                 match (&obj_val, &idx_val) {
                     (Value::Array(arr), Value::Int(i)) => {
                         arr.get(*i as usize).cloned().ok_or_else(|| crate::RakError::Runtime("Index out of bounds".to_string()))
@@ -1196,6 +1273,27 @@ impl Interpreter {
         if let Expr::Path(segs) = callee {
             return self.eval_path(segs, args);
         }
+        // Method-call syntax: `obj.method(args...)`
+        if let Expr::FieldAccess(obj_expr, method) = callee {
+            let obj_val = self.eval_expr(obj_expr)?;
+            if let Value::Regex(_) = &obj_val {
+                return self.call_regex_method(&obj_val, method, args);
+            }
+            let tn = obj_val.type_name();
+            if let Some(func) = self.methods.get(&(tn.clone(), method.clone())).cloned() {
+                return self.call_method_value(func, obj_val, args);
+            }
+            // Fallback: a field that itself holds a callable (modules, etc.).
+            if let Some(v) = self.field_value(&obj_val, method) {
+                if let Value::Function { params, body, closure, is_async } = v {
+                    return self.call_function(&params, &body, &closure, is_async, args);
+                }
+            }
+            return Err(crate::RakError::Runtime(format!(
+                "No method '{}' on {}",
+                method, tn
+            )));
+        }
         let callee_val = self.eval_expr(callee)?;
         if let Value::Function { params, body, closure, is_async } = callee_val {
             return self.call_function(&params, &body, &closure, is_async, args);
@@ -1207,8 +1305,23 @@ impl Interpreter {
     }
 
     fn call_function(&mut self, params: &[Param], body: &[Stmt], closure: &Arc<Env>, is_async: bool, args: &[Expr]) -> crate::Result<Value> {
-        let _ = is_async;
         let arg_vals: Vec<Value> = args.iter().map(|a| self.eval_expr(a)).collect::<crate::Result<_>>()?;
+        self.call_function_values(params, body, closure, is_async, arg_vals)
+    }
+
+    /// Call a function value with already-evaluated argument values. Used by
+    /// trait-method dispatch where the receiver and arguments are computed
+    /// before the call.
+    fn call_function_with_values(&mut self, func: Value, arg_vals: Vec<Value>) -> crate::Result<Value> {
+        if let Value::Function { params, body, closure, is_async } = func {
+            self.call_function_values(&params, &body, &closure, is_async, arg_vals)
+        } else {
+            Err(crate::RakError::Runtime("value is not callable".to_string()))
+        }
+    }
+
+    fn call_function_values(&mut self, params: &[Param], body: &[Stmt], closure: &Arc<Env>, is_async: bool, arg_vals: Vec<Value>) -> crate::Result<Value> {
+        let _ = is_async;
         let saved_returning = self.returning;
         self.returning = false;
         let saved_env = self.env.clone();
@@ -1231,6 +1344,139 @@ impl Interpreter {
         self.env = saved_env;
         self.returning = saved_returning;
         Ok(ret)
+    }
+
+    /// Dispatch a user-defined method `obj.method(args...)`, passing `obj` as
+    /// the first argument (the receiver).
+    fn call_method_value(&mut self, func: Value, receiver: Value, args: &[Expr]) -> crate::Result<Value> {
+        let mut arg_vals = vec![receiver];
+        for a in args {
+            arg_vals.push(self.eval_expr(a)?);
+        }
+        self.call_function_with_values(func, arg_vals)
+    }
+
+    /// Like `call_method_value` but with already-evaluated argument values.
+    fn call_method_with_values(&mut self, func: Value, receiver: Value, args: Vec<Value>) -> crate::Result<Value> {
+        let mut arg_vals = vec![receiver];
+        arg_vals.extend(args);
+        self.call_function_with_values(func, arg_vals)
+    }
+
+    /// Read a field of a value as a callable, used as a fallback for
+    /// `obj.method(...)` when no method is registered (e.g. module functions
+    /// or struct fields that hold functions).
+    fn field_value(&self, obj: &Value, field: &str) -> Option<Value> {
+        match obj {
+            Value::Map(m) => m.get(field).cloned(),
+            Value::Struct { fields, .. } => fields.get(field).cloned(),
+            Value::Module(m) => m.get(field).cloned(),
+            Value::Tuple(t) => field.parse::<usize>().ok().and_then(|i| t.get(i).cloned()),
+            _ => None,
+        }
+    }
+
+    /// Render a value using `Display::fmt` if implemented, else `to_string`.
+    fn display_value(&mut self, v: &Value) -> crate::Result<String> {
+        let tn = v.type_name();
+        if let Some(func) = self
+            .trait_impls
+            .get(&("Display".to_string(), tn, "fmt".to_string()))
+            .cloned()
+        {
+            let r = self.call_method_with_values(func, v.clone(), vec![])?;
+            self.val_to_string(Some(&r))
+        } else {
+            Ok(v.to_string())
+        }
+    }
+
+    /// Render a value using `Debug::fmt` if implemented, else `{:?}`.
+    fn debug_value(&mut self, v: &Value) -> crate::Result<String> {
+        let tn = v.type_name();
+        if let Some(func) = self
+            .trait_impls
+            .get(&("Debug".to_string(), tn, "fmt".to_string()))
+            .cloned()
+        {
+            let r = self.call_method_with_values(func, v.clone(), vec![])?;
+            self.val_to_string(Some(&r))
+        } else {
+            Ok(format!("{:?}", v))
+        }
+    }
+
+    /// Compile a regex pattern with the given flags into a `RegexValue`.
+    fn build_regex(&self, pattern: &str, flags: &str) -> crate::Result<Arc<RegexValue>> {
+        let mut b = regex::RegexBuilder::new(pattern);
+        for f in flags.chars() {
+            match f {
+                'i' | 'I' => b.case_insensitive(true),
+                'm' | 'M' => b.multi_line(true),
+                's' | 'S' => b.dot_matches_new_line(true),
+                'x' | 'X' => b.ignore_whitespace(true),
+                'g' | 'G' => continue,
+                _ => {
+                    return Err(crate::RakError::Runtime(format!(
+                        "unknown regex flag '{}'",
+                        f
+                    )))
+                }
+            };
+        }
+        let re = b.build().map_err(|e| {
+            crate::RakError::Runtime(format!("invalid regex /{}/{}: {}", pattern, flags, e))
+        })?;
+        Ok(Arc::new(RegexValue {
+            pattern: pattern.to_string(),
+            flags: flags.to_string(),
+            re,
+        }))
+    }
+
+    /// Coerce an argument into a compiled regex: pass through `Value::Regex`,
+    /// or build one from a string pattern (with optional flags argument).
+    fn coerce_regex(&self, v: Option<&Value>, flags_arg: Option<&Value>) -> crate::Result<Arc<RegexValue>> {
+        match v {
+            Some(Value::Regex(r)) => Ok(r.clone()),
+            Some(other) => {
+                let pattern = self.val_to_string(Some(other))?;
+                let flags = self.val_to_string(flags_arg)?;
+                self.build_regex(&pattern, &flags)
+            }
+            None => Err(crate::RakError::Runtime("expected a regex".to_string())),
+        }
+    }
+
+    /// Dispatch native methods on a `Value::Regex`.
+    fn call_regex_method(&mut self, re_val: &Value, method: &str, args: &[Expr]) -> crate::Result<Value> {
+        let re = match re_val {
+            Value::Regex(r) => r.clone(),
+            _ => return Err(crate::RakError::Runtime("not a regex".to_string())),
+        };
+        let arg_vals: Vec<Value> = args.iter().map(|a| self.eval_expr(a)).collect::<crate::Result<_>>()?;
+        match method {
+            "match" | "is_match" => {
+                let hay = self.val_to_string(arg_vals.first())?;
+                Ok(Value::Bool(re.re.is_match(&hay)))
+            }
+            "find" => {
+                let hay = self.val_to_string(arg_vals.first())?;
+                Ok(re.re.find(&hay).map(|m| Value::String(m.as_str().to_string())).unwrap_or(Value::Nil))
+            }
+            "find_all" => {
+                let hay = self.val_to_string(arg_vals.first())?;
+                Ok(Value::Array(
+                    re.re.find_iter(&hay).map(|m| Value::String(m.as_str().to_string())).collect(),
+                ))
+            }
+            "replace" | "replace_all" => {
+                let hay = self.val_to_string(arg_vals.first())?;
+                let rep = self.val_to_string(arg_vals.get(1))?;
+                Ok(Value::String(re.re.replace_all(&hay, rep.as_str()).into_owned()))
+            }
+            _ => Err(crate::RakError::Runtime(format!("regex has no method '{}'", method))),
+        }
     }
 
     fn eval_path(&mut self, segs: &[String], args: &[Expr]) -> crate::Result<Value> {
@@ -1409,6 +1655,38 @@ impl Interpreter {
             }
             (Pattern::Array(pats), Value::Array(vals)) => {
                 pats.len() == vals.len() && pats.iter().zip(vals.iter()).all(|(p, v)| self.pattern_matches(p, v).unwrap_or(false))
+            }
+            // Exact-length byte slice matching via an array pattern of byte literals.
+            (Pattern::Array(pats), Value::Bytes(vals)) => {
+                pats.len() == vals.len()
+                    && pats.iter().zip(vals.iter()).all(|(p, v)| match p {
+                        Pattern::Hex(h) => *h == (*v as u64),
+                        Pattern::Int(i) => *i == (*v as i64),
+                        Pattern::Byte(b) => *b == *v,
+                        _ => false,
+                    })
+            }
+            (Pattern::Byte(b), Value::Bytes(vals)) => vals.len() == 1 && vals[0] == *b,
+            (Pattern::Byte(b), Value::Int(i)) => *i == (*b as i64),
+            (Pattern::Bytes(pats), Value::Bytes(vals)) => {
+                let mut vi = 0usize;
+                let mut pi = 0usize;
+                while pi < pats.len() {
+                    match &pats[pi] {
+                        BytesPat::Byte(b) => {
+                            if vi >= vals.len() || vals[vi] != *b {
+                                return Ok(false);
+                            }
+                            vi += 1;
+                            pi += 1;
+                        }
+                        BytesPat::Rest => {
+                            // A trailing (or sole) rest matches everything left.
+                            return Ok(true);
+                        }
+                    }
+                }
+                vi == vals.len()
             }
             (Pattern::Struct(name, fields), Value::Struct { name: sn, fields: fmap }) => {
                 name == sn && fields.iter().all(|(fname, fp)| {
@@ -2030,6 +2308,33 @@ impl Interpreter {
             "gui_open" | "gui_update" | "gui_title" | "gui_close" | "gui_wait" | "gui_callback" => {
                 Err(crate::RakError::Runtime("GUI support not enabled (build with --features gui)".to_string()))
             }
+            // --- Regex builtins ---
+            "regex_new" => {
+                let pattern = self.val_to_string(args.first())?;
+                let flags = self.val_to_string(args.get(1))?;
+                Ok(Value::Regex(self.build_regex(&pattern, &flags)?))
+            }
+            "regex_match" | "regex_is_match" => {
+                let re = self.coerce_regex(args.first(), args.get(2))?;
+                let hay = self.val_to_string(args.get(1))?;
+                Ok(Value::Bool(re.re.is_match(&hay)))
+            }
+            "regex_find" => {
+                let re = self.coerce_regex(args.first(), args.get(2))?;
+                let hay = self.val_to_string(args.get(1))?;
+                Ok(re.re.find(&hay).map(|m| Value::String(m.as_str().to_string())).unwrap_or(Value::Nil))
+            }
+            "regex_find_all" => {
+                let re = self.coerce_regex(args.first(), args.get(2))?;
+                let hay = self.val_to_string(args.get(1))?;
+                Ok(Value::Array(re.re.find_iter(&hay).map(|m| Value::String(m.as_str().to_string())).collect()))
+            }
+            "regex_replace" | "regex_replace_all" => {
+                let re = self.coerce_regex(args.first(), args.get(3))?;
+                let hay = self.val_to_string(args.get(1))?;
+                let rep = self.val_to_string(args.get(2))?;
+                Ok(Value::String(re.re.replace_all(&hay, rep.as_str()).into_owned()))
+            }
             _ => Err(crate::RakError::Runtime(format!("Unknown function: {}", name))),
         }
     }
@@ -2101,6 +2406,26 @@ impl Interpreter {
 }
 
 impl Value {
+    fn type_name(&self) -> String {
+        match self {
+            Value::Hex(_) => "hex".to_string(),
+            Value::Int(_) => "int".to_string(),
+            Value::Float(_) => "float".to_string(),
+            Value::String(_) => "string".to_string(),
+            Value::Bytes(_) => "bytes".to_string(),
+            Value::Bool(_) => "bool".to_string(),
+            Value::Nil => "nil".to_string(),
+            Value::Tuple(_) => "tuple".to_string(),
+            Value::Array(_) => "array".to_string(),
+            Value::Map(_) => "map".to_string(),
+            Value::Struct { name, .. } => name.clone(),
+            Value::Enum { name, .. } => name.clone(),
+            Value::Regex(_) => "regex".to_string(),
+            Value::Function { .. } => "function".to_string(),
+            Value::Module(_) => "module".to_string(),
+            _ => "<opaque>".to_string(),
+        }
+    }
     fn as_i64(&self) -> Option<i64> {
         match self {
             Value::Hex(h) => Some(*h as i64),
@@ -2376,5 +2701,87 @@ mod tests {
         assert!(output.iter().any(|l| l.contains("[DUMP] cba")));
         assert!(output.iter().any(|l| l.contains("[DUMP] 10")));
         assert!(output.iter().any(|l| l.contains("[DUMP] 9")));
+    }
+
+    #[test]
+    fn test_interpreter_pipeline() {
+        let mut interp = Interpreter::new();
+        let src = "fn inc(n) { return n + 1 } fn dbl(n) { return n * 2 } let r = 5 |> inc |> dbl; dump r";
+        let output = interp.run_source(src).unwrap();
+        assert!(output.iter().any(|l| l.contains("[DUMP] 12")));
+    }
+
+    #[test]
+    fn test_interpreter_pipeline_first_arg() {
+        let mut interp = Interpreter::new();
+        let src = "fn add(a, b) { return a + b } let r = 3 |> add(10); dump r";
+        let output = interp.run_source(src).unwrap();
+        assert!(output.iter().any(|l| l.contains("[DUMP] 13")));
+    }
+
+    #[test]
+    fn test_interpreter_regex_literal_methods() {
+        let mut interp = Interpreter::new();
+        let src = r#"let re = /\d+/g; dump re.is_match("abc123"); dump re.find_all("a1 b22 c333");"#;
+        let output = interp.run_source(src).unwrap();
+        assert!(output.iter().any(|l| l.contains("true")));
+        // Value::Display does not quote strings inside arrays.
+        assert!(output.iter().any(|l| l.contains("[DUMP] [1, 22, 333]")));
+    }
+
+    #[test]
+    fn test_interpreter_regex_replace() {
+        let mut interp = Interpreter::new();
+        let src = r#"let re = /\s+/g; dump re.replace("a  b   c", "_")"#;
+        let output = interp.run_source(src).unwrap();
+        assert!(output.iter().any(|l| l.contains("a_b_c")));
+    }
+
+    #[test]
+    fn test_interpreter_regex_case_insensitive_flag() {
+        let mut interp = Interpreter::new();
+        let src = r#"dump (/rak/i).is_match("RAK language")"#;
+        let output = interp.run_source(src).unwrap();
+        assert!(output.iter().any(|l| l.contains("true")));
+    }
+
+    #[test]
+    fn test_interpreter_bytes_pattern_match() {
+        let mut interp = Interpreter::new();
+        let src = r#"let png = b"\x89PNG\x0d\x0a\x1a\x0a"; match png { [0x89, 'P', 'N', 'G', ..] => { dump "png" }, _ => { dump "other" } }"#;
+        let output = interp.run_source(src).unwrap();
+        assert!(output.iter().any(|l| l.contains("[DUMP] png")));
+    }
+
+    #[test]
+    fn test_interpreter_bytes_pattern_no_match() {
+        let mut interp = Interpreter::new();
+        let src = r#"let jpg = b"\xFF\xD8\xFF"; match jpg { [0x89, 'P', 'N', 'G', ..] => { dump "png" }, _ => { dump "other" } }"#;
+        let output = interp.run_source(src).unwrap();
+        assert!(output.iter().any(|l| l.contains("[DUMP] other")));
+    }
+
+    #[test]
+    fn test_interpreter_trait_display_dump() {
+        let mut interp = Interpreter::new();
+        let src = "struct Point { x: int, y: int } impl Display for Point { fn fmt(self) { return fmt(\"({}, {})\", self.x, self.y) } } let p = Point { x: 3, y: 4 } dump p";
+        let output = interp.run_source(src).unwrap();
+        assert!(output.iter().any(|l| l.contains("[DUMP] (3, 4)")), "got: {:?}", output);
+    }
+
+    #[test]
+    fn test_interpreter_trait_iterable() {
+        let mut interp = Interpreter::new();
+        let src = "struct Range { lo: int, hi: int } impl Iterable for Range { fn iter(self) { let out = []; let i = self.lo; while i <= self.hi { out = push(out, i); i = i + 1 } return out } } let r = Range { lo: 1, hi: 4 }; let s = 0; for n in r { s = s + n } dump s";
+        let output = interp.run_source(src).unwrap();
+        assert!(output.iter().any(|l| l.contains("[DUMP] 10")), "got: {:?}", output);
+    }
+
+    #[test]
+    fn test_interpreter_trait_index() {
+        let mut interp = Interpreter::new();
+        let src = "struct Vec3 { data: array } impl Index for Vec3 { fn index(self, i) { return self.data[i] } } let v = Vec3 { data: [10, 20, 30] } dump v[1]";
+        let output = interp.run_source(src).unwrap();
+        assert!(output.iter().any(|l| l.contains("[DUMP] 20")), "got: {:?}", output);
     }
 }

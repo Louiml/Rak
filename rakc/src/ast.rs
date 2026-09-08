@@ -11,6 +11,7 @@ pub enum Expr {
         parts: Vec<Expr>,
     },
     Bytes(Vec<u8>),
+    Regex(String, String),
     Ident(String),
     Bool(bool),
     Nil,
@@ -196,6 +197,8 @@ pub enum Pattern {
     Nil,
     Tuple(Vec<Pattern>),
     Array(Vec<Pattern>),
+    Byte(u8),
+    Bytes(Vec<BytesPat>),
     Struct(String, Vec<(String, Pattern)>),
     Range(Box<Pattern>, Box<Pattern>),
     Or(Vec<Pattern>),
@@ -203,6 +206,12 @@ pub enum Pattern {
     None,
     Ok(Box<Pattern>),
     Err(Box<Pattern>),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum BytesPat {
+    Byte(u8),
+    Rest,
 }
 
 #[derive(Debug, Clone, PartialEq)]

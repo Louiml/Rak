@@ -1,0 +1,63 @@
+// traits.rak -- standardized trait protocols: Display, Debug, Iterable,
+// Index, IndexMut. The receiver is passed as the first argument of each
+// method; name it whatever you like (here `self`).
+//
+// Built-in trait hooks:
+//   trait Display   -> fn fmt(self) -> string   used by `dump`
+//   trait Debug     -> fn fmt(self) -> string   used by `trace`
+//   trait Iterable  -> fn iter(self) -> array  used by `for x in target`
+//   trait Index     -> fn index(self, key)     used by `obj[key]`
+//   trait IndexMut  -> fn set(self, key, val)  used by `obj[key] = val`
+
+struct Point { x: int, y: int }
+
+impl Display for Point {
+    fn fmt(self) {
+        return fmt("({}, {})", self.x, self.y)
+    }
+}
+
+let p = Point { x: 3, y: 4 }
+dump p                        // (3, 4)   <- uses Display::fmt
+
+// Iterable: a custom range type usable in `for`.
+struct Range { lo: int, hi: int }
+
+impl Iterable for Range {
+    fn iter(self) {
+        let out = []
+        let i = self.lo
+        while i <= self.hi {
+            out = push(out, i)
+            i = i + 1
+        }
+        return out
+    }
+}
+
+let s = 0
+for n in Range { lo: 1, hi: 5 } {
+    s = s + n
+}
+dump s                        // 15
+
+// Index / IndexMut: a lookup-table type.
+struct Table { entries: map }
+
+impl Index for Table {
+    fn index(self, key) {
+        return get(self.entries, key, 0)
+    }
+}
+
+impl IndexMut for Table {
+    fn set(self, key, value) {
+        self.entries[key] = value
+        return self
+    }
+}
+
+let t = Table { entries: {a: 1, b: 2} }
+dump t["a"]                   // 1   <- uses Index::index
+t["c"] = 99                   //       <- uses IndexMut::set
+dump t["c"]                   // 99
