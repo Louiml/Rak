@@ -1,0 +1,15 @@
+[package]
+name = "rakpkg"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Rak package manager"
+
+[dependencies]
+serde_json = "1.0"
+
+[[bin]]
+name = "rakpkg"
+path = "src/main.rs"

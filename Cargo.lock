@@ -2794,7 +2794,16 @@ dependencies = [
  "rak-stdlib",
  "serde",
  "serde_json",
+ "tao",
  "thiserror 1.0.69",
+ "wry",
+]
+
+[[package]]
+name = "rakpkg"
+version = "0.2.1"
+dependencies = [
+ "serde_json",
 ]
 
 [[package]]

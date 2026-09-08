@@ -20,6 +20,10 @@ serde_json = "1.0"
 # Parser - using chumsky for combinator approach
 chumsky = { version = "1.0.0-alpha.7", default-features = false, features = ["std"] }
 
+# GUI: WebView2 for Windows desktop windows
+wry = { version = "0.55", optional = true }
+tao = { version = "0.35", optional = true }
+
 # Future backends
 # inkwell = { workspace = true, optional = true }
 # cranelift = { optional = true }
@@ -31,6 +35,7 @@ pretty_assertions = "1.4"
 default = []
 llvm = [] # "inkwell"
 jit = []
+gui = ["dep:wry", "dep:tao"]
 
 [[bin]]
 name = "rakc"

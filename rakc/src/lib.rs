@@ -7,6 +7,9 @@ pub mod bytecode;
 pub mod compiler;
 pub mod vm;
 
+#[cfg(feature = "gui")]
+pub mod gui;
+
 use thiserror::Error;
 
 #[derive(Error, Debug)]

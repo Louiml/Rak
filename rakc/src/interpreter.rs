@@ -206,6 +206,8 @@ pub struct Interpreter {
     base_dir: String,
     returning: bool,
     return_value: Value,
+    #[cfg(feature = "gui")]
+    gui: Option<crate::gui::GuiManager>,
 }
 
 impl Interpreter {
@@ -216,6 +218,8 @@ impl Interpreter {
             base_dir: ".".to_string(),
             returning: false,
             return_value: Value::Nil,
+            #[cfg(feature = "gui")]
+            gui: None,
         }
     }
 
@@ -226,6 +230,8 @@ impl Interpreter {
             base_dir,
             returning: false,
             return_value: Value::Nil,
+            #[cfg(feature = "gui")]
+            gui: None,
         }
     }
 
@@ -1968,6 +1974,55 @@ impl Interpreter {
                 Ok(Value::Nil)
             }
             "to_string" => Ok(Value::String(self.val_to_string(args.first())?)),
+            #[cfg(feature = "gui")]
+            "gui_open" => {
+                let title = self.val_to_string(args.get(0))?;
+                let html = self.val_to_string(args.get(1))?;
+                let width = args.get(2).and_then(|v| v.as_u64()).unwrap_or(800) as u32;
+                let height = args.get(3).and_then(|v| v.as_u64()).unwrap_or(600) as u32;
+                let mgr = self.gui.get_or_insert(crate::gui::GuiManager::new());
+                Ok(Value::Int(mgr.open(&title, &html, width, height)))
+            }
+            #[cfg(feature = "gui")]
+            "gui_update" => {
+                let id = args.get(0).and_then(|v| v.as_i64()).unwrap_or(-1);
+                let html = self.val_to_string(args.get(1))?;
+                let mgr = self.gui.get_or_insert(crate::gui::GuiManager::new());
+                mgr.update(id, &html);
+                Ok(Value::Nil)
+            }
+            #[cfg(feature = "gui")]
+            "gui_title" => {
+                let id = args.get(0).and_then(|v| v.as_i64()).unwrap_or(-1);
+                let title = self.val_to_string(args.get(1))?;
+                let mgr = self.gui.get_or_insert(crate::gui::GuiManager::new());
+                mgr.set_title(id, &title);
+                Ok(Value::Nil)
+            }
+            #[cfg(feature = "gui")]
+            "gui_close" => {
+                let id = args.get(0).and_then(|v| v.as_i64()).unwrap_or(-1);
+                let mgr = self.gui.get_or_insert(crate::gui::GuiManager::new());
+                mgr.close(id);
+                Ok(Value::Nil)
+            }
+            #[cfg(feature = "gui")]
+            "gui_wait" => {
+                let mgr = self.gui.get_or_insert(crate::gui::GuiManager::new());
+                mgr.wait();
+                Ok(Value::Nil)
+            }
+            #[cfg(feature = "gui")]
+            "gui_callback" => {
+                let name = self.val_to_string(args.get(0))?;
+                let mgr = self.gui.get_or_insert(crate::gui::GuiManager::new());
+                mgr.register_callback(&name);
+                Ok(Value::Nil)
+            }
+            #[cfg(not(feature = "gui"))]
+            "gui_open" | "gui_update" | "gui_title" | "gui_close" | "gui_wait" | "gui_callback" => {
+                Err(crate::RakError::Runtime("GUI support not enabled (build with --features gui)".to_string()))
+            }
             _ => Err(crate::RakError::Runtime(format!("Unknown function: {}", name))),
         }
     }

@@ -1,0 +1,18 @@
+// gui_demo.rak — creates a desktop window with HTML/CSS/JS
+// Run with: rakc run examples/gui_demo.rak (requires --features gui)
+
+dump "Opening window..."
+
+let html = "<h1 style='color:#22c55e;text-align:center;margin-top:40px'>Hello from Rak!</h1>
+<p style='text-align:center;color:#666'>This window was created by a Rak script.</p>
+<button onclick=\"window.rak_call('clicked')\" style='display:block;margin:20px auto;padding:10px 30px;font-size:18px;background:#22c55e;color:white;border:none;border-radius:8px;cursor:pointer'>Click me</button>
+<div id='count' style='text-align:center;font-size:24px;margin-top:20px'>0</div>
+<script>
+var n = 0;
+window.rak_call('clicked');
+</script>"
+
+let win = gui_open("Rak GUI Demo", html, 600, 400)
+dump f"Window opened with ID: {win}"
+gui_wait()
+dump "All windows closed"
