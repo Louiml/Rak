@@ -268,6 +268,9 @@ rakc bench <file>   Benchmark interpreter vs VM
 rakc check <file>   Lex and parse, print diagnostics with line/column
 rakc lex <file>     Print tokens
 rakc parse <file>   Print AST
+rakc repl           Start an interactive REPL
+rakc lsp            Start the language server (stdio)
+rakc bindgen <h>    Generate Rak bindings from a C header
 rakc --version
 
 rakpkg init [name]       Create a new package
@@ -278,6 +281,42 @@ rakpkg build             Build to a standalone executable
 rakpkg list              List installed packages
 rakpkg remove <name>     Remove a package
 ```
+
+## Tooling
+
+### REPL
+
+`rakc repl` starts an interactive session. State persists between lines, so variables and functions stay defined. Unclosed blocks continue on the next line. Commands start with `:`.
+
+```
+rak> let x = 10
+rak> dump x
+[DUMP] 10
+rak> fn add(a, b) { return a + b }
+rak> dump add(3, 4)
+[DUMP] 7
+rak> :ast 1 + 2
+rak> :help
+```
+
+`:vars` shows defined variables. `:ast <expr>` prints the AST. `:bytecode <expr>` prints the compiled chunk. `:clear` resets state. `:quit` exits.
+
+### Language server
+
+`rakc lsp` is a stdio language server. It reports parser and lexer diagnostics, offers keyword, type, and builtin completion, shows hover text for identifiers, and jumps to `fn`, `let`, `struct`, and `enum` definitions.
+
+Build it with `cargo build --release --features lsp`. The `vscode-rak/` directory has a VS Code extension with a TextMate grammar that pairs with it. For Neovim, point `nvim-lspconfig` at `rakc lsp` for `.rak` files.
+
+### C header bindgen
+
+`rakc bindgen header.h -o bindings.rak` reads a C header and generates a Rak file with a function per C function (calling `extern_call`) and a struct per C struct. Pointers map to `u64`, `char*` maps to `string`, numeric types map to `i8` through `u64` and `f32`/`f64`.
+
+```bash
+cargo build --release --features bindgen
+rakc bindgen sdl.h -o sdl.rak
+```
+
+The generated functions call `extern_call`, which returns an error until a Rust wrapper is linked into the standard library. The wrapper is where the actual FFI linking happens.
 
 ## Platform support
 
@@ -296,7 +335,10 @@ Rak/
 │       ├── bytecode.rs    Opcode set and chunk
 │       ├── compiler.rs    AST to bytecode
 │       ├── vm.rs          Stack-based bytecode VM
-│       └── gui.rs         WebView2/WebKitGTK window management
+│       ├── gui.rs         WebView2/WebKitGTK window management
+│       ├── repl.rs        Interactive REPL
+│       ├── lsp.rs         Language server
+│       └── bindgen.rs     C header bindgen
 ├── stdlib/            Rust native stdlib (net, crypto, encoding, recon, web, file, json)
 ├── rakpkg/            Package manager CLI
 ├── ide/               Tauri + Next.js IDE
