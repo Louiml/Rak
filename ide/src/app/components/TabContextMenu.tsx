@@ -2,6 +2,7 @@
 
 import React, { useState } from 'react';
 import { Tab } from './TabBar';
+import { FileIcon, Icon, IconName } from './Icon';
 
 interface TabContextMenuProps {
   tab: Tab;
@@ -17,13 +18,13 @@ interface TabContextMenuProps {
 }
 
 export default function TabContextMenu(props: TabContextMenuProps) {
-  const items: { label: string; icon?: string; action: () => void; danger?: boolean }[] = [
-    { label: 'Close', icon: '✕', action: props.onCloseTab },
-    { label: 'Close Others', icon: '✕', action: props.onCloseOthers },
-    { label: 'Close to the Right', icon: '✕', action: props.onCloseRight },
-    { label: 'Close All', icon: '✕', action: props.onCloseAll },
-    { label: 'Copy Path', icon: '📋', action: props.onCopyPath },
-    { label: 'Reveal in Explorer', icon: '📁', action: props.onRevealInExplorer },
+  const items: { label: string; icon?: IconName; action: () => void; danger?: boolean }[] = [
+    { label: 'Close', icon: 'x', action: props.onCloseTab },
+    { label: 'Close Others', icon: 'x', action: props.onCloseOthers },
+    { label: 'Close to the Right', icon: 'x', action: props.onCloseRight },
+    { label: 'Close All', icon: 'x', action: props.onCloseAll },
+    { label: 'Copy Path', icon: 'copy', action: props.onCopyPath },
+    { label: 'Reveal in Explorer', icon: 'folder-search', action: props.onRevealInExplorer },
   ];
 
   return (
@@ -39,7 +40,7 @@ export default function TabContextMenu(props: TabContextMenuProps) {
             onClick={() => { item.action(); props.onClose(); }}
             className="w-full flex items-center gap-2 px-3 py-1.5 text-xs text-zinc-300 hover:bg-emerald-600 hover:text-white"
           >
-            {item.icon && <span className="text-[10px] w-4">{item.icon}</span>}
+            {item.icon && <span className="w-4 flex items-center justify-center"><Icon name={item.icon} size={13} className="text-zinc-400" /></span>}
             {item.label}
           </button>
         ))}
@@ -80,14 +81,14 @@ export function TabBarWithMenu(props: TabBarWithMenuProps) {
                 : 'text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300'
             }`}
           >
-            <span className="text-[10px]">{tab.name.endsWith('.rak') ? '🔴' : '📄'}</span>
+            <span className="text-[10px] flex items-center"><FileIcon name={tab.name} size={14} /></span>
             <span>{tab.name}</span>
-            {tab.isDirty && <span className="text-emerald-500 text-[10px]">●</span>}
+            {tab.isDirty && <span className="text-emerald-500"><Icon name="dot" size={8} /></span>}
             <button
               onClick={(e) => { e.stopPropagation(); props.onTabClose(tab.id); }}
               className="opacity-0 group-hover:opacity-100 text-zinc-600 hover:text-zinc-300 ml-1 px-1"
             >
-              ✕
+              <Icon name="x" size={12} />
             </button>
           </div>
         ))}

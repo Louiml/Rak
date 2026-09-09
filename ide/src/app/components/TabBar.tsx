@@ -1,6 +1,7 @@
 'use client';
 
 import React from 'react';
+import { FileIcon, Icon } from './Icon';
 
 export interface Tab {
   id: string;
@@ -32,9 +33,9 @@ export default function TabBar({ tabs, activeTabId, onTabSelect, onTabClose }: T
               : 'text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300'
           }`}
         >
-          <span className="text-[10px]">{tab.name.endsWith('.rak') ? '🔴' : '📄'}</span>
+          <span className="text-[10px] flex items-center"><FileIcon name={tab.name} size={14} /></span>
           <span>{tab.name}</span>
-          {tab.isDirty && <span className="text-emerald-500 text-[10px]">●</span>}
+          {tab.isDirty && <span className="text-emerald-500"><Icon name="dot" size={8} /></span>}
           <button
             onClick={(e) => {
               e.stopPropagation();
@@ -42,7 +43,7 @@ export default function TabBar({ tabs, activeTabId, onTabSelect, onTabClose }: T
             }}
             className="opacity-0 group-hover:opacity-100 text-zinc-600 hover:text-zinc-300 ml-1 px-1"
           >
-            ✕
+            <Icon name="x" size={12} />
           </button>
         </div>
       ))}

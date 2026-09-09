@@ -1,13 +1,17 @@
 'use client';
 
 import React, { useRef, useEffect, useState, useCallback } from 'react';
-import EditorContextMenu, { ContextMenuItem } from './EditorContextMenu';
+import EditorContextMenu from './EditorContextMenu';
+import { Icon, IconName } from './Icon';
 
 interface CodeEditorProps {
   value: string;
   onChange: (value: string) => void;
   onRun?: () => void;
   onCursorChange?: (pos: { line: number; col: number }) => void;
+  fontSize?: number;
+  tabSize?: number;
+  autoClose?: boolean;
 }
 
 interface Snippet { trigger: string; label: string; body: string; }
@@ -18,9 +22,15 @@ const SNIPPETS: Snippet[] = [
   { trigger: 'for', label: 'for', body: 'for item in iterable {\n    \n}' },
   { trigger: 'while', label: 'while', body: 'while cond {\n    \n}' },
   { trigger: 'match', label: 'match', body: 'match value {\n    pattern => {\n        \n    },\n    _ => {}\n}' },
+  { trigger: 'matchb', label: 'match bytes', body: 'match data {\n    [0x89, ..] => {\n        \n    },\n    _ => {}\n}' },
   { trigger: 'struct', label: 'struct', body: 'struct Name {\n    field: type\n}' },
   { trigger: 'enum', label: 'enum', body: 'enum Name {\n    Variant\n}' },
   { trigger: 'let', label: 'let', body: 'let name = value' },
+  { trigger: 'pipe', label: 'pipeline', body: 'value |> fn' },
+  { trigger: 'regex', label: 'regex literal', body: '/\\d+/g' },
+  { trigger: 'impld', label: 'impl Display', body: 'impl Display for Name {\n    fn fmt(self) {\n        return fmt("{}", self)\n    }\n}' },
+  { trigger: 'impli', label: 'impl Iterable', body: 'impl Iterable for Name {\n    fn iter(self) {\n        return []\n    }\n}' },
+  { trigger: 'implx', label: 'impl Index', body: 'impl Index for Name {\n    fn index(self, key) {\n        return self.data[key]\n    }\n}' },
 ];
 
 const KEYWORDS = [
@@ -53,6 +63,7 @@ const BUILTINS = [
   'html_count', 'html_headers',
   'json_parse', 'json_get', 'json_path', 'json_keys', 'json_len', 'json_find_all',
   'scan_ports', 'scan_subdomains',
+  'regex_new', 'regex_match', 'regex_is_match', 'regex_find', 'regex_find_all', 'regex_replace',
   'net_listen', 'net_accept', 'net_connect', 'net_local_addr',
   'tcp_read', 'tcp_write', 'tcp_read_line', 'tcp_close',
   'spawn', 'thread_join', 'channel', 'chan_send', 'chan_recv',
@@ -73,21 +84,27 @@ const ALL_SUGGESTIONS: Suggestion[] = [
   ...BUILTINS.map((b) => ({ label: b, kind: 'builtin' as const })),
 ];
 
-const KIND_ICON = { keyword: '🔑', type: '📦', builtin: '⚡', snippet: '📝' };
-
-const BRACKETS: Record<string, string> = {
-  '(': ')', '[': ']', '{': '}',
-};
-const CLOSING_BRACKETS = new Set([')', ']', '}']);
+const KIND_ICON: Record<Suggestion['kind'], IconName> = { keyword: 'key', type: 'box', builtin: 'zap', snippet: 'file-code' };
 
 interface Token {
-  type: 'keyword' | 'type' | 'hex' | 'number' | 'float' | 'typedint' | 'interp' | 'string' | 'comment' | 'bytes' | 'ident' | 'op' | 'ws';
+  type: 'keyword' | 'type' | 'hex' | 'number' | 'float' | 'typedint' | 'interp' | 'string' | 'comment' | 'bytes' | 'ident' | 'op' | 'ws' | 'regex' | 'char';
   value: string;
+}
+
+function canEndExpr(t: Token | null): boolean {
+  if (!t) return false; // start of line -> regex context
+  if (['ident', 'hex', 'number', 'float', 'typedint', 'interp', 'string', 'bytes', 'regex', 'char'].includes(t.type)) return true;
+  if (t.type === 'op' && (t.value === ')' || t.value === ']' || t.value === '}')) return true;
+  return false;
 }
 
 function tokenizeLine(line: string): Token[] {
   const tokens: Token[] = [];
   let i = 0;
+  const lastSig = (): Token | null => {
+    for (let k = tokens.length - 1; k >= 0; k--) if (tokens[k].type !== 'ws') return tokens[k];
+    return null;
+  };
 
   while (i < line.length) {
     if (/\s/.test(line[i])) {
@@ -99,6 +116,40 @@ function tokenizeLine(line: string): Token[] {
     if (line[i] === '/' && line[i + 1] === '/') {
       tokens.push({ type: 'comment', value: line.slice(i) });
       break;
+    }
+    if (line[i] === '/' && !canEndExpr(lastSig())) {
+      // Regex literal /pattern/flags (operand context).
+      let j = i + 1;
+      let re = '/';
+      let inClass = false;
+      while (j < line.length) {
+        const c = line[j];
+        if (c === '\\' && j + 1 < line.length) { re += c + line[j + 1]; j += 2; continue; }
+        if (c === '[') { inClass = true; re += c; j++; continue; }
+        if (c === ']') { inClass = false; re += c; j++; continue; }
+        if (c === '/' && !inClass) { re += '/'; j++; break; }
+        re += c; j++;
+      }
+      while (j < line.length && /[a-z]/i.test(line[j])) { re += line[j]; j++; }
+      tokens.push({ type: 'regex', value: re });
+      i = j;
+      continue;
+    }
+    if (line[i] === "'") {
+      // Char literal 'P', '\x41', '\n'
+      let j = i + 1;
+      let ch = "'";
+      if (line[j] === '\\' && line[j + 1] === 'x' && j + 3 < line.length && /[0-9a-fA-F]{2}/.test(line.slice(j + 2, j + 4))) {
+        ch += line.slice(j, j + 4); j += 4;
+      } else if (line[j] === '\\' && j + 1 < line.length) {
+        ch += line[j] + line[j + 1]; j += 2;
+      } else if (line[j] && line[j] !== "'") {
+        ch += line[j]; j += 1;
+      }
+      if (line[j] === "'") { ch += "'"; j++; }
+      tokens.push({ type: 'char', value: ch });
+      i = j;
+      continue;
     }
     if (line[i] === '0' && (line[i + 1] === 'x' || line[i + 1] === 'X')) {
       let hex = '0x';
@@ -169,7 +220,7 @@ function tokenizeLine(line: string): Token[] {
       tokens.push({ type: 'op', value: threeChar }); i += 3; continue;
     }
     const twoChar = line.slice(i, i + 2);
-    if (['==', '!=', '<=', '>=', '<<', '>>', '&&', '||', '->', '=>', '+=', '-=', '*=', '/=', '%=', '::', '..'].includes(twoChar)) {
+    if (['==', '!=', '<=', '>=', '<<', '>>', '&&', '||', '->', '=>', '+=', '-=', '*=', '/=', '%=', '::', '..', '|>'].includes(twoChar)) {
       tokens.push({ type: 'op', value: twoChar }); i += 2; continue;
     }
     if ('+-*/%&|^!~<>=.,:;()[]{}?'.includes(line[i])) {
@@ -190,6 +241,8 @@ function getColorClass(type: Token['type']): string {
     case 'typedint': return 'text-orange-300';
     case 'interp': return 'text-green-400';
     case 'string': return 'text-green-400';
+    case 'regex': return 'text-rose-400';
+    case 'char': return 'text-amber-400';
     case 'bytes': return 'text-yellow-400';
     case 'comment': return 'text-zinc-600 italic';
     case 'op': return 'text-pink-400';
@@ -206,7 +259,7 @@ function renderLine(line: string): React.ReactNode {
   ));
 }
 
-export default function CodeEditor({ value, onChange, onRun, onCursorChange }: CodeEditorProps) {
+export default function CodeEditor({ value, onChange, onRun, onCursorChange, fontSize = 14, tabSize = 4, autoClose = true }: CodeEditorProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const highlightRef = useRef<HTMLPreElement>(null);
   const lines = value.split('\n');
@@ -360,37 +413,6 @@ export default function CodeEditor({ value, onChange, onRun, onCursorChange }: C
     setShowSuggestions(false);
   };
 
-  // Bracket matching
-  const getMatchingBracket = (): { start: number; end: number } | null => {
-    if (!textareaRef.current) return null;
-    const pos = textareaRef.current.selectionStart;
-    if (pos >= value.length) return null;
-    const char = value[pos];
-    if (BRACKETS[char]) {
-      const target = BRACKETS[char];
-      let depth = 0;
-      for (let i = pos + 1; i < value.length; i++) {
-        if (value[i] === char) depth++;
-        if (value[i] === target) {
-          if (depth === 0) return { start: pos, end: i };
-          depth--;
-        }
-      }
-    } else if (CLOSING_BRACKETS.has(char)) {
-      const openBrackets = Object.entries(BRACKETS).find(([, v]) => v === char)?.[0];
-      if (!openBrackets) return null;
-      let depth = 0;
-      for (let i = pos - 1; i >= 0; i--) {
-        if (value[i] === char) depth++;
-        if (value[i] === openBrackets) {
-          if (depth === 0) return { start: i, end: pos };
-          depth--;
-        }
-      }
-    }
-    return null;
-  };
-
   const reportCursor = useCallback(() => {
     const ta = textareaRef.current;
     if (!ta || !onCursorChange) return;
@@ -420,10 +442,8 @@ export default function CodeEditor({ value, onChange, onRun, onCursorChange }: C
 
   const duplicateLine = () => {
     const { start, end } = getLineBounds();
-    const line = value.substring(start, end) + (end < value.length ? '\n' : '');
-    const newValue = value.substring(0, end) + '\n' + line + value.substring(end - (line.endsWith('\n') ? 1 : 0));
-    // simpler: insert the line + newline at the end of the line
-    onChange(value.substring(0, start) + (value.substring(start, end)) + '\n' + value.substring(start, end) + value.substring(end));
+    const line = value.substring(start, end);
+    onChange(value.substring(0, start) + line + '\n' + line + value.substring(end));
   };
 
   const deleteLine = () => {
@@ -500,13 +520,13 @@ export default function CodeEditor({ value, onChange, onRun, onCursorChange }: C
       return;
     }
     // Auto-close brackets and quotes
-    const autoClose: Record<string, string> = { '(': ')', '[': ']', '{': '}', '"': '"', "'": "'" };
-    if (!mod && !e.altKey && autoClose[e.key] && !e.key.startsWith('Arrow')) {
+    const autoCloseMap: Record<string, string> = { '(': ')', '[': ']', '{': '}', '"': '"', "'": "'" };
+    if (autoClose && !mod && !e.altKey && autoCloseMap[e.key] && !e.key.startsWith('Arrow')) {
       const start = e.currentTarget.selectionStart;
       const end = e.currentTarget.selectionEnd;
       if (start === end) {
         e.preventDefault();
-        const insert = e.key + autoClose[e.key];
+        const insert = e.key + autoCloseMap[e.key];
         onChange(value.substring(0, start) + insert + value.substring(end));
         setTimeout(() => {
           if (textareaRef.current) {
@@ -560,10 +580,11 @@ export default function CodeEditor({ value, onChange, onRun, onCursorChange }: C
       e.preventDefault();
       const start = e.currentTarget.selectionStart;
       const end = e.currentTarget.selectionEnd;
-      onChange(value.substring(0, start) + '    ' + value.substring(end));
+      const pad = ' '.repeat(tabSize);
+      onChange(value.substring(0, start) + pad + value.substring(end));
       setTimeout(() => {
         if (textareaRef.current) {
-          textareaRef.current.selectionStart = textareaRef.current.selectionEnd = start + 4;
+          textareaRef.current.selectionStart = textareaRef.current.selectionEnd = start + tabSize;
         }
       }, 0);
       return;
@@ -576,11 +597,12 @@ export default function CodeEditor({ value, onChange, onRun, onCursorChange }: C
       const lastChar = before.trim().slice(-1);
       if (lastChar === '{') {
         e.preventDefault();
-        const insert = '\n' + indent + '    \n' + indent;
+        const pad = ' '.repeat(tabSize);
+        const insert = '\n' + indent + pad + '\n' + indent;
         onChange(value.substring(0, start) + insert + value.substring(e.currentTarget.selectionEnd));
         setTimeout(() => {
           if (textareaRef.current) {
-            const pos = start + 1 + indent.length + 4;
+            const pos = start + 1 + indent.length + tabSize;
             textareaRef.current.selectionStart = textareaRef.current.selectionEnd = pos;
           }
         }, 0);
@@ -592,8 +614,6 @@ export default function CodeEditor({ value, onChange, onRun, onCursorChange }: C
     updateSuggestions();
     reportCursor();
   };
-
-  const bracketMatch = getMatchingBracket();
 
   // Build highlighted content with search match highlights
   const renderHighlighted = () => {
@@ -631,9 +651,9 @@ export default function CodeEditor({ value, onChange, onRun, onCursorChange }: C
               <span className="text-xs text-zinc-500 min-w-[60px]">
                 {matchCount > 0 ? `${currentMatch}/${matchCount}` : '0/0'}
               </span>
-              <button onClick={findPrev} className="text-zinc-400 hover:text-zinc-200 text-xs px-1">↑</button>
-              <button onClick={findNext} className="text-zinc-400 hover:text-zinc-200 text-xs px-1">↓</button>
-              <button onClick={() => { setFindOpen(false); setReplaceOpen(false); }} className="text-zinc-400 hover:text-zinc-200 text-xs px-1">✕</button>
+              <button onClick={findPrev} className="text-zinc-400 hover:text-zinc-200 px-1"><Icon name="arrow-up" size={12} /></button>
+              <button onClick={findNext} className="text-zinc-400 hover:text-zinc-200 px-1"><Icon name="arrow-down" size={12} /></button>
+              <button onClick={() => { setFindOpen(false); setReplaceOpen(false); }} className="text-zinc-400 hover:text-zinc-200 px-1"><Icon name="x" size={12} /></button>
             </div>
             {replaceOpen && (
               <div className="flex items-center gap-2">
@@ -671,11 +691,11 @@ export default function CodeEditor({ value, onChange, onRun, onCursorChange }: C
                   i === suggestionIndex ? 'bg-emerald-600 text-white' : 'text-zinc-300 hover:bg-zinc-700'
                 }`}
               >
-                <span className="text-[10px] w-4 text-center">{KIND_ICON[s.kind]}</span>
+                <span className="w-4 flex items-center justify-center"><Icon name={KIND_ICON[s.kind]} size={12} className={i === suggestionIndex ? 'text-white' : 'text-zinc-400'} /></span>
                 <span className={s.kind === 'keyword' ? 'text-purple-400' : s.kind === 'type' ? 'text-cyan-400' : s.kind === 'builtin' ? 'text-yellow-400' : 'text-green-400'}>
                   {s.label}
                 </span>
-                {s.kind === 'snippet' && <span className="text-[10px] text-zinc-500 ml-auto">⇥</span>}
+                {s.kind === 'snippet' && <span className="ml-auto"><Icon name="tab" size={11} className="text-zinc-500" /></span>}
               </div>
             ))}
           </div>
@@ -685,8 +705,8 @@ export default function CodeEditor({ value, onChange, onRun, onCursorChange }: C
         <pre
           ref={highlightRef}
           aria-hidden="true"
-          className="absolute inset-0 p-4 font-mono text-sm leading-6 pointer-events-none overflow-auto whitespace-pre"
-          style={{ margin: 0 }}
+          className="absolute inset-0 p-4 font-mono pointer-events-none overflow-auto whitespace-pre"
+          style={{ margin: 0, fontSize, lineHeight: '24px' }}
         >
           {renderHighlighted()}
           <div className="min-h-[1.5rem]">{'\u200B'}</div>
@@ -707,8 +727,8 @@ export default function CodeEditor({ value, onChange, onRun, onCursorChange }: C
             setContextMenu({ x: e.clientX, y: e.clientY });
           }}
           spellCheck={false}
-          className="absolute inset-0 p-4 font-mono text-sm leading-6 bg-transparent text-transparent caret-emerald-400 resize-none outline-none whitespace-pre overflow-auto"
-          style={{ tabSize: 4 }}
+          className="absolute inset-0 p-4 font-mono bg-transparent text-transparent caret-emerald-400 resize-none outline-none whitespace-pre overflow-auto"
+          style={{ fontSize, lineHeight: '24px', tabSize }}
         />
       </div>
 
@@ -721,7 +741,7 @@ export default function CodeEditor({ value, onChange, onRun, onCursorChange }: C
           items={[
             {
               label: 'Cut',
-              icon: '✂',
+              icon: 'scissors',
               action: () => {
                 const ta = textareaRef.current;
                 if (ta) {
@@ -732,7 +752,7 @@ export default function CodeEditor({ value, onChange, onRun, onCursorChange }: C
             },
             {
               label: 'Copy',
-              icon: '📋',
+              icon: 'copy',
               action: () => {
                 const ta = textareaRef.current;
                 if (ta) document.execCommand('copy');
@@ -740,7 +760,7 @@ export default function CodeEditor({ value, onChange, onRun, onCursorChange }: C
             },
             {
               label: 'Paste',
-              icon: '📄',
+              icon: 'clipboard',
               action: async () => {
                 const ta = textareaRef.current;
                 if (ta) {
@@ -760,7 +780,7 @@ export default function CodeEditor({ value, onChange, onRun, onCursorChange }: C
             },
             {
               label: 'Select All',
-              icon: '✦',
+              icon: 'list',
               action: () => {
                 const ta = textareaRef.current;
                 if (ta) {
@@ -773,7 +793,7 @@ export default function CodeEditor({ value, onChange, onRun, onCursorChange }: C
             { separator: true },
             {
               label: 'Find...',
-              icon: '🔍',
+              icon: 'search',
               action: () => {
                 setFindOpen(true);
                 setReplaceOpen(false);
@@ -782,7 +802,7 @@ export default function CodeEditor({ value, onChange, onRun, onCursorChange }: C
             },
             {
               label: 'Replace...',
-              icon: '🔄',
+              icon: 'replace',
               action: () => {
                 setFindOpen(true);
                 setReplaceOpen(true);
@@ -792,17 +812,17 @@ export default function CodeEditor({ value, onChange, onRun, onCursorChange }: C
             { separator: true },
             {
               label: 'Toggle Comment',
-              icon: '💬',
+              icon: 'message-square',
               action: toggleComment,
             },
             {
               label: 'Duplicate Line',
-              icon: '⧉',
+              icon: 'copy',
               action: duplicateLine,
             },
             {
               label: 'Go to Line...',
-              icon: '📏',
+              icon: 'ruler',
               action: () => {
                 const n = prompt('Go to line:');
                 if (n && !isNaN(Number(n))) goToLine(Number(n));
@@ -811,7 +831,7 @@ export default function CodeEditor({ value, onChange, onRun, onCursorChange }: C
             { separator: true },
             {
               label: 'Run Script',
-              icon: '▶',
+              icon: 'play',
               action: () => onRun?.(),
             },
           ]}

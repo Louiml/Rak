@@ -2,6 +2,7 @@
 
 import React, { useState, useRef, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { FileIcon } from './Icon';
 
 interface QuickFileEntry { name: string; path: string; }
 
@@ -70,7 +71,7 @@ export default function QuickOpen({ open, workspacePath, onOpen, onClose }: Quic
                 i === selected ? 'bg-emerald-600 text-white' : 'text-zinc-300 hover:bg-zinc-700'
               }`}
             >
-              <span className="text-xs">🔴</span>
+              <span className="flex items-center"><FileIcon name={f.name} size={14} /></span>
               <span className="truncate">{f.name}</span>
               <span className={`text-[10px] truncate ml-auto ${i === selected ? 'text-white/50' : 'text-zinc-600'}`}>
                 {f.path.replace(workspacePath, '').replace(/^[\\\/]/, '')}

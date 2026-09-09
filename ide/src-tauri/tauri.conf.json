@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "rak-ide",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "identifier": "com.ryuzaki.rak-ide",
   "build": {
     "frontendDist": "../out",
@@ -19,7 +19,8 @@
         "minHeight": 600,
         "resizable": true,
         "fullscreen": false,
-        "decorations": false
+        "decorations": false,
+        "dragDropEnabled": false
       }
     ],
     "security": {
@@ -30,7 +31,7 @@
   "bundle": {
     "active": true,
     "targets": "all",
-    "resources": ["resources/rakc", "resources/rakpkg"],
+    "resources": ["resources/rakc*", "resources/rakpkg*"],
     "windows": {
       "nsis": {
         "installMode": "currentUser",

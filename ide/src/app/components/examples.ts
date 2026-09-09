@@ -1643,4 +1643,82 @@ while running {
     handle_client(stream)
 }
 ` },
+  { name: "pipeline", filename: "pipeline.rak", source: `// pipeline.rak -- the |> pipeline operator (interpreter + VM).
+// x |> f        desugars to  f(x)
+// x |> f(a, b)  desugars to  f(x, a, b)
+
+fn inc(n) { return n + 1 }
+fn dbl(n) { return n * 2 }
+fn add(a, b) { return a + b }
+
+dump 5 |> inc |> dbl          // 12
+dump 3 |> add(10)             // 13
+dump [1, 2, 3, 4] |> sum      // 10
+` },
+  { name: "regex", filename: "regex.rak", source: `// regex.rak -- regex literals and matching.
+// Flags: i (case-insensitive), m (multi-line), s (dotall), x (extended), g (no-op).
+
+let re = /\\d+/g
+dump re.is_match("abc123")            // true
+dump re.find_all("a1 b22 c333")       // [1, 22, 333]
+dump re.find("no digits here")        // nil
+
+let ws = /\\s+/g
+dump ws.replace("a  b   c", "_")      // a_b_c
+
+// Free-function form (also works on the VM):
+dump regex_find_all(/[a-z]+/g, "a1bc2def")   // [a, bc, def]
+` },
+  { name: "binary_patterns", filename: "binary_patterns.rak", source: `// binary_patterns.rak -- binary pattern matching over byte slices.
+
+fn sniff(data: bytes) {
+    match data {
+        [0x89, 'P', 'N', 'G', ..] => { return "png" },
+        [0xFF, 0xD8, 0xFF, ..] => { return "jpeg" },
+        ['%', 'P', 'D', 'F', ..] => { return "pdf" },
+        _ => { return "unknown" },
+    }
+}
+
+dump sniff(b"\\x89PNG\\x0d\\x0a\\x1a\\x0a")  // png
+dump sniff(b"\\xFF\\xD8\\xFF\\xE0")          // jpeg
+dump sniff(b"%PDF-1.4")                      // pdf
+` },
+  { name: "traits", filename: "traits.rak", source: `// traits.rak -- Display, Iterable, Index, IndexMut.
+// The receiver is passed as the first argument of each method.
+
+struct Point { x: int, y: int }
+
+impl Display for Point {
+    fn fmt(self) { return fmt("({}, {})", self.x, self.y) }
+}
+dump Point { x: 3, y: 4 }   // (3, 4)
+
+struct Range { lo: int, hi: int }
+impl Iterable for Range {
+    fn iter(self) {
+        let out = []
+        let i = self.lo
+        while i <= self.hi { out = push(out, i); i = i + 1 }
+        return out
+    }
+}
+
+let s = 0
+for n in Range { lo: 1, hi: 5 } { s = s + n }
+dump s   // 15
+
+struct Table { entries: map }
+impl Index for Table {
+    fn index(self, key) { return get(self.entries, key, 0) }
+}
+impl IndexMut for Table {
+    fn set(self, key, value) { self.entries[key] = value; return self }
+}
+
+let t = Table { entries: {a: 1, b: 2} }
+dump t["a"]   // 1
+t["c"] = 99
+dump t["c"]   // 99
+` },
 ];

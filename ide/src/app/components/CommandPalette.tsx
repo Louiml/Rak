@@ -1,12 +1,13 @@
 'use client';
 
 import React, { useState, useRef, useEffect } from 'react';
+import { Icon, IconName } from './Icon';
 
 export interface Command {
   id: string;
   label: string;
   shortcut?: string;
-  icon?: string;
+  icon?: IconName;
   action: () => void;
 }
 
@@ -84,7 +85,7 @@ export default function CommandPalette({ open, commands, onClose }: CommandPalet
               }`}
             >
               <span className="flex items-center gap-2">
-                {cmd.icon && <span className="text-xs">{cmd.icon}</span>}
+                {cmd.icon && <Icon name={cmd.icon} size={14} className={i === selected ? 'text-white' : 'text-zinc-400'} />}
                 {cmd.label}
               </span>
               {cmd.shortcut && (
