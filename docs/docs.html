@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta name="description" content="Rak language reference: syntax, types, hexadecimal, standard library, OSINT statements, and examples.">
+    <meta name="description" content="Rak language reference: syntax, types, hexadecimal, pipelines, regex, binary patterns, traits, standard library, OSINT, and the IDE.">
     <title>Rak Documentation: Language Reference</title>
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%2306070a'/%3E%3Cpath d='M9 9l14 0 0 14-14 0z' fill='none' stroke='%2334d399' stroke-width='2.5'/%3E%3C/svg%3E">
     <link rel="stylesheet" href="style.css">
@@ -15,18 +15,18 @@
         <a class="brand" href="index.html">
             <span class="brand-mark">R</span>
             <span class="brand-name">Rak</span>
-            <span class="brand-ver">v0.1.0</span>
+            <span class="brand-ver">v0.3.1</span>
         </a>
         <nav class="site-nav">
             <a href="#intro">Intro</a>
+            <a href="#start">Start</a>
             <a href="#syntax">Syntax</a>
-            <a href="#types">Types</a>
-            <a href="#keywords">Keywords</a>
-            <a href="#hex">Hex</a>
-            <a href="#ops">Operators</a>
-            <a href="#stdlib">Standard Library</a>
-            <a href="#osint">OSINT</a>
-            <a href="#web">Web</a>
+            <a href="#pipeline">Pipeline</a>
+            <a href="#regex">Regex</a>
+            <a href="#patterns">Patterns</a>
+            <a href="#traits">Traits</a>
+            <a href="#stdlib">Stdlib</a>
+            <a href="#ide">IDE</a>
             <a href="#examples">Examples</a>
         </nav>
         <div class="header-actions">
@@ -40,14 +40,24 @@
 
         <nav class="docs-toc" aria-label="Table of contents">
             <a href="#intro" class="active">Introduction</a>
+            <a href="#start">Getting started</a>
             <a href="#syntax">Syntax</a>
             <a href="#types">Types</a>
-            <a href="#keywords">Keywords</a>
             <a href="#hex">Hexadecimal</a>
             <a href="#ops">Operators</a>
-            <a href="#stdlib">Standard Library</a>
-            <a href="#osint">OSINT &amp; Hacking</a>
-            <a href="#web">Web Interop</a>
+            <a href="#pipeline">Pipeline |&gt;</a>
+            <a href="#regex">Regex literals</a>
+            <a href="#patterns">Binary patterns</a>
+            <a href="#traits">Traits</a>
+            <a href="#strings">Strings &amp; arrays</a>
+            <a href="#errors">Error handling</a>
+            <a href="#concurrency">Concurrency</a>
+            <a href="#json">JSON</a>
+            <a href="#vm">Bytecode VM</a>
+            <a href="#stdlib">Standard library</a>
+            <a href="#osint">OSINT &amp; hacking</a>
+            <a href="#web">Web interop</a>
+            <a href="#ide">The IDE</a>
             <a href="#examples">Examples</a>
         </nav>
 
@@ -57,397 +67,572 @@
 
                 <section id="intro" class="doc-section">
                     <h1>Rak language reference</h1>
-<p class="doc-intro">Rak is for security research. Hex literals are a real type, syntax reads like English, and the standard library covers the network, HTML, and crypto work you'd otherwise hand-roll. Network scanners, web scrapers, and forensic tools end up shorter and easier to read.</p>
+                    <p class="doc-intro">Rak is a programming language for security research, OSINT, and systems work. Hex literals are a real type, syntax reads like English, and the standard library covers the network, HTML, and crypto work you'd otherwise hand-roll. Network scanners, web scrapers, and forensic tools end up shorter and easier to read.</p>
 
-                    <div class="highlight-box">
-                        <p>This reference is a work in progress. Some sections lag the implementation, and a couple spell out plans before they exist. The examples are real and runnable.</p>
+                    <div class="callout">
+                        <div class="callout-title">Two backends, one language</div>
+                        <p>Rak has a tree-walking interpreter (<code>rakc run</code>) and a stack-based bytecode VM (<code>rakc vm</code>). They share the same parser and AST, so a script that runs on one runs on the other. The VM is roughly 6&times; faster; use <code>rakc bench</code> to compare.</p>
                     </div>
 
                     <h3>Hello, World</h3>
                     <figure class="codeblock" data-title="hello.rak">
-                        <div class="codeblock-bar" aria-hidden="true">
-                            <span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-dot"></span>
-                            <span class="bar-title">hello.rak</span>
-                        </div>
+                        <div class="codeblock-bar" aria-hidden="true"><span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-title">hello.rak</span></div>
                         <pre><code data-lang="rak">dump "Hello, World"</code></pre>
                     </figure>
+                    <p><code>dump</code> prints a value to the console. That's the whole program. No <code>main</code>, no imports, no boilerplate.</p>
+                </section>
 
-                    <h3>Quick start: scan a target</h3>
-                    <figure class="codeblock" data-title="quick.rak">
-                        <div class="codeblock-bar" aria-hidden="true">
-                            <span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-dot"></span>
-                            <span class="bar-title">quick.rak</span>
-                        </div>
-                        <pre><code data-lang="rak">scan "192.168.1.1" {
-    range: [0x0016, 0x0050]
-} {
-    if open {
-        dump fmt("Port 0x{:04X}", port)
-    }
-}</code></pre>
+                <section id="start" class="doc-section">
+                    <h2>Getting started</h2>
+                    <p>Grab a release binary from the <a href="https://github.com/Louiml/Rak/releases/tag/v0.3.1" target="_blank" rel="noopener">v0.3.1 release</a>, or build from source with <code>cargo build --release -p rakc</code>. Then:</p>
+
+                    <figure class="codeblock" data-title="shell">
+                        <div class="codeblock-bar" aria-hidden="true"><span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-title">shell</span></div>
+                        <pre><code data-lang="rak">rakc run hello.rak      # run on the interpreter
+rakc vm hello.rak       # run on the bytecode VM
+rakc bench hello.rak    # compare both
+rakc build hello.rak    # produce a standalone executable
+rakc check hello.rak    # lex + parse, print diagnostics</code></pre>
                     </figure>
+
+                    <div class="callout tip">
+                        <div class="callout-title">Tip &middot; The IDE</div>
+                        <p>The Windows/Linux IDE (<code>cd ide &amp;&amp; npx tauri dev</code>) bundles the compiler and adds a file tree, terminal, console, command palette, a first-run tutorial, and settings. It's the easiest way to try Rak.</p>
+                    </div>
                 </section>
 
                 <section id="syntax" class="doc-section">
                     <h2>Syntax overview</h2>
-                    <p>Rak uses English keywords, and hex is a real type rather than a formatting trick. No semicolons required inside blocks; statements outside blocks need them.</p>
+                    <p>Rak uses English keywords and newlines as separators. Hex is a real type, not a formatting trick. Statements inside blocks don't need semicolons; top-level statements do.</p>
 
                     <h3>Variables</h3>
-                    <figure class="codeblock" data-title="syntax.rak">
-                        <div class="codeblock-bar" aria-hidden="true">
-                            <span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-dot"></span>
-                            <span class="bar-title">variables.rak</span>
-                        </div>
-                        <pre><code data-lang="rak">let x = 0xFF
-let mut counter = 0
+                    <figure class="codeblock" data-title="variables.rak">
+                        <div class="codeblock-bar" aria-hidden="true"><span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-title">variables.rak</span></div>
+                        <pre><code data-lang="rak">let port = 0x0050         // immutable
+let mut counter = 0       // mutable
 counter = counter + 1</code></pre>
                     </figure>
+                    <p>Bind with <code>let</code>. Add <code>mut</code> if you'll reassign later. Without <code>mut</code>, reassigning is an error.</p>
 
                     <h3>Functions</h3>
                     <figure class="codeblock" data-title="functions.rak">
-                        <div class="codeblock-bar" aria-hidden="true">
-                            <span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-dot"></span>
-                            <span class="bar-title">functions.rak</span>
-                        </div>
+                        <div class="codeblock-bar" aria-hidden="true"><span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-title">functions.rak</span></div>
                         <pre><code data-lang="rak">fn add(a, b) {
     return a + b
 }
 
-let result = add(0x10, 0x20)</code></pre>
+// anonymous closure
+let sq = fn(n) { return n * n }
+dump add(0x10, 0x20)    // 48
+dump sq(7)             // 49</code></pre>
                     </figure>
+                    <p>Closures capture their definition environment (lexical scoping), so recursion and higher-order functions just work.</p>
 
                     <h3>Control flow</h3>
                     <figure class="codeblock" data-title="control.rak">
-                        <div class="codeblock-bar" aria-hidden="true">
-                            <span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-dot"></span>
-                            <span class="bar-title">control.rak</span>
-                        </div>
-                        <pre><code data-lang="rak">if x > 0x10 {
-    dump "Greater"
+                        <div class="codeblock-bar" aria-hidden="true"><span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-title">control.rak</span></div>
+                        <pre><code data-lang="rak">if port > 0x0050 {
+    dump "high"
 } else {
-    dump "Smaller"
-}
-
-loop {
-    dump "Infinite"
-    break
+    dump "low"
 }
 
 while counter < 0x0A {
-    dump counter
     counter = counter + 1
+}
+
+loop {
+    dump "forever"
+    break
+}
+
+for x in [1, 2, 3] {
+    dump x
 }</code></pre>
                     </figure>
+
+                    <h3>Structs, enums, and match</h3>
+                    <figure class="codeblock" data-title="data.rak">
+                        <div class="codeblock-bar" aria-hidden="true"><span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-title">data.rak</span></div>
+                        <pre><code data-lang="rak">struct Point { x: int, y: int }
+let p = Point { x: 3, y: 4 }
+dump p.x
+
+enum Shape {
+    Circle,
+    Square(int)
+}
+
+match shape {
+    Shape::Circle => { dump "round" },
+    Shape::Square(n) => { dump n },
+    _ => { dump "other" },
+}</code></pre>
+                    </figure>
+                    <p><code>match</code> arms need a trailing comma. Patterns support literals, identifiers, tuples, arrays, struct fields, <code>Some</code>/<code>Ok</code>/<code>Err</code>, ranges, and <code>|</code> alternatives.</p>
                 </section>
 
                 <section id="types" class="doc-section">
                     <h2>Type system</h2>
                     <table>
-                        <thead>
-                            <tr><th>Type</th><th>Description</th><th>Example</th></tr>
-                        </thead>
+                        <thead><tr><th>Type</th><th>Description</th><th>Example</th></tr></thead>
                         <tbody>
-                            <tr><td>hex8 &middot; hex16 &middot; hex32 &middot; hex64</td><td>Unsigned integers</td><td>0xFF, 0xABCD</td></tr>
-                            <tr><td>int</td><td>Decimal integer</td><td>42, 1000</td></tr>
+                            <tr><td>hex8 &middot; hex16 &middot; hex32 &middot; hex64</td><td>Unsigned integers (hex is a real type)</td><td>0xFF, 0xDEADBEEF</td></tr>
+                            <tr><td>i8 &hellip; i64, u8 &hellip; u64</td><td>Signed/unsigned ints with type suffixes</td><td>42i32, 10u8</td></tr>
+                            <tr><td>int</td><td>Default integer</td><td>42, 1000</td></tr>
+                            <tr><td>f32, f64</td><td>Floating point</td><td>3.14, 3.14f64</td></tr>
                             <tr><td>string</td><td>UTF-8 text</td><td>"hello"</td></tr>
                             <tr><td>bytes</td><td>Raw byte array</td><td>b"\x48\x65\x6C\x6C\x6F"</td></tr>
                             <tr><td>bool</td><td>Boolean</td><td>true, false</td></tr>
                             <tr><td>nil</td><td>Null / void</td><td>nil</td></tr>
                             <tr><td>[T]</td><td>Array</td><td>[1, 2, 3]</td></tr>
                             <tr><td>{K: V}</td><td>Map</td><td>{"key": "value"}</td></tr>
+                            <tr><td>Option&lt;T&gt;, Result&lt;T, E&gt;</td><td>Optional / fallible values</td><td>Some(1), Ok(42), Err("x")</td></tr>
                         </tbody>
                     </table>
                 </section>
 
-                <section id="keywords" class="doc-section">
-                    <h2>Keywords</h2>
-                    <div class="keyword-grid">
-                        <div class="keyword-card"><code>scan</code><p>Port / network scanner</p></div>
-                        <div class="keyword-card"><code>fetch</code><p>HTTP / TCP request</p></div>
-                        <div class="keyword-card"><code>dump</code><p>Output to console or file</p></div>
-                        <div class="keyword-card"><code>trace</code><p>Inspect / debug output</p></div>
-                        <div class="keyword-card"><code>let</code><p>Variable declaration</p></div>
-                        <div class="keyword-card"><code>mut</code><p>Mutable modifier</p></div>
-                        <div class="keyword-card"><code>fn</code><p>Function definition</p></div>
-                        <div class="keyword-card"><code>if / else</code><p>Conditional</p></div>
-                        <div class="keyword-card"><code>loop</code><p>Infinite loop</p></div>
-                        <div class="keyword-card"><code>while</code><p>Conditional loop</p></div>
-                        <div class="keyword-card"><code>for</code><p>Iterator loop</p></div>
-                        <div class="keyword-card"><code>return</code><p>Return value</p></div>
-                    </div>
-                </section>
-
                 <section id="hex" class="doc-section">
                     <h2>Hexadecimal</h2>
-                    <p>Hex is a real type in Rak. You write memory addresses, port numbers, and byte sequences in it directly.</p>
+                    <p>Hex is a real type in Rak. Memory addresses, port numbers, and byte sequences read like they look in a hex editor. Hex arithmetic stays hex.</p>
 
-                    <h3>Literals</h3>
-                    <figure class="codeblock" data-title="hex_literals.rak">
-                        <div class="codeblock-bar" aria-hidden="true">
-                            <span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-dot"></span>
-                            <span class="bar-title">hex_literals.rak</span>
-                        </div>
-                        <pre><code data-lang="rak">let port = 0x0050      // 80 in decimal
-let signature = 0xDEADBEEF
-let mask = 0xFF00FF00</code></pre>
+                    <figure class="codeblock" data-title="hex.rak">
+                        <div class="codeblock-bar" aria-hidden="true"><span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-title">hex.rak</span></div>
+                        <pre><code data-lang="rak">let port = 0x0050          // 80
+let sig = 0xDEADBEEF
+
+let a = 0x10 & 0xFF00      // 0x1000
+let b = 0xFF | 0x0F        // 0xFF
+let c = 0xAA ^ 0x0F        // 0xA5
+
+dump fmt("0x{:08X}", sig)  // 0xDEADBEEF</code></pre>
                     </figure>
 
-                    <h3>Arithmetic</h3>
-                    <figure class="codeblock" data-title="hex_math.rak">
-                        <div class="codeblock-bar" aria-hidden="true">
-                            <span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-dot"></span>
-                            <span class="bar-title">hex_math.rak</span>
-                        </div>
-                        <pre><code data-lang="rak">let a = 0x10
-let b = 0x20
-let c = a + b           // 0x30
-let d = a & b           // 0x00
-let e = a | b           // 0x30
-let f = a ^ b           // 0x30</code></pre>
-                    </figure>
-
-                    <h3>Formatting</h3>
-                    <figure class="codeblock" data-title="hex_format.rak">
-                        <div class="codeblock-bar" aria-hidden="true">
-                            <span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-dot"></span>
-                            <span class="bar-title">hex_format.rak</span>
-                        </div>
-                        <pre><code data-lang="rak">dump fmt("0x{:04X}", port)    // 0x0050
-dump fmt("0x{:08X}", sig)     // 0xDEADBEEF</code></pre>
-                    </figure>
+                    <div class="callout">
+                        <div class="callout-title">Formatting</div>
+                        <p><code>fmt("0x{:08X}", v)</code> zero-pads to 8 hex digits. <code>{:04X}</code> pads to 4. The <code>X</code> upper-cases; <code>x</code> lower-cases.</p>
+                    </div>
                 </section>
 
                 <section id="ops" class="doc-section">
                     <h2>Operators</h2>
                     <table>
-                        <thead>
-                            <tr><th>Operator</th><th>Description</th></tr>
-                        </thead>
+                        <thead><tr><th>Operator</th><th>Description</th></tr></thead>
                         <tbody>
                             <tr><td>+ &minus; * / %</td><td>Arithmetic</td></tr>
                             <tr><td>&amp; | ^ ~ &lt;&lt; &gt;&gt;</td><td>Bitwise</td></tr>
                             <tr><td>== != &lt; &gt; &lt;= &gt;=</td><td>Comparison</td></tr>
                             <tr><td>&amp;&amp; || !</td><td>Logical</td></tr>
-                            <tr><td>= += &minus;= *= /=</td><td>Assignment</td></tr>
-                            <tr><td>[] .</td><td>Index, field access</td></tr>
+                            <tr><td>= += &minus;= *= /= %=</td><td>Assignment</td></tr>
+                            <tr><td>|&gt;</td><td>Pipeline (see below)</td></tr>
+                            <tr><td>? !</td><td>Try / raise</td></tr>
+                            <tr><td>[] . ::</td><td>Index, field, path</td></tr>
                         </tbody>
                     </table>
                 </section>
 
+                <section id="pipeline" class="doc-section">
+                    <h2>Pipeline <code>|&gt;</code> <span class="new-badge">new</span></h2>
+                    <p>The pipeline operator threads a value into the next call, so data flows left-to-right instead of nesting inside-out.</p>
+
+                    <div class="callout">
+                        <div class="callout-title">The rule</div>
+                        <p><code>x |&gt; f</code> becomes <code>f(x)</code>, and <code>x |&gt; f(a, b)</code> becomes <code>f(x, a, b)</code> &mdash; the left value is <em>prepended</em> as the first argument. Chaining is left-associative: <code>data |&gt; parse |&gt; load</code> is <code>load(parse(data))</code>.</p>
+                    </div>
+
+                    <figure class="codeblock" data-title="pipeline.rak">
+                        <div class="codeblock-bar" aria-hidden="true"><span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-title">pipeline.rak</span></div>
+                        <pre><code data-lang="rak">fn inc(n) { return n + 1 }
+fn dbl(n) { return n * 2 }
+fn add(a, b) { return a + b }
+
+dump 5 |> inc |> dbl          // dbl(inc(5)) = 12
+dump 3 |> add(10)             // add(3, 10) = 13
+dump [1, 2, 3, 4] |> sum      // 10
+
+// a data-processing chain, top to bottom
+let hits = payload
+    |> regex_find_all(/\d+\.\d+\.\d+\.\d+/g)
+    |> len
+dump hits</code></pre>
+                    </figure>
+                    <p>The pipeline is a parse-time desugar, so it works identically on the interpreter and the VM &mdash; there's no new bytecode.</p>
+                </section>
+
+                <section id="regex" class="doc-section">
+                    <h2>Regex literals <span class="new-badge">new</span></h2>
+                    <p>Write a regex inline with <code>/pattern/flags</code>. A <code>/</code> after a value is division; a <code>/</code> anywhere else starts a regex, so <code>let r = /\d+/g</code> and <code>a / b</code> both parse correctly.</p>
+
+                    <figure class="codeblock" data-title="regex.rak">
+                        <div class="codeblock-bar" aria-hidden="true"><span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-title">regex.rak</span></div>
+                        <pre><code data-lang="rak">let re = /\d+/g
+dump re.is_match("abc123")          // true
+dump re.find_all("a1 b22 c333")     // [1, 22, 333]
+dump re.find("no digits here")      // nil
+
+let ws = /\s+/g
+dump ws.replace("a  b   c", "_")   // a_b_c
+
+// case-insensitive
+dump (/rak/i).is_match("RAK language")   // true</code></pre>
+                    </figure>
+
+                    <div class="callout tip">
+                        <div class="callout-title">Flags</div>
+                        <p><code>i</code> case-insensitive, <code>m</code> multi-line, <code>s</code> dotall, <code>x</code> extended, <code>g</code> accepted (find is global anyway). Escape a literal <code>/</code> as <code>\/</code>.</p>
+                    </div>
+
+                    <p>Free-function form works on both backends (handy for the VM, which has no method dispatch):</p>
+                    <figure class="codeblock" data-title="regex_builtin.rak">
+                        <div class="codeblock-bar" aria-hidden="true"><span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-title">regex_builtin.rak</span></div>
+                        <pre><code data-lang="rak">dump regex_find_all(/[a-z]+/g, "a1bc2def")   // [a, bc, def]
+dump regex_replace(/\s+/g, "a b c", "_")     // a_b_c</code></pre>
+                    </figure>
+                </section>
+
+                <section id="patterns" class="doc-section">
+                    <h2>Binary pattern matching <span class="new-badge">new</span></h2>
+                    <p>Match a <code>bytes</code> value against a list of byte literals. A trailing <code>..</code> matches the rest, so you can sniff magic numbers without knowing the full length.</p>
+
+                    <figure class="codeblock" data-title="sniff.rak">
+                        <div class="codeblock-bar" aria-hidden="true"><span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-title">sniff.rak</span></div>
+                        <pre><code data-lang="rak">fn sniff(d: bytes) {
+    match d {
+        [0x89, 'P', 'N', 'G', ..] => { return "png" },
+        [0xFF, 0xD8, 0xFF, ..] => { return "jpeg" },
+        [0x47, 0x49, 0x46, '8', ..] => { return "gif" },
+        ['%', 'P', 'D', 'F', ..] => { return "pdf" },
+        _ => { return "unknown" },
+    }
+}
+
+dump sniff(b"\x89PNG\x0d\x0a\x1a\x0a")  // png
+dump sniff(b"\xFF\xD8\xFF\xE0")         // jpeg
+dump sniff(b"%PDF-1.4")                 // pdf</code></pre>
+                    </figure>
+
+                    <div class="callout">
+                        <div class="callout-title">Byte literals</div>
+                        <p>Inside a bytes pattern, literals can be hex (<code>0x89</code>), decimal (<code>216</code>), or a char (<code>'P'</code>). Each is bounds-checked to 0&ndash;255. A pattern with <code>..</code> matches the rest; without it, the lengths must be equal. Exact-length matching without <code>..</code> also works against <code>bytes</code>.</p>
+                    </div>
+                </section>
+
+                <section id="traits" class="doc-section">
+                    <h2>Traits <span class="new-badge">new</span></h2>
+                    <p>Traits are the language's protocols. Implement one on your type and the built-in syntax uses it automatically.</p>
+
+                    <table>
+                        <thead><tr><th>Trait</th><th>Method</th><th>Drives</th></tr></thead>
+                        <tbody>
+                            <tr><td>Display</td><td><code>fmt(self)</code></td><td><code>dump</code>, file output</td></tr>
+                            <tr><td>Debug</td><td><code>fmt(self)</code></td><td><code>trace</code></td></tr>
+                            <tr><td>Iterable</td><td><code>iter(self)</code></td><td><code>for x in target</code></td></tr>
+                            <tr><td>Index</td><td><code>index(self, key)</code></td><td><code>obj[key]</code> read</td></tr>
+                            <tr><td>IndexMut</td><td><code>set(self, key, value)</code></td><td><code>obj[key] = v</code> write</td></tr>
+                        </tbody>
+                    </table>
+
+                    <div class="callout">
+                        <div class="callout-title">The receiver is the first argument</div>
+                        <p>There's no <code>self</code> keyword. The receiver is passed as the first argument of the method &mdash; name it whatever you like. <code>IndexMut::set</code> must <strong>return</strong> the updated container (functional-update semantics, matching Rak's clone-on-read values).</p>
+                    </div>
+
+                    <figure class="codeblock" data-title="traits.rak">
+                        <div class="codeblock-bar" aria-hidden="true"><span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-title">traits.rak</span></div>
+                        <pre><code data-lang="rak">struct Point { x: int, y: int }
+
+impl Display for Point {
+    fn fmt(self) { return fmt("({}, {})", self.x, self.y) }
+}
+dump Point { x: 3, y: 4 }   // (3, 4)
+
+struct Range { lo: int, hi: int }
+impl Iterable for Range {
+    fn iter(self) {
+        let out = []
+        let i = self.lo
+        while i <= self.hi { out = push(out, i); i = i + 1 }
+        return out
+    }
+}
+let s = 0
+for n in Range { lo: 1, hi: 5 } { s = s + n }
+dump s   // 15
+
+struct Table { entries: map }
+impl Index for Table {
+    fn index(self, key) { return get(self.entries, key, 0) }
+}
+impl IndexMut for Table {
+    fn set(self, key, value) { self.entries[key] = value; return self }
+}
+let t = Table { entries: {a: 1} }
+dump t["a"]   // 1
+t["b"] = 2
+dump t["b"]   // 2</code></pre>
+                    </figure>
+                </section>
+
+                <section id="strings" class="doc-section">
+                    <h2>Strings &amp; arrays</h2>
+                    <p>Built-in helpers operate on strings, arrays, and maps. They're plain functions, not methods, so they work on both backends.</p>
+
+                    <figure class="codeblock" data-title="strings.rak">
+                        <div class="codeblock-bar" aria-hidden="true"><span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-title">strings.rak</span></div>
+                        <pre><code data-lang="rak">dump replace("hello", "l", "L")     // heLLo
+dump split("a,b,c", ",")          // [a, b, c]
+dump join(", ", ["x", "y", "z"])  // x, y, z
+dump slice("hello", 1, 3)         // el
+dump starts_with("hello", "he")   // true
+dump reverse([1, 2, 3])           // [3, 2, 1]
+dump sum([1, 2, 3, 4])            // 10
+dump max(3, 9, 2)                 // 9</code></pre>
+                    </figure>
+
+                    <h3>Interpolation</h3>
+                    <figure class="codeblock" data-title="interp.rak">
+                        <div class="codeblock-bar" aria-hidden="true"><span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-title">interp.rak</span></div>
+                        <pre><code data-lang="rak">let name = "Rak"
+dump f"hello {name}!"            // hello Rak!
+dump fmt("0x{:04X}", 0x0050)     // 0x0050</code></pre>
+                    </figure>
+                    <p><code>f"..."</code> interpolates <code>{expr}</code> inline. <code>fmt</code> is the same idea with explicit format specifiers.</p>
+                </section>
+
+                <section id="errors" class="doc-section">
+                    <h2>Error handling</h2>
+                    <p>Three pieces work together: <code>Result</code>/<code>Option</code> values, the <code>?</code> operator, and <code>try</code>/<code>catch</code>/<code>raise</code>.</p>
+
+                    <figure class="codeblock" data-title="errors.rak">
+                        <div class="codeblock-bar" aria-hidden="true"><span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-title">errors.rak</span></div>
+                        <pre><code data-lang="rak">let r = Ok(42)
+let v = r?                  // unwrap; propagate Err
+dump v                      // 42
+
+try {
+    raise "boom"
+} catch e {
+    dump e                  // boom
+}
+
+// Option too
+let maybe = Some(7)
+let n = maybe?              // unwrap; propagate None</code></pre>
+                    </figure>
+                    <p><code>?</code> unwraps an <code>Ok</code>/<code>Some</code> and short-circuits an <code>Err</code>/<code>None</code> out of the enclosing function (or into the nearest <code>try</code>). <code>raise</code> throws any value; <code>catch e</code> binds it.</p>
+                </section>
+
+                <section id="concurrency" class="doc-section">
+                    <h2>Concurrency</h2>
+                    <p><code>spawn</code> launches a thread, <code>thread_join</code> waits, and <code>channel()</code> gives a sender/receiver pair. TCP networking is built in.</p>
+
+                    <figure class="codeblock" data-title="concurrency.rak">
+                        <div class="codeblock-bar" aria-hidden="true"><span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-title">concurrency.rak</span></div>
+                        <pre><code data-lang="rak">let h = spawn(fn() { return 42 })
+dump thread_join(h)          // 42
+
+let (tx, rx) = channel()
+chan_send(tx, "hi")
+dump chan_recv(rx)           // Some(hi)
+
+let listener = net_listen("127.0.0.1:18392")
+let conn = net_accept(listener)
+let stream = conn.0
+tcp_write(stream, "hello\n")
+dump tcp_read_line(stream)
+tcp_close(stream)</code></pre>
+                    </figure>
+                </section>
+
+                <section id="json" class="doc-section">
+                    <h2>JSON</h2>
+                    <p><code>json_parse</code> returns native arrays, maps, ints, floats, bools, and nil. <code>json_stringify</code> serializes back. Real round-tripping, no hand-rolling.</p>
+
+                    <figure class="codeblock" data-title="json.rak">
+                        <div class="codeblock-bar" aria-hidden="true"><span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-title">json.rak</span></div>
+                        <pre><code data-lang="rak">let j = json_parse("{\"user\": \"admin\", \"id\": 7}")
+dump j.user                       // admin
+dump j.id                         // 7
+dump json_stringify(j)            // {"user":"admin","id":7}
+dump json_keys(j)                 // [user, id]</code></pre>
+                    </figure>
+                </section>
+
+                <section id="vm" class="doc-section">
+                    <h2>Bytecode VM</h2>
+                    <p>Same language, two runtimes. The VM compiles the AST to a stack-based bytecode chunk and runs it &mdash; about 6&times; faster than the tree-walker on compute-heavy scripts.</p>
+
+                    <figure class="codeblock" data-title="bench.rak">
+                        <div class="codeblock-bar" aria-hidden="true"><span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-title">bench.rak</span></div>
+                        <pre><code data-lang="rak">fn fib(n) {
+    if n < 2 { return n }
+    return fib(n - 1) + fib(n - 2)
+}
+dump fib(28)</code></pre>
+                    </figure>
+
+                    <div class="callout tip">
+                        <div class="callout-title">Run it</div>
+                        <p><code>rakc bench bench.rak</code> prints both timings. The VM supports functions, recursion, arrays/tuples/maps, indexing, match, interpolation, regex literals, and the pipeline. Trait protocols and method dispatch are interpreter-only for now.</p>
+                    </div>
+                </section>
+
                 <section id="stdlib" class="doc-section">
                     <h2>Standard library</h2>
+                    <p>Modules cover the work you'd otherwise hand-roll. Call them as plain functions.</p>
 
-                    <h3>net</h3>
-                    <figure class="codeblock" data-title="net.rak">
-                        <div class="codeblock-bar" aria-hidden="true">
-                            <span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-dot"></span>
-                            <span class="bar-title">net.rak</span>
-                        </div>
-                        <pre><code data-lang="rak">use net.http
-
-fetch "https://example.com" {
-    method: "GET",
-    headers: {"User-Agent": "Rak/0.1"}
-} {
-    dump headers
-    trace body
-}</code></pre>
-                    </figure>
-
-                    <h3>recon</h3>
-                    <figure class="codeblock" data-title="recon.rak">
-                        <div class="codeblock-bar" aria-hidden="true">
-                            <span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-dot"></span>
-                            <span class="bar-title">recon.rak</span>
-                        </div>
-                        <pre><code data-lang="rak">use recon.dns
-
-scan "target.com" {
-    range: [0x0016, 0x01F4]
-    threads: 0x64
-}</code></pre>
-                    </figure>
-
-                    <h3>crypto</h3>
+                    <h3>crypto &amp; encoding</h3>
                     <figure class="codeblock" data-title="crypto.rak">
-                        <div class="codeblock-bar" aria-hidden="true">
-                            <span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-dot"></span>
-                            <span class="bar-title">crypto.rak</span>
-                        </div>
-                        <pre><code data-lang="rak">use crypto.hash
+                        <div class="codeblock-bar" aria-hidden="true"><span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-title">crypto.rak</span></div>
+                        <pre><code data-lang="rak">dump md5("password")
+dump sha256("secret")
+dump hex_encode("ABC")        // 414243
+dump base64_encode("hello")
+dump url_encode("a b&c")</code></pre>
+                    </figure>
 
-let data = "password"
-let hash = md5(data)
-let hash2 = sha256(data)</code></pre>
+                    <h3>file</h3>
+                    <figure class="codeblock" data-title="file.rak">
+                        <div class="codeblock-bar" aria-hidden="true"><span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-title">file.rak</span></div>
+                        <pre><code data-lang="rak">file_write("out.txt", "Rak was here")
+dump file_read("out.txt")
+dump file_exists("out.txt")    // true
+for f in file_list(".") { dump f }</code></pre>
                     </figure>
                 </section>
 
                 <section id="osint" class="doc-section">
-                    <h2>OSINT and hacking modules</h2>
+                    <h2>OSINT and hacking</h2>
+                    <p>Rak started as an OSINT scripting tool. <code>scan</code> and <code>fetch</code> are first-class statements with callback blocks.</p>
 
                     <h3>Port scanning</h3>
                     <figure class="codeblock" data-title="osint_scan.rak">
-                        <div class="codeblock-bar" aria-hidden="true">
-                            <span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-dot"></span>
-                            <span class="bar-title">osint_scan.rak</span>
-                        </div>
-                        <pre><code data-lang="rak">scan target {
-    range: [start_port, end_port],
-    threads: 0x64,
+                        <div class="codeblock-bar" aria-hidden="true"><span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-title">osint_scan.rak</span></div>
+                        <pre><code data-lang="rak">scan "192.168.1.1" {
+    range: [0x0016, 0x01F4],
     timeout: 0x1388
 } {
     if open {
-        dump fmt("[+] Port {}", port)
-        dump fmt("[+] Banner: {}", banner)
+        dump fmt("[+] Port 0x{:04X}: {}", port, banner)
     }
+}
+
+// or as a function, for for-loops
+for port in scan_ports(target, { range: [0x0016, 0x0050] }) {
+    dump fmt("Open: 0x{:04X}", port)
 }</code></pre>
                     </figure>
 
                     <h3>Web reconnaissance</h3>
                     <figure class="codeblock" data-title="osint_web.rak">
-                        <div class="codeblock-bar" aria-hidden="true">
-                            <span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-dot"></span>
-                            <span class="bar-title">osint_web.rak</span>
-                        </div>
-                        <pre><code data-lang="rak">fetch url {
-    method: "GET",
-    follow_redirects: true
+                        <div class="codeblock-bar" aria-hidden="true"><span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-title">osint_web.rak</span></div>
+                        <pre><code data-lang="rak">fetch "https://example.com" {
+    method: "GET"
 } {
-    trace status
     dump headers["Server"]
-    dump body
-}</code></pre>
-                    </figure>
-
-                    <h3>Packet analysis</h3>
-                    <figure class="codeblock" data-title="packet.rak">
-                        <div class="codeblock-bar" aria-hidden="true">
-                            <span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-dot"></span>
-                            <span class="bar-title">packet.rak</span>
-                        </div>
-                        <pre><code data-lang="rak">let packet = b"\x45\x00\x00\x3C\x1C\x46..."
-let ip_version = packet[0] >> 4
-dump fmt("IP Version: {}", ip_version)</code></pre>
+    for link in html_links(body) {
+        dump link
+    }
+}
+dump dns_lookup("example.com")</code></pre>
                     </figure>
                 </section>
 
                 <section id="web" class="doc-section">
-                    <h2>HTML, CSS, JS Interop</h2>
-                    <p>Rak integrates with the web for scraping, DOM parsing, and JavaScript execution.</p>
+                    <h2>HTML &amp; web interop</h2>
+                    <p>Parse HTML with CSS selectors, extract links and forms, and walk the DOM. Built on <code>scraper</code>.</p>
 
-                    <h3>HTML parsing</h3>
-                    <figure class="codeblock" data-title="web_html.rak">
-                        <div class="codeblock-bar" aria-hidden="true">
-                            <span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-dot"></span>
-                            <span class="bar-title">web_html.rak</span>
-                        </div>
-                        <pre><code data-lang="rak">use web.html
-
-fetch "https://example.com" {
-    method: "GET"
-} {
-    let title = html.select("title").text()
-    let links = html.select_all("a[href]")
-
-    for link in links {
-        dump link.attr("href")
-    }
-}</code></pre>
+                    <figure class="codeblock" data-title="web.rak">
+                        <div class="codeblock-bar" aria-hidden="true"><span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-title">web.rak</span></div>
+                        <pre><code data-lang="rak">let html = "&lt;title&gt;Rak&lt;/title&gt;&lt;a href='https://rak.dev'&gt;Rak&lt;/a&gt;"
+dump html_title(html)                       // Rak
+for link in html_links(html) { dump link }  // https://rak.dev
+dump html_select(html, "a")                // Rak</code></pre>
                     </figure>
+                </section>
 
-                    <h3>CSS selectors</h3>
-                    <figure class="codeblock" data-title="web_selectors.rak">
-                        <div class="codeblock-bar" aria-hidden="true">
-                            <span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-dot"></span>
-                            <span class="bar-title">web_selectors.rak</span>
-                        </div>
-                        <pre><code data-lang="rak">// Extract all images
-let images = html.select_all("img")
-for img in images {
-    dump img.attr("src")
-}
+                <section id="ide" class="doc-section">
+                    <h2>The IDE</h2>
+                    <p>The desktop IDE (Tauri + Next.js) bundles the compiler and adds everything you need to write Rak comfortably.</p>
 
-// Extract forms
-let forms = html.select_all("form")
-for form in forms {
-    dump form.attr("action")
-    let inputs = form.select_all("input")
-    for input in inputs {
-        dump fmt("{} = {}", input.attr("name"), input.attr("value"))
-    }
-}</code></pre>
-                    </figure>
+                    <div class="feature-grid" style="margin-top:1.2rem">
+                        <div class="feature"><h4>First-run tutorial</h4><p>A spotlight coachmark tour walks the editor, run modes, console, terminal, and examples. Replays from the palette or Settings.</p></div>
+                        <div class="feature"><h4>Settings</h4><p>Editor font size, tab size, auto-close brackets, default run mode &mdash; persisted across sessions.</p></div>
+                        <div class="feature"><h4>File tree</h4><p>A recursive sidebar: click a folder to expand, right-click the background for New File/Folder, drag files into folders to move them.</p></div>
+                        <div class="feature"><h4>Syntax highlight</h4><p>Regex, char, hex, and <code>|&gt;</code> all color correctly, with autocomplete for builtins, types, and snippets.</p></div>
+                        <div class="feature"><h4>Three run modes</h4><p>Interpreter, VM, and Bench from a single dropdown &mdash; output streams to the console.</p></div>
+                        <div class="feature"><h4>Built-in terminal</h4><p>Run <code>rakc</code>, <code>rakpkg</code>, or system commands without leaving the editor.</p></div>
+                    </div>
 
-                    <h3>JavaScript execution</h3>
-                    <figure class="codeblock" data-title="web_js.rak">
-                        <div class="codeblock-bar" aria-hidden="true">
-                            <span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-dot"></span>
-                            <span class="bar-title">web_js.rak</span>
-                        </div>
-                        <pre><code data-lang="rak">use web.js
-
-let result = js.eval("JSON.stringify(document.cookie)")
-dump result
-
-let element = js.query("#username")
-js.click(element)
-js.type(element, "admin")</code></pre>
-                    </figure>
+                    <div class="callout">
+                        <div class="callout-title">Shortcuts</div>
+                        <p><span class="kbd">Ctrl+R</span> run &middot; <span class="kbd">Ctrl+S</span> save &middot; <span class="kbd">Ctrl+Shift+P</span> command palette &middot; <span class="kbd">Ctrl+P</span> quick open &middot; <span class="kbd">Ctrl+Shift+T</span> terminal &middot; <span class="kbd">Ctrl+B</span> sidebar.</p>
+                    </div>
                 </section>
 
                 <section id="examples" class="doc-section">
-                    <h2>Example scripts</h2>
+                    <h2>Examples</h2>
 
-                    <h3>Network scanner</h3>
-                    <figure class="codeblock" data-title="net_scan.rak">
-                        <div class="codeblock-bar" aria-hidden="true">
-                            <span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-dot"></span>
-                            <span class="bar-title">net_scan.rak</span>
-                        </div>
-                        <pre><code data-lang="rak">// Simple network reconnaissance
-let target = "192.168.1.1"
-let start = 0x0016   // 22 SSH
-let end = 0x01F4     // 500
+                    <h3>Log parsing with pipelines + regex</h3>
+                    <figure class="codeblock" data-title="log_parse.rak">
+                        <div class="codeblock-bar" aria-hidden="true"><span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-title">log_parse.rak</span></div>
+                        <pre><code data-lang="rak">let log = "192.168.1.5 - admin - POST /login 200"
+let ips = log |> regex_find_all(/\d+\.\d+\.\d+\.\d+/g)
+dump ips                       // [192.168.1.5]
 
-scan target {
-    range: [start, end],
-    threads: 0x64
-} {
-    if open {
-        dump fmt("[OPEN] {}:{}", target, port)
-        if port == 0x0050 {
-            dump "[HTTP] Checking web server..."
-            fetch fmt("http://{}/", target) {
-                method: "GET",
-                timeout: 0x1388
-            } {
-                trace headers
-            }
-        }
-    }
-}</code></pre>
+let codes = log |> regex_find_all(/\b[1-5]\d{2}\b/g)
+dump codes                     // [200]</code></pre>
                     </figure>
 
-                    <h3>Data exfil detection</h3>
-                    <figure class="codeblock" data-title="exfil.rak">
-                        <div class="codeblock-bar" aria-hidden="true">
-                            <span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-dot"></span>
-                            <span class="bar-title">exfil.rak</span>
-                        </div>
-                        <pre><code data-lang="rak">// Monitor network for suspicious patterns
-let subnet = "10.0.0.0/24"
-let suspicious_ports = [0x1F90, 0x1388, 0x115C]  // 8080, 5000, 4444
-
-scan subnet {
-    ports: suspicious_ports
-} {
-    if open {
-        dump fmt("[ALERT] Suspicious port open: 0x{:04X}", port)
-        trace target
+                    <h3>File-header sniffer (binary patterns)</h3>
+                    <figure class="codeblock" data-title="sniffer.rak">
+                        <div class="codeblock-bar" aria-hidden="true"><span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-title">sniffer.rak</span></div>
+                        <pre><code data-lang="rak">fn kind(d: bytes) {
+    match d {
+        [0x89, 'P', 'N', 'G', ..] => { return "png" },
+        [0xFF, 0xD8, 0xFF, ..] => { return "jpeg" },
+        ['%', 'P', 'D', 'F', ..] => { return "pdf" },
+        _ => { return "unknown" },
     }
+}
+dump kind(b"\x89PNG\x0d\x0a")</code></pre>
+                    </figure>
+
+                    <h3>Custom iterable type (traits)</h3>
+                    <figure class="codeblock" data-title="range_type.rak">
+                        <div class="codeblock-bar" aria-hidden="true"><span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-title">range_type.rak</span></div>
+                        <pre><code data-lang="rak">struct Range { lo: int, hi: int }
+impl Iterable for Range {
+    fn iter(self) {
+        let out = []
+        let i = self.lo
+        while i <= self.hi { out = push(out, i); i = i + 1 }
+        return out
+    }
+}
+let total = 0
+for n in Range { lo: 1, hi: 100 } { total = total + n }
+dump total   // 5050</code></pre>
+                    </figure>
+
+                    <h3>Scan, then fetch, then hash</h3>
+                    <figure class="codeblock" data-title="recon.rak">
+                        <div class="codeblock-bar" aria-hidden="true"><span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-title">recon.rak</span></div>
+                        <pre><code data-lang="rak">let target = "127.0.0.1"
+for port in scan_ports(target, { range: [0x0016, 0x0050] }) {
+    dump fmt("Port 0x{:04X} open", port)
+}
+
+fetch "https://example.com" { method: "GET" } {
+    dump sha256(body)
 }</code></pre>
                     </figure>
                 </section>
+
+                <div class="callout warn" style="margin-top:2rem">
+                    <div class="callout-title">What's specified, not shipped</div>
+                    <p>The systems-level modules &mdash; FFI (<code>libffi</code>), memory-mapped files, an async event loop, raw-socket forging, and native DNS/TLS/PCAP parsers &mdash; are fully designed in <a href="https://github.com/Louiml/Rak/blob/main/docs/rak-features-spec.md" target="_blank" rel="noopener">rak-features-spec.md</a> and are the next milestone.</p>
+                </div>
 
             </article>
 
@@ -458,7 +643,7 @@ scan subnet {
 <footer>
     <div class="container footer-inner">
         <p>Rak &copy; 2026 Louiml &middot; MIT License</p>
-        <p><a href="index.html">Overview</a> &middot; <a href="https://github.com/Louiml/Rak" target="_blank" rel="noopener">GitHub</a></p>
+        <p><a href="index.html">Overview</a> &middot; <a href="https://github.com/Louiml/Rak/releases/tag/v0.3.1" target="_blank" rel="noopener">v0.3.1</a> &middot; <a href="https://github.com/Louiml/Rak" target="_blank" rel="noopener">GitHub</a></p>
     </div>
 </footer>
 
