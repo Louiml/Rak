@@ -162,7 +162,8 @@ pub fn tcp_syn(src: &str, dst: &str, src_port: u16, dport: u16) -> Result<Vec<u8
 pub fn send(pkt: &[u8]) -> Result<usize, String> {
     use socket2::{Domain, Protocol, SockAddr, Socket, Type};
     use std::net::{Ipv4Addr, SocketAddrV4};
-    let sock = Socket::new(Domain::IPV4, Type::from_raw(libc::SOCK_RAW), Some(Protocol::from_raw(libc::IPPROTO_RAW)))
+    use std::os::fd::AsRawFd;
+    let sock = Socket::new(Domain::IPV4, Type::from(libc::SOCK_RAW), Some(Protocol::from(libc::IPPROTO_RAW)))
         .map_err(|e| format!("net_raw: open raw socket failed (need CAP_NET_RAW/Administrator): {}", e))?;
     unsafe {
         let one: libc::c_int = 1;
@@ -188,7 +189,7 @@ pub fn send(_pkt: &[u8]) -> Result<usize, String> {
 #[cfg(unix)]
 pub fn recv(max: usize) -> Result<Vec<u8>, String> {
     use socket2::{Domain, Protocol, Socket, Type};
-    let sock = Socket::new(Domain::IPV4, Type::from_raw(libc::SOCK_RAW), Some(Protocol::from_raw(libc::IPPROTO_RAW)))
+    let sock = Socket::new(Domain::IPV4, Type::from(libc::SOCK_RAW), Some(Protocol::from(libc::IPPROTO_RAW)))
         .map_err(|e| format!("net_raw: open raw socket failed (need CAP_NET_RAW/Administrator): {}", e))?;
     let mut buf = vec![0u8; max];
     let (n, _addr) = sock.recv_from(unsafe { std::slice::from_raw_parts_mut(buf.as_mut_ptr() as *mut std::mem::MaybeUninit<u8>, max) })
