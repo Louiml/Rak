@@ -1230,4 +1230,30 @@ mod tests {
         let out = run("dump pcap_open(\"nope.pcap\")");
         assert!(out.iter().any(|l| l.contains("Err(")), "got: {:?}", out);
     }
+
+    // --- Macros ---
+
+    #[test]
+    fn test_vm_macro_expr() {
+        let out = run("macro add1(x: expr) { $x + 1 } dump add1!(41)");
+        assert!(out.iter().any(|l| l.contains("[DUMP] 42")), "got: {:?}", out);
+    }
+
+    #[test]
+    fn test_vm_macro_multi_arg_splice() {
+        let out = run("macro add3(a: expr, b: expr, c: expr) { $a + $b + $c } dump add3!(10, 20, 30)");
+        assert!(out.iter().any(|l| l.contains("[DUMP] 60")), "got: {:?}", out);
+    }
+
+    #[test]
+    fn test_vm_macro_array_build() {
+        let out = run("macro pair(a: expr, b: expr) { [$a, $b] } dump pair!(1, 2)");
+        assert!(out.iter().any(|l| l.contains("[DUMP] [1, 2]")), "got: {:?}", out);
+    }
+
+    #[test]
+    fn test_vm_const_binding() {
+        let out = run("const MAX = 256; dump MAX");
+        assert!(out.iter().any(|l| l.contains("[DUMP] 256")), "got: {:?}", out);
+    }
 }

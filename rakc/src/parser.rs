@@ -202,6 +202,8 @@ impl<'a> Parser<'a> {
             }
             Some(Token::Type) => self.parse_type_alias(),
             Some(Token::Extern) => self.parse_extern(),
+            Some(Token::Macro) => self.parse_macro(),
+            Some(Token::Const) => self.parse_const(),
             Some(Token::Async) => {
                 // `async fn ...` -> async function; `async { ... }` -> async block.
                 let is_fn = matches!(self.peek_n(1), Some(Token::Fn));
@@ -644,6 +646,28 @@ impl<'a> Parser<'a> {
         }
         self.expect(Token::RBrace)?;
         Ok(Stmt::Extern { abi, lib, decls })
+    }
+
+    /// Parse `macro name($params) { body }`. The body is a block whose
+    /// statements may contain `$param` placeholders.
+    fn parse_macro(&mut self) -> Result<Stmt> {
+        self.expect(Token::Macro)?;
+        let name = self.expect_ident()?;
+        self.expect(Token::LParen)?;
+        let params = self.parse_params()?;
+        self.expect(Token::RParen)?;
+        let body = self.parse_block()?;
+        Ok(Stmt::MacroDef { name, params, body })
+    }
+
+    /// Parse `const NAME = expr`.
+    fn parse_const(&mut self) -> Result<Stmt> {
+        self.expect(Token::Const)?;
+        let name = self.expect_ident()?;
+        self.expect(Token::Eq)?;
+        let value = self.parse_expr()?;
+        self.semi()?;
+        Ok(Stmt::Const { name, value: Box::new(value) })
     }
 
     fn expect_ident(&mut self) -> Result<String> {
@@ -1286,6 +1310,18 @@ impl<'a> Parser<'a> {
     fn parse_postfix(&mut self) -> Result<Expr> {
         let mut expr = self.parse_primary()?;
         loop {
+            // `name!(args)` macro invocation (only when the base is an ident).
+            if self.check(&Token::Bang) {
+                if let Expr::Ident(name) = &expr {
+                    let name = name.clone();
+                    self.advance(); // consume `!`
+                    self.expect(Token::LParen)?;
+                    let args = self.parse_args()?;
+                    self.expect(Token::RParen)?;
+                    expr = Expr::MacroInvoke { name, args };
+                    continue;
+                }
+            }
             if self.match_token(&Token::LParen) {
                 let args = self.parse_args()?;
                 self.expect(Token::RParen)?;
@@ -1342,6 +1378,10 @@ impl<'a> Parser<'a> {
 
     fn parse_primary(&mut self) -> Result<Expr> {
         match self.peek().cloned() {
+            Some(Token::MacroVar(n)) => {
+                self.advance();
+                Ok(Expr::MacroVar(n))
+            }
             Some(Token::Hex(h)) => {
                 self.advance();
                 Ok(Expr::Hex(h))
@@ -1830,6 +1870,32 @@ mod tests {
                 assert_eq!(decls.len(), 1);
             }
             _ => panic!("expected Stmt::Extern"),
+        }
+    }
+
+    #[test]
+    fn test_parse_macro_def_and_invoke() {
+        let source = "macro add1(x: expr) { $x + 1 } dump add1!(41)";
+        let tokens = tokenize(source).unwrap();
+        let module = parse(&tokens, source).unwrap();
+        match &module.items[0] {
+            Stmt::MacroDef { name, params, body } => {
+                assert_eq!(name, "add1");
+                assert_eq!(params.len(), 1);
+                assert_eq!(params[0].name, "x");
+                assert!(!body.is_empty());
+            }
+            _ => panic!("expected Stmt::MacroDef"),
+        }
+        match &module.items[1] {
+            Stmt::Dump { value, .. } => match &**value {
+                Expr::MacroInvoke { name, args } => {
+                    assert_eq!(name, "add1");
+                    assert_eq!(args.len(), 1);
+                }
+                _ => panic!("expected Expr::MacroInvoke"),
+            },
+            _ => panic!("expected Stmt::Dump"),
         }
     }
 }

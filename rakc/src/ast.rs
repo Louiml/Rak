@@ -71,6 +71,13 @@ pub enum Expr {
         fields: Vec<(String, Expr)>,
     },
     As(Box<Expr>, Type),
+    /// A macro placeholder `$name` inside a macro body (replaced on expansion).
+    MacroVar(String),
+    /// `name!(args)` — a macro invocation, expanded before evaluation.
+    MacroInvoke {
+        name: String,
+        args: Vec<Expr>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -176,6 +183,17 @@ pub enum Stmt {
         abi: String,
         lib: Option<String>,
         decls: Vec<ForeignFn>,
+    },
+    /// `macro name($params) { body }` — an AST-expanding macro.
+    MacroDef {
+        name: String,
+        params: Vec<Param>,
+        body: Vec<Stmt>,
+    },
+    /// `const NAME = expr` — a compile-time constant (eagerly evaluated).
+    Const {
+        name: String,
+        value: Box<Expr>,
     },
 }
 

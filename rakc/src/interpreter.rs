@@ -285,6 +285,8 @@ pub struct Interpreter {
     /// keyed by raw pointer address → byte length, so `ffi_free` can release
     /// them with the correct `Vec::from_raw_parts` layout.
     ffi_allocs: HashMap<u64, usize>,
+    /// `macro name(params) { body }` definitions, keyed by macro name.
+    macros: HashMap<String, crate::ast::Stmt>,
 }
 
 /// An `extern "C"` declaration plus the (lazily resolved) library it lives in.
@@ -309,6 +311,7 @@ impl Interpreter {
             foreign_fns: HashMap::new(),
             foreign_default_lib: None,
             ffi_allocs: HashMap::new(),
+            macros: HashMap::new(),
         }
     }
 
@@ -326,6 +329,7 @@ impl Interpreter {
             foreign_fns: HashMap::new(),
             foreign_default_lib: None,
             ffi_allocs: HashMap::new(),
+            macros: HashMap::new(),
         }
     }
 
@@ -699,6 +703,13 @@ impl Interpreter {
                         ForeignFnDecl { decl: decl.clone(), lib: lib_handle.clone() },
                     );
                 }
+            }
+            Stmt::MacroDef { name, params: _, body: _ } => {
+                self.macros.insert(name.clone(), stmt.clone());
+            }
+            Stmt::Const { name, value } => {
+                let val = self.eval_expr(value)?;
+                self.env.define(name, val);
             }
         }
         Ok(())
@@ -1302,7 +1313,59 @@ impl Interpreter {
                 let v = self.eval_expr(inner)?;
                 Ok(self.cast_as(&v, ty))
             }
+            Expr::MacroVar(name) => Err(crate::RakError::Runtime(format!(
+                "macro variable '${}' used outside a macro body", name
+            ))),
+            Expr::MacroInvoke { name, args } => self.eval_macro_invoke(name, args),
         }
+    }
+
+    /// Evaluate `name!(args)`: substitute the argument ASTs into the macro
+    /// body's `$param` placeholders and execute the expanded body.
+    fn eval_macro_invoke(&mut self, name: &str, args: &[Expr]) -> crate::Result<Value> {
+        let def = match self.macros.get(name) {
+            Some(d) => d.clone(),
+            None => return Err(crate::RakError::Runtime(format!("undefined macro '{}!'", name))),
+        };
+        let (params, body) = match def {
+            Stmt::MacroDef { params, body, .. } => (params, body),
+            _ => return Err(crate::RakError::Runtime(format!("'{}' is not a macro", name))),
+        };
+        if args.len() != params.len() {
+            return Err(crate::RakError::Runtime(format!(
+                "macro '{}!' expects {} args, got {}", name, params.len(), args.len()
+            )));
+        }
+        let mut bindings: HashMap<String, Expr> = HashMap::new();
+        for (p, a) in params.iter().zip(args.iter()) {
+            bindings.insert(p.name.clone(), a.clone());
+        }
+        let expanded = substitute_stmts(&body, &bindings);
+        self.env.push_scope();
+        let saved_returning = self.returning;
+        self.returning = false;
+        let mut result = Value::Nil;
+        let n = expanded.len();
+        for (i, s) in expanded.iter().enumerate() {
+            if i == n - 1 && !self.returning {
+                if let Stmt::Expr(e) = s {
+                    result = self.eval_expr(e)?;
+                } else {
+                    self.exec_stmt(s)?;
+                }
+            } else {
+                self.exec_stmt(s)?;
+            }
+            if self.returning {
+                break;
+            }
+        }
+        if self.returning {
+            result = std::mem::replace(&mut self.return_value, Value::Nil);
+        }
+        self.returning = saved_returning;
+        self.env.pop_scope();
+        Ok(result)
     }
 
     fn store_back(&mut self, target: &Expr, value: Value) -> crate::Result<()> {
@@ -3167,6 +3230,70 @@ impl Interpreter {
     }
 }
 
+/// Substitute `$param` placeholders in a macro body with the bound argument
+/// AST nodes. Walks statements and expressions recursively.
+pub fn substitute_stmts(stmts: &[Stmt], bindings: &HashMap<String, Expr>) -> Vec<Stmt> {
+    stmts.iter().map(|s| substitute_stmt(s, bindings)).collect()
+}
+
+pub fn substitute_stmt(stmt: &Stmt, bindings: &HashMap<String, Expr>) -> Stmt {
+    match stmt {
+        Stmt::Expr(e) => Stmt::Expr(Box::new(substitute_expr(e, bindings))),
+        Stmt::Let { name, pattern, mutable, value, type_hint } => Stmt::Let {
+            name: name.clone(), pattern: pattern.clone(), mutable: *mutable,
+            value: Box::new(substitute_expr(value, bindings)), type_hint: type_hint.clone(),
+        },
+        Stmt::Return(e) => Stmt::Return(e.as_ref().map(|e| Box::new(substitute_expr(e, bindings)))),
+        Stmt::If { cond, then_branch, else_branch } => Stmt::If {
+            cond: Box::new(substitute_expr(cond, bindings)),
+            then_branch: substitute_stmts(then_branch, bindings),
+            else_branch: else_branch.as_ref().map(|b| substitute_stmts(b, bindings)),
+        },
+        Stmt::Loop(b) => Stmt::Loop(substitute_stmts(b, bindings)),
+        Stmt::While { cond, body } => Stmt::While {
+            cond: Box::new(substitute_expr(cond, bindings)),
+            body: substitute_stmts(body, bindings),
+        },
+        Stmt::For { name, iterable, body } => Stmt::For {
+            name: name.clone(),
+            iterable: Box::new(substitute_expr(iterable, bindings)),
+            body: substitute_stmts(body, bindings),
+        },
+        Stmt::Dump { value, target } => Stmt::Dump {
+            value: Box::new(substitute_expr(value, bindings)),
+            target: target.as_ref().map(|t| Box::new(substitute_expr(t, bindings))),
+        },
+        Stmt::Raise(e) => Stmt::Raise(Box::new(substitute_expr(e, bindings))),
+        other => other.clone(),
+    }
+}
+
+pub fn substitute_expr(expr: &Expr, bindings: &HashMap<String, Expr>) -> Expr {
+    match expr {
+        Expr::MacroVar(name) => bindings.get(name).cloned().unwrap_or_else(|| Expr::MacroVar(name.clone())),
+        Expr::Binary(op, l, r) => Expr::Binary(op.clone(), Box::new(substitute_expr(l, bindings)), Box::new(substitute_expr(r, bindings))),
+        Expr::Unary(op, e) => Expr::Unary(op.clone(), Box::new(substitute_expr(e, bindings))),
+        Expr::Call { callee, args } => Expr::Call {
+            callee: Box::new(substitute_expr(callee, bindings)),
+            args: args.iter().map(|a| substitute_expr(a, bindings)).collect(),
+        },
+        Expr::Index(o, i) => Expr::Index(Box::new(substitute_expr(o, bindings)), Box::new(substitute_expr(i, bindings))),
+        Expr::FieldAccess(o, f) => Expr::FieldAccess(Box::new(substitute_expr(o, bindings)), f.clone()),
+        Expr::If { cond, then_branch, else_branch } => Expr::If {
+            cond: Box::new(substitute_expr(cond, bindings)),
+            then_branch: then_branch.iter().map(|s| substitute_stmt(s, bindings)).collect(),
+            else_branch: else_branch.as_ref().map(|b| b.iter().map(|s| substitute_stmt(s, bindings)).collect()),
+        },
+        Expr::Tuple(v) => Expr::Tuple(v.iter().map(|e| substitute_expr(e, bindings)).collect()),
+        Expr::Array(v) => Expr::Array(v.iter().map(|e| substitute_expr(e, bindings)).collect()),
+        Expr::Interp { template, parts } => Expr::Interp {
+            template: template.clone(),
+            parts: parts.iter().map(|e| substitute_expr(e, bindings)).collect(),
+        },
+        other => other.clone(),
+    }
+}
+
 impl Value {
     fn type_name(&self) -> String {
         match self {
@@ -3716,5 +3843,39 @@ mod tests {
         let src = "try { let info = tls_parse_client_hello(b\"\"); dump info } catch e { dump \"short\" }";
         let output = interp.run_source(src).unwrap();
         assert!(output.iter().any(|l| l.contains("[DUMP] short")), "got: {:?}", output);
+    }
+
+    // --- Macros ---
+
+    #[test]
+    fn test_interpreter_macro_expr() {
+        let mut interp = Interpreter::new();
+        let src = "macro add1(x: expr) { $x + 1 } dump add1!(41)";
+        let output = interp.run_source(src).unwrap();
+        assert!(output.iter().any(|l| l.contains("[DUMP] 42")), "got: {:?}", output);
+    }
+
+    #[test]
+    fn test_interpreter_macro_multi_arg_splice() {
+        let mut interp = Interpreter::new();
+        let src = "macro add3(a: expr, b: expr, c: expr) { $a + $b + $c } dump add3!(10, 20, 30)";
+        let output = interp.run_source(src).unwrap();
+        assert!(output.iter().any(|l| l.contains("[DUMP] 60")), "got: {:?}", output);
+    }
+
+    #[test]
+    fn test_interpreter_macro_array_build() {
+        let mut interp = Interpreter::new();
+        let src = "macro pair(a: expr, b: expr) { [$a, $b] } dump pair!(1, 2)";
+        let output = interp.run_source(src).unwrap();
+        assert!(output.iter().any(|l| l.contains("[DUMP] [1, 2]")), "got: {:?}", output);
+    }
+
+    #[test]
+    fn test_interpreter_const_binding() {
+        let mut interp = Interpreter::new();
+        let src = "const MAX = 256; dump MAX";
+        let output = interp.run_source(src).unwrap();
+        assert!(output.iter().any(|l| l.contains("[DUMP] 256")), "got: {:?}", output);
     }
 }

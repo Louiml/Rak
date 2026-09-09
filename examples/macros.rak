@@ -1,0 +1,38 @@
+// Compile-time macros: AST-expanding templates with `$param` placeholders.
+//
+//   rakc run examples/macros.rak   (interpreter)
+//   rakc vm  examples/macros.rak   (bytecode VM)
+//
+// `macro name(params) { body }` defines a macro; `name!(args)` splices the
+// argument expressions into the body's `$param` placeholders before
+// evaluation. `const NAME = expr` binds a compile-time constant.
+
+// An expression-returning macro: `add1!(n)` expands to `n + 1`.
+macro add1(x: expr) {
+    $x + 1
+}
+dump add1!(41)          // 42
+
+// A multi-arg macro that splices twice (the arg is evaluated per use).
+macro swap(a: expr, b: expr) {
+    let t = $a
+    t + $b
+}
+dump swap!(10, 20)      // 30
+
+// A macro that builds an array literal from two fragments.
+macro pair(a: expr, b: expr) {
+    [$a, $b]
+}
+dump pair!(1, 2)        // [1, 2]
+
+// Compile-time constants (eagerly evaluated, inlined).
+const MAX_LEN = 256
+const GREETING = "hi"
+dump MAX_LEN
+dump GREETING
+if MAX_LEN > 100 {
+    dump "big"
+} else {
+    dump "small"
+}

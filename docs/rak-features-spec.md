@@ -477,60 +477,85 @@ let offs = mmap_lines_off(m, "\n")        // -> [(offset, length), ...] zero-cop
 
 ---
 
-### 1.7 Metaprogramming & macros  **[SPEC]**
+### 1.7 Metaprogramming & macros  **[SHIPPED]**
 
 #### Syntax
 ```rak
-// Hygienic AST macros, macro_rules!-style:
-macro_rules! json_obj {
-    ($($k:literal : $v:expr),* $(,)?) => {
-        map([$($k, $v),*])
-    }
+// AST-expanding macros with $param placeholders, macro_rules!-style:
+macro add1(x: expr) {
+    $x + 1
 }
-let m = json_obj! { "a": 1, "b": 2 }
+dump add1!(41)         // 42 — `add1!(41)` splices `41` into `$x` before eval
 
-// Compile-time `const` evaluation for schema validation:
+macro swap(a: expr, b: expr) {
+    let t = $a
+    t + $b
+}
+dump swap!(10, 20)     // 30
+
+macro pair(a: expr, b: expr) {
+    [$a, $b]
+}
+dump pair!(1, 2)       // [1, 2]
+
+// Compile-time constants (eagerly evaluated, inlined):
 const MAX_LEN = 256
-fn validate(buf: bytes) {
-    if len(buf) > MAX_LEN { raise "too long" }
-}
-
-// AST transformation functions (proc-macro analogue):
-macro assert_nonneg(x: expr) {
-    if $x < 0 { raise fmt("negative: {}", $x) }
-}
-assert_nonneg!(port)
+dump MAX_LEN
 ```
 
+> `macro name(params) { body }` defines a macro; `name!(args)` splices each
+> argument's AST into the matching `$param` placeholder in the body, then
+> evaluates/compiles the expanded body in place. Macros are expanded in the
+> frontend, so both backends see the expanded code.
+
 #### Architecture
-- `ast.rs`: `Stmt::MacroRules { name, arms: Vec<MacroArm> }` with
-  `MacroArm { pat: TokenTree, body: TokenTree }`, and `Expr::MacroInvoke {
-  name, tokens: TokenTree }`.
-- `lexer.rs`/`parser.rs`: a `TokenTree` type (delimited groups + tokens) is
-  captured raw during parsing so macro bodies can be re-parsed with
-  substitutions. `macro_rules!` is parsed into `Stmt::MacroRules` and stored in
-  a compile-time `MacroRegistry`. `name!(...)` / `name!{...}` invocations
-  expand **before** the rest of the AST is finalised.
-- `compiler.rs` (new `macro_expand.rs` pass): pattern-matches the invocation's
-  `TokenTree` against each arm, binds fragment variables (`:expr`, `:literal`,
-  `:ident`, `:tt`), substitutes into the body, and re-parses the result into
-  an `Expr`/`Stmt` which replaces the invocation node.
-- `const` is a compile-time `let` evaluated by the interpreter at build time;
-  the resulting `Value` is inlined wherever the const name appears.
-- `macro` (proc-macro analogue) is a Rak function tagged `#[macro]` that
-  receives the AST of its arguments as `Value::Struct` nodes and returns an
-  AST node to splice in.
+- `ast.rs`: `Stmt::MacroDef { name, params, body }`, `Expr::MacroVar(String)`
+  (a `$name` placeholder), `Expr::MacroInvoke { name, args }`, and
+  `Stmt::Const { name, value }`.
+- `lexer.rs`: `macro` and `const` keywords, and a `$ident` regex →
+  `Token::MacroVar(String)`.
+- `parser.rs`: `parse_macro` (`macro name(params) { body }`, reusing
+  `parse_params` — the kind is accepted but treated as an expr fragment),
+  `parse_const`, and `name!(args)` invocation in `parse_postfix` (when the
+  base is an `Expr::Ident` followed by `!`).
+- Expansion: `interpreter.rs::substitute_stmts` / `substitute_expr` walk the
+  body AST and replace each `Expr::MacroVar(name)` with the bound argument
+  AST. The interpreter registers `MacroDef`s in a `macros` map and evaluates
+  `MacroInvoke` by substituting + executing the body in a pushed scope
+  (returning the last expression's value).
+- VM (`compiler.rs`): `MacroDef`s are collected in a `compile()` pre-pass
+  (and cloned into sub-compilers) so `Expr::MacroInvoke` is expanded at
+  **compile time** — the substituted body is compiled in place (last stmt's
+  value is the result). `Expr::MacroVar` outside a macro body is a compile
+  error.
+- `Stmt::Const` compiles like a `let` (eagerly evaluated and bound; immutable
+  by convention) on both backends.
 
 #### Error handling & edge cases
-- **Macro not found** → `Compile("undefined macro 'foo!'")`.
-- **No matching arm** → `Compile("macro 'foo!' has no arm matching ...")` with
-  the offending token slice printed.
-- **Hygiene**: macro-introduced identifiers are renamed with a per-expansion
-  suffix to avoid capturing user bindings, matching `macro_rules!` hygiene.
-- **Recursion limit**: macro expansion is capped (default 64) to prevent
-  infinite self-expansion → `Compile("macro expansion depth exceeded")`.
-- **`const` evaluation failure** → compile error with the runtime message.
-- Macros are expanded in the frontend, so both backends see the expanded AST.
+- **Macro not found** → `Runtime/Compile("undefined macro 'foo!'")`.
+- **Arity mismatch** → `Runtime/Compile("macro 'foo!' expects N args, got M")`.
+- **`$name` outside a macro body** → a clear runtime/compile error.
+- **Hygiene**: this v1 is **non-hygienic** — `let t = $a` in a macro body
+  introduces `t` in the caller's scope (matching `Expr::Block` semantics).
+  Per-expansion identifier renaming (true hygiene) is a follow-up.
+- **Recursion limit**: macro expansion is not currently depth-capped; a
+  self-referential macro body would recurse at parse/eval time and is the
+  user's responsibility (a depth cap is a planned follow-up).
+
+#### Errata (deviations from the original [SPEC])
+- **Named-param macros** (`macro name($params) { body }` + `name!(args)`)
+  instead of `macro_rules!` with `TokenTree` capture, fragment specifiers
+  (`:expr`/`:literal`/`:ident`/`:tt`), and `$(...)*` repetition. The kind
+  annotation is accepted but all params are treated as expr fragments. Full
+  `macro_rules!` with repetition is a follow-up.
+- **`const`** is eager-eval-and-bind (like `let`), not a true compile-time
+  constant-folding pass that inlines the value at every use site.
+- **`macro` proc-macro analogue** (`#[macro]`-tagged fn receiving AST nodes)
+  is not implemented; the `macro ... { body }` template form covers the
+  common cases.
+- **VM `Stmt::Raise`** is not supported, so macro bodies that expand to
+  `raise` (e.g. an `assert_nonneg!` that raises) work on the interpreter but
+  not the VM; VM-compatible macro bodies avoid `raise`.
 
 ---
 
@@ -811,7 +836,7 @@ mmap_close(m)
 | Async (`async fn`/`await`/I/O futures) | yes (deferred bodies + I/O) | yes (`Op::Await` + I/O natives; `async fn` runs sync) |
 | Raw sockets (packet forging) | yes (builders + unix send/recv) | yes (builders + `Result` send/recv) |
 | DNS / TLS / PCAP | yes (dns_query/build/parse, tls parse, pcap open/next) | yes (same builtins; `Result` for query/open) |
-| macros | spec | spec |
+| Compile-time macros (`macro`/`name!`/`const`) | yes (expand + exec) | yes (expand at compile time) |
 
 The VM's `compile_stmt`/`compile_expr`/`compile_pattern` return
 `Err("VM does not support ...")` for unsupported nodes, so running an

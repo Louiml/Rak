@@ -10,6 +10,8 @@ pub struct Compiler {
     scope_depth: usize,
     func_names: std::collections::HashSet<String>,
     func_closures: HashMap<String, Value>,
+    /// `macro name(params) { body }` definitions, for compile-time expansion.
+    macros: HashMap<String, (Vec<Param>, Vec<Stmt>)>,
 }
 
 impl Compiler {
@@ -20,6 +22,7 @@ impl Compiler {
             scope_depth: 0,
             func_names: std::collections::HashSet::new(),
             func_closures: HashMap::new(),
+            macros: HashMap::new(),
         }
     }
 
@@ -31,6 +34,9 @@ impl Compiler {
                     let closure = self.compile_function(name, params, body)?;
                     self.func_closures.insert(name.clone(), closure);
                 }
+            }
+            if let Stmt::MacroDef { name, params, body } = stmt {
+                self.macros.insert(name.clone(), (params.clone(), body.clone()));
             }
         }
         // Register `extern "C"` declarations as native-fn globals, so
@@ -66,6 +72,9 @@ impl Compiler {
             if matches!(stmt, Stmt::Extern { .. }) {
                 continue;
             }
+            if matches!(stmt, Stmt::MacroDef { .. }) {
+                continue;
+            }
             self.compile_stmt(stmt)?;
         }
         self.emit_op(Op::Nil);
@@ -81,6 +90,7 @@ impl Compiler {
         }
         sub.func_names = self.func_names.clone();
         sub.func_closures = self.func_closures.clone();
+        sub.macros = self.macros.clone();
         for s in body {
             sub.compile_stmt(s)?;
         }
@@ -223,6 +233,21 @@ impl Compiler {
                 self.emit_jump_back(loop_start);
             }
             Stmt::For { name, iterable, body } => self.compile_for(name, iterable, body)?,
+            Stmt::Const { name, value } => {
+                // `const NAME = expr` compiles like a `let` (eagerly evaluated
+                // at the call site and bound; immutable by convention).
+                self.compile_expr(value)?;
+                if self.scope_depth == 0 {
+                    let ci = self.const_str(name);
+                    self.emit_op(Op::StoreGlobal);
+                    self.emit_u16(ci);
+                } else {
+                    let slot = self.add_local(name.clone());
+                    self.emit_op(Op::StoreLocal);
+                    self.emit_byte(slot);
+                }
+            }
+            Stmt::MacroDef { .. } => {} // registered in the pre-pass
             other => {
                 return Err(format!("VM does not support statement: {:?}", other));
             }
@@ -253,6 +278,39 @@ impl Compiler {
                 break;
             }
         }
+    }
+
+    fn compile_macro_invoke(&mut self, name: &str, args: &[Expr]) -> Result<(), String> {
+        let (params, body) = match self.macros.get(name) {
+            Some(d) => (d.0.clone(), d.1.clone()),
+            None => return Err(format!("undefined macro '{}!'", name)),
+        };
+        if args.len() != params.len() {
+            return Err(format!("macro '{}!' expects {} args, got {}", name, params.len(), args.len()));
+        }
+        let mut bindings: HashMap<String, Expr> = HashMap::new();
+        for (p, a) in params.iter().zip(args.iter()) {
+            bindings.insert(p.name.clone(), a.clone());
+        }
+        let expanded = crate::interpreter::substitute_stmts(&body, &bindings);
+        // Compile the expanded body as an expression: all but the last stmt
+        // are statements (popped); the last stmt's value is the result. No
+        // scope wrapping (locals leak to the enclosing block, matching
+        // `Expr::Block`).
+        let n = expanded.len();
+        for (i, s) in expanded.iter().enumerate() {
+            if i == n - 1 {
+                if let Stmt::Expr(e) = s {
+                    self.compile_expr(e)?;
+                } else {
+                    self.compile_stmt(s)?;
+                    self.emit_op(Op::Nil);
+                }
+            } else {
+                self.compile_stmt(s)?;
+            }
+        }
+        Ok(())
     }
 
     fn compile_for(&mut self, name: &str, iterable: &Expr, body: &[Stmt]) -> Result<(), String> {
@@ -553,6 +611,12 @@ impl Compiler {
             Expr::Await(inner) => {
                 self.compile_expr(inner)?;
                 self.emit_op(Op::Await);
+            }
+            Expr::MacroVar(name) => {
+                return Err(format!("macro variable '${}' used outside a macro body", name));
+            }
+            Expr::MacroInvoke { name, args } => {
+                self.compile_macro_invoke(name, args)?;
             }
             Expr::Interp { template, parts } => {
                 let fmt_str = interp_to_fmt(template);

@@ -112,6 +112,19 @@ let certs = tls_parse_cert_chain(der)    // [{subject, issuer}, ...]
 dump pcap_open("capture.pcap")           // Ok(<pcap>) or Err(...)
 ```
 
+**Compile-time macros.** `macro name($params) { body }` defines an AST-expanding template; `name!(args)` splices the argument expressions into the body's `$param` placeholders before evaluation. Expanded in the frontend, so both backends see the expanded code. `const NAME = expr` binds a compile-time constant.
+
+```rak
+macro add1(x: expr) { $x + 1 }
+dump add1!(41)            // 42
+
+macro pair(a: expr, b: expr) { [$a, $b] }
+dump pair!(1, 2)          // [1, 2]
+
+const MAX_LEN = 256
+dump MAX_LEN
+```
+
 ## Build a standalone executable
 
 ```bash
@@ -508,6 +521,7 @@ Rak/
 │   ├── async.rak           Async event loop: async fn / await / tcp_probe
 │   ├── net_raw.rak         Raw sockets: forge IPv4/TCP/UDP packets
 │   ├── parsers.rak         DNS / TLS / PCAP wire-format parsers
+│   ├── macros.rak          Compile-time macros: macro / name! / const
 │   └── stdlib_demo.rak     String, array, and math builtins
 ```
 

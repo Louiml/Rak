@@ -78,6 +78,14 @@ pub enum Token {
     Type,
     #[token("extern")]
     Extern,
+    #[token("macro")]
+    Macro,
+    #[token("const")]
+    Const,
+
+    /// A macro placeholder `$name` inside a macro body.
+    #[regex(r"\$[a-zA-Z_][a-zA-Z0-9_]*", |lex| lex.slice()[1..].to_string())]
+    MacroVar(String),
 
     #[regex(r"0x[0-9A-Fa-f]+", |lex| hex_to_u64(lex.slice()))]
     Hex(u64),
