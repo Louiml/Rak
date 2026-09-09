@@ -1,7 +1,174 @@
 use crate::bytecode::{Chunk, Op};
 use crate::value::Value;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::ffi::CString;
+use std::sync::{Arc, Mutex};
+
+/// VM-side tracking for native allocations made by `ffi_alloc` /
+/// `ffi_string_to_cstr`, so `ffi_free` can release them with the correct
+/// `Vec::from_raw_parts` layout.
+static FFI_ALLOC: Mutex<Option<HashMap<u64, usize>>> = Mutex::new(None);
+
+/// Holds a buffer alive for the duration of an FFI call so a `u64` argument
+/// pointing into it stays valid.
+enum MarshalGuardVm {
+    #[allow(dead_code)]
+    CStr(CString),
+    #[allow(dead_code)]
+    Bytes(Vec<u8>),
+}
+
+/// Marshal Rak `Value`s to `u64` bit patterns by runtime type (dynamic
+/// `lib.call` / `ffi_call`). Returns the args plus guards that keep the
+/// backing buffers alive for the duration of the call.
+fn marshal_vm_args(args: &[Value]) -> Result<(Vec<u64>, Vec<MarshalGuardVm>), String> {
+    let mut out = Vec::with_capacity(args.len());
+    let mut guards = Vec::with_capacity(args.len());
+    for a in args {
+        match a {
+            Value::I64(i) => out.push(*i as u64),
+            Value::I32(i) => out.push(*i as u64),
+            Value::U64(v) => out.push(*v),
+            Value::U32(v) => out.push(*v as u64),
+            Value::Hex(h, _) => out.push(*h),
+            Value::Bool(b) => out.push(if *b { 1 } else { 0 }),
+            Value::ForeignPtr(p) => out.push(*p),
+            Value::Nil => out.push(0),
+            Value::String(s) => {
+                let c = CString::new(s.as_ref()).map_err(|e| format!("ffi: bad string: {}", e))?;
+                let p = c.as_ptr() as u64;
+                out.push(p);
+                guards.push(MarshalGuardVm::CStr(c));
+            }
+            Value::Bytes(b) => {
+                let mut v = b.to_vec();
+                v.push(0);
+                let p = v.as_ptr() as u64;
+                out.push(p);
+                guards.push(MarshalGuardVm::Bytes(v));
+            }
+            other => return Err(format!("ffi: cannot marshal {} to C", other.type_name())),
+        }
+    }
+    Ok((out, guards))
+}
+
+/// Cache of loaded foreign libraries keyed by path (or `"<default>"`), so
+/// repeated `extern "C"` calls don't `dlopen` on every invocation.
+static FFI_LIB_CACHE: Mutex<Option<HashMap<String, Arc<Mutex<rak_stdlib::ffi::LibHandle>>>>> = Mutex::new(None);
+
+/// Resolve (and cache) a foreign library handle for an `extern` block.
+fn ffi_get_lib(path: &Option<String>) -> Result<Arc<Mutex<rak_stdlib::ffi::LibHandle>>, String> {
+    let key = path.clone().unwrap_or_else(|| "<default>".to_string());
+    let mut cache = FFI_LIB_CACHE.lock().unwrap();
+    let cache = cache.get_or_insert_with(HashMap::new);
+    if let Some(h) = cache.get(&key) {
+        return Ok(h.clone());
+    }
+    let h = Arc::new(Mutex::new(match path {
+        Some(p) => rak_stdlib::ffi::load(p)?,
+        None => rak_stdlib::ffi::load_default()?,
+    }));
+    cache.insert(key, h.clone());
+    Ok(h)
+}
+
+/// Marshal Rak `Value`s to `u64` bit patterns using declared `Param` types
+/// (so float args land in the right register class).
+fn marshal_vm_args_typed(args: &[Value], params: &[crate::ast::Param], varargs: bool) -> Result<(Vec<u64>, Vec<MarshalGuardVm>), String> {
+    let mut out = Vec::with_capacity(args.len());
+    let mut guards = Vec::with_capacity(args.len());
+    for (i, a) in args.iter().enumerate() {
+        let ty = params.get(i).and_then(|p| p.type_hint.as_ref());
+        match (a, ty) {
+            (Value::String(s), _) => {
+                let c = CString::new(s.as_ref()).map_err(|e| format!("ffi: bad string: {}", e))?;
+                let p = c.as_ptr() as u64;
+                out.push(p);
+                guards.push(MarshalGuardVm::CStr(c));
+            }
+            (Value::Bytes(b), _) => {
+                let mut v = b.to_vec();
+                v.push(0);
+                let p = v.as_ptr() as u64;
+                out.push(p);
+                guards.push(MarshalGuardVm::Bytes(v));
+            }
+            (Value::ForeignPtr(p), _) => out.push(*p),
+            (Value::I64(i), _) => out.push(*i as u64),
+            (Value::I32(i), _) => out.push(*i as u64),
+            (Value::U64(v), _) => out.push(*v),
+            (Value::U32(v), _) => out.push(*v as u64),
+            (Value::Hex(h, _), _) => out.push(*h),
+            (Value::Bool(b), _) => out.push(if *b { 1 } else { 0 }),
+            (Value::F64(f), Some(crate::ast::Type::F64)) => out.push(f.to_bits()),
+            (Value::F64(f), Some(crate::ast::Type::F32)) => out.push((*f as f32).to_bits() as u64),
+            (Value::F32(f), Some(crate::ast::Type::F32)) => out.push(f.to_bits() as u64),
+            (Value::F32(f), Some(crate::ast::Type::F64)) => out.push((*f as f64).to_bits()),
+            (Value::F64(f), _) => out.push(*f as u64),
+            (Value::F32(f), _) => out.push(*f as u64),
+            (Value::Nil, _) => out.push(0),
+            (other, _) => {
+                if varargs && i >= params.len() {
+                    match other {
+                        Value::I64(i) => out.push(*i as u64),
+                        Value::Hex(h, _) => out.push(*h),
+                        Value::ForeignPtr(p) => out.push(*p),
+                        Value::Bool(b) => out.push(if *b { 1 } else { 0 }),
+                        Value::Nil => out.push(0),
+                        _ => return Err(format!("ffi: cannot marshal {} as vararg", other.type_name())),
+                    }
+                } else {
+                    return Err(format!("ffi: cannot marshal {} to C", other.type_name()));
+                }
+            }
+        }
+    }
+    Ok((out, guards))
+}
+
+/// Convert a raw return word into a VM `Value` per the declared return type.
+fn unmarshal_vm_ret(ret: &Option<crate::ast::Type>, bits: u64, is_float: bool) -> Value {
+    use crate::ast::Type;
+    match ret {
+        None | Some(Type::Void) => Value::Nil,
+        Some(Type::I8) => Value::I64((bits as u8) as i8 as i64),
+        Some(Type::I16) => Value::I64((bits as u16) as i16 as i64),
+        Some(Type::I32) | Some(Type::Int) => Value::I64(bits as u32 as i64),
+        Some(Type::I64) => Value::I64(bits as i64),
+        Some(Type::U8) => Value::U64(bits as u8 as u64),
+        Some(Type::U16) => Value::U64(bits as u16 as u64),
+        Some(Type::U32) => Value::U64(bits as u32 as u64),
+        Some(Type::U64) | Some(Type::Hex(_)) => Value::U64(bits),
+        Some(Type::F32) => Value::F64(f32::from_bits(bits as u32) as f64),
+        Some(Type::F64) => Value::F64(f64::from_bits(bits)),
+        Some(Type::Ptr(_)) => Value::ForeignPtr(bits),
+        Some(Type::Custom(_)) => Value::ForeignPtr(bits),
+        Some(_) => {
+            if is_float { Value::F64(f64::from_bits(bits)) } else { Value::ForeignPtr(bits) }
+        }
+    }
+}
+
+/// Build a VM `Value::NativeFn` for one `extern "C"` declaration. The closure
+/// lazily loads (and caches) the library, resolves the symbol, marshals args
+/// per the declared types, calls, and unmarshals the return.
+pub fn make_foreign_native(decl: crate::ast::ForeignFn, lib_path: Option<String>) -> Value {
+    let name = Arc::from(decl.name.as_str());
+    let native = move |args: &[Value]| -> Result<Value, String> {
+        let lib = ffi_get_lib(&lib_path)?;
+        let (marshalled, _g) = marshal_vm_args_typed(args, &decl.params, decl.varargs)?;
+        let addr = { let h = lib.lock().unwrap(); rak_stdlib::ffi::sym_addr(&h, &decl.name)? };
+        let is_float_ret = matches!(decl.return_type, Some(crate::ast::Type::F32) | Some(crate::ast::Type::F64));
+        let bits = if is_float_ret {
+            unsafe { rak_stdlib::ffi::call_float(addr, &marshalled).to_bits() }
+        } else {
+            unsafe { rak_stdlib::ffi::call_int(addr, &marshalled) }
+        };
+        Ok(unmarshal_vm_ret(&decl.return_type, bits, is_float_ret))
+    };
+    Value::NativeFn(name, Arc::new(native))
+}
 
 pub struct ChannelHandle {
     pub id: u64,
@@ -109,6 +276,98 @@ impl Vm {
             let rep = native_str(args.get(2));
             let cow = re.replace_all(&hay, rep.as_str());
             Ok(Value::String(Arc::from(&*cow)))
+        });
+        // --- FFI ---
+        self.insert_native("ffi_load", |args| {
+            let path = native_str(args.first());
+            match rak_stdlib::ffi::load(&path) {
+                Ok(h) => Ok(Value::ForeignLib(Arc::new(Mutex::new(h)))),
+                Err(e) => Err(e),
+            }
+        });
+        self.insert_native("ffi_ptr", |args| {
+            Ok(Value::ForeignPtr(args.first().and_then(|v| v.as_u64()).unwrap_or(0)))
+        });
+        self.insert_native("ffi_alloc", |args| {
+            let n = args.first().and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+            let v = vec![0u8; n];
+            let ptr = v.as_ptr() as u64;
+            std::mem::forget(v);
+            FFI_ALLOC.lock().unwrap().get_or_insert_with(HashMap::new).insert(ptr, n);
+            Ok(Value::ForeignPtr(ptr))
+        });
+        self.insert_native("ffi_free", |args| {
+            let ptr = match args.first() {
+                Some(Value::ForeignPtr(p)) => *p,
+                _ => return Err("ffi_free(ptr) requires a ptr".to_string()),
+            };
+            let mut tbl = FFI_ALLOC.lock().unwrap();
+            if let Some(tbl) = tbl.as_mut() {
+                if let Some(n) = tbl.remove(&ptr) {
+                    unsafe { let _ = Vec::from_raw_parts(ptr as *mut u8, n, n); }
+                    return Ok(Value::Nil);
+                }
+            }
+            Err("ffi_free: pointer was not allocated by ffi_alloc/ffi_string_to_cstr".to_string())
+        });
+        self.insert_native("ffi_write", |args| {
+            let ptr = match args.first() {
+                Some(Value::ForeignPtr(p)) => *p as usize,
+                _ => return Err("ffi_write(ptr, off, byte)".to_string()),
+            };
+            let off = args.get(1).and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+            let byte = args.get(2).and_then(|v| v.as_u64()).unwrap_or(0) as u8;
+            unsafe { *((ptr + off) as *mut u8) = byte; }
+            Ok(Value::Nil)
+        });
+        self.insert_native("ffi_read", |args| {
+            let ptr = match args.first() {
+                Some(Value::ForeignPtr(p)) => *p as usize,
+                _ => return Err("ffi_read(ptr, off)".to_string()),
+            };
+            let off = args.get(1).and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+            let b = unsafe { *((ptr + off) as *const u8) };
+            Ok(Value::I64(b as i64))
+        });
+        self.insert_native("ffi_cstr_to_string", |args| {
+            let ptr = match args.first() {
+                Some(Value::ForeignPtr(p)) => *p as usize,
+                _ => return Err("ffi_cstr_to_string(ptr)".to_string()),
+            };
+            let s = unsafe {
+                let mut len = 0usize;
+                while *(ptr as *const u8).add(len) != 0 { len += 1; }
+                let slice = std::slice::from_raw_parts(ptr as *const u8, len);
+                String::from_utf8_lossy(slice).into_owned()
+            };
+            Ok(Value::String(Arc::from(s.as_str())))
+        });
+        self.insert_native("ffi_string_to_cstr", |args| {
+            let s = native_str(args.first());
+            let bytes = match CString::new(s.as_str()) {
+                Ok(c) => c.into_bytes_with_nul(),
+                Err(e) => return Err(format!("ffi_string_to_cstr: {}", e)),
+            };
+            let len = bytes.len();
+            let ptr = bytes.as_ptr() as u64;
+            std::mem::forget(bytes);
+            FFI_ALLOC.lock().unwrap().get_or_insert_with(HashMap::new).insert(ptr, len);
+            Ok(Value::ForeignPtr(ptr))
+        });
+        self.insert_native("ffi_call", |args| {
+            let (lib, symbol) = match (args.first(), args.get(1)) {
+                (Some(Value::ForeignLib(h)), Some(Value::String(s))) => (h.clone(), s.to_string()),
+                _ => return Err("ffi_call(lib, symbol, args_array)".to_string()),
+            };
+            let c_args: Vec<Value> = match args.get(2) {
+                Some(Value::Array(a)) => a.to_vec(),
+                Some(Value::Nil) | None => Vec::new(),
+                Some(other) => return Err(format!("ffi_call: args must be an array, got {}", other.type_name())),
+            };
+            let (marshalled, _g) = marshal_vm_args(&c_args)?;
+            let addr = { let h = lib.lock().unwrap(); rak_stdlib::ffi::sym_addr(&h, &symbol)? };
+            let ret = unsafe { rak_stdlib::ffi::call_int(addr, &marshalled) };
+            Ok(Value::I64(ret as i64))
         });
     }
 
@@ -340,6 +599,30 @@ impl Vm {
                 Op::Closure => {}
                 Op::GetUpvalue | Op::SetUpvalue => {}
                 Op::LoopBegin | Op::LoopEnd => {}
+                Op::FFICall => {
+                    let args_val = frame.pop();
+                    let symbol = match frame.pop() {
+                        Value::String(s) => s.to_string(),
+                        other => return Err(format!("ffi: symbol must be a string, got {}", other.type_name())),
+                    };
+                    let lib = match frame.pop() {
+                        Value::ForeignLib(h) => h,
+                        other => return Err(format!("ffi: not a library: {}", other.type_name())),
+                    };
+                    let c_args: Vec<Value> = match args_val {
+                        Value::Array(a) => a.to_vec(),
+                        Value::Nil => Vec::new(),
+                        other => return Err(format!("ffi: args must be an array, got {}", other.type_name())),
+                    };
+                    let (marshalled, _g) = marshal_vm_args(&c_args)?;
+                    let addr = { let h = lib.lock().unwrap(); rak_stdlib::ffi::sym_addr(&h, &symbol)? };
+                    let ret = unsafe { rak_stdlib::ffi::call_int(addr, &marshalled) };
+                    frame.push(Value::I64(ret as i64));
+                }
+                Op::FFIClose => {
+                    let _ = frame.pop();
+                    frame.push(Value::Nil);
+                }
             }
         }
         Ok(())
@@ -554,5 +837,38 @@ mod tests {
         let out = run(r#"let re = /[a-z]+/g; dump regex_find_all(re, "a1bc2def")"#);
         // Value::Display does not quote strings inside arrays.
         assert!(out.iter().any(|l| l.contains("[DUMP] [a, bc, def]")));
+    }
+
+    // --- FFI ---
+
+    #[test]
+    fn test_vm_ffi_extern_abs() {
+        let out = run("extern \"C\" { fn abs(n: i32) -> i32 } dump abs(-42)");
+        assert!(out.iter().any(|l| l.contains("[DUMP] 42")), "got: {:?}", out);
+    }
+
+    #[test]
+    fn test_vm_ffi_alloc_write_read() {
+        let out = run("let buf = ffi_alloc(4); ffi_write(buf, 0, 0x41); ffi_write(buf, 1, 0x00); dump ffi_read(buf, 0); dump ffi_cstr_to_string(buf)");
+        assert!(out.iter().any(|l| l.contains("[DUMP] 65")), "got: {:?}", out);
+        assert!(out.iter().any(|l| l.contains("[DUMP] A")), "got: {:?}", out);
+    }
+
+    #[test]
+    fn test_vm_ffi_string_to_cstr_roundtrip() {
+        let out = run("let cs = ffi_string_to_cstr(\"hello ffi\"); dump ffi_cstr_to_string(cs)");
+        assert!(out.iter().any(|l| l.contains("[DUMP] hello ffi")), "got: {:?}", out);
+    }
+
+    #[test]
+    fn test_vm_ffi_ptr() {
+        let out = run("let p = ffi_ptr(0xDEADBEEF); dump fmt(\"0x{:08X}\", p)");
+        assert!(out.iter().any(|l| l.contains("0xDEADBEEF")), "got: {:?}", out);
+    }
+
+    #[test]
+    fn test_vm_ffi_void_return_is_nil() {
+        let out = run("extern \"C\" { fn abs(n: i32) } let r = abs(0); dump r");
+        assert!(out.iter().any(|l| l.contains("[DUMP] nil")), "got: {:?}", out);
     }
 }

@@ -76,6 +76,8 @@ pub enum Token {
     As,
     #[token("type")]
     Type,
+    #[token("extern")]
+    Extern,
 
     #[regex(r"0x[0-9A-Fa-f]+", |lex| hex_to_u64(lex.slice()))]
     Hex(u64),
@@ -176,6 +178,8 @@ pub enum Token {
     Dot,
     #[token("..")]
     DotDot,
+    #[token("...")]
+    Ellipsis,
     #[token(",")]
     Comma,
     #[token(":")]

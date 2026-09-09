@@ -304,7 +304,7 @@ names it (conventionally `self`, though `self` is not a keyword).
 
 ---
 
-### 1.5 Foreign Function Interface (FFI)  **[SPEC]**
+### 1.5 Foreign Function Interface (FFI)  **[SHIPPED]**
 
 #### Syntax
 ```rak
@@ -312,6 +312,11 @@ names it (conventionally `self`, though `self` is not a keyword).
 extern "C" {
     fn printf(fmt: *u8, ...) -> i32
     fn getpid() -> i32
+}
+
+// Optional explicit library:
+extern "C" from "libc.so.6" {
+    fn abs(n: i32) -> i32
 }
 
 // 2. Dynamic loader:
@@ -323,53 +328,80 @@ libc.close()
 let p = ffi_ptr(0xDEADBEEF)               // raw pointer value
 let buf = ffi_alloc(256)                  // -> *u8  (ffi-managed, freed on GC)
 ffi_write(buf, 0, 0x41)
-let s = ffi_cstr_to_string(ptr)           // *i8 -> string (copies, NUL-terminated)
+let b = ffi_read(buf, 0)                  // -> i64 (one byte)
+let s = ffi_cstr_to_string(p)             // *i8 -> string (copies, NUL-terminated)
 let cs = ffi_string_to_cstr(s)            // string -> *i8 (NUL-terminated, ffi-managed)
+ffi_free(buf)                             // release an ffi_alloc/ffi_string_to_cstr buffer
 ```
 
+> `lib.call(symbol, args)` takes the **args as a single Rak array** (the array
+> elements are marshalled to C; `[]` means no arguments). The return is an
+> `i64` (untyped dynamic call). The declarative `extern "C"` form uses the
+> declared return type for proper unmarshalling.
+
 #### Architecture
-- New crate dep `libffi` (for portable `ffi_call` with arbitrary signatures)
-and `libc`/`windows-sys` for `dlopen`/`dlsym`/`LoadLibrary`/`GetProcAddress`.
-- `ast.rs`: `Stmt::Extern { abi: String, decls: Vec<ForeignFn> }` and
-  `Expr::FFICall { lib: Box<Expr>, symbol: String, args: Vec<Expr>, ret: Type }`.
-  `ForeignFn { name, params: Vec<Param>, varargs: bool, return_type: Type }`.
-- `lexer.rs`: `extern` keyword; `"C"` (and later `"stdcall"`) as a string
-  literal after `extern`.
-- `parser.rs`: `parse_extern` parses the ABI string and a block of `fn`
-  signatures, including a trailing `...` for varargs.
-- `interpreter.rs`: a `Value::ForeignLib(Arc<Mutex<LibHandle>>)` holding the
-  OS handle, and `Value::ForeignPtr(usize)` for raw pointers. `extern` blocks
-  register each symbol as a `NativeFn` that, on call:
-  1. Marshals each `Value` arg to a C ABI slot via `libffi`'s `CType`:
-     `i8..i64`/`u8..u64` → ints; `*u8`/`*i8` → pointer (from `ForeignPtr` or
-     ffi-managed buffer); `string` → NUL-terminated `CString` (owned, freed
-     after the call); `bytes` → pointer to the `Arc<[u8]>`'s data (valid for
-     the call's duration).
-  2. Calls `libffi::call` with the prepared CIF and a buffer for the return
-     value.
-  3. Unmarshals the return value to a Rak `Value` per `ret` type.
-- `stdlib/ffi.rs` (new) wraps `dlopen`/`dlsym`/`dlclose` (Unix) and
-  `LoadLibraryA`/`GetProcAddress`/`FreeLibrary` (Windows) behind one
-  `LibHandle` enum.
+- New crate dep `libloading` (cross-platform `dlopen`/`LoadLibrary`).
+  `stdlib/ffi.rs` wraps it in a `LibHandle` and exposes `load`, `load_default`,
+  `sym_addr`, plus two low-level call trampolines.
+- `ast.rs`: `Stmt::Extern { abi, lib: Option<String>, decls: Vec<ForeignFn> }`,
+  `ForeignFn { name, params, varargs, return_type }`, `Type::Ptr(Box<Type>)`,
+  `Type::Void`.
+- `lexer.rs`: `extern` keyword (`Token::Extern`), `...` (`Token::Ellipsis`).
+- `parser.rs`: `parse_extern` parses the ABI string, optional `from "path"`,
+  and a block of `fn` signatures (trailing `...` for varargs; `*T` pointer
+  types; `void` return type). Optional `;`/`,` between declarations.
+- `interpreter.rs`: `Value::ForeignLib(Arc<Mutex<LibHandle>>)` and
+  `Value::ForeignPtr(u64)`. `Stmt::Extern` registers each declaration in a
+  `foreign_fns` registry (lazily loading the platform default C library or the
+  named `from` library once). Calls marshal each `Value` arg to a `u64` bit
+  pattern (ints → two's-complement bits; `string` → NUL-terminated `CString`
+  kept alive for the call; `bytes` → pointer into a kept-alive buffer; `ptr`
+  → raw address) and unmarshal the return word per the declared `Type`.
+  `lib.call`/`lib.sym`/`lib.close` method dispatch on `ForeignLib`, plus the
+  `ffi_*` free-function builtins.
+- VM (`value.rs` + `vm.rs` + `compiler.rs`): mirrored `Value::ForeignLib` /
+  `Value::ForeignPtr` variants, `ffi_*` natives registered in
+  `register_natives`, two new opcodes `Op::FFICall` / `Op::FFIClose`, and
+  `make_foreign_native` which bakes each `extern` declaration into a
+  `Value::NativeFn` global (lazy library cache + typed marshalling) so the VM
+  runs `extern`-declared calls via `Op::Call` and `lib.call` via `Op::FFICall`.
 
 #### Error handling & edge cases
-- **Safety**: FFI is inherently `unsafe`. Every `extern` block requires the
-  `--ffi` build flag (compile error otherwise) to gate it. A future `unsafe`
-  keyword on the block is the planned UX.
-- **Symbol not found** → `Runtime("ffi: symbol 'foo' not found in <lib>")`.
+- **Safety**: FFI is inherently `unsafe`. Every foreign call goes through a
+  single `unsafe` trampoline; the runtime never dereferences a raw pointer by
+  accident — `ffi_read`/`ffi_write` require an explicit offset and operate one
+  byte at a time.
+- **Symbol not found** → `Runtime("ffi: symbol 'foo' not found: <os err>")`.
 - **Library load failure** → `Runtime("ffi: cannot load 'libc.so.6': <os err>")`.
 - **Marshalling failure** (e.g. passing a map where a pointer is expected) →
-  `Runtime("ffi: cannot marshal <type> to <CType>")`. Never a panic; all
-  `libffi` calls go through a `catch_unwind` boundary.
+  `Runtime("ffi: cannot marshal <type> to C")`. Never a panic.
 - **String lifetime**: strings passed to C are `CString`s owned by the call
   frame and freed when the call returns — the C side must not retain them.
-  `ffi_string_to_cstr` returns an ffi-managed pointer with a deterministic
-  free (`ffi_free`) to bridge to C APIs that retain buffers.
-- **Varargs**: `printf`-style `...` is supported by `libffi`'s CIF builder
-  with per-call argument types.
-- **Pointers are opaque `usize`**: dereferencing is explicit via
-  `ffi_read`/`ffi_write` with a `Type`, so the runtime never dereferences a
-  raw pointer by accident.
+  `ffi_string_to_cstr` returns an ffi-managed pointer freed explicitly with
+  `ffi_free`.
+- **Varargs**: `printf`-style `...` is accepted by the parser and marshalled
+  best-effort by runtime type after the fixed params.
+- **Pointers are opaque `u64`**: dereferencing is explicit via `ffi_read`/
+  `ffi_write` / `ffi_cstr_to_string`.
+- **`ffi_alloc`/`ffi_string_to_cstr` allocations are tracked** (pointer →
+  byte length) so `ffi_free` releases them with the correct
+  `Vec::from_raw_parts` layout; freeing an untracked pointer is an error.
+
+#### Errata (deviations from the original [SPEC])
+- **No `libffi` dependency.** Instead of the `libffi`-based CIF builder, FFI
+  uses a pair of `extern "C" fn(u64×8) -> u64` / `-> f64` trampolines that
+  pass integer/pointer arguments in the integer register class. This builds
+  cleanly on Windows MSVC (where `libffi-sys` is fragile) and covers the
+  OSINT/FFI use cases (`getpid`, `abs`, `strlen`, pointer passing). **Float
+  arguments** are not supported by the trampoline (float *return* is, via the
+  `-> f64` trampoline); full float-by-value argument support is deferred to a
+  future `libffi`-backed backend.
+- **`lib.call(symbol, args)` takes an array**, not a spread argument list,
+  matching the spec's `libc.call("getpid", [])` example. The compiler emits a
+  dedicated `Op::FFICall` (no operand) that unpacks the array.
+- **VM `extern` support** uses `Value::NativeFn` globals (consistent with the
+  existing regex-builtin precedent) rather than dedicated per-declaration
+  opcodes; this is the idiomatic VM path and reuses `Op::Call`.
 
 ---
 
@@ -686,7 +718,8 @@ mmap_close(m)
 | Binary pattern matching | yes | no (graceful error) |
 | Trait protocols | yes | no (graceful error) |
 | Method-call dispatch | yes | no (no dispatch layer) |
-| FFI / mmap / macros / async / raw sockets / DNS / TLS / PCAP | spec | spec |
+| FFI | yes | yes (natives + `Op::FFICall`/`Op::FFIClose`) |
+| mmap / macros / async / raw sockets / DNS / TLS / PCAP | spec | spec |
 
 The VM's `compile_stmt`/`compile_expr`/`compile_pattern` return
 `Err("VM does not support ...")` for unsupported nodes, so running an

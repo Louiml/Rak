@@ -48,6 +48,24 @@ The language started as an OSINT scripting tool. It grew into something bigger.
 
 **Package manager.** `rakpkg` is a CLI for Git-based shareable Rak packages. Initialize, add dependencies from GitHub repos, install, run, and build. The manifest is a Rak file with `let` bindings.
 
+**Foreign Function Interface (FFI).** Call native C functions in `.so`/`.dll`/`.dylib` libraries. Declare bindings with `extern "C" { ... }` (resolved against the platform default C library, or an explicit `from "path"`) or load dynamically with `ffi_load` and `lib.call`. Marshal raw memory with `ffi_alloc`/`ffi_write`/`ffi_read`/`ffi_cstr_to_string`/`ffi_string_to_cstr`/`ffi_free`. Works on both the interpreter and the bytecode VM.
+
+```rak
+extern "C" {
+    fn abs(n: i32) -> i32
+}
+dump abs(-42)                    // 42
+
+let libc = ffi_load("libc.so.6") // or "ucrtbase.dll" / "libSystem.dylib"
+dump libc.call("abs", [-9])      // 9
+libc.close()
+
+let buf = ffi_alloc(4)
+ffi_write(buf, 0, 0x41)
+dump ffi_cstr_to_string(buf)     // "A"
+ffi_free(buf)
+```
+
 ## Build a standalone executable
 
 ```bash
@@ -438,6 +456,8 @@ Rak/
 │   ├── regex.rak           Regex literals and matching
 │   ├── binary_patterns.rak Binary byte-pattern matching
 │   ├── traits.rak          Display/Iterable/Index trait protocols
+│   ├── ffi.rak             FFI: extern bindings + raw memory (interpreter + VM)
+│   ├── ffi_dynamic.rak     FFI dynamic loader (lib.call/lib.sym/lib.close)
 │   └── stdlib_demo.rak     String, array, and math builtins
 ```
 

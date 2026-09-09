@@ -171,6 +171,12 @@ pub enum Stmt {
     },
     Async(Vec<Stmt>),
     Export(Box<Stmt>),
+    /// `extern "C" { fn name(params) -> ret, ... }` — declarative FFI bindings.
+    Extern {
+        abi: String,
+        lib: Option<String>,
+        decls: Vec<ForeignFn>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -240,6 +246,10 @@ pub enum Type {
     Generic(String),
     Option(Box<Type>),
     Result(Box<Type>, Box<Type>),
+    /// Raw pointer to the inner type (`*u8`, `*i8`, `*void`). Used by FFI.
+    Ptr(Box<Type>),
+    /// C `void`, used as an FFI return type for functions returning nothing.
+    Void,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -300,4 +310,14 @@ pub struct Import {
     pub path: Vec<String>,
     pub is_file: bool,
     pub alias: Option<String>,
+}
+
+/// A single foreign function declaration inside an `extern "C" { ... }` block.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ForeignFn {
+    pub name: String,
+    pub params: Vec<Param>,
+    /// Set when the declaration ends with `...` (C varargs).
+    pub varargs: bool,
+    pub return_type: Option<Type>,
 }

@@ -3049,6 +3049,7 @@ version = "0.2.1"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
+ "libloading 0.8.9",
  "md-5",
  "scraper",
  "serde_json",

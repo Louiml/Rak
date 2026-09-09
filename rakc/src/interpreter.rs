@@ -5,6 +5,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::sync::mpsc;
 use std::thread::JoinHandle;
+use std::ffi::CString;
 
 /// A compiled regular expression value. Stored behind an `Arc` so it can be
 /// cloned cheaply inside `Value`.
@@ -56,12 +57,25 @@ pub enum Value {
     Sender(Arc<Mutex<mpsc::Sender<Value>>>),
     Receiver(Arc<Mutex<mpsc::Receiver<Value>>>),
     Regex(Arc<RegexValue>),
+    /// A loaded native shared library (`ffi_load` / `extern` default lib).
+    ForeignLib(Arc<Mutex<rak_stdlib::ffi::LibHandle>>),
+    /// An opaque raw pointer (`ffi_ptr`, `ffi_alloc`, FFI returns).
+    ForeignPtr(u64),
 }
 
 impl fmt::Debug for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self)
     }
+}
+
+/// Holds a buffer alive for the duration of an FFI call so a `u64` argument
+/// pointing into it stays valid.
+enum MarshalGuard {
+    #[allow(dead_code)]
+    CStr(CString),
+    #[allow(dead_code)]
+    Bytes(Vec<u8>),
 }
 
 impl PartialEq for Value {
@@ -139,6 +153,8 @@ impl fmt::Display for Value {
             Value::Sender(_) => write!(f, "<sender>"),
             Value::Receiver(_) => write!(f, "<receiver>"),
             Value::Regex(r) => write!(f, "/{}/{}", r.pattern, r.flags),
+            Value::ForeignLib(_) => write!(f, "<ffi-lib>"),
+            Value::ForeignPtr(p) => write!(f, "0x{:X}", p),
         }
     }
 }
@@ -224,6 +240,23 @@ pub struct Interpreter {
     /// (type, method) -> function, used for `obj.method(...)` call syntax.
     /// Populated from both inherent and trait impls.
     methods: HashMap<(String, String), Value>,
+    /// `extern "C"` declarations, keyed by function name. Calls to these names
+    /// resolve here before the generic builtin dispatch.
+    foreign_fns: HashMap<String, ForeignFnDecl>,
+    /// Lazily-loaded platform default C library for `extern "C"` blocks that
+    /// don't name an explicit `from "path"`.
+    foreign_default_lib: Option<Arc<Mutex<rak_stdlib::ffi::LibHandle>>>,
+    /// Tracked native allocations made by `ffi_alloc` / `ffi_string_to_cstr`,
+    /// keyed by raw pointer address → byte length, so `ffi_free` can release
+    /// them with the correct `Vec::from_raw_parts` layout.
+    ffi_allocs: HashMap<u64, usize>,
+}
+
+/// An `extern "C"` declaration plus the (lazily resolved) library it lives in.
+#[derive(Clone)]
+struct ForeignFnDecl {
+    decl: crate::ast::ForeignFn,
+    lib: Arc<Mutex<rak_stdlib::ffi::LibHandle>>,
 }
 
 impl Interpreter {
@@ -238,6 +271,9 @@ impl Interpreter {
             gui: None,
             trait_impls: HashMap::new(),
             methods: HashMap::new(),
+            foreign_fns: HashMap::new(),
+            foreign_default_lib: None,
+            ffi_allocs: HashMap::new(),
         }
     }
 
@@ -252,6 +288,9 @@ impl Interpreter {
             gui: None,
             trait_impls: HashMap::new(),
             methods: HashMap::new(),
+            foreign_fns: HashMap::new(),
+            foreign_default_lib: None,
+            ffi_allocs: HashMap::new(),
         }
     }
 
@@ -600,6 +639,30 @@ impl Interpreter {
             Stmt::Async(body) => {
                 for s in body {
                     self.exec_stmt(s)?;
+                }
+            }
+            Stmt::Extern { abi: _, lib, decls } => {
+                let lib_handle = if let Some(path) = lib {
+                    Arc::new(Mutex::new(
+                        rak_stdlib::ffi::load(path).map_err(crate::RakError::Runtime)?,
+                    ))
+                } else {
+                    match &self.foreign_default_lib {
+                        Some(arc) => arc.clone(),
+                        None => {
+                            let h = rak_stdlib::ffi::load_default()
+                                .map_err(crate::RakError::Runtime)?;
+                            let arc = Arc::new(Mutex::new(h));
+                            self.foreign_default_lib = Some(arc.clone());
+                            arc
+                        }
+                    }
+                };
+                for decl in decls {
+                    self.foreign_fns.insert(
+                        decl.name.clone(),
+                        ForeignFnDecl { decl: decl.clone(), lib: lib_handle.clone() },
+                    );
                 }
             }
         }
@@ -1267,6 +1330,10 @@ impl Interpreter {
                     return self.call_function(&params, &body, &closure, is_async, args);
                 }
             }
+            if let Some(decl) = self.foreign_fns.get(name).cloned() {
+                let arg_vals: Vec<Value> = args.iter().map(|a| self.eval_expr(a)).collect::<crate::Result<_>>()?;
+                return self.call_foreign(decl, &arg_vals);
+            }
             let arg_vals: Vec<Value> = args.iter().map(|a| self.eval_expr(a)).collect::<crate::Result<_>>()?;
             return self.eval_builtin(name, &arg_vals);
         }
@@ -1278,6 +1345,9 @@ impl Interpreter {
             let obj_val = self.eval_expr(obj_expr)?;
             if let Value::Regex(_) = &obj_val {
                 return self.call_regex_method(&obj_val, method, args);
+            }
+            if let Value::ForeignLib(_) = &obj_val {
+                return self.call_foreign_lib_method(&obj_val, method, args);
             }
             let tn = obj_val.type_name();
             if let Some(func) = self.methods.get(&(tn.clone(), method.clone())).cloned() {
@@ -1476,6 +1546,187 @@ impl Interpreter {
                 Ok(Value::String(re.re.replace_all(&hay, rep.as_str()).into_owned()))
             }
             _ => Err(crate::RakError::Runtime(format!("regex has no method '{}'", method))),
+        }
+    }
+
+    /// Dispatch `lib.method(args)` on a `Value::ForeignLib`.
+    fn call_foreign_lib_method(&mut self, lib_val: &Value, method: &str, args: &[Expr]) -> crate::Result<Value> {
+        let lib = match lib_val {
+            Value::ForeignLib(h) => h.clone(),
+            _ => return Err(crate::RakError::Runtime("not an ffi library".to_string())),
+        };
+        match method {
+            "call" => {
+                let arg_vals: Vec<Value> = args.iter().map(|a| self.eval_expr(a)).collect::<crate::Result<_>>()?;
+                let symbol = self.val_to_string(arg_vals.first())?;
+                let c_args: Vec<Value> = match arg_vals.get(1) {
+                    Some(Value::Array(a)) => a.clone(),
+                    Some(Value::Nil) | None => Vec::new(),
+                    Some(other) => return Err(crate::RakError::Runtime(format!(
+                        "ffi: lib.call(symbol, args) expects an array of args, got {}", other.type_name()
+                    ))),
+                };
+                let mut marshalled: Vec<u64> = Vec::with_capacity(c_args.len());
+                let _guards = self.marshal_args(&c_args, &mut marshalled)?;
+                let addr = {
+                    let h = lib.lock().unwrap();
+                    rak_stdlib::ffi::sym_addr(&h, &symbol).map_err(crate::RakError::Runtime)?
+                };
+                let ret = unsafe { rak_stdlib::ffi::call_int(addr, &marshalled) };
+                Ok(Value::Int(ret as i64))
+            }
+            "sym" => {
+                let sym_expr = args.first().cloned().unwrap_or(Expr::Nil);
+                let sym_val = self.eval_expr(&sym_expr)?;
+                let symbol = self.val_to_string(Some(&sym_val))?;
+                let addr = {
+                    let h = lib.lock().unwrap();
+                    rak_stdlib::ffi::sym_addr(&h, &symbol).map_err(crate::RakError::Runtime)?
+                };
+                Ok(Value::ForeignPtr(addr as u64))
+            }
+            "close" => {
+                // Drop the handle if this is the last strong ref. Returns nil.
+                if let Value::ForeignLib(arc) = lib_val {
+                    if Arc::strong_count(arc) <= 2 {
+                        let h = arc.lock().unwrap();
+                        // Releasing happens via Drop when the last Arc drops.
+                        let _ = &h;
+                    }
+                }
+                Ok(Value::Nil)
+            }
+            _ => Err(crate::RakError::Runtime(format!("ffi library has no method '{}'", method))),
+        }
+    }
+
+    /// Call a typed `extern "C"` declaration with already-evaluated args.
+    fn call_foreign(&self, decl: ForeignFnDecl, args: &[Value]) -> crate::Result<Value> {
+        let ForeignFnDecl { decl, lib } = decl;
+        if !decl.varargs && args.len() > decl.params.len() {
+            return Err(crate::RakError::Runtime(format!(
+                "ffi: {} expects {} args, got {}",
+                decl.name, decl.params.len(), args.len()
+            )));
+        }
+        let mut marshalled: Vec<u64> = Vec::with_capacity(args.len());
+        let _guards = self.marshal_args_typed(args, &decl.params, decl.varargs, &mut marshalled)?;
+        let addr = {
+            let h = lib.lock().unwrap();
+            rak_stdlib::ffi::sym_addr(&h, &decl.name).map_err(crate::RakError::Runtime)?
+        };
+        let is_float_ret = matches!(decl.return_type, Some(Type::F32) | Some(Type::F64));
+        let ret_bits = if is_float_ret {
+            let f = unsafe { rak_stdlib::ffi::call_float(addr, &marshalled) };
+            f.to_bits()
+        } else {
+            unsafe { rak_stdlib::ffi::call_int(addr, &marshalled) }
+        };
+        Ok(self.unmarshal_ret(&decl.return_type, ret_bits, is_float_ret))
+    }
+
+    /// Marshal Rak `Value`s to `u64` bit patterns by runtime type (dynamic
+    /// `lib.call`). Returns a guard vector holding the backing buffers alive
+    /// for the duration of the call.
+    fn marshal_args(&self, args: &[Value], out: &mut Vec<u64>) -> crate::Result<Vec<MarshalGuard>> {
+        let mut guards = Vec::with_capacity(args.len());
+        for a in args {
+            match a {
+                Value::Int(i) => out.push(*i as u64),
+                Value::Hex(h) => out.push(*h),
+                Value::Bool(b) => out.push(if *b { 1 } else { 0 }),
+                Value::Float(f) => out.push(*f as u64), // best-effort, integer ABI
+                Value::ForeignPtr(p) => out.push(*p),
+                Value::Nil => out.push(0),
+                Value::String(s) => {
+                    let c = CString::new(s.as_str()).map_err(|e| crate::RakError::Runtime(format!("ffi: bad string: {}", e)))?;
+                    let p = c.as_ptr() as u64;
+                    out.push(p);
+                    guards.push(MarshalGuard::CStr(c));
+                }
+                Value::Bytes(b) => {
+                    let mut v = b.clone();
+                    v.push(0);
+                    let p = v.as_ptr() as u64;
+                    out.push(p);
+                    guards.push(MarshalGuard::Bytes(v));
+                }
+                other => return Err(crate::RakError::Runtime(format!("ffi: cannot marshal {} to C", other.type_name()))),
+            }
+        }
+        Ok(guards)
+    }
+
+    /// Marshal Rak `Value`s to `u64` bit patterns using declared `Param` types.
+    fn marshal_args_typed(&self, args: &[Value], params: &[Param], varargs: bool, out: &mut Vec<u64>) -> crate::Result<Vec<MarshalGuard>> {
+        let mut guards = Vec::with_capacity(args.len());
+        for (i, a) in args.iter().enumerate() {
+            let ty = params.get(i).and_then(|p| p.type_hint.as_ref());
+            match (a, ty) {
+                (Value::String(s), _) => {
+                    let c = CString::new(s.as_str()).map_err(|e| crate::RakError::Runtime(format!("ffi: bad string: {}", e)))?;
+                    let p = c.as_ptr() as u64;
+                    out.push(p);
+                    guards.push(MarshalGuard::CStr(c));
+                }
+                (Value::Bytes(b), _) => {
+                    let mut v = b.clone();
+                    v.push(0);
+                    let p = v.as_ptr() as u64;
+                    out.push(p);
+                    guards.push(MarshalGuard::Bytes(v));
+                }
+                (Value::ForeignPtr(p), _) => out.push(*p),
+                (Value::Int(i), _) => out.push(*i as u64),
+                (Value::Hex(h), _) => out.push(*h),
+                (Value::Bool(b), _) => out.push(if *b { 1 } else { 0 }),
+                (Value::Float(f), Some(Type::F32)) => out.push((*f as f32).to_bits() as u64),
+                (Value::Float(f), Some(Type::F64)) => out.push((*f).to_bits()),
+                (Value::Float(f), _) => out.push(*f as u64),
+                (Value::Nil, _) => out.push(0),
+                (other, _) => {
+                    if varargs && i >= params.len() {
+                        // Varargs: marshal best-effort by runtime type.
+                        match other {
+                            Value::Int(i) => out.push(*i as u64),
+                            Value::Hex(h) => out.push(*h),
+                            Value::ForeignPtr(p) => out.push(*p),
+                            Value::Bool(b) => out.push(if *b { 1 } else { 0 }),
+                            Value::Nil => out.push(0),
+                            _ => return Err(crate::RakError::Runtime(format!("ffi: cannot marshal {} as vararg", other.type_name()))),
+                        }
+                    } else {
+                        return Err(crate::RakError::Runtime(format!("ffi: cannot marshal {} to C", other.type_name())));
+                    }
+                }
+            }
+        }
+        Ok(guards)
+    }
+
+    /// Convert a raw return-word into a Rak `Value` per the declared return type.
+    fn unmarshal_ret(&self, ret: &Option<Type>, bits: u64, is_float: bool) -> Value {
+        match ret {
+            None | Some(Type::Void) => Value::Nil,
+            Some(Type::I8) => Value::Int((bits as u8) as i8 as i64),
+            Some(Type::I16) => Value::Int((bits as u16) as i16 as i64),
+            Some(Type::I32) | Some(Type::Int) => Value::Int(bits as u32 as i64),
+            Some(Type::I64) => Value::Int(bits as i64),
+            Some(Type::U8) => Value::Hex(bits as u8 as u64),
+            Some(Type::U16) => Value::Hex(bits as u16 as u64),
+            Some(Type::U32) => Value::Hex(bits as u32 as u64),
+            Some(Type::U64) | Some(Type::Hex(_)) => Value::Hex(bits),
+            Some(Type::F32) => Value::Float(f32::from_bits(bits as u32) as f64),
+            Some(Type::F64) => Value::Float(f64::from_bits(bits)),
+            Some(Type::Ptr(_)) => Value::ForeignPtr(bits),
+            Some(Type::Custom(_)) => Value::ForeignPtr(bits),
+            Some(_) => {
+                if is_float {
+                    Value::Float(f64::from_bits(bits))
+                } else {
+                    Value::ForeignPtr(bits)
+                }
+            }
         }
     }
 
@@ -2308,6 +2559,93 @@ impl Interpreter {
             "gui_open" | "gui_update" | "gui_title" | "gui_close" | "gui_wait" | "gui_callback" => {
                 Err(crate::RakError::Runtime("GUI support not enabled (build with --features gui)".to_string()))
             }
+            // --- FFI builtins ---
+            "ffi_load" => {
+                let path = self.val_to_string(args.first())?;
+                let h = rak_stdlib::ffi::load(&path).map_err(crate::RakError::Runtime)?;
+                Ok(Value::ForeignLib(Arc::new(Mutex::new(h))))
+            }
+            "ffi_ptr" => Ok(Value::ForeignPtr(args.first().and_then(|v| v.as_u64()).unwrap_or(0))),
+            "ffi_alloc" => {
+                let n = args.first().and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                let mut v = vec![0u8; n];
+                let ptr = v.as_mut_ptr() as u64;
+                std::mem::forget(v);
+                self.ffi_allocs.insert(ptr, n);
+                Ok(Value::ForeignPtr(ptr))
+            }
+            "ffi_free" => {
+                let ptr = match args.first() {
+                    Some(Value::ForeignPtr(p)) => *p,
+                    _ => return Err(crate::RakError::Runtime("ffi_free(ptr) requires a ptr".to_string())),
+                };
+                match self.ffi_allocs.remove(&ptr) {
+                    Some(n) => {
+                        unsafe { let _ = Vec::from_raw_parts(ptr as *mut u8, n, n); }
+                        Ok(Value::Nil)
+                    }
+                    None => Err(crate::RakError::Runtime("ffi_free: pointer was not allocated by ffi_alloc/ffi_string_to_cstr".to_string())),
+                }
+            }
+            "ffi_write" => {
+                let ptr = args.first().and_then(|v| match v { Value::ForeignPtr(p) => Some(*p), _ => None }).ok_or_else(|| crate::RakError::Runtime("ffi_write(ptr, off, byte)".to_string()))?;
+                let off = args.get(1).and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                let byte = args.get(2).and_then(|v| v.as_u64()).unwrap_or(0) as u8;
+                unsafe { *((ptr as usize + off) as *mut u8) = byte; }
+                Ok(Value::Nil)
+            }
+            "ffi_read" => {
+                let ptr = args.first().and_then(|v| match v { Value::ForeignPtr(p) => Some(*p), _ => None }).ok_or_else(|| crate::RakError::Runtime("ffi_read(ptr, off)".to_string()))?;
+                let off = args.get(1).and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                let b = unsafe { *((ptr as usize + off) as *const u8) };
+                Ok(Value::Int(b as i64))
+            }
+            "ffi_read_i32" => {
+                let ptr = args.first().and_then(|v| match v { Value::ForeignPtr(p) => Some(*p), _ => None }).ok_or_else(|| crate::RakError::Runtime("ffi_read_i32(ptr, off)".to_string()))?;
+                let off = args.get(1).and_then(|v| v.as_u64()).unwrap_or(0) as isize;
+                let v = unsafe { *((ptr as usize).wrapping_add(off as usize) as *const i32) };
+                Ok(Value::Int(v as i64))
+            }
+            "ffi_cstr_to_string" => {
+                let ptr = args.first().and_then(|v| match v { Value::ForeignPtr(p) => Some(*p), _ => None }).ok_or_else(|| crate::RakError::Runtime("ffi_cstr_to_string(ptr)".to_string()))? as usize;
+                let s = unsafe {
+                    let mut len = 0usize;
+                    while *(ptr as *const u8).add(len) != 0 { len += 1; }
+                    let slice = std::slice::from_raw_parts(ptr as *const u8, len);
+                    String::from_utf8_lossy(slice).into_owned()
+                };
+                Ok(Value::String(s))
+            }
+            "ffi_string_to_cstr" => {
+                let s = self.val_to_string(args.first())?;
+                let bytes = match CString::new(s.as_str()) {
+                    Ok(c) => c.into_bytes_with_nul(),
+                    Err(e) => return Err(crate::RakError::Runtime(format!("ffi_string_to_cstr: {}", e))),
+                };
+                let len = bytes.len();
+                let ptr = bytes.as_ptr() as u64;
+                std::mem::forget(bytes);
+                self.ffi_allocs.insert(ptr, len);
+                Ok(Value::ForeignPtr(ptr))
+            }
+            "ffi_call" => {
+                let (lib, symbol) = match (args.first(), args.get(1)) {
+                    (Some(Value::ForeignLib(h)), Some(Value::String(s))) => (h.clone(), s.clone()),
+                    _ => return Err(crate::RakError::Runtime("ffi_call(lib, symbol, args_array)".to_string())),
+                };
+                let c_args: Vec<Value> = match args.get(2) {
+                    Some(Value::Array(a)) => a.clone(),
+                    Some(Value::Nil) | None => Vec::new(),
+                    Some(other) => return Err(crate::RakError::Runtime(format!(
+                        "ffi_call: args must be an array, got {}", other.type_name()
+                    ))),
+                };
+                let mut marshalled = Vec::with_capacity(c_args.len());
+                let _g = self.marshal_args(&c_args, &mut marshalled)?;
+                let addr = { let h = lib.lock().unwrap(); rak_stdlib::ffi::sym_addr(&h, &symbol).map_err(crate::RakError::Runtime)? };
+                let ret = unsafe { rak_stdlib::ffi::call_int(addr, &marshalled) };
+                Ok(Value::Int(ret as i64))
+            }
             // --- Regex builtins ---
             "regex_new" => {
                 let pattern = self.val_to_string(args.first())?;
@@ -2423,6 +2761,8 @@ impl Value {
             Value::Regex(_) => "regex".to_string(),
             Value::Function { .. } => "function".to_string(),
             Value::Module(_) => "module".to_string(),
+            Value::ForeignLib(_) => "ffi-lib".to_string(),
+            Value::ForeignPtr(_) => "ptr".to_string(),
             _ => "<opaque>".to_string(),
         }
     }
@@ -2431,11 +2771,16 @@ impl Value {
             Value::Hex(h) => Some(*h as i64),
             Value::Int(i) => Some(*i),
             Value::Float(f) => Some(*f as i64),
+            Value::ForeignPtr(p) => Some(*p as i64),
             _ => None,
         }
     }
     fn as_u64(&self) -> Option<u64> {
-        self.as_i64().map(|v| v as u64)
+        match self {
+            Value::Hex(h) => Some(*h),
+            Value::ForeignPtr(p) => Some(*p),
+            _ => self.as_i64().map(|v| v as u64),
+        }
     }
     fn as_f64(&self) -> Option<f64> {
         match self {
@@ -2783,5 +3128,49 @@ mod tests {
         let src = "struct Vec3 { data: array } impl Index for Vec3 { fn index(self, i) { return self.data[i] } } let v = Vec3 { data: [10, 20, 30] } dump v[1]";
         let output = interp.run_source(src).unwrap();
         assert!(output.iter().any(|l| l.contains("[DUMP] 20")), "got: {:?}", output);
+    }
+
+    // --- FFI ---
+
+    #[test]
+    fn test_interpreter_ffi_extern_abs() {
+        let mut interp = Interpreter::new();
+        let src = "extern \"C\" { fn abs(n: i32) -> i32 } dump abs(-42)";
+        let output = interp.run_source(src).unwrap();
+        assert!(output.iter().any(|l| l.contains("[DUMP] 42")), "got: {:?}", output);
+    }
+
+    #[test]
+    fn test_interpreter_ffi_alloc_write_read_free() {
+        let mut interp = Interpreter::new();
+        let src = "let buf = ffi_alloc(4); ffi_write(buf, 0, 0x41); ffi_write(buf, 1, 0x00); dump ffi_read(buf, 0); dump ffi_cstr_to_string(buf); ffi_free(buf)";
+        let output = interp.run_source(src).unwrap();
+        assert!(output.iter().any(|l| l.contains("[DUMP] 65")), "got: {:?}", output);
+        assert!(output.iter().any(|l| l.contains("[DUMP] A")), "got: {:?}", output);
+    }
+
+    #[test]
+    fn test_interpreter_ffi_string_to_cstr_roundtrip() {
+        let mut interp = Interpreter::new();
+        let src = "let cs = ffi_string_to_cstr(\"hello ffi\"); dump ffi_cstr_to_string(cs); ffi_free(cs)";
+        let output = interp.run_source(src).unwrap();
+        assert!(output.iter().any(|l| l.contains("[DUMP] hello ffi")), "got: {:?}", output);
+    }
+
+    #[test]
+    fn test_interpreter_ffi_ptr_format() {
+        let mut interp = Interpreter::new();
+        let src = "let p = ffi_ptr(0xDEADBEEF); dump fmt(\"0x{:08X}\", p)";
+        let output = interp.run_source(src).unwrap();
+        assert!(output.iter().any(|l| l.contains("0xDEADBEEF")), "got: {:?}", output);
+    }
+
+    #[test]
+    fn test_interpreter_ffi_void_return_is_nil() {
+        let mut interp = Interpreter::new();
+        // A function declared with no return type yields nil (void).
+        let src = "extern \"C\" { fn abs(n: i32) } let r = abs(0); dump r";
+        let output = interp.run_source(src).unwrap();
+        assert!(output.iter().any(|l| l.contains("[DUMP] nil")), "got: {:?}", output);
     }
 }

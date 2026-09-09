@@ -33,9 +33,26 @@ impl Compiler {
                 }
             }
         }
+        // Register `extern "C"` declarations as native-fn globals, so
+        // `getpid()` resolves to `Op::Call` on a `Value::NativeFn`.
+        let mut foreigns: Vec<(String, Value)> = Vec::new();
+        for stmt in &module.items {
+            if let Stmt::Extern { lib, decls, .. } = stmt {
+                for decl in decls {
+                    let native = crate::vm::make_foreign_native(decl.clone(), lib.clone());
+                    foreigns.push((decl.name.clone(), native));
+                }
+            }
+        }
         let closures: Vec<(String, Value)> = self.func_closures.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
         for (name, closure) in closures {
             self.load_const(closure);
+            let ci = self.const_str(&name);
+            self.emit_op(Op::StoreGlobal);
+            self.emit_u16(ci);
+        }
+        for (name, native) in foreigns {
+            self.load_const(native);
             let ci = self.const_str(&name);
             self.emit_op(Op::StoreGlobal);
             self.emit_u16(ci);
@@ -45,6 +62,9 @@ impl Compiler {
                 if matches!(value.as_ref(), Expr::Function { .. }) {
                     continue;
                 }
+            }
+            if matches!(stmt, Stmt::Extern { .. }) {
+                continue;
             }
             self.compile_stmt(stmt)?;
         }
@@ -456,6 +476,22 @@ impl Compiler {
                         }
                         self.emit_op(Op::Call);
                         self.emit_byte(args.len() as u8);
+                        return Ok(());
+                    }
+                }
+                // `lib.call(symbol, args_array)` and `lib.close()` desugar to FFI opcodes.
+                if let Expr::FieldAccess(obj, method) = callee.as_ref() {
+                    if method == "call" && args.len() == 2 {
+                        self.compile_expr(obj)?;
+                        for a in args {
+                            self.compile_expr(a)?;
+                        }
+                        self.emit_op(Op::FFICall);
+                        return Ok(());
+                    }
+                    if method == "close" && args.is_empty() {
+                        self.compile_expr(obj)?;
+                        self.emit_op(Op::FFIClose);
                         return Ok(());
                     }
                 }

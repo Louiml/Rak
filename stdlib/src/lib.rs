@@ -5,6 +5,7 @@ pub mod recon;
 pub mod web;
 pub mod file;
 pub mod js;
+pub mod ffi;
 
 pub use net::*;
 pub use crypto::*;

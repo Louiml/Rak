@@ -1,0 +1,36 @@
+// FFI: call native C functions and manage raw memory.
+//
+// This example runs on both backends:
+//   rakc run examples/ffi.rak    (interpreter)
+//   rakc vm  examples/ffi.rak    (bytecode VM)
+//
+// It uses only VM-supported features so the bytecode backend can run it too.
+
+// 1. Declarative C bindings against the platform default C library.
+//    `abs` lives in libc/ucrt on every OS, so this is portable.
+extern "C" {
+    fn abs(n: i32) -> i32
+}
+
+dump abs(-42)          // 42  (typed i32 return)
+dump abs(-100)         // 100
+
+// 2. Raw memory: allocate, write, read, then free.
+let buf = ffi_alloc(8)
+ffi_write(buf, 0, 0x41)      // 'A'
+ffi_write(buf, 1, 0x42)      // 'B'
+ffi_write(buf, 2, 0x43)      // 'C'
+ffi_write(buf, 3, 0x00)      // NUL terminator
+dump ffi_read(buf, 0)        // 65
+dump ffi_read(buf, 1)        // 66
+dump ffi_cstr_to_string(buf) // "ABC"
+ffi_free(buf)
+
+// 3. String <-> C string round trip (ffi-managed, freed with ffi_free).
+let cs = ffi_string_to_cstr("hello ffi")
+dump ffi_cstr_to_string(cs)  // "hello ffi"
+ffi_free(cs)
+
+// 4. Pointer values.
+let p = ffi_ptr(0xDEADBEEF)
+dump fmt("ptr = 0x{:08X}", p)  // ptr = 0xDEADBEEF

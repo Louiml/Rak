@@ -1,0 +1,29 @@
+// FFI dynamic loader — interpreter only (the VM doesn't support try/catch).
+//
+//   rakc run examples/ffi_dynamic.rak
+//
+// Demonstrates `ffi_load`, `lib.call`, `lib.sym`, and `lib.close` with a
+// platform fallback so the same script runs on Windows and Linux.
+
+let lib = nil
+try {
+    let lib = ffi_load("ucrtbase.dll")
+    dump lib.call("abs", [-9])   // 9  (Windows UCRT)
+} catch e {
+    try {
+        let lib = ffi_load("libc.so.6")
+        dump lib.call("abs", [-9])   // 9  (Linux libc)
+    } catch e2 {
+        dump "dynamic loader skipped on this platform"
+    }
+}
+
+// `lib.sym` resolves a symbol to a raw pointer address.
+try {
+    let libc = ffi_load("msvcrt.dll")
+    let strlen_ptr = libc.sym("strlen")
+    dump fmt("strlen @ 0x{:X}", strlen_ptr)
+    libc.close()
+} catch e {
+    dump "msvcrt demo skipped"
+}

@@ -55,6 +55,8 @@ pub enum Value {
     Channel(Arc<crate::vm::ChannelHandle>),
     Future(Arc<crate::vm::FutureHandle>),
     Regex(Arc<RegexValue>),
+    ForeignLib(Arc<std::sync::Mutex<rak_stdlib::ffi::LibHandle>>),
+    ForeignPtr(u64),
 }
 
 impl Value {
@@ -88,6 +90,8 @@ impl Value {
             Value::Channel(_) => "channel",
             Value::Future(_) => "future",
             Value::Regex(_) => "regex",
+            Value::ForeignLib(_) => "ffi-lib",
+            Value::ForeignPtr(_) => "ptr",
         }
     }
 
@@ -104,6 +108,7 @@ impl Value {
             Value::F32(v) => Some(*v as i64),
             Value::F64(v) => Some(*v as i64),
             Value::Hex(v, _) => Some(*v as i64),
+            Value::ForeignPtr(p) => Some(*p as i64),
             _ => None,
         }
     }
@@ -172,6 +177,7 @@ impl PartialEq for Value {
             (Value::Map(a), Value::Map(b)) => a == b,
             (Value::Option(a), Value::Option(b)) => a == b,
             (Value::Regex(a), Value::Regex(b)) => a.pattern == b.pattern && a.flags == b.flags,
+            (Value::ForeignPtr(a), Value::ForeignPtr(b)) => a == b,
             (Value::Closure { code: a, .. }, Value::Closure { code: b, .. }) => Arc::ptr_eq(a, b),
             (Value::NativeFn(na, _), Value::NativeFn(nb, _)) => na == nb,
             _ => std::mem::discriminant(self) == std::mem::discriminant(other),
@@ -238,6 +244,8 @@ impl fmt::Display for Value {
             Value::Channel(_) => write!(f, "<channel>"),
             Value::Future(_) => write!(f, "<future>"),
             Value::Regex(r) => write!(f, "/{}/{}", r.pattern, r.flags),
+            Value::ForeignLib(_) => write!(f, "<ffi-lib>"),
+            Value::ForeignPtr(p) => write!(f, "0x{:X}", p),
         }
     }
 }
@@ -317,5 +325,7 @@ pub fn type_of(t: &Type) -> String {
         Type::I8 | Type::I16 | Type::I32 | Type::I64 => "int".to_string(),
         Type::U8 | Type::U16 | Type::U32 | Type::U64 => "uint".to_string(),
         Type::F32 | Type::F64 => "float".to_string(),
+        Type::Ptr(_) => "ptr".to_string(),
+        Type::Void => "void".to_string(),
     }
 }

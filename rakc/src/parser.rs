@@ -201,6 +201,7 @@ impl<'a> Parser<'a> {
                 Ok(Stmt::Raise(Box::new(e)))
             }
             Some(Token::Type) => self.parse_type_alias(),
+            Some(Token::Extern) => self.parse_extern(),
             Some(Token::Async) => {
                 self.advance();
                 let body = self.parse_block()?;
@@ -573,6 +574,71 @@ impl<'a> Parser<'a> {
         Ok(Stmt::TypeAlias { name, alias })
     }
 
+    /// Parse `extern "C" [from "path"] { fn name(params) -> ret, ... }`.
+    fn parse_extern(&mut self) -> Result<Stmt> {
+        self.expect(Token::Extern)?;
+        let abi = match self.peek() {
+            Some(Token::String(s)) => {
+                let s = s.clone();
+                self.advance();
+                s
+            }
+            _ => return Err(self.perr("Expected ABI string after 'extern' (e.g. \"C\")".to_string())),
+        };
+        if abi != "C" {
+            return Err(self.perr(format!("Unsupported ABI '{}' (only \"C\" is supported)", abi)));
+        }
+        let lib = if matches!(self.peek(), Some(Token::Ident(n)) if n == "from") {
+            self.advance();
+            match self.peek() {
+                Some(Token::String(s)) => {
+                    let s = s.clone();
+                    self.advance();
+                    Some(s)
+                }
+                _ => return Err(self.perr("Expected library path string after 'from'".to_string())),
+            }
+        } else {
+            None
+        };
+        self.expect(Token::LBrace)?;
+        let mut decls = Vec::new();
+        while !self.check(&Token::RBrace) && self.peek().is_some() {
+            self.expect(Token::Fn)?;
+            let name = self.expect_ident()?;
+            self.expect(Token::LParen)?;
+            let mut params = Vec::new();
+            let mut varargs = false;
+            while !self.check(&Token::RParen) && self.peek().is_some() {
+                if self.match_token(&Token::Ellipsis) {
+                    varargs = true;
+                    break;
+                }
+                let pname = self.expect_ident()?;
+                let type_hint = if self.match_token(&Token::Colon) {
+                    Some(self.parse_type()?)
+                } else {
+                    None
+                };
+                params.push(Param { name: pname, type_hint });
+                if !self.match_token(&Token::Comma) {
+                    break;
+                }
+            }
+            self.expect(Token::RParen)?;
+            let return_type = if self.match_token(&Token::Arrow) {
+                Some(self.parse_type()?)
+            } else {
+                None
+            };
+            self.match_token(&Token::Semi);
+            self.match_token(&Token::Comma);
+            decls.push(ForeignFn { name, params, varargs, return_type });
+        }
+        self.expect(Token::RBrace)?;
+        Ok(Stmt::Extern { abi, lib, decls })
+    }
+
     fn expect_ident(&mut self) -> Result<String> {
         match self.peek() {
             Some(Token::Ident(n)) => {
@@ -671,11 +737,18 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_type(&mut self) -> Result<Type> {
+        // Pointer types: `*u8`, `*i8`, `*void`, `*SomeType`.
+        if self.check(&Token::Star) {
+            self.advance();
+            let inner = self.parse_type()?;
+            return Ok(Type::Ptr(Box::new(inner)));
+        }
         let base = match self.peek() {
             Some(Token::Ident(name)) => {
                 let name = name.clone();
                 self.advance();
                 match name.as_str() {
+                    "void" => Type::Void,
                     "hex8" => Type::Hex(8),
                     "hex16" => Type::Hex(16),
                     "hex32" => Type::Hex(32),
@@ -1714,6 +1787,42 @@ mod tests {
         match &module.items[0] {
             Stmt::Let { value, .. } => assert!(matches!(&**value, Expr::Int(65))),
             _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn test_parse_extern_block() {
+        let source = "extern \"C\" { fn printf(fmt: *u8, ...) -> i32; fn getpid() -> i32 }";
+        let tokens = tokenize(source).unwrap();
+        let module = parse(&tokens, source).unwrap();
+        match &module.items[0] {
+            Stmt::Extern { abi, lib, decls } => {
+                assert_eq!(abi, "C");
+                assert!(lib.is_none());
+                assert_eq!(decls.len(), 2);
+                assert_eq!(decls[0].name, "printf");
+                assert!(decls[0].varargs);
+                assert!(matches!(decls[0].return_type, Some(Type::I32)));
+                assert!(matches!(decls[0].params[0].type_hint, Some(Type::Ptr(_))));
+                assert_eq!(decls[1].name, "getpid");
+                assert!(!decls[1].varargs);
+            }
+            _ => panic!("expected Stmt::Extern"),
+        }
+    }
+
+    #[test]
+    fn test_parse_extern_with_from() {
+        let source = "extern \"C\" from \"libc.so.6\" { fn abs(n: i32) -> i32 }";
+        let tokens = tokenize(source).unwrap();
+        let module = parse(&tokens, source).unwrap();
+        match &module.items[0] {
+            Stmt::Extern { abi, lib, decls } => {
+                assert_eq!(abi, "C");
+                assert_eq!(lib.as_deref(), Some("libc.so.6"));
+                assert_eq!(decls.len(), 1);
+            }
+            _ => panic!("expected Stmt::Extern"),
         }
     }
 }

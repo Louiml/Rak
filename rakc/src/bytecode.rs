@@ -40,6 +40,13 @@ pub enum Op {
 
     LoopBegin,
     LoopEnd,
+
+    /// Pop the args array value, pop the symbol string, pop the `ForeignLib`
+    /// handle, unpack the array into C arguments, and call the symbol via the
+    /// dynamic loader. Push the `i64` result. No operand.
+    FFICall,
+    /// Pop a `ForeignLib` handle (best-effort early release). Push nil.
+    FFIClose,
 }
 
 impl Op {
