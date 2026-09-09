@@ -57,6 +57,8 @@ pub enum Value {
     Regex(Arc<RegexValue>),
     ForeignLib(Arc<std::sync::Mutex<rak_stdlib::ffi::LibHandle>>),
     ForeignPtr(u64),
+    Mmap(Arc<rak_stdlib::mmap::MmapHandle>),
+    MmapSlice(Arc<rak_stdlib::mmap::MmapHandle>, usize, usize),
 }
 
 impl Value {
@@ -92,6 +94,8 @@ impl Value {
             Value::Regex(_) => "regex",
             Value::ForeignLib(_) => "ffi-lib",
             Value::ForeignPtr(_) => "ptr",
+            Value::Mmap(_) => "mmap",
+            Value::MmapSlice(_, _, _) => "mmap-slice",
         }
     }
 
@@ -246,6 +250,8 @@ impl fmt::Display for Value {
             Value::Regex(r) => write!(f, "/{}/{}", r.pattern, r.flags),
             Value::ForeignLib(_) => write!(f, "<ffi-lib>"),
             Value::ForeignPtr(p) => write!(f, "0x{:X}", p),
+            Value::Mmap(_) => write!(f, "<mmap>"),
+            Value::MmapSlice(_, _, n) => write!(f, "<mmap-slice {}B>", n),
         }
     }
 }

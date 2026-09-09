@@ -405,47 +405,75 @@ ffi_free(buf)                             // release an ffi_alloc/ffi_string_to_
 
 ---
 
-### 1.6 Memory-mapped files & zero-copy I/O  **[SPEC]**
+### 1.6 Memory-mapped files & zero-copy I/O  **[SHIPPED]**
 
 #### Syntax
 ```rak
-let m = mmap_open("huge.pcap", "r")      // "r" | "rw" | "rw_new"
-let slice = mmap_slice(m, 0x1000, 64)     // -> bytes (zero-copy view into the map)
-let magic = slice[0..4]                   // bytes view, no copy
+let m = mmap_open("huge.pcap", "r")      // "r" | "rw"
+let slice = mmap_slice(m, 0x1000, 64)     // -> mmap-slice (zero-copy view)
+let magic = slice[0..4]                   // bytes view, no copy (interpreter)
+dump magic[0]                             // single byte (both backends)
 mmap_close(m)
 
 // Zero-copy inspection helpers:
 for line in mmap_lines(m, "\n") { ... }   // iterates without materialising
-let off = mmap_find(m, b"\xff\xd8\xff")   // byte search, returns offset
+let off = mmap_find(m, "\xff\xd8\xff")    // byte search, returns offset (or -1)
 let n = mmap_size(m)
+let offs = mmap_lines_off(m, "\n")        // -> [(offset, length), ...] zero-copy
 ```
+
+> `mmap_slice` returns a `Value::MmapSlice(Arc<MmapHandle>, off, len)` — a
+> zero-copy view that keeps the mapping alive. Single-byte indexing (`s[i]`)
+> reads directly from the mapped page on both backends; range slicing
+> (`s[a..b]`) and binary pattern matching over slices work on the interpreter.
+> `string(mmap_slice)` / `val_to_bytes(mmap_slice)` copy the slice once when
+> crossing into string/regex builtins.
 
 #### Architecture
 - New crate dep `memmap2` (cross-platform `Mmap`/`MmapMut`).
-- `value.rs` and `interpreter.rs`: `Value::Mmap(Arc<MmapHandle>)` where
-  `MmapHandle { map: memmap2::Mmap, file: File, writable: bool }`.
-- `stdlib/mmap.rs` (new): `open(path, mode)`, `slice(handle, off, len) ->
-  &[u8]`, `close(handle)`, `size`, `find`, `lines`.
-- `mmap_slice` returns a `Value::Bytes` whose `Arc<[u8]>` is an
-  `Arc::from(&map[off..off+len])` — a **zero-copy** sub-slice of the mapped
-  region (Rust's `Arc<[u8]>` from a `&[u8]` copies; to truly avoid copies we
-  return a `Value::MmapSlice { map: Arc<MmapHandle>, off, len }` variant so the
-  backing mapping is kept alive). Indexing/range over an `MmapSlice` reads
+- `stdlib/mmap.rs`: `MmapHandle { inner: MmapInner { Ro(Mmap), Rw(MmapMut) },
+  _file: File }` with `open(path, mode)`, `size`, `find`, `lines`, `lines_off`.
+  `open` returns an `Arc<MmapHandle>` so slices share ownership.
+- `value.rs` and `interpreter.rs`: `Value::Mmap(Arc<MmapHandle>)` and
+  `Value::MmapSlice(Arc<MmapHandle>, usize, usize)`. `mmap_slice` returns the
+  slice variant — a true zero-copy view (the `Arc` keeps the `Mmap` alive, so
+  slices outlive `mmap_close`). Indexing/range over an `MmapSlice` reads
   directly from the mapped pages.
+- `interpreter.rs`: zero-copy `Expr::Index` handling for `Mmap`/`MmapSlice`
+  (single index → byte; `Expr::Range` → sub-slice), `pattern_matches` arms for
+  `Pattern::Bytes`/`Array`/`Byte` against `MmapSlice` (reads mapped pages),
+  and `val_to_bytes`/`val_to_string` MmapSlice arms (copy-on-use). Builtins:
+  `mmap_open`, `mmap_slice`, `mmap_size`, `mmap_close`, `mmap_find`,
+  `mmap_lines`, `mmap_lines_off`.
+- VM (`value.rs` + `vm.rs`): mirrored `Value::Mmap`/`MmapSlice` variants,
+  `mmap_*` natives registered in `register_natives`, and `Op::IndexGet` cases
+  for `Mmap`/`MmapSlice` single-byte reads. (`string()` native special-cases
+  `Mmap`/`MmapSlice` to return content.)
 
 #### Error handling & edge cases
-- **Unmapping**: `mmap_close` drops the `Arc<MmapHandle>`; slices derived from
-  it keep their own `Arc` so they remain valid until they themselves drop
-  (Rust's `Arc` refcount guarantees the mapping outlives all slices).
-- **Out-of-bounds slice** → `Runtime("mmap_slice: [off,off+len) out of range")`.
-- **File open / mmap failure** → `Runtime("mmap_open: <os err>")`.
-- **Write to read-only map** → `Runtime("mmap: map is read-only")`.
+- **Unmapping**: `mmap_close` is a no-op convenience — the `Arc<MmapHandle>`
+  keeps the mapping alive until all slices drop (Rust's refcount guarantees the
+  mapping outlives all views), preventing use-after-unmap.
+- **Out-of-bounds slice** → `Runtime("mmap_slice: [off, off+len) = [...] out of
+  range (len ...)")`.
+- **File open / mmap failure** → `Runtime("mmap_open: cannot open/map '...':
+  <os err>")`.
 - **RAM**: a 4 GiB PCAP is mapped, not loaded — peak RAM is the OS page cache
-  for touched pages plus the slice metadata. Documented `Value::MmapSlice`
-  keeps the `Mmap` alive, preventing use-after-unmap.
+  for touched pages plus the slice metadata.
 - **`mmap_lines`** yields owned `String`s per line (a copy is unavoidable for
-  safe iteration); for true zero-copy line scanning, expose `mmap_lines_off`
-  returning `(offset, len)` pairs.
+  safe iteration); for true zero-copy line scanning use `mmap_lines_off`
+  returning `(offset, length)` pairs.
+
+#### Errata (deviations from the original [SPEC])
+- **VM coverage**: range slicing (`s[a..b]`) and binary pattern matching over
+  `MmapSlice` are interpreter-only on the VM (the VM has no range-index or
+  binary-pattern opcodes); single-byte indexing, `mmap_find`, `mmap_lines*`,
+  and `mmap_size` work on both backends.
+- **Bug fix**: the VM `for x in <array> { ... }` loop had an inverted
+  `IndexGet` operand order (idx pushed before obj) and an unbalanced
+  `Pop`/`StoreLocal` sequence, so the loop body never executed. Fixed in this
+  pass (`compile_for` array arm) — `for x in [1,2,3] { dump x }` now works on
+  the VM. New tests `test_vm_for_array` / `test_vm_for_array_dump` cover it.
 
 ---
 
@@ -719,7 +747,8 @@ mmap_close(m)
 | Trait protocols | yes | no (graceful error) |
 | Method-call dispatch | yes | no (no dispatch layer) |
 | FFI | yes | yes (natives + `Op::FFICall`/`Op::FFIClose`) |
-| mmap / macros / async / raw sockets / DNS / TLS / PCAP | spec | spec |
+| Memory-mapped files | yes (slice/range/pattern) | yes (natives + single-byte index) |
+| macros / async / raw sockets / DNS / TLS / PCAP | spec | spec |
 
 The VM's `compile_stmt`/`compile_expr`/`compile_pattern` return
 `Err("VM does not support ...")` for unsupported nodes, so running an

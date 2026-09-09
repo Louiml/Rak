@@ -311,12 +311,12 @@ impl Compiler {
                 self.emit_byte(idx_slot);
                 let loop_start = self.chunk.code.len();
                 self.emit_op(Op::LoadLocal);
-                self.emit_byte(idx_slot);
-                self.emit_op(Op::LoadLocal);
                 self.emit_byte(arr_slot);
+                self.emit_op(Op::LoadLocal);
+                self.emit_byte(idx_slot);
                 self.emit_op(Op::IndexGet);
                 let jexit = self.emit_jump(Op::JumpIfFalse);
-                self.emit_op(Op::Pop);
+                // item is truthy and still on the stack; store it into the loop var.
                 let item_slot = self.add_local(name.to_string());
                 self.emit_op(Op::StoreLocal);
                 self.emit_byte(item_slot);
@@ -327,15 +327,13 @@ impl Compiler {
                 self.end_scope();
                 self.emit_op(Op::LoadLocal);
                 self.emit_byte(idx_slot);
-                self.emit_op(Op::Dup);
                 self.load_const(Value::I64(1));
                 self.emit_op(Op::AddI);
                 self.emit_op(Op::StoreLocal);
                 self.emit_byte(idx_slot);
                 self.emit_jump_back(loop_start);
                 self.patch_jump(jexit);
-                self.emit_op(Op::Pop);
-                self.emit_op(Op::Pop);
+                // JumpIfFalse left the (falsy) item on the stack; pop it.
                 self.emit_op(Op::Pop);
                 Ok(())
             }

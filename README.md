@@ -66,6 +66,19 @@ dump ffi_cstr_to_string(buf)     // "A"
 ffi_free(buf)
 ```
 
+**Memory-mapped files.** Map huge PCAP / log files into memory and inspect them zero-copy. `mmap_open` maps a file; `mmap_slice` returns a view that keeps the mapping alive and reads directly from the mapped pages. Single-byte indexing, byte search, and line scanning work on both the interpreter and the bytecode VM; range slicing and binary pattern matching over slices work on the interpreter.
+
+```rak
+let m = mmap_open("trace.pcap", "r")
+dump mmap_size(m)
+let hdr = mmap_slice(m, 0, 8)
+dump hdr[0]                       // first byte (zero-copy)
+dump mmap_find(m, "\xff\xd8\xff") // byte search -> offset
+for (off, len) in mmap_lines_off(m, "\n") {
+    dump string(mmap_slice(m, off, len))
+}
+```
+
 ## Build a standalone executable
 
 ```bash
@@ -458,6 +471,7 @@ Rak/
 │   ├── traits.rak          Display/Iterable/Index trait protocols
 │   ├── ffi.rak             FFI: extern bindings + raw memory (interpreter + VM)
 │   ├── ffi_dynamic.rak     FFI dynamic loader (lib.call/lib.sym/lib.close)
+│   ├── mmap.rak            Memory-mapped files: zero-copy slice/search/lines
 │   └── stdlib_demo.rak     String, array, and math builtins
 ```
 

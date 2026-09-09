@@ -216,7 +216,15 @@ impl Vm {
             _ => Ok(Value::I64(0)),
         });
         self.insert_native("float", |args| Ok(Value::F64(args.first().and_then(|v| v.as_f64()).unwrap_or(0.0))));
-        self.insert_native("string", |args| Ok(Value::String(Arc::from(args.first().map(|v| v.to_string()).unwrap_or_default().as_str()))));
+        self.insert_native("string", |args| {
+            let s = match args.first() {
+                Some(Value::MmapSlice(h, off, n)) => String::from_utf8_lossy(&h.as_slice()[*off..off + n]).into_owned(),
+                Some(Value::Mmap(h)) => String::from_utf8_lossy(h.as_slice()).into_owned(),
+                Some(v) => v.to_string(),
+                None => String::new(),
+            };
+            Ok(Value::String(Arc::from(s.as_str())))
+        });
         self.insert_native("upper", |args| Ok(Value::String(Arc::from(native_str(args.first()).to_uppercase().as_str()))));
         self.insert_native("lower", |args| Ok(Value::String(Arc::from(native_str(args.first()).to_lowercase().as_str()))));
         self.insert_native("md5", |args| {
@@ -368,6 +376,63 @@ impl Vm {
             let addr = { let h = lib.lock().unwrap(); rak_stdlib::ffi::sym_addr(&h, &symbol)? };
             let ret = unsafe { rak_stdlib::ffi::call_int(addr, &marshalled) };
             Ok(Value::I64(ret as i64))
+        });
+        // --- Memory-mapped files ---
+        self.insert_native("mmap_open", |args| {
+            let path = native_str(args.first());
+            let mode = { let m = native_str(args.get(1)); if m.is_empty() { "r".to_string() } else { m } };
+            match rak_stdlib::mmap::open(&path, &mode) {
+                Ok(h) => Ok(Value::Mmap(h)),
+                Err(e) => Err(e),
+            }
+        });
+        self.insert_native("mmap_slice", |args| {
+            let (h, off, len) = match (args.first(), args.get(1), args.get(2)) {
+                (Some(Value::Mmap(h)), Some(o), Some(l)) => (h.clone(), o.as_u64().unwrap_or(0) as usize, l.as_u64().unwrap_or(0) as usize),
+                _ => return Err("mmap_slice(mmap, off, len)".to_string()),
+            };
+            let total = h.len();
+            if off.saturating_add(len) > total {
+                return Err(format!("mmap_slice: [off, off+len) = [{}, {}) out of range (len {})", off, off + len, total));
+            }
+            Ok(Value::MmapSlice(h, off, len))
+        });
+        self.insert_native("mmap_size", |args| match args.first() {
+            Some(Value::Mmap(h)) => Ok(Value::I64(h.len() as i64)),
+            Some(Value::MmapSlice(_, _, n)) => Ok(Value::I64(*n as i64)),
+            _ => Err("mmap_size(mmap)".to_string()),
+        });
+        self.insert_native("mmap_close", |_| Ok(Value::Nil));
+        self.insert_native("mmap_find", |args| {
+            let h = match args.first() {
+                Some(Value::Mmap(h)) => h.clone(),
+                Some(Value::MmapSlice(h, _, _)) => h.clone(),
+                _ => return Err("mmap_find(mmap, needle)".to_string()),
+            };
+            let needle = native_bytes(args.get(1));
+            match rak_stdlib::mmap::find(&h, &needle) {
+                Some(p) => Ok(Value::I64(p as i64)),
+                None => Ok(Value::I64(-1)),
+            }
+        });
+        self.insert_native("mmap_lines", |args| {
+            let h = match args.first() {
+                Some(Value::Mmap(h)) => h.clone(),
+                _ => return Err("mmap_lines(mmap, delim?)".to_string()),
+            };
+            let delim = { let d = native_str(args.get(1)); if d.is_empty() { "\n".to_string() } else { d } };
+            let ls = rak_stdlib::mmap::lines(&h, delim.as_bytes());
+            Ok(Value::Array(Arc::from(ls.into_iter().map(|s| Value::String(Arc::from(s.as_str()))).collect::<Vec<_>>())))
+        });
+        self.insert_native("mmap_lines_off", |args| {
+            let h = match args.first() {
+                Some(Value::Mmap(h)) => h.clone(),
+                _ => return Err("mmap_lines_off(mmap, delim?)".to_string()),
+            };
+            let delim = { let d = native_str(args.get(1)); if d.is_empty() { "\n".to_string() } else { d } };
+            let offs = rak_stdlib::mmap::lines_off(&h, delim.as_bytes());
+            let tup: Vec<Value> = offs.into_iter().map(|(o, l)| Value::Tuple(Arc::from([Value::I64(o as i64), Value::I64(l as i64)]))).collect();
+            Ok(Value::Array(Arc::from(tup)))
         });
     }
 
@@ -572,6 +637,15 @@ impl Vm {
                         }
                         (Value::Map(m), Value::String(k)) => {
                             frame.push(m.get(k.as_ref()).cloned().unwrap_or(Value::Nil));
+                        }
+                        (Value::Mmap(h), Value::I64(i)) => {
+                            let data = h.as_slice();
+                            frame.push(Value::I64(data.get(*i as usize).copied().unwrap_or(0) as i64));
+                        }
+                        (Value::MmapSlice(h, off, n), Value::I64(i)) => {
+                            let i = *i as usize;
+                            let b = if i < *n { h.as_slice()[off + i] as i64 } else { 0 };
+                            frame.push(Value::I64(b));
                         }
                         _ => { frame.push(Value::Nil); }
                     }
@@ -784,6 +858,12 @@ mod tests {
     }
 
     #[test]
+    fn test_vm_for_array() {
+        let out = run("let s = 0; for x in [10, 20, 30] { s = s + x } dump s");
+        assert!(out.iter().any(|l| l.contains("[DUMP] 60")), "got: {:?}", out);
+    }
+
+    #[test]
     fn test_vm_fib() {
         let out = run("fn fib(n) { if n < 2 { return n } return fib(n - 1) + fib(n - 2) } dump fib(20)");
         assert!(out.iter().any(|l| l.contains("[DUMP] 6765")));
@@ -870,5 +950,41 @@ mod tests {
     fn test_vm_ffi_void_return_is_nil() {
         let out = run("extern \"C\" { fn abs(n: i32) } let r = abs(0); dump r");
         assert!(out.iter().any(|l| l.contains("[DUMP] nil")), "got: {:?}", out);
+    }
+
+    // --- Memory-mapped files ---
+
+    fn write_vm_mmap_sample(name: &str) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!("rak_mmap_vm_{}.bin", name));
+        let bytes: [u8; 15] = [0xD4, 0xC3, 0xB2, 0xA1, 0x0A, b'G', b'E', b'T', b' ', 0x31, 0x0A, b'x', b'y', b'z', 0x0A];
+        std::fs::write(&path, bytes).unwrap();
+        path
+    }
+
+    #[test]
+    fn test_vm_mmap_size_and_index() {
+        let path = write_vm_mmap_sample("size");
+        let src = format!(
+            "let m = mmap_open(\"{}\", \"r\"); dump mmap_size(m); let s = mmap_slice(m, 0, 4); dump s[0]; dump s[3]",
+            path.to_str().unwrap().replace('\\', "\\\\")
+        );
+        let out = run(&src);
+        assert!(out.iter().any(|l| l.contains("[DUMP] 15")), "got: {:?}", out);
+        assert!(out.iter().any(|l| l.contains("[DUMP] 212")), "got: {:?}", out);
+        assert!(out.iter().any(|l| l.contains("[DUMP] 161")), "got: {:?}", out);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_vm_mmap_find_lines() {
+        let path = write_vm_mmap_sample("find");
+        let src = format!(
+            "let m = mmap_open(\"{}\", \"r\"); dump mmap_find(m, \"GET\"); let lines = mmap_lines_off(m, \"\\n\"); dump len(lines)",
+            path.to_str().unwrap().replace('\\', "\\\\")
+        );
+        let out = run(&src);
+        assert!(out.iter().any(|l| l.contains("[DUMP] 5")), "got: {:?}", out);
+        assert!(out.iter().any(|l| l.contains("[DUMP] 3")), "got: {:?}", out);
+        let _ = std::fs::remove_file(&path);
     }
 }

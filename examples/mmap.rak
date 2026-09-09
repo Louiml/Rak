@@ -1,0 +1,54 @@
+// Memory-mapped files: inspect large PCAP / log files without loading them.
+//
+//   rakc run examples/mmap.rak     (interpreter)
+//   rakc vm  examples/mmap.rak     (bytecode VM)
+//
+// Zero-copy slicing, magic-number sniffing, byte search, line scanning, and
+// interop with the regex/|> pipeline.
+
+let path = "examples/mmap_sample.bin"
+
+// Map the file read-only. The whole file is mapped into the address space;
+// only touched pages are faulted into RAM.
+let m = mmap_open(path, "r")
+dump fmt("size = {} bytes", mmap_size(m))
+
+// Zero-copy slice of the first 8 bytes (no allocation; the view keeps the
+// mapping alive and reads directly from the mapped pages).
+let hdr = mmap_slice(m, 0, 8)
+dump fmt("hdr byte 0 = 0x{:02X}", hdr[0])
+dump fmt("hdr bytes = {}B", mmap_size(mmap_slice(m, 0, 4)))
+
+// Magic-number sniff via byte reads (works on both backends).
+let magic = [hdr[0], hdr[1], hdr[2], hdr[3]]
+if magic == [212, 195, 178, 161] {
+    dump "pcap little-endian"
+} else {
+    if magic == [161, 178, 195, 212] {
+        dump "pcap big-endian"
+    } else {
+        dump "unknown magic"
+    }
+}
+
+// Byte search returns the offset of the first match (or -1).
+let off = mmap_find(m, "GET ")
+if off >= 0 {
+    dump fmt("found \"GET \" at offset {}", off)
+}
+
+// Zero-copy line scanning via (offset, length) pairs.
+let lines = mmap_lines_off(m, "\n")
+dump fmt("line count = {}", len(lines))
+for li in lines {
+    let o = li.0
+    let n = li.1
+    dump fmt("  line @ {} ({}B): {}", o, n, string(mmap_slice(m, o, n)))
+}
+
+// Regex scan over a zero-copy slice (the slice is copied once into the
+// matcher, not into a Rak-owned buffer).
+let span = mmap_size(m) - off
+let body = mmap_slice(m, off, span)
+let hits = regex_find_all(/\d+\.\d+\.\d+\.\d+/g, string(body))
+dump fmt("ip-ish hits: {}", hits)

@@ -61,6 +61,10 @@ pub enum Value {
     ForeignLib(Arc<Mutex<rak_stdlib::ffi::LibHandle>>),
     /// An opaque raw pointer (`ffi_ptr`, `ffi_alloc`, FFI returns).
     ForeignPtr(u64),
+    /// A memory-mapped file (`mmap_open`).
+    Mmap(Arc<rak_stdlib::mmap::MmapHandle>),
+    /// A zero-copy view into a `Mmap` (`mmap_slice`); keeps the mapping alive.
+    MmapSlice(Arc<rak_stdlib::mmap::MmapHandle>, usize, usize),
 }
 
 impl fmt::Debug for Value {
@@ -155,6 +159,8 @@ impl fmt::Display for Value {
             Value::Regex(r) => write!(f, "/{}/{}", r.pattern, r.flags),
             Value::ForeignLib(_) => write!(f, "<ffi-lib>"),
             Value::ForeignPtr(p) => write!(f, "0x{:X}", p),
+            Value::Mmap(_) => write!(f, "<mmap>"),
+            Value::MmapSlice(_, _, n) => write!(f, "<mmap-slice {}B>", n),
         }
     }
 }
@@ -1044,6 +1050,33 @@ impl Interpreter {
             }
             Expr::Index(obj, idx) => {
                 let obj_val = self.eval_expr(obj)?;
+                // Zero-copy indexing/slicing for memory maps.
+                if let Value::Mmap(h) = &obj_val {
+                    if let Expr::Range(lo, hi) = idx.as_ref() {
+                        let len = h.len();
+                        let s = lo.as_ref().map(|e| self.eval_expr(e)).transpose()?.and_then(|v| v.as_i64()).unwrap_or(0).max(0) as usize;
+                        let e = hi.as_ref().map(|e| self.eval_expr(e)).transpose()?.and_then(|v| v.as_i64()).unwrap_or(len as i64).min(len as i64).max(0) as usize;
+                        if s > e { return Err(crate::RakError::Runtime("mmap slice: start > end".to_string())); }
+                        return Ok(Value::MmapSlice(h.clone(), s, e - s));
+                    }
+                    let idx_val = self.eval_expr(idx)?;
+                    let i = idx_val.as_i64().unwrap_or(0) as usize;
+                    let data = h.as_slice();
+                    if i >= data.len() { return Err(crate::RakError::Runtime("Index out of bounds".to_string())); }
+                    return Ok(Value::Int(data[i] as i64));
+                }
+                if let Value::MmapSlice(h, base, n) = &obj_val {
+                    if let Expr::Range(lo, hi) = idx.as_ref() {
+                        let s = lo.as_ref().map(|e| self.eval_expr(e)).transpose()?.and_then(|v| v.as_i64()).unwrap_or(0).max(0) as usize;
+                        let e = hi.as_ref().map(|e| self.eval_expr(e)).transpose()?.and_then(|v| v.as_i64()).unwrap_or(*n as i64).min(*n as i64).max(0) as usize;
+                        if s > e { return Err(crate::RakError::Runtime("mmap slice: start > end".to_string())); }
+                        return Ok(Value::MmapSlice(h.clone(), base + s, e - s));
+                    }
+                    let idx_val = self.eval_expr(idx)?;
+                    let i = idx_val.as_i64().unwrap_or(0) as usize;
+                    if i >= *n { return Err(crate::RakError::Runtime("Index out of bounds".to_string())); }
+                    return Ok(Value::Int(h.as_slice()[base + i] as i64));
+                }
                 let idx_val = self.eval_expr(idx)?;
                 let tn = obj_val.type_name();
                 if let Some(func) = self
@@ -1945,6 +1978,33 @@ impl Interpreter {
                 })
             }
             (Pattern::Or(opts), _) => opts.iter().any(|p| self.pattern_matches(p, value).unwrap_or(false)),
+            // Binary pattern matching directly against a zero-copy mmap slice.
+            (Pattern::Bytes(pats), Value::MmapSlice(h, off, n)) => {
+                let data = &h.as_slice()[*off..off + n];
+                let mut vi = 0usize;
+                let mut pi = 0usize;
+                while pi < pats.len() {
+                    match &pats[pi] {
+                        BytesPat::Byte(b) => {
+                            if vi >= data.len() || data[vi] != *b { return Ok(false); }
+                            vi += 1; pi += 1;
+                        }
+                        BytesPat::Rest => return Ok(true),
+                    }
+                }
+                vi == data.len()
+            }
+            (Pattern::Array(pats), Value::MmapSlice(h, off, n)) => {
+                let data = &h.as_slice()[*off..off + n];
+                pats.len() == data.len()
+                    && pats.iter().zip(data.iter()).all(|(p, v)| match p {
+                        Pattern::Hex(h) => *h == (*v as u64),
+                        Pattern::Int(i) => *i == (*v as i64),
+                        Pattern::Byte(b) => *b == *v,
+                        _ => false,
+                    })
+            }
+            (Pattern::Byte(b), Value::MmapSlice(h, off, n)) => *n == 1 && h.as_slice()[*off] == *b,
             _ => false,
         })
     }
@@ -2646,6 +2706,65 @@ impl Interpreter {
                 let ret = unsafe { rak_stdlib::ffi::call_int(addr, &marshalled) };
                 Ok(Value::Int(ret as i64))
             }
+            // --- Memory-mapped files ---
+            "mmap_open" => {
+                let path = self.val_to_string(args.first())?;
+                let mode = self.val_to_string(args.get(1)).unwrap_or_else(|_| "r".to_string());
+                match rak_stdlib::mmap::open(&path, &mode) {
+                    Ok(h) => Ok(Value::Mmap(h)),
+                    Err(e) => Err(crate::RakError::Runtime(e)),
+                }
+            }
+            "mmap_slice" => {
+                let (h, off, len) = match args {
+                    [Value::Mmap(h), Value::Int(o), Value::Int(l)] => (h.clone(), *o as usize, *l as usize),
+                    [Value::Mmap(h), Value::Hex(o), Value::Hex(l)] => (h.clone(), *o as usize, *l as usize),
+                    _ => return Err(crate::RakError::Runtime("mmap_slice(mmap, off, len)".to_string())),
+                };
+                let total = h.len();
+                if off.saturating_add(len) > total {
+                    return Err(crate::RakError::Runtime(format!(
+                        "mmap_slice: [off, off+len) = [{}, {}) out of range (len {})", off, off + len, total
+                    )));
+                }
+                Ok(Value::MmapSlice(h, off, len))
+            }
+            "mmap_size" => match args.first() {
+                Some(Value::Mmap(h)) => Ok(Value::Int(h.len() as i64)),
+                Some(Value::MmapSlice(_, _, n)) => Ok(Value::Int(*n as i64)),
+                _ => Err(crate::RakError::Runtime("mmap_size(mmap)".to_string())),
+            },
+            "mmap_close" => Ok(Value::Nil),
+            "mmap_find" => {
+                let h = match args.first() {
+                    Some(Value::Mmap(h)) => h.clone(),
+                    Some(Value::MmapSlice(h, _, _)) => h.clone(),
+                    _ => return Err(crate::RakError::Runtime("mmap_find(mmap, needle)".to_string())),
+                };
+                let needle = self.val_to_bytes(args.get(1))?;
+                match rak_stdlib::mmap::find(&h, &needle) {
+                    Some(p) => Ok(Value::Int(p as i64)),
+                    None => Ok(Value::Int(-1)),
+                }
+            }
+            "mmap_lines" => {
+                let h = match args.first() {
+                    Some(Value::Mmap(h)) => h.clone(),
+                    _ => return Err(crate::RakError::Runtime("mmap_lines(mmap, delim?)".to_string())),
+                };
+                let delim = self.val_to_string(args.get(1)).unwrap_or_else(|_| "\n".to_string());
+                let ls = rak_stdlib::mmap::lines(&h, delim.as_bytes());
+                Ok(Value::Array(ls.into_iter().map(Value::String).collect()))
+            }
+            "mmap_lines_off" => {
+                let h = match args.first() {
+                    Some(Value::Mmap(h)) => h.clone(),
+                    _ => return Err(crate::RakError::Runtime("mmap_lines_off(mmap, delim?)".to_string())),
+                };
+                let delim = self.val_to_string(args.get(1)).unwrap_or_else(|_| "\n".to_string());
+                let offs = rak_stdlib::mmap::lines_off(&h, delim.as_bytes());
+                Ok(Value::Array(offs.into_iter().map(|(o, l)| Value::Tuple(vec![Value::Int(o as i64), Value::Int(l as i64)])).collect()))
+            }
             // --- Regex builtins ---
             "regex_new" => {
                 let pattern = self.val_to_string(args.first())?;
@@ -2681,6 +2800,8 @@ impl Interpreter {
         match val {
             Some(Value::String(s)) => Ok(s.clone()),
             Some(Value::Bytes(b)) => Ok(String::from_utf8_lossy(b).to_string()),
+            Some(Value::MmapSlice(h, off, n)) => Ok(String::from_utf8_lossy(&h.as_slice()[*off..off + n]).to_string()),
+            Some(Value::Mmap(h)) => Ok(String::from_utf8_lossy(h.as_slice()).to_string()),
             Some(v) => Ok(v.to_string()),
             None => Ok(String::new()),
         }
@@ -2692,6 +2813,8 @@ impl Interpreter {
             Some(Value::String(s)) => Ok(s.bytes().collect()),
             Some(Value::Hex(h)) => Ok(h.to_le_bytes().to_vec()),
             Some(Value::Int(i)) => Ok(i.to_le_bytes().to_vec()),
+            Some(Value::MmapSlice(h, off, n)) => Ok(h.as_slice()[*off..off + n].to_vec()),
+            Some(Value::Mmap(h)) => Ok(h.as_slice().to_vec()),
             Some(v) => Ok(v.to_string().bytes().collect()),
             None => Ok(vec![]),
         }
@@ -2763,6 +2886,8 @@ impl Value {
             Value::Module(_) => "module".to_string(),
             Value::ForeignLib(_) => "ffi-lib".to_string(),
             Value::ForeignPtr(_) => "ptr".to_string(),
+            Value::Mmap(_) => "mmap".to_string(),
+            Value::MmapSlice(_, _, _) => "mmap-slice".to_string(),
             _ => "<opaque>".to_string(),
         }
     }
@@ -3172,5 +3297,44 @@ mod tests {
         let src = "extern \"C\" { fn abs(n: i32) } let r = abs(0); dump r";
         let output = interp.run_source(src).unwrap();
         assert!(output.iter().any(|l| l.contains("[DUMP] nil")), "got: {:?}", output);
+    }
+
+    // --- Memory-mapped files ---
+
+    fn write_mmap_sample(name: &str) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!("rak_mmap_{}.bin", name));
+        let bytes: [u8; 15] = [0xD4, 0xC3, 0xB2, 0xA1, 0x0A, b'G', b'E', b'T', b' ', 0x31, 0x0A, b'x', b'y', b'z', 0x0A];
+        std::fs::write(&path, bytes).unwrap();
+        path
+    }
+
+    #[test]
+    fn test_interpreter_mmap_size_and_slice() {
+        let path = write_mmap_sample("interp_size");
+        let src = format!(
+            "let m = mmap_open(\"{}\", \"r\"); dump mmap_size(m); let s = mmap_slice(m, 0, 4); dump s[0]; dump s[3]",
+            path.to_str().unwrap().replace('\\', "\\\\")
+        );
+        let mut interp = Interpreter::new();
+        let output = interp.run_source(&src).unwrap();
+        assert!(output.iter().any(|l| l.contains("[DUMP] 15")), "got: {:?}", output);
+        assert!(output.iter().any(|l| l.contains("[DUMP] 212")), "got: {:?}", output); // 0xD4
+        assert!(output.iter().any(|l| l.contains("[DUMP] 161")), "got: {:?}", output); // 0xA1
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_interpreter_mmap_find_lines_pattern() {
+        let path = write_mmap_sample("interp_find");
+        let src = format!(
+            "let m = mmap_open(\"{}\", \"r\"); dump mmap_find(m, \"GET\"); let lines = mmap_lines_off(m, \"\\n\"); dump len(lines); let h = mmap_slice(m, 0, 4); match h {{ [0xD4, 0xC3, 0xB2, 0xA1, ..] => {{ dump \"pcap\" }}, _ => {{ dump \"other\" }} }}",
+            path.to_str().unwrap().replace('\\', "\\\\")
+        );
+        let mut interp = Interpreter::new();
+        let output = interp.run_source(&src).unwrap();
+        assert!(output.iter().any(|l| l.contains("[DUMP] 5")), "got: {:?}", output); // GET at offset 5
+        assert!(output.iter().any(|l| l.contains("[DUMP] 3")), "got: {:?}", output); // 3 lines
+        assert!(output.iter().any(|l| l.contains("[DUMP] pcap")), "got: {:?}", output);
+        let _ = std::fs::remove_file(&path);
     }
 }

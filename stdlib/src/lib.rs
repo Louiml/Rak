@@ -6,6 +6,7 @@ pub mod web;
 pub mod file;
 pub mod js;
 pub mod ffi;
+pub mod mmap;
 
 pub use net::*;
 pub use crypto::*;
