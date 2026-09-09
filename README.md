@@ -463,7 +463,7 @@ The IDE is Tauri v2, Next.js, TypeScript, and Tailwind CSS. It runs Rak scripts 
 
 ## License
 
-MIT OR Apache-2.0
+Apache-2.0
 
 ## Author
 
