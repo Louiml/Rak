@@ -31,6 +31,17 @@ const SNIPPETS: Snippet[] = [
   { trigger: 'impld', label: 'impl Display', body: 'impl Display for Name {\n    fn fmt(self) {\n        return fmt("{}", self)\n    }\n}' },
   { trigger: 'impli', label: 'impl Iterable', body: 'impl Iterable for Name {\n    fn iter(self) {\n        return []\n    }\n}' },
   { trigger: 'implx', label: 'impl Index', body: 'impl Index for Name {\n    fn index(self, key) {\n        return self.data[key]\n    }\n}' },
+  { trigger: 'import', label: 'import module', body: 'import module' },
+  { trigger: 'from', label: 'from import', body: 'from module import name' },
+  { trigger: 'export', label: 'export fn', body: 'export fn name(params) {\n    \n}' },
+  { trigger: 'macro', label: 'macro', body: 'macro name(x: expr) {\n    $x\n}' },
+  { trigger: 'extern', label: 'extern C', body: 'extern "C" {\n    fn name(args) -> i32\n}' },
+  { trigger: 'const', label: 'const', body: 'const NAME = value' },
+  { trigger: 'async', label: 'async fn', body: 'async fn name(args) {\n    let r = await expr\n    return r\n}' },
+  { trigger: 'mmap', label: 'mmap open', body: 'let m = mmap_open("file", "r")\ndump mmap_size(m)' },
+  { trigger: 'netraw', label: 'net_raw SYN', body: 'let pkt = net_raw_tcp_syn("10.0.0.1", "10.0.0.2", 12345, 80)\ndump len(pkt)' },
+  { trigger: 'ffi', label: 'ffi_load', body: 'let lib = ffi_load("libc.so.6")\ndump lib.call("abs", [-9])' },
+  { trigger: 'dns', label: 'dns_query', body: 'dump dns_query("example.com", "A")' },
 ];
 
 const KEYWORDS = [
@@ -38,6 +49,7 @@ const KEYWORDS = [
   'return', 'use', 'mod', 'pub', 'struct', 'enum', 'impl', 'match', 'for',
   'while', 'break', 'continue', 'true', 'false', 'nil', 'in',
   'try', 'catch', 'raise', 'throw', 'trait', 'async', 'await', 'spawn', 'as', 'type',
+  'import', 'from', 'export', 'macro', 'macro_rules', 'const', 'extern',
 ];
 
 const KEYWORD_SET = new Set(KEYWORDS);
@@ -45,7 +57,7 @@ const KEYWORD_SET = new Set(KEYWORDS);
 const TYPES = [
   'hex8', 'hex16', 'hex32', 'hex64', 'int', 'string', 'bytes', 'bool',
   'i8', 'i16', 'i32', 'i64', 'u8', 'u16', 'u32', 'u64', 'f32', 'f64',
-  'Option', 'Result',
+  'Option', 'Result', 'void',
 ];
 const TYPE_SET = new Set(TYPES);
 
@@ -69,6 +81,21 @@ const BUILTINS = [
   'spawn', 'thread_join', 'channel', 'chan_send', 'chan_recv',
   'sleep', 'now_ms', 'args', 'env_get', 'ord', 'chr', 'substr', 'print', 'dbg', 'exit',
   'Some', 'None', 'Ok', 'Err',
+  // FFI
+  'ffi_load', 'ffi_ptr', 'ffi_alloc', 'ffi_free', 'ffi_write', 'ffi_read',
+  'ffi_read_i32', 'ffi_cstr_to_string', 'ffi_string_to_cstr', 'ffi_call',
+  // Memory-mapped files
+  'mmap_open', 'mmap_slice', 'mmap_size', 'mmap_close', 'mmap_find',
+  'mmap_lines', 'mmap_lines_off',
+  // Raw sockets
+  'net_raw_csum', 'net_raw_ipv4', 'net_raw_tcp', 'net_raw_udp',
+  'net_raw_tcp_syn', 'net_raw_send', 'net_raw_recv',
+  // Protocol parsers
+  'dns_query', 'dns_build', 'dns_parse',
+  'tls_parse_client_hello', 'tls_parse_cert_chain',
+  'pcap_open', 'pcap_next',
+  // Async I/O
+  'http_get_async', 'tcp_probe', 'tcp_connect_async',
 ];
 
 interface Suggestion {
@@ -87,13 +114,13 @@ const ALL_SUGGESTIONS: Suggestion[] = [
 const KIND_ICON: Record<Suggestion['kind'], IconName> = { keyword: 'key', type: 'box', builtin: 'zap', snippet: 'file-code' };
 
 interface Token {
-  type: 'keyword' | 'type' | 'hex' | 'number' | 'float' | 'typedint' | 'interp' | 'string' | 'comment' | 'bytes' | 'ident' | 'op' | 'ws' | 'regex' | 'char';
+  type: 'keyword' | 'type' | 'hex' | 'number' | 'float' | 'typedint' | 'interp' | 'string' | 'comment' | 'bytes' | 'ident' | 'op' | 'ws' | 'regex' | 'char' | 'macrovar' | 'macroinv';
   value: string;
 }
 
 function canEndExpr(t: Token | null): boolean {
   if (!t) return false; // start of line -> regex context
-  if (['ident', 'hex', 'number', 'float', 'typedint', 'interp', 'string', 'bytes', 'regex', 'char'].includes(t.type)) return true;
+  if (['ident', 'hex', 'number', 'float', 'typedint', 'interp', 'string', 'bytes', 'regex', 'char', 'macrovar', 'macroinv'].includes(t.type)) return true;
   if (t.type === 'op' && (t.value === ')' || t.value === ']' || t.value === '}')) return true;
   return false;
 }
@@ -133,6 +160,14 @@ function tokenizeLine(line: string): Token[] {
       while (j < line.length && /[a-z]/i.test(line[j])) { re += line[j]; j++; }
       tokens.push({ type: 'regex', value: re });
       i = j;
+      continue;
+    }
+    if (line[i] === '$' && /[a-zA-Z_]/.test(line[i + 1] || '')) {
+      // Macro placeholder $name
+      let mv = '$';
+      i++;
+      while (i < line.length && /[a-zA-Z0-9_]/.test(line[i])) { mv += line[i]; i++; }
+      tokens.push({ type: 'macrovar', value: mv });
       continue;
     }
     if (line[i] === "'") {
@@ -210,6 +245,8 @@ function tokenizeLine(line: string): Token[] {
     if (/[a-zA-Z_]/.test(line[i])) {
       let ident = '';
       while (i < line.length && /[a-zA-Z0-9_]/.test(line[i])) { ident += line[i]; i++; }
+      // Macro invocation `name!(...)` — but not `name != ...`
+      if (line[i] === '!' && line[i + 1] !== '=') { ident += '!'; i++; tokens.push({ type: 'macroinv', value: ident }); continue; }
       if (KEYWORD_SET.has(ident)) tokens.push({ type: 'keyword', value: ident });
       else if (TYPE_SET.has(ident)) tokens.push({ type: 'type', value: ident });
       else tokens.push({ type: 'ident', value: ident });
@@ -244,6 +281,8 @@ function getColorClass(type: Token['type']): string {
     case 'regex': return 'text-rose-400';
     case 'char': return 'text-amber-400';
     case 'bytes': return 'text-yellow-400';
+    case 'macrovar': return 'text-sky-300';
+    case 'macroinv': return 'text-emerald-300 font-semibold';
     case 'comment': return 'text-zinc-600 italic';
     case 'op': return 'text-pink-400';
     case 'ident': return 'text-zinc-200';

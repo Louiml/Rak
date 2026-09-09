@@ -19,3 +19,21 @@ Syntax highlighting and language features for the [Rak](https://github.com/Louim
 ```
 
 For Neovim (with `nvim-lspconfig`), configure `rakc lsp` as the command for `.rak` files.
+
+## Changelog
+
+### 0.4.0
+
+Syntax highlighting for the new Rak language features:
+
+- **Imports & exports** — `import`, `from`, `export`, `pub use`, `pub use {…} from`.
+- **Async** — `async fn`, `await`, `async`/`await` keywords now color correctly.
+- **Macros** — `macro`, `$placeholder` variables, and `name!(…)` macro invocations.
+- **Constants & FFI** — `const` and `extern "C" { … }` blocks; `*u8`/`*i8`/`*void` pointer types.
+- **New builtins** — `ffi_*`, `mmap_*`, `net_raw_*`, `dns_*`, `tls_*`, `pcap_*`, `http_get_async`, `tcp_probe` (highlighted as `support.function`).
+- **Literals** — regex literals `/…/flags`, byte strings `b"…"`, char literals `'…'`, and `{expr}` interpolation inside `f"…"`.
+- **Operators** — `|>` (pipeline), `..`, `!`, `$`.
+
+### 0.3.0
+
+Initial TextMate grammar + language configuration.

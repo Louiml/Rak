@@ -1,3 +1,23 @@
+# Rak IDE
+
+A Tauri 2 + Next.js + React desktop IDE for the [Rak](https://github.com/Louiml/Rak) language. The editor is a bespoke `<textarea>` over a syntax-highlighted `<pre>` overlay with a hand-rolled tokenizer (no CodeMirror/Monaco). Runs scripts via the bundled `rakc` (interp/vm/bench) as a CLI.
+
+## Editor syntax highlighting
+
+The editor tokenizer (`src/app/components/CodeEditor.tsx`) highlights:
+
+- **Keywords** — `let`, `fn`, `struct`, `enum`, `impl`, `trait`, `mod`, `pub`, `use`, `import`, `from`, `export`, `macro`, `const`, `extern`, `async`, `await`, `spawn`, `match`, `if`/`else`/`for`/`while`/`loop`, `try`/`catch`/`raise`, `scan`/`fetch`/`dump`/`trace`, `type`, `as`.
+- **Literals** — regex literals `/…/flags`, byte strings `b"…"`, interpolation strings `f"…{expr}…"`, char literals `'…'`, hex `0x…`, typed ints `42i32`.
+- **Macros** — `$placeholder` variables and `name!(…)` macro invocations.
+- **Operators** — `|>` (pipeline), `..`, `::`, `->`, `=>`, `!`, `$`, and the usual arithmetic/logic ops.
+- **Builtins** — `ffi_*`, `mmap_*`, `net_raw_*`, `dns_*`, `tls_*`, `pcap_*`, `http_get_async`, `tcp_probe`, the crypto/file/html/json/net/regex builtins, and `Some`/`None`/`Ok`/`Err`.
+
+Autocomplete offers keywords, types, builtins, and snippets (incl. `import`, `from`, `export`, `macro`, `extern`, `const`, `async`, `mmap`, `netraw`, `ffi`, `dns`). The built-in **Examples** gallery includes `ffi`, `mmap`, `async`, `net_raw`, `parsers`, `macros`, and `import_demo`.
+
+## Getting Started
+
+---
+
 This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
 
 ## Getting Started

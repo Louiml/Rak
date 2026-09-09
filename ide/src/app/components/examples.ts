@@ -1721,4 +1721,112 @@ dump t["a"]   // 1
 t["c"] = 99
 dump t["c"]   // 99
 ` },
+  {
+    name: 'ffi',
+    filename: 'ffi.rak',
+    source: `// FFI: call native C functions and manage raw memory.
+extern "C" {
+    fn abs(n: i32) -> i32
+}
+dump abs(-42)            // 42
+let buf = ffi_alloc(4)
+ffi_write(buf, 0, 0x41)
+dump ffi_cstr_to_string(buf)  // "A"
+ffi_free(buf)
+let p = ffi_ptr(0xDEADBEEF)
+dump fmt("ptr = 0x{:08X}", p)
+`,
+  },
+  {
+    name: 'mmap',
+    filename: 'mmap.rak',
+    source: `// Memory-mapped files: inspect large files without loading them.
+let m = mmap_open("examples/mmap_sample.bin", "r")
+dump fmt("size = {} bytes", mmap_size(m))
+let hdr = mmap_slice(m, 0, 8)
+dump fmt("byte 0 = 0x{:02X}", hdr[0])
+dump mmap_find(m, "GET")
+let lines = mmap_lines_off(m, "\\n")
+dump fmt("line count = {}", len(lines))
+`,
+  },
+  {
+    name: 'async',
+    filename: 'async.rak',
+    source: `// Async event loop: async fn, await, and futures.
+async fn probe(host, port) {
+    let open = await tcp_probe(host, port, 200)
+    return open
+}
+dump await probe("127.0.0.1", 80)
+dump await probe("127.0.0.1", 9999)
+let f = tcp_probe("127.0.0.1", 22, 200)
+dump fmt("port 22 open = {}", await f)
+`,
+  },
+  {
+    name: 'net_raw',
+    filename: 'net_raw.rak',
+    source: `// Raw sockets: forge IPv4/TCP/UDP packets with checksums.
+let pkt = net_raw_tcp_syn("10.0.0.5", "10.0.0.10", 12345, 80)
+dump fmt("syn packet = {} bytes", len(pkt))
+dump fmt("byte 0 = 0x{:02X} (IPv4)", pkt[0])
+dump fmt("byte 9 = 0x{:02X} (proto TCP)", pkt[9])
+dump fmt("byte 33 = 0x{:02X} (SYN flag)", pkt[33])
+dump net_raw_send(pkt)   // Ok(...) on unix w/ CAP_NET_RAW, Err(...) otherwise
+`,
+  },
+  {
+    name: 'parsers',
+    filename: 'parsers.rak',
+    source: `// DNS / TLS / PCAP wire-format parsers.
+let q = dns_build("example.com", "A")
+dump fmt("dns query = {} bytes", len(q))
+dump dns_query("example.com", "A")   // Ok({answers: [...], truncated}) or Err offline
+dump pcap_open("capture.pcap")       // Ok(<pcap>) or Err (needs --features pcap)
+`,
+  },
+  {
+    name: 'macros',
+    filename: 'macros.rak',
+    source: `// Compile-time macros: AST-expanding templates with $param placeholders.
+macro add1(x: expr) { $x + 1 }
+dump add1!(41)          // 42
+macro swap(a: expr, b: expr) {
+    let t = $a
+    t + $b
+}
+dump swap!(10, 20)      // 30
+macro pair(a: expr, b: expr) { [$a, $b] }
+dump pair!(1, 2)        // [1, 2]
+const MAX_LEN = 256
+dump MAX_LEN
+`,
+  },
+  {
+    name: 'import_demo',
+    filename: 'import_demo.rak',
+    source: `// Python-style imports & exports. NOTE: this script uses 'import mymod'
+// which resolves a sibling mymod/ package — save it next to a mymod/ folder
+// (with init.rak + sub.rak) to run. It still highlights correctly here.
+import mymod
+dump mymod.PI
+dump mymod.add(2, 3)
+import mymod as m
+dump m.add(1, 1)
+from mymod import add
+dump add(10, 20)
+from mymod import add as plus, mul as times
+dump plus(7, 8)
+dump times(6, 7)
+let PI = "local-pi"
+from mymod import *
+dump PI               // "local-pi" (local wins)
+dump mul(3, 3)        // 9 (imported)
+from mymod.sub import sub_add, SUB_NAME, add
+dump SUB_NAME
+dump sub_add(100, 1)
+dump add(5, 6)
+`,
+  },
 ];

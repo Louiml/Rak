@@ -3,63 +3,113 @@
   "name": "Rak",
   "scopeName": "source.rak",
   "patterns": [
-    {
-      "include": "#comments"
-    },
-    {
-      "include": "#strings"
-    },
-    {
-      "include": "#keywords"
-    },
-    {
-      "include": "#types"
-    },
-    {
-      "include": "#hex"
-    },
-    {
-      "include": "#numbers"
-    },
-    {
-      "include": "#operators"
-    }
+    { "include": "#comments" },
+    { "include": "#regex" },
+    { "include": "#strings" },
+    { "include": "#bytes" },
+    { "include": "#chars" },
+    { "include": "#macroinvoke" },
+    { "include": "#macrovar" },
+    { "include": "#keywords" },
+    { "include": "#builtins" },
+    { "include": "#types" },
+    { "include": "#hex" },
+    { "include": "#numbers" },
+    { "include": "#operators" }
   ],
   "repository": {
     "comments": {
       "patterns": [
-        {
-          "name": "comment.line.double-slash.rak",
-          "match": "//.*$"
-        }
+        { "name": "comment.line.double-slash.rak", "match": "//.*$" }
       ]
     },
     "strings": {
       "patterns": [
         {
-          "name": "string.quoted.double.rak",
-          "begin": "\"",
+          "name": "string.interpolated.rak",
+          "begin": "f\"",
           "end": "\"",
           "patterns": [
-            { "name": "constant.character.escape.rak", "match": "\\\\." }
+            { "name": "constant.character.escape.rak", "match": "\\\\." },
+            {
+              "name": "meta.interpolation.rak",
+              "begin": "\\{",
+              "end": "\\}",
+              "patterns": [ { "include": "$self" } ]
+            }
           ]
         },
         {
-          "name": "string.interpolated.rak",
-          "begin": "f\"",
-          "end": "\""
+          "name": "string.quoted.double.rak",
+          "begin": "\"",
+          "end": "\"",
+          "patterns": [ { "name": "constant.character.escape.rak", "match": "\\\\." } ]
         }
+      ]
+    },
+    "bytes": {
+      "patterns": [
+        {
+          "name": "string.quoted.other.rak",
+          "begin": "b\"",
+          "end": "\"",
+          "patterns": [ { "name": "constant.character.escape.rak", "match": "\\\\." } ]
+        }
+      ]
+    },
+    "chars": {
+      "patterns": [
+        {
+          "name": "constant.character.rak",
+          "match": "'([^'\\\\]|\\\\x[0-9A-Fa-f]{2}|\\\\.)'"
+        }
+      ]
+    },
+    "regex": {
+      "patterns": [
+        {
+          "name": "string.regexp.rak",
+          "begin": "(?x)(?<![A-Za-z0-9_\\)\\]\\}\\.'\"])(/)",
+          "end": "(/)([a-z]*)",
+          "patterns": [
+            { "name": "constant.character.escape.rak", "match": "\\\\/|\\\\." },
+            {
+              "name": "constant.other.escape.rak",
+              "begin": "\\[",
+              "end": "\\]",
+              "patterns": [ { "name": "constant.character.escape.rak", "match": "\\\\." } ]
+            }
+          ],
+          "beginCaptures": { "1": { "name": "punctuation.definition.string.rak" } },
+          "endCaptures": {
+            "1": { "name": "punctuation.definition.string.rak" },
+            "2": { "name": "keyword.other.rak" }
+          }
+        }
+      ]
+    },
+    "macroinvoke": {
+      "patterns": [
+        {
+          "name": "entity.name.function.macro.rak",
+          "match": "\\b([A-Za-z_][A-Za-z0-9_]*)\\!"
+        }
+      ]
+    },
+    "macrovar": {
+      "patterns": [
+        { "name": "variable.other.macrovar.rak", "match": "\\$[A-Za-z_][A-Za-z0-9_]*" }
       ]
     },
     "keywords": {
       "patterns": [
         {
           "name": "keyword.control.rak",
-          "match": "\\b(if|else|for|while|loop|break|continue|return|match|try|catch|raise|throw|spawn|await|async|as|type)\\b"
+          "match": "\\b(if|else|for|while|loop|break|continue|return|match|try|catch|raise|throw|spawn|await|async|as|type|from|import)\\b"
         },
         {
           "name": "keyword.other.rak",
-          "match": "\\b(let|mut|fn|struct|enum|impl|trait|mod|pub|use|export|scan|fetch|dump|trace)\\b"
+          "match": "\\b(let|mut|fn|struct|enum|impl|trait|mod|pub|use|export|scan|fetch|dump|trace|macro|macro_rules|const|extern|in)\\b"
         },
         {
           "name": "constant.language.rak",
@@ -67,20 +117,25 @@
         }
       ]
     },
+    "builtins": {
+      "patterns": [
+        {
+          "name": "support.function.rak",
+          "match": "\\b(ffi_load|ffi_ptr|ffi_alloc|ffi_free|ffi_write|ffi_read|ffi_read_i32|ffi_cstr_to_string|ffi_string_to_cstr|ffi_call|mmap_open|mmap_slice|mmap_size|mmap_close|mmap_find|mmap_lines|mmap_lines_off|net_raw_csum|net_raw_ipv4|net_raw_tcp|net_raw_udp|net_raw_tcp_syn|net_raw_send|net_raw_recv|dns_query|dns_build|dns_parse|tls_parse_client_hello|tls_parse_cert_chain|pcap_open|pcap_next|http_get_async|tcp_probe|tcp_connect_async|net_listen|net_accept|net_connect|net_local_addr|tcp_read|tcp_read_line|tcp_write|tcp_close|thread_join|channel|chan_send|chan_recv|md5|sha1|sha256|xor|rot13|hex_encode|hex_decode|base64_encode|base64_decode|url_encode|url_decode|json_parse|json_stringify|regex_new|regex_match|regex_find|regex_find_all|regex_replace|len|string|bytes|int|float|split|join|contains|to_hex|from_hex|push|keys|has|get|values|sum|max|min|abs|sqrt|pow|clamp|replace|find|starts_with|ends_with|slice|repeat|trim_start|reverse|fmt|dump|trace|spawn)\\b"
+        }
+      ]
+    },
     "types": {
       "patterns": [
         {
           "name": "storage.type.rak",
-          "match": "\\b(i8|i16|i32|i64|u8|u16|u32|u64|f32|f64|hex8|hex16|hex32|hex64|int|string|bytes|bool|Option|Result)\\b"
+          "match": "\\b(i8|i16|i32|i64|u8|u16|u32|u64|f32|f64|hex8|hex16|hex32|hex64|int|string|bytes|bool|void|Option|Result)\\b"
         }
       ]
     },
     "hex": {
       "patterns": [
-        {
-          "name": "constant.numeric.hex.rak",
-          "match": "\\b0[xX][0-9A-Fa-f]+\\b"
-        }
+        { "name": "constant.numeric.hex.rak", "match": "\\b0[xX][0-9A-Fa-f]+\\b" }
       ]
     },
     "numbers": {
@@ -95,7 +150,7 @@
       "patterns": [
         {
           "name": "keyword.operator.rak",
-          "match": "(->|=>|::|==|!=|<=|>=|<<|>>|&&|\\|\\||\\+=|-=|\\*=|/=|%=|\\+|-|\\*|/|%|&|\\||\\^|!|~|<|>|=)"
+          "match": "(\\|>|->|=>|::|\\.\\.|==|!=|<=|>=|<<|>>|&&|\\|\\||\\+=|-=|\\*=|/=|%=|\\+|-|\\*|/|%|&|\\||\\^|!|~|<|>|=|\\$)"
         }
       ]
     }
