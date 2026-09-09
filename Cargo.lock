@@ -3177,7 +3177,7 @@ dependencies = [
 
 [[package]]
 name = "rak-stdlib"
-version = "0.2.1"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -3198,7 +3198,7 @@ dependencies = [
 
 [[package]]
 name = "rakc"
-version = "0.2.1"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "bindgen",
@@ -3219,7 +3219,7 @@ dependencies = [
 
 [[package]]
 name = "rakpkg"
-version = "0.2.1"
+version = "0.4.0"
 dependencies = [
  "serde_json",
 ]
