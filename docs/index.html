@@ -3,9 +3,10 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta name="description" content="Rak is a programming language for hackers and OSINT investigators. First-class hex, pipelines, regex, binary pattern matching, and a built-in IDE.">
+    <meta name="theme-color" content="#fdfcfc">
+    <meta name="description" content="Rak is a programming language for hackers and OSINT investigators. First-class hex, pipelines, regex, binary pattern matching, FFI, memory-mapped files — and a built-in desktop IDE.">
     <title>Rak: A language for hackers and OSINT investigators</title>
-    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%2306070a'/%3E%3Cpath d='M9 9l14 0 0 14-14 0z' fill='none' stroke='%2334d399' stroke-width='2.5'/%3E%3C/svg%3E">
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='4' fill='%23fdfcfc'/%3E%3Cpath d='M9 9l14 0 0 14-14 0z' fill='none' stroke='%23201d1d' stroke-width='2.5'/%3E%3C/svg%3E">
     <link rel="stylesheet" href="style.css">
 </head>
 <body class="landing">
@@ -15,15 +16,16 @@
         <a class="brand" href="index.html">
             <span class="brand-mark">R</span>
             <span class="brand-name">Rak</span>
-            <span class="brand-ver">v0.3.1</span>
+            <span class="brand-ver">v0.4.0</span>
         </a>
         <nav class="site-nav">
-            <a href="#status">Status</a>
             <a href="#features">Features</a>
+            <a href="#status">Status</a>
             <a href="#feel">Examples</a>
             <a href="docs.html">Docs</a>
         </nav>
         <div class="header-actions">
+            <button id="theme-toggle" class="btn btn-ghost btn-sm" type="button" aria-label="Toggle theme"></button>
             <a class="btn btn-ghost btn-sm" href="https://github.com/Louiml/Rak" target="_blank" rel="noopener">GitHub</a>
         </div>
     </div>
@@ -33,16 +35,58 @@
 
     <section class="hero">
         <div class="hero-inner reveal is-visible">
-            <p class="pill"><span style="color:var(--accent)">●</span> v0.3.1 &middot; pipelines, regex, binary patterns, traits</p>
-            <h1 class="hero-title"><span class="grad">Rak</span></h1>
-            <p class="lead">A programming language for hackers and OSINT investigators. English-readable syntax, first-class hexadecimal, pipelines, regex literals, and a built-in desktop IDE. Write scanners like sentences.</p>
+            <h1 class="hero-title">A language for <span class="grad">hackers</span> &amp; OSINT</h1>
+            <p class="lead">English-readable syntax, first-class hexadecimal, pipelines, regex literals, and a systems stdlib: foreign function calls, zero-copy memory maps, raw sockets, and wire parsers. Write scanners like sentences.</p>
             <div class="cta-row">
                 <a class="btn btn-primary" href="docs.html">
                     Read the docs
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg>
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg>
                 </a>
                 <a class="btn btn-ghost" href="#features">What's new</a>
-                <a class="text-link" href="#feel">See it in action <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg></a>
+                <a class="text-link" href="#feel">See it in action <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg></a>
+            </div>
+        </div>
+
+        <div class="hero-tui reveal is-visible">
+            <div class="tui-bar">
+                <span class="tui-tabs">
+                    <span class="tui-tab">summary</span>
+                    <span class="tui-tab active">terminal</span>
+                    <span class="tui-tab">console</span>
+                </span>
+                <span class="tui-status">rak &mdash; recon.rak &mdash; ~/lab</span>
+            </div>
+
+            <div class="tui-wordmark"><pre>███    ██    █  █
+█  █  █  █  █ █
+███   ████   ██
+█ █   █  █  █ █
+█  █  █  █  █  █</pre></div>
+
+            <div class="tui-body">
+                <pre><code data-lang="rak">fn sniff(d: bytes) {
+    match d {
+        [0x89, 'P', 'N', 'G', ..] => { return "png" },
+        ['%', 'P', 'D', 'F', ..] => { return "pdf" },
+        _ => { return "unknown" },
+    }
+}
+
+let m = mmap_open("trace.pcap", "r")
+let hits = mmap_slice(m, 0x1000, 64)
+    |> regex_find_all(/\d+\.\d+\.\d+\.\d+/g)
+dump hits</code></pre>
+
+                <div class="tui-prompt-row">
+                    <span class="tui-caret">&#9646;</span>
+                    <span>rak&gt; scan "10.0.0.0/24" { range: [0x0016, 0x01F4] }</span>
+                </div>
+            </div>
+
+            <div class="tui-keyhints">
+                <span><b>tab</b> switch agent</span>
+                <span><b>ctrl-p</b> commands</span>
+                <span><b>ctrl-r</b> run</span>
             </div>
         </div>
     </section>
@@ -50,39 +94,39 @@
     <section class="section" id="features">
         <div class="container">
             <div class="section-head reveal">
-                <p class="kicker">What's new in v0.3.1</p>
-                <h2 class="section-title">Four new ways to write less code</h2>
-                <p class="section-sub">All shipping in the compiler and the IDE today.</p>
+                <p class="kicker">Features</p>
+                <h2 class="section-title">What is Rak?</h2>
+                <p class="section-sub">One frontend, two backends: a tree-walking interpreter and a bytecode VM. Everything below ships in the compiler and works in the IDE.</p>
             </div>
 
             <div class="feature-grid">
                 <div class="feature reveal">
-                    <div class="feature-ico"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7h8"/><path d="m7 3 4 4-4 4"/><path d="M15 4v16"/></svg></div>
-                    <h4>Pipeline <code style="color:var(--accent)">|&gt;</code></h4>
-                    <p>Chain calls left-to-right. <code>data |> parse |> load</code> reads top-to-bottom like a sentence.</p>
+                    <div class="feature-ico">[+]</div>
+                    <h4>Pipeline <code style="color:var(--ink)">|&gt;</code></h4>
+                    <p>Chain calls left-to-right. <code>data &#124;&gt; parse &#124;&gt; load</code> reads top-to-bottom like a sentence.</p>
                 </div>
                 <div class="feature reveal">
-                    <div class="feature-ico"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg></div>
+                    <div class="feature-ico">[+]</div>
                     <h4>Regex literals</h4>
                     <p>Write <code>/\d+/g</code> inline. A <code>/</code> after a value is division; everywhere else it's a regex.</p>
                 </div>
                 <div class="feature reveal">
-                    <div class="feature-ico"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M9 3v18"/></svg></div>
+                    <div class="feature-ico">[+]</div>
                     <h4>Binary patterns</h4>
                     <p>Match byte slices by magic number: <code>[0x89, 'P', 'N', 'G', ..]</code>. Built for PCAP and file sniffing.</p>
                 </div>
                 <div class="feature reveal">
-                    <div class="feature-ico"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg></div>
-                    <h4>Traits</h4>
-                    <p>Implement <code>Display</code>, <code>Iterable</code>, <code>Index</code> on your types. They drive <code>dump</code>, <code>for</code>, and <code>obj[key]</code>.</p>
+                    <div class="feature-ico">[+]</div>
+                    <h4>Traits &amp; protocols</h4>
+                    <p>Implement <code>Display</code>, <code>Iterable</code>, <code>Index</code>. They drive <code>dump</code>, <code>for</code>, and <code>obj[key]</code>.</p>
                 </div>
                 <div class="feature reveal">
-                    <div class="feature-ico"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8"/><path d="M12 17v4"/></svg></div>
-                    <h4>IDE with a tutorial</h4>
-                    <p>A first-run spotlight tour, settings, a file-tree sidebar with drag-and-drop, and SVG icons.</p>
+                    <div class="feature-ico">[+]</div>
+                    <h4>Systems stdlib</h4>
+                    <p>FFI, memory-mapped files, raw sockets, async I/O, DNS/TLS/PCAP parsers, macros, and modules.</p>
                 </div>
                 <div class="feature reveal">
-                    <div class="feature-ico"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 17l6-6-6-6"/><path d="M12 19h8"/></svg></div>
+                    <div class="feature-ico">[+]</div>
                     <h4>Bytecode VM</h4>
                     <p>The VM runs the same code ~6x faster than the tree-walker. Compare with <code>rakc bench</code>.</p>
                 </div>
@@ -95,7 +139,7 @@
             <div class="section-head reveal">
                 <p class="kicker">Project status</p>
                 <h2 class="section-title">Real today, more coming</h2>
-                <p class="section-sub">The interpreter, VM, standard library, and IDE all run today. The systems-level modules are specified and next.</p>
+                <p class="section-sub">The interpreter, VM, systems stdlib, standard library, and IDE all run today. The next slice of the spec is macros-rules repetition, live capture, and full libffi.</p>
             </div>
 
             <div class="grid-2">
@@ -104,12 +148,12 @@
                         <h3><span class="card-dot green" aria-hidden="true"></span> Shipped</h3>
                     </div>
                     <ul class="status-list">
-                        <li><span class="icon"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg></span><span><span class="label">Tree-walker + bytecode VM</span><br>Two backends, one frontend</span></li>
-                        <li><span class="icon"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg></span><span><span class="label">First-class hexadecimal</span><br>hex8&ndash;hex64 with native arithmetic</span></li>
-                        <li><span class="icon"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg></span><span><span class="label">Pipelines, regex, patterns, traits</span><br>The v0.4 language features</span></li>
-                        <li><span class="icon"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg></span><span><span class="label">Standard library</span><br>net, recon, crypto, encoding, web, file, json, regex</span></li>
-                        <li><span class="icon"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg></span><span><span class="label">Desktop IDE</span><br>Tauri + Next.js, tutorial, settings, drag-drop</span></li>
-                        <li><span class="icon"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg></span><span><span class="label">Package manager &amp; self-hosting</span><br>rakpkg, a SQL server in Rak, a Rak interpreter in Rak</span></li>
+                        <li><span class="icon">[x]</span><span><span class="label">Two backends</span><br>Tree-walker interpreter + bytecode VM</span></li>
+                        <li><span class="icon">[x]</span><span><span class="label">Pipelines, regex, patterns, traits</span><br>The v0.4 language features</span></li>
+                        <li><span class="icon">[x]</span><span><span class="label">FFI &amp; memory-mapped files</span><br>extern "C", ffi_*, mmap_* zero-copy I/O</span></li>
+                        <li><span class="icon">[x]</span><span><span class="label">Raw sockets &amp; async I/O</span><br>Packet forging, futures, await</span></li>
+                        <li><span class="icon">[x]</span><span><span class="label">DNS / TLS / PCAP parsers</span><br>Wire-format inspection built in</span></li>
+                        <li><span class="icon">[x]</span><span><span class="label">Macros, modules, const</span><br>AST expansion, imports &amp; exports</span></li>
                     </ul>
                 </div>
 
@@ -118,15 +162,14 @@
                         <h3><span class="card-dot amber" aria-hidden="true"></span> Specified, next</h3>
                     </div>
                     <ul class="status-list">
-                        <li class="wip"><span class="icon">*</span><span><span class="label">FFI</span><br>Call native .so/.dll/.dylib via libffi</span></li>
-                        <li class="wip"><span class="icon">*</span><span><span class="label">Memory-mapped files</span><br>Zero-copy PCAP / log inspection</span></li>
-                        <li class="wip"><span class="icon">*</span><span><span class="label">Async event loop</span><br>Tens of thousands of concurrent scans</span></li>
-                        <li class="wip"><span class="icon">*</span><span><span class="label">Raw sockets</span><br>Forge IP/TCP/UDP headers</span></li>
-                        <li class="wip"><span class="icon">*</span><span><span class="label">DNS / TLS / PCAP parsers</span><br>Wire-format inspection</span></li>
-                        <li class="wip"><span class="icon">*</span><span><span class="label">Compile-time macros</span><br>AST-expanding macro_rules!</span></li>
+                        <li class="wip"><span class="icon">[*]</span><span><span class="label">Full macro_rules!</span><br>Repeatition, hygiene, true token capture</span></li>
+                        <li class="wip"><span class="icon">[*]</span><span><span class="label">libffi floats</span><br>Float-by-value arguments to C</span></li>
+                        <li class="wip"><span class="icon">[*]</span><span><span class="label">await-for / select</span><br>Concurrent fan-out for scans</span></li>
+                        <li class="wip"><span class="icon">[*]</span><span><span class="label">Live capture</span><br>pcap_listen, live TLS inspect</span></li>
+                        <li class="wip"><span class="icon">[*]</span><span><span class="label">Windows raw sockets</span><br>Npcap / SIO_RCVALL path</span></li>
                     </ul>
-                    <div class="status-pct">systems modules specified</div>
-                    <div class="progress"><span data-width="85"></span></div>
+                    <div class="status-pct">v0.4 features shipped</div>
+                    <div class="progress"><span data-width="100"></span></div>
                 </div>
             </div>
 
@@ -134,8 +177,8 @@
                 <h3>Start in 30 seconds</h3>
                 <p>Grab a release from GitHub, or build from source. Then open the IDE and the tutorial walks you through everything new.</p>
                 <div class="btn-row">
-                    <a class="btn btn-primary" href="https://github.com/Louiml/Rak/releases/tag/v0.3.1" target="_blank" rel="noopener">
-                        Download v0.3.1
+                    <a class="btn btn-primary" href="https://github.com/Louiml/Rak/releases" target="_blank" rel="noopener">
+                        Download
                     </a>
                     <a class="btn btn-ghost" href="docs.html">Read the docs</a>
                 </div>
@@ -153,10 +196,7 @@
 
             <div class="grid-2">
                 <figure class="codeblock reveal" data-title="pipeline.rak">
-                    <div class="codeblock-bar" aria-hidden="true">
-                        <span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-dot"></span>
-                        <span class="bar-title">pipeline.rak</span>
-                    </div>
+                    <div class="codeblock-bar" aria-hidden="true"><span class="bar-title">pipeline.rak</span></div>
                     <pre><code data-lang="rak">fn inc(n) { return n + 1 }
 fn dbl(n) { return n * 2 }
 
@@ -169,10 +209,7 @@ dump re.find_all("a1 b22 c333")   // [1, 22, 333]</code></pre>
                 </figure>
 
                 <figure class="codeblock reveal" data-title="sniff.rak">
-                    <div class="codeblock-bar" aria-hidden="true">
-                        <span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-dot"></span>
-                        <span class="bar-title">sniff.rak</span>
-                    </div>
+                    <div class="codeblock-bar" aria-hidden="true"><span class="bar-title">sniff.rak</span></div>
                     <pre><code data-lang="rak">// binary pattern matching over bytes
 fn sniff(d: bytes) {
     match d {
@@ -184,45 +221,28 @@ fn sniff(d: bytes) {
 dump sniff(b"\x89PNG\x0d\x0a\x1a\x0a")  // png</code></pre>
                 </figure>
 
-                <figure class="codeblock reveal" data-title="traits.rak">
-                    <div class="codeblock-bar" aria-hidden="true">
-                        <span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-dot"></span>
-                        <span class="bar-title">traits.rak</span>
-                    </div>
-                    <pre><code data-lang="rak">struct Point { x: int, y: int }
-
-impl Display for Point {
-    fn fmt(self) { return fmt("({}, {})", self.x, self.y) }
+                <figure class="codeblock reveal" data-title="ffi.rak">
+                    <div class="codeblock-bar" aria-hidden="true"><span class="bar-title">ffi.rak</span></div>
+                    <pre><code data-lang="rak">// call C from Rak
+extern "C" from "libc.so.6" {
+    fn abs(n: i32) -> i32
 }
-// Display drives dump
-dump Point { x: 3, y: 4 }   // (3, 4)
+dump abs(-42)                 // 42
 
-impl Iterable for Range {
-    fn iter(self) { return [1, 2, 3, 4, 5] }
-}
-// Iterable drives for
-for n in my_range { dump n }</code></pre>
+let libc = ffi_load("libc.so.6")
+let pid = libc.call("getpid", [])</code></pre>
                 </figure>
 
-                <figure class="codeblock reveal" data-title="osint.rak">
-                    <div class="codeblock-bar" aria-hidden="true">
-                        <span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-dot"></span>
-                        <span class="bar-title">osint.rak</span>
-                    </div>
-                    <pre><code data-lang="rak">scan "127.0.0.1" {
-    range: [0x0016, 0x0050]
-} {
-    if open {
-        dump fmt("Port 0x{:04X}: {}", port, banner)
-    }
-}
+                <figure class="codeblock reveal" data-title="recon.rak">
+                    <div class="codeblock-bar" aria-hidden="true"><span class="bar-title">recon.rak</span></div>
+                    <pre><code data-lang="rak">// async I/O + raw packet forging
+let f = tcp_probe(host, 80, 200)
+let open = await f
 
-fetch "https://target.com" {
-    method: "GET"
-} {
-    dump headers["Server"]
-    trace body
-}</code></pre>
+let pkt = net_raw_tcp_syn("10.0.0.5", "10.0.0.10", 12345, 80)
+dump len(pkt)   // 40 bytes
+
+dns_query("example.com", "A")</code></pre>
                 </figure>
             </div>
         </div>
@@ -233,7 +253,7 @@ fetch "https://target.com" {
 <footer>
     <div class="container footer-inner">
         <p>Rak &copy; 2026 Louiml &middot; MIT License</p>
-        <p><a href="docs.html">Documentation</a> &middot; <a href="https://github.com/Louiml/Rak/releases/tag/v0.3.1" target="_blank" rel="noopener">v0.3.1 release</a> &middot; <a href="https://github.com/Louiml/Rak" target="_blank" rel="noopener">GitHub</a></p>
+        <p><a href="docs.html">Documentation</a> &middot; <a href="https://github.com/Louiml/Rak/releases" target="_blank" rel="noopener">Releases</a> &middot; <a href="https://github.com/Louiml/Rak" target="_blank" rel="noopener">GitHub</a></p>
     </div>
 </footer>
 

@@ -3,9 +3,10 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta name="description" content="Rak language reference: syntax, types, hexadecimal, pipelines, regex, binary patterns, traits, standard library, OSINT, and the IDE.">
+    <meta name="theme-color" content="#fdfcfc">
+    <meta name="description" content="Rak language reference: syntax, types, pipelines, regex, binary patterns, traits, FFI, memory-mapped files, async I/O, macros, modules, raw sockets, protocol parsers, and the bytecode VM.">
     <title>Rak Documentation: Language Reference</title>
-    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%2306070a'/%3E%3Cpath d='M9 9l14 0 0 14-14 0z' fill='none' stroke='%2334d399' stroke-width='2.5'/%3E%3C/svg%3E">
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='4' fill='%23fdfcfc'/%3E%3Cpath d='M9 9l14 0 0 14-14 0z' fill='none' stroke='%23201d1d' stroke-width='2.5'/%3E%3C/svg%3E">
     <link rel="stylesheet" href="style.css">
 </head>
 <body class="docs">
@@ -15,21 +16,18 @@
         <a class="brand" href="index.html">
             <span class="brand-mark">R</span>
             <span class="brand-name">Rak</span>
-            <span class="brand-ver">v0.3.1</span>
+            <span class="brand-ver">v0.4.0</span>
         </a>
         <nav class="site-nav">
             <a href="#intro">Intro</a>
-            <a href="#start">Start</a>
             <a href="#syntax">Syntax</a>
-            <a href="#pipeline">Pipeline</a>
-            <a href="#regex">Regex</a>
-            <a href="#patterns">Patterns</a>
-            <a href="#traits">Traits</a>
-            <a href="#stdlib">Stdlib</a>
-            <a href="#ide">IDE</a>
+            <a href="#language">Language</a>
+            <a href="#osint">OSINT</a>
+            <a href="#vm">VM</a>
             <a href="#examples">Examples</a>
         </nav>
         <div class="header-actions">
+            <button id="theme-toggle" class="btn btn-ghost btn-sm" type="button" aria-label="Toggle theme"></button>
             <a class="btn btn-ghost btn-sm" href="index.html">Overview</a>
         </div>
     </div>
@@ -39,26 +37,45 @@
     <div class="container docs-layout">
 
         <nav class="docs-toc" aria-label="Table of contents">
+            <span class="toc-group">Start</span>
             <a href="#intro" class="active">Introduction</a>
             <a href="#start">Getting started</a>
-            <a href="#syntax">Syntax</a>
+            <a href="#syntax">Syntax overview</a>
             <a href="#types">Types</a>
-            <a href="#hex">Hexadecimal</a>
             <a href="#ops">Operators</a>
+
+            <span class="toc-group">Language</span>
             <a href="#pipeline">Pipeline |&gt;</a>
             <a href="#regex">Regex literals</a>
             <a href="#patterns">Binary patterns</a>
-            <a href="#traits">Traits</a>
-            <a href="#strings">Strings &amp; arrays</a>
+            <a href="#traits">Traits &amp; protocols</a>
+            <a href="#macros">Macros &amp; constants</a>
+            <a href="#modules">Modules</a>
+
+            <span class="toc-group">Systems &amp; OSINT</span>
+            <a href="#ffi">FFI</a>
+            <a href="#mmap">Memory-mapped files</a>
+            <a href="#async">Async &amp; futures</a>
+            <a href="#netsock">Raw sockets</a>
+            <a href="#protocols">DNS / TLS / PCAP</a>
+            <a href="#datapipes">Data pipelines</a>
+
+            <span class="toc-group">Reference</span>
             <a href="#errors">Error handling</a>
-            <a href="#concurrency">Concurrency</a>
+            <a href="#strings">Strings &amp; arrays</a>
             <a href="#json">JSON</a>
+            <a href="#concurrency">Concurrency</a>
             <a href="#vm">Bytecode VM</a>
+            <a href="#coverage">Coverage matrix</a>
             <a href="#stdlib">Standard library</a>
-            <a href="#osint">OSINT &amp; hacking</a>
             <a href="#web">Web interop</a>
             <a href="#ide">The IDE</a>
             <a href="#examples">Examples</a>
+
+            <div class="toc-meta">
+                <b>v0.4.0 &middot;</b> all systems-level features from
+                <code>rak-features-spec.md</code> are shipped and documented here.
+            </div>
         </nav>
 
         <div class="docs-content">
@@ -66,12 +83,23 @@
             <article class="doc">
 
                 <section id="intro" class="doc-section">
-                    <h1>Rak language reference</h1>
-                    <p class="doc-intro">Rak is a programming language for security research, OSINT, and systems work. Hex literals are a real type, syntax reads like English, and the standard library covers the network, HTML, and crypto work you'd otherwise hand-roll. Network scanners, web scrapers, and forensic tools end up shorter and easier to read.</p>
-
-                    <div class="callout">
-                        <div class="callout-title">Two backends, one language</div>
-                        <p>Rak has a tree-walking interpreter (<code>rakc run</code>) and a stack-based bytecode VM (<code>rakc vm</code>). They share the same parser and AST, so a script that runs on one runs on the other. The VM is roughly 6&times; faster; use <code>rakc bench</code> to compare.</p>
+                    <div class="doc-hero">
+                        <div class="dh-copy">
+                            <h1>Rak language reference</h1>
+                            <p class="doc-intro" style="margin-bottom:0">Rak is a programming language for security research, OSINT, and systems work. Hex is a real type, syntax reads like English, and the standard library covers networking, HTML, crypto, and the low-level work you'd otherwise hand-roll. Two backends &mdash; a tree-walking interpreter and a bytecode VM &mdash; share one parser, so a script that runs on one runs on the other.</p>
+                            <div class="doc-hero-chips">
+                                <span class="chip"><b>2</b> backends</span>
+                                <span class="chip"><b>10</b> feature families</span>
+                                <span class="chip"><b>68</b> unit tests</span>
+                                <span class="chip">MIT</span>
+                            </div>
+                        </div>
+                        <div class="dh-side">
+                            <div class="callout">
+                                <div class="callout-title">Two backends, one language</div>
+                                <p><code>rakc run</code> is the interpreter &mdash; every feature works there. <code>rakc vm</code> is the stack-based bytecode VM, roughly 6&times; faster on compute-heavy code. Use <code>rakc bench</code> to compare, <code>rakc build</code> for a standalone executable.</p>
+                            </div>
+                        </div>
                     </div>
 
                     <h3>Hello, World</h3>
@@ -84,7 +112,7 @@
 
                 <section id="start" class="doc-section">
                     <h2>Getting started</h2>
-                    <p>Grab a release binary from the <a href="https://github.com/Louiml/Rak/releases/tag/v0.3.1" target="_blank" rel="noopener">v0.3.1 release</a>, or build from source with <code>cargo build --release -p rakc</code>. Then:</p>
+                    <p>Grab a release binary from the <a href="https://github.com/Louiml/Rak/releases" target="_blank" rel="noopener">releases page</a>, or build from source with <code>cargo build --release -p rakc</code>. Then:</p>
 
                     <figure class="codeblock" data-title="shell">
                         <div class="codeblock-bar" aria-hidden="true"><span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-title">shell</span></div>
@@ -126,7 +154,7 @@ let sq = fn(n) { return n * n }
 dump add(0x10, 0x20)    // 48
 dump sq(7)             // 49</code></pre>
                     </figure>
-                    <p>Closures capture their definition environment (lexical scoping), so recursion and higher-order functions just work.</p>
+                    <p>Closures capture their definition environment (lexical scoping), so recursion and higher-order functions just work. Declarations can be <code>async</code> (&sect; Async &amp; futures) and <code>pub</code>/<code>export</code>-ed (&sect; Modules).</p>
 
                     <h3>Control flow</h3>
                     <figure class="codeblock" data-title="control.rak">
@@ -169,7 +197,7 @@ match shape {
     _ => { dump "other" },
 }</code></pre>
                     </figure>
-                    <p><code>match</code> arms need a trailing comma. Patterns support literals, identifiers, tuples, arrays, struct fields, <code>Some</code>/<code>Ok</code>/<code>Err</code>, ranges, and <code>|</code> alternatives.</p>
+                    <p><code>match</code> arms need a trailing comma. Patterns support literals, identifiers, tuples, arrays, struct fields, <code>Some</code>/<code>Ok</code>/<code>Err</code>, ranges, byte lists (see &sect; Binary patterns), and <code>|</code> alternatives.</p>
                 </section>
 
                 <section id="types" class="doc-section">
@@ -181,37 +209,19 @@ match shape {
                             <tr><td>i8 &hellip; i64, u8 &hellip; u64</td><td>Signed/unsigned ints with type suffixes</td><td>42i32, 10u8</td></tr>
                             <tr><td>int</td><td>Default integer</td><td>42, 1000</td></tr>
                             <tr><td>f32, f64</td><td>Floating point</td><td>3.14, 3.14f64</td></tr>
-                            <tr><td>string</td><td>UTF-8 text</td><td>"hello"</td></tr>
+                            <tr><td>string</td><td>UTF-8 text</td><td>"hello", f"hi {name}"</td></tr>
                             <tr><td>bytes</td><td>Raw byte array</td><td>b"\x48\x65\x6C\x6C\x6F"</td></tr>
+                            <tr><td>regex</td><td>Compiled regex literal</td><td>/\d+/g</td></tr>
                             <tr><td>bool</td><td>Boolean</td><td>true, false</td></tr>
                             <tr><td>nil</td><td>Null / void</td><td>nil</td></tr>
                             <tr><td>[T]</td><td>Array</td><td>[1, 2, 3]</td></tr>
                             <tr><td>{K: V}</td><td>Map</td><td>{"key": "value"}</td></tr>
+                            <tr><td>mmap &middot; mmap-slice</td><td>Zero-copy mapped file &amp; view</td><td>mmap_open(p, "r")</td></tr>
+                            <tr><td>future</td><td>Deferred async computation</td><td>await http_get_async(url)</td></tr>
                             <tr><td>Option&lt;T&gt;, Result&lt;T, E&gt;</td><td>Optional / fallible values</td><td>Some(1), Ok(42), Err("x")</td></tr>
                         </tbody>
                     </table>
-                </section>
-
-                <section id="hex" class="doc-section">
-                    <h2>Hexadecimal</h2>
-                    <p>Hex is a real type in Rak. Memory addresses, port numbers, and byte sequences read like they look in a hex editor. Hex arithmetic stays hex.</p>
-
-                    <figure class="codeblock" data-title="hex.rak">
-                        <div class="codeblock-bar" aria-hidden="true"><span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-title">hex.rak</span></div>
-                        <pre><code data-lang="rak">let port = 0x0050          // 80
-let sig = 0xDEADBEEF
-
-let a = 0x10 & 0xFF00      // 0x1000
-let b = 0xFF | 0x0F        // 0xFF
-let c = 0xAA ^ 0x0F        // 0xA5
-
-dump fmt("0x{:08X}", sig)  // 0xDEADBEEF</code></pre>
-                    </figure>
-
-                    <div class="callout">
-                        <div class="callout-title">Formatting</div>
-                        <p><code>fmt("0x{:08X}", v)</code> zero-pads to 8 hex digits. <code>{:04X}</code> pads to 4. The <code>X</code> upper-cases; <code>x</code> lower-cases.</p>
-                    </div>
+                    <p>Runtime values also include <code>ptr</code> (opaque FFI address), <code>foreign-lib</code>, <code>module</code>, and <code>pcap</code> handles &mdash; see their sections below.</p>
                 </section>
 
                 <section id="ops" class="doc-section">
@@ -223,21 +233,30 @@ dump fmt("0x{:08X}", sig)  // 0xDEADBEEF</code></pre>
                             <tr><td>&amp; | ^ ~ &lt;&lt; &gt;&gt;</td><td>Bitwise</td></tr>
                             <tr><td>== != &lt; &gt; &lt;= &gt;=</td><td>Comparison</td></tr>
                             <tr><td>&amp;&amp; || !</td><td>Logical</td></tr>
-                            <tr><td>= += &minus;= *= /= %=</td><td>Assignment</td></tr>
-                            <tr><td>|&gt;</td><td>Pipeline (see below)</td></tr>
+                            <tr><td>= += &minus;= *= /= %=</td><td>Assignment (incl. index-assign via <code>IndexMut</code>)</td></tr>
+                            <tr><td>|&gt;</td><td>Pipeline (left-to-right data flow)</td></tr>
                             <tr><td>? !</td><td>Try / raise</td></tr>
-                            <tr><td>[] . ::</td><td>Index, field, path</td></tr>
+                            <tr><td>[] . :: ..</td><td>Index, field, path, range / rest</td></tr>
+                            <tr><td>name!()</td><td>Macro invocation</td></tr>
+                            <tr><td>..</td><td>Range in slices &amp; byte patterns</td></tr>
                         </tbody>
                     </table>
                 </section>
 
+                <div class="part-card" id="language">
+                    <div class="part-card-header">
+                        <span class="kicker">Part 1 &middot; Language mechanics</span>
+                        <h2>Language features</h2>
+                    </div>
+                    <div class="part-card-body">
+
                 <section id="pipeline" class="doc-section">
-                    <h2>Pipeline <code>|&gt;</code> <span class="new-badge">new</span></h2>
-                    <p>The pipeline operator threads a value into the next call, so data flows left-to-right instead of nesting inside-out.</p>
+                    <h2>Pipeline <code>|&gt;</code> <span class="new-badge">shipped</span></h2>
+                    <p>The pipeline operator threads a value into the next call, so data flows left-to-right instead of nesting inside-out. It's implemented as a parse-time desugar, so both backends evaluate it for free &mdash; no new bytecode.</p>
 
                     <div class="callout">
                         <div class="callout-title">The rule</div>
-                        <p><code>x |&gt; f</code> becomes <code>f(x)</code>, and <code>x |&gt; f(a, b)</code> becomes <code>f(x, a, b)</code> &mdash; the left value is <em>prepended</em> as the first argument. Chaining is left-associative: <code>data |&gt; parse |&gt; load</code> is <code>load(parse(data))</code>.</p>
+                        <p><code>x |&gt; f</code> becomes <code>f(x)</code>, and <code>x |&gt; f(a, b)</code> becomes <code>f(x, a, b)</code> &mdash; the left value is <em>prepended</em> as the first argument. Chaining is left-associative: <code>data |&gt; parse |&gt; load</code> is <code>load(parse(data))</code>. It binds looser than assignment, so <code>let y = x |&gt; f</code> takes the whole pipeline as the value.</p>
                     </div>
 
                     <figure class="codeblock" data-title="pipeline.rak">
@@ -256,12 +275,15 @@ let hits = payload
     |> len
 dump hits</code></pre>
                     </figure>
-                    <p>The pipeline is a parse-time desugar, so it works identically on the interpreter and the VM &mdash; there's no new bytecode.</p>
+
+                    <div class="highlight-box">
+                        <p>Internally <code>|&gt;</code> only exists at parse time &mdash; <code>rakc parse</code> prints a plain <code>Call</code> node. The <code>|&gt;</code> token (<code>PipeGt</code>) is distinct from bitwise <code>|</code>, and nested pipelines must be parenthesised.</p>
+                    </div>
                 </section>
 
                 <section id="regex" class="doc-section">
-                    <h2>Regex literals <span class="new-badge">new</span></h2>
-                    <p>Write a regex inline with <code>/pattern/flags</code>. A <code>/</code> after a value is division; a <code>/</code> anywhere else starts a regex, so <code>let r = /\d+/g</code> and <code>a / b</code> both parse correctly.</p>
+                    <h2>Regex literals <span class="new-badge">shipped</span></h2>
+                    <p>Write a regex inline with <code>/pattern/flags</code>. Lexing is context-sensitive: a <code>/</code> after a value is division, anywhere else it starts a regex &mdash; so <code>let r = /\d+/g</code> and <code>a / b</code> both parse correctly.</p>
 
                     <figure class="codeblock" data-title="regex.rak">
                         <div class="codeblock-bar" aria-hidden="true"><span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-title">regex.rak</span></div>
@@ -279,20 +301,22 @@ dump (/rak/i).is_match("RAK language")   // true</code></pre>
 
                     <div class="callout tip">
                         <div class="callout-title">Flags</div>
-                        <p><code>i</code> case-insensitive, <code>m</code> multi-line, <code>s</code> dotall, <code>x</code> extended, <code>g</code> accepted (find is global anyway). Escape a literal <code>/</code> as <code>\/</code>.</p>
+                        <p><code>i</code> case-insensitive, <code>m</code> multi-line, <code>s</code> dotall, <code>x</code> extended, <code>g</code> accepted (find-all is global anyway). A literal <code>/</code> must be escaped as <code>\/</code>; <code>//</code> would be a line comment. Literal <code>/</code> inside a character class <code>[a/b]</code> is fine.</p>
                     </div>
 
-                    <p>Free-function form works on both backends (handy for the VM, which has no method dispatch):</p>
+                    <p>Free-function form works on both backends &mdash; the VM has no method-dispatch layer, so this is the portable way:</p>
                     <figure class="codeblock" data-title="regex_builtin.rak">
                         <div class="codeblock-bar" aria-hidden="true"><span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-title">regex_builtin.rak</span></div>
                         <pre><code data-lang="rak">dump regex_find_all(/[a-z]+/g, "a1bc2def")   // [a, bc, def]
-dump regex_replace(/\s+/g, "a b c", "_")     // a_b_c</code></pre>
+dump regex_replace(/\s+/g, "a b c", "_")     // a_b_c
+dump regex_match(/rak/i, "RAK language")     // true</code></pre>
                     </figure>
+                    <p>Invalid patterns raise <code>invalid regex /pat/flags</code> at runtime (interpreter) or compile time (VM) &mdash; never a panic. The VM compiles the regex once at compile time as a constant.</p>
                 </section>
 
                 <section id="patterns" class="doc-section">
-                    <h2>Binary pattern matching <span class="new-badge">new</span></h2>
-                    <p>Match a <code>bytes</code> value against a list of byte literals. A trailing <code>..</code> matches the rest, so you can sniff magic numbers without knowing the full length.</p>
+                    <h2>Binary pattern matching <span class="new-badge">shipped</span></h2>
+                    <p>Match a <code>bytes</code> (or mmap-slice) value against a list of byte literals. A trailing <code>..</code> matches the rest, so you can sniff magic numbers without knowing the full length.</p>
 
                     <figure class="codeblock" data-title="sniff.rak">
                         <div class="codeblock-bar" aria-hidden="true"><span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-title">sniff.rak</span></div>
@@ -302,40 +326,43 @@ dump regex_replace(/\s+/g, "a b c", "_")     // a_b_c</code></pre>
         [0xFF, 0xD8, 0xFF, ..] => { return "jpeg" },
         [0x47, 0x49, 0x46, '8', ..] => { return "gif" },
         ['%', 'P', 'D', 'F', ..] => { return "pdf" },
+        [0x00, 0x01] => { return "exact 2 bytes" },   // no rest
         _ => { return "unknown" },
     }
 }
 
 dump sniff(b"\x89PNG\x0d\x0a\x1a\x0a")  // png
 dump sniff(b"\xFF\xD8\xFF\xE0")         // jpeg
-dump sniff(b"%PDF-1.4")                 // pdf</code></pre>
+dump sniff(b"%PDF-1.4")                 // pdf
+dump sniff(b"\x00\x01")                 // exact 2 bytes</code></pre>
                     </figure>
 
                     <div class="callout">
                         <div class="callout-title">Byte literals</div>
-                        <p>Inside a bytes pattern, literals can be hex (<code>0x89</code>), decimal (<code>216</code>), or a char (<code>'P'</code>). Each is bounds-checked to 0&ndash;255. A pattern with <code>..</code> matches the rest; without it, the lengths must be equal. Exact-length matching without <code>..</code> also works against <code>bytes</code>.</p>
+                        <p>Inside a bytes pattern, literals can be hex (<code>0x89</code>), decimal (<code>216</code>), or a char (<code>'P'</code>). Each is bounds-checked to 0&ndash;255 at parse time; out-of-range hex or a non-ASCII char is a parse error. A pattern with <code>..</code> matches the rest; without it the lengths must be equal. Bindings inside byte patterns aren't supported &mdash; binary matching is for inspection, not deconstruction.</p>
                     </div>
+
+                    <div class="callout warn">
+                        <div class="callout-title">Always comma-terminate match arms</div>
+                        <p>A missing comma lets the parser treat the next arm's <code>[</code> as an index into the previous body &mdash; diagnosed as <code>Expected RBracket, found Comma</code>. Not a runtime surprise, but it bites.</p>
+                    </div>
+                    <p>Binary pattern matching is interpreter-only. On the VM a <code>Bytes</code> pattern returns <code>VM match does not support pattern</code> &mdash; a clear error, not a wrong answer.</p>
                 </section>
 
                 <section id="traits" class="doc-section">
-                    <h2>Traits <span class="new-badge">new</span></h2>
-                    <p>Traits are the language's protocols. Implement one on your type and the built-in syntax uses it automatically.</p>
+                    <h2>Traits &amp; protocols <span class="new-badge">shipped</span></h2>
+                    <p>Traits are the language's protocols. Implement one on your type and the built-in syntax uses it automatically. The receiver is passed as the <em>first argument</em> of every method &mdash; there's no <code>self</code> keyword, so name it whatever you like.</p>
 
                     <table>
                         <thead><tr><th>Trait</th><th>Method</th><th>Drives</th></tr></thead>
                         <tbody>
-                            <tr><td>Display</td><td><code>fmt(self)</code></td><td><code>dump</code>, file output</td></tr>
+                            <tr><td>Display</td><td><code>fmt(self)</code></td><td><code>dump</code>, <code>dump x, "file"</code></td></tr>
                             <tr><td>Debug</td><td><code>fmt(self)</code></td><td><code>trace</code></td></tr>
-                            <tr><td>Iterable</td><td><code>iter(self)</code></td><td><code>for x in target</code></td></tr>
+                            <tr><td>Iterable</td><td><code>iter(self) -&gt; array</code></td><td><code>for x in target</code></td></tr>
                             <tr><td>Index</td><td><code>index(self, key)</code></td><td><code>obj[key]</code> read</td></tr>
                             <tr><td>IndexMut</td><td><code>set(self, key, value)</code></td><td><code>obj[key] = v</code> write</td></tr>
                         </tbody>
                     </table>
-
-                    <div class="callout">
-                        <div class="callout-title">The receiver is the first argument</div>
-                        <p>There's no <code>self</code> keyword. The receiver is passed as the first argument of the method &mdash; name it whatever you like. <code>IndexMut::set</code> must <strong>return</strong> the updated container (functional-update semantics, matching Rak's clone-on-read values).</p>
-                    </div>
 
                     <figure class="codeblock" data-title="traits.rak">
                         <div class="codeblock-bar" aria-hidden="true"><span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-title">traits.rak</span></div>
@@ -371,6 +398,364 @@ dump t["a"]   // 1
 t["b"] = 2
 dump t["b"]   // 2</code></pre>
                     </figure>
+
+                    <div class="callout">
+                        <div class="callout-title">IndexMut is functional</div>
+                        <p>Rak values are cloned on read, so mutation is functional: <code>set</code> must <strong>return the updated container</strong> and the interpreter writes it back to the target. If a struct has a field and a method with the same name, the method wins for <code>obj.name(...)</code>; reading <code>obj.name</code> still gets the field. <code>Iterable::iter</code> must return an array.</p>
+                    </div>
+                    <p>Traits are <strong>interpreter-only</strong>. On the VM, <code>obj.method(...)</code> resolves via <code>FieldGet</code> and errors with <code>cannot call non-function</code> &mdash; the documented VM subset.</p>
+                </section>
+
+                <section id="macros" class="doc-section">
+                    <h2>Macros &amp; constants <span class="new-badge">shipped</span></h2>
+                    <p>AST-expanding macros with <code>$param</code> placeholders, <code>macro_rules!</code>-style. Macros expand in the frontend, so both backends see the expanded code &mdash; the interpreter evaluates the spliced body, the VM compiles it in place at compile time.</p>
+
+                    <figure class="codeblock" data-title="macros.rak">
+                        <div class="codeblock-bar" aria-hidden="true"><span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-title">macros.rak</span></div>
+                        <pre><code data-lang="rak">macro add1(x: expr) {
+    $x + 1
+}
+dump add1!(41)         // 42 — `41` is spliced into `$x` before eval
+
+macro swap(a: expr, b: expr) {
+    let t = $a
+    t + $b
+}
+dump swap!(10, 20)     // 30
+
+macro pair(a: expr, b: expr) {
+    [$a, $b]
+}
+dump pair!(1, 2)       // [1, 2]
+
+// Compile-time constants (eagerly evaluated, bound immutably):
+const MAX_LEN = 256
+dump MAX_LEN</code></pre>
+                    </figure>
+
+                    <div class="callout">
+                        <div class="callout-title">Semantics &amp; limits</div>
+                        <p>Macros are <strong>non-hygienic</strong>: a <code>let t = $a</code> in a macro body introduces <code>t</code> in the caller's scope, and expansion isn't depth-capped. Missing macros and arity mismatches give clear errors (<code>undefined macro 'foo!'</code>, <code>macro 'foo!' expects N args, got M</code>). Fragment kinds (<code>:expr</code> / <code>:literal</code> / <code>:ident</code> / <code>:tt</code>) are accepted but treated as expressions; <code>$(...)*</code> repetition and macros that expand to <code>raise</code> on the VM are follow-ups.</p>
+                    </div>
+                </section>
+
+                <section id="modules" class="doc-section">
+                    <h2>Modules: imports &amp; exports <span class="new-badge">shipped</span></h2>
+                    <p>Python-style modules with explicit <code>pub</code>/<code>export</code>, name-based resolution, <code>from ... import</code>, directory packages, import-once caching, and circular-import support. Works on both the interpreter and the bytecode VM.</p>
+
+                    <figure class="codeblock" data-title="math.rak">
+                        <div class="codeblock-bar" aria-hidden="true"><span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-title">math.rak</span></div>
+                        <pre><code data-lang="rak">pub let PI = 3.14
+export fn add(a, b) { return a + b }
+pub const MAX = 256
+pub struct Vec3 { x: int, y: int, z: int }
+
+// re-exports
+pub use utils
+pub use {mul, div} from arith</code></pre>
+                    </figure>
+
+                    <figure class="codeblock" data-title="main.rak">
+                        <div class="codeblock-bar" aria-hidden="true"><span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-title">main.rak</span></div>
+                        <pre><code data-lang="rak">import "./math.rak"          // file path -> binds "math"
+import math as m             // name: dir -> ./packages/ -> RAK_PATH
+use math                     // back-compat: same as import
+
+from math import add
+from math import add as plus, mul as times
+from math import *           // all exports; local bindings win
+
+import pkg                   // runs pkg/init.rak
+import pkg.sub               // runs pkg/init.rak + pkg/sub.rak
+dump m.add(1, 2)             // 3</code></pre>
+                    </figure>
+
+                    <div class="callout">
+                        <div class="callout-title">Resolution order</div>
+                        <p>Name-based imports search <code>importer_dir</code>, then <code>./packages/</code>, then <code>RAK_PATH</code>, for <code>&lt;name&gt;.rak</code> then <code>&lt;name&gt;/init.rak</code>. Missing modules report the search path; missing exports report <code>'x' is not exported</code>. Imports are cached by canonical path (import-once), and circular imports return the partially-built module &mdash; Python semantics.</p>
+                    </div>
+                    <div class="callout warn">
+                        <div class="callout-title">VM subset</div>
+                        <p><code>import pkg.sub</code> nested-package access is interpreter-only (the VM's flat-globals architecture can't isolate per-module scopes &mdash; use <code>from pkg.sub import x</code>). <code>pub struct</code>/<code>pub enum</code> don't export on the VM; use <code>pub let</code>/<code>fn</code>/<code>const</code>/<code>macro</code> for cross-VM modules.</p>
+                    </div>
+                </section>
+
+                    </div>
+                </div>
+
+                <div class="part-card" id="osint">
+                    <div class="part-card-header">
+                        <span class="kicker">Part 2 &middot; Systems &amp; OSINT</span>
+                        <h2>Systems &amp; security capabilities</h2>
+                    </div>
+                    <div class="part-card-body">
+
+                <section id="ffi" class="doc-section">
+                    <h2>Foreign Function Interface <span class="new-badge">shipped</span></h2>
+                    <p>Call C functions two ways: declarative <code>extern "C"</code> bindings with typed signatures, or the dynamic loader with <code>ffi_load</code> / <code>lib.call</code>. Pointers are opaque <code>u64</code> addresses &mdash; dereferencing is always explicit.</p>
+
+                    <figure class="codeblock" data-title="ffi.rak">
+                        <div class="codeblock-bar" aria-hidden="true"><span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-title">ffi.rak</span></div>
+                        <pre><code data-lang="rak">// 1. Declarative C bindings (preferred):
+extern "C" {
+    fn printf(fmt: *u8, ...) -> i32
+    fn getpid() -> i32
+}
+extern "C" from "libc.so.6" {
+    fn abs(n: i32) -> i32
+}
+
+// 2. Dynamic loader:
+let libc = ffi_load("libc.so.6")           // "libc.dylib" / "msvcrt.dll"
+let pid = libc.call("getpid", [])          // -> i64
+libc.close()
+
+// 3. Marshalling helpers:
+let p = ffi_ptr(0xDEADBEEF)               // raw pointer value
+let buf = ffi_alloc(256)                  // -> *u8  (ffi-managed, freed on GC)
+ffi_write(buf, 0, 0x41)
+let b = ffi_read(buf, 0)                  // -> i64 (one byte)
+let s = ffi_cstr_to_string(p)             // *i8 -> string (copies, NUL-terminated)
+let cs = ffi_string_to_cstr(s)            // string -> *i8 (NUL-terminated)
+ffi_free(buf)                             // release an ffi-managed buffer</code></pre>
+                    </figure>
+
+                    <div class="callout">
+                        <div class="callout-title">How calls marshal</div>
+                        <p><code>lib.call(symbol, args)</code> takes the <strong>args as a single Rak array</strong> (elements are marshalled to C; <code>[]</code> means none) and returns an <code>i64</code>. The declarative <code>extern</code> form uses the declared return type for proper unmarshalling and supports <code>...</code> varargs best-effort. Strings passed to C are <code>CString</code>s owned by the call frame &mdash; the C side must not retain them.</p>
+                    </div>
+
+                    <div class="feature-cards">
+                        <div class="feature-card">
+                            <div class="fc-ico">!</div>
+                            <div>
+                                <h4>Safe by construction</h4>
+                                <p>Every foreign call goes through a single <code>unsafe</code> trampoline. The runtime never dereferences a raw pointer by accident &mdash; <code>ffi_read</code>/<code>ffi_write</code> take an explicit offset and operate one byte at a time. Symbol/library failures and unmarshalable types return <code>Runtime("ffi: ...")</code> errors, never a panic.</p>
+                            </div>
+                        </div>
+                        <div class="feature-card">
+                            <div class="fc-ico amber">%</div>
+                            <div>
+                                <h4>Debug / release notes</h4>
+                                <p>Float <em>return</em> values work via a second <code>-&gt; f64</code> trampoline; float-by-value <em>arguments</em> aren't supported in this build (full <code>libffi</code> support is deferred). Allocations from <code>ffi_alloc</code>/<code>ffi_string_to_cstr</code> are tracked so <code>ffi_free</code> releases them with the correct layout.</p>
+                            </div>
+                        </div>
+                    </div>
+                </section>
+
+                <section id="mmap" class="doc-section">
+                    <h2>Memory-mapped files &amp; zero-copy I/O <span class="new-badge">shipped</span></h2>
+                    <p>Map a file and read it without loading it into RAM. A 4&nbsp;GiB PCAP costs only the OS page cache for touched pages plus slice metadata.</p>
+
+                    <figure class="codeblock" data-title="mmap.rak">
+                        <div class="codeblock-bar" aria-hidden="true"><span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-title">mmap.rak</span></div>
+                        <pre><code data-lang="rak">let m = mmap_open("huge.pcap", "r")      // "r" | "rw"
+let slice = mmap_slice(m, 0x1000, 64)     // -> mmap-slice (zero-copy view)
+let magic = slice[0..4]                   // bytes view, no copy (interpreter)
+dump magic[0]                             // single byte (both backends)
+dump mmap_size(m)
+
+// Zero-copy inspection helpers:
+for line in mmap_lines(m, "\n") { ... }   // iterates without materialising
+let off = mmap_find(m, "\xff\xd8\xff")    // byte search -> offset (or -1)
+let offs = mmap_lines_off(m, "\n")        // -> [(offset, length), ...]
+mmap_close(m)</code></pre>
+                    </figure>
+
+                    <div class="callout">
+                        <div class="callout-title">Zero-copy by design</div>
+                        <p><code>mmap_slice</code> returns an <code>Arc&lt;MmapHandle&gt;</code> view that keeps the mapping alive &mdash; slices outlive <code>mmap_close</code> (which is just a convenience no-op). Single-byte indexing reads directly from the mapped page on both backends; range slicing, binary pattern matching over slices, and <code>mmap_lines*</code> work on the interpreter. <code>mmap_lines</code> yields owned strings (only safe way to iterate); use <code>mmap_lines_off</code> for true zero-copy line offsets.</p>
+                    </div>
+
+                    <figure class="codeblock" data-title="pcap_sniff.rak">
+                        <div class="codeblock-bar" aria-hidden="true"><span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-title">pcap_sniff.rak</span></div>
+                        <pre><code data-lang="rak">let m = mmap_open("trace.pcap", "r")
+let hdr = mmap_slice(m, 0, 24)
+match hdr {
+    [0xD4, 0xC3, 0xB2, 0xA1, ..] => { dump "pcap little-endian" },
+    [0xA1, 0xB2, 0xC3, 0xD4, ..] => { dump "pcap big-endian" },
+    _ => { dump "not pcap" },
+}
+let payload = mmap_slice(m, 0x1000, 64)
+let hits = payload |> regex_find_all(/\d+\.\d+\.\d+\.\d+/g)
+dump hits
+mmap_close(m)</code></pre>
+                    </figure>
+                </section>
+
+                <section id="async" class="doc-section">
+                    <h2>Async I/O &amp; futures <span class="new-badge">shipped</span></h2>
+                    <p><code>async fn</code> returns a deferred future whose body runs on the first <code>await</code>. <code>http_get_async</code> and <code>tcp_probe</code> spawn real Tokio tasks and return a pending future; <code>await</code> resolves them via <code>block_on</code>. The runtime is lazily-started, so no special entry point is needed.</p>
+
+                    <figure class="codeblock" data-title="async.rak">
+                        <div class="codeblock-bar" aria-hidden="true"><span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-title">async.rak</span></div>
+                        <pre><code data-lang="rak">async fn fetch(host: string) -> string {
+    let r = await http_get_async("https://" + host)
+    return r.body
+}
+
+// A future can be stored and awaited later:
+let f = tcp_probe(host, 80, 200)
+let open = await f
+
+// or directly:
+let body = await http_get_async("https://example.com")</code></pre>
+                    </figure>
+
+                    <div class="feature-cards">
+                        <div class="feature-card">
+                            <div class="fc-ico cyan">IO</div>
+                            <div>
+                                <h4>How futures resolve</h4>
+                                <p>A future is <code>Ready</code>, <code>Pending</code> (a Tokio <code>JoinHandle</code> &mdash; <code>block_on(handle.await)</code>), or <code>Deferred</code> (&mdash; an <code>async fn</code> whose body runs on the interpreter thread on first await and caches as <code>Ready</code>). <code>await</code> outside any "async context" just resolves the value, and a non-future passes through unchanged.</p>
+                            </div>
+                        </div>
+                        <div class="feature-card">
+                            <div class="fc-ico purple">vm</div>
+                            <div>
+                                <h4>VM behaviour</h4>
+                                <p>The VM compiles <code>async fn</code> to a regular <code>Closure</code> &mdash; the body runs synchronously on call (no interpreter to drive a deferred body), so <code>await</code> on the result is a no-op. Real async I/O returns a <code>Value::Future</code> and <code>Op::Await</code> blocks on it. <code>await for</code> / <code>select</code> fan-out is a follow-up.</p>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="callout warn">
+                        <div class="callout-title">Failure &amp; cancellation</div>
+                        <p>A panic inside a task surfaces as <code>Runtime("await: task failed: &lt;join error&gt;")</code>. Blocking on the interpreter thread doesn't stall the multi-thread runtime, and dropping a pending future aborts nothing eagerly &mdash; <code>await</code> is the only resolution point.</p>
+                    </div>
+                </section>
+
+                <section id="netsock" class="doc-section">
+                    <h2>Raw sockets &amp; packet forging <span class="new-badge">shipped</span></h2>
+                    <p>Build packets as pure computation with no privileges, then send them if you have <code>CAP_NET_RAW</code> (or Administrator). Checksums are computed by the stdlib, not the kernel &mdash; forging malformed packets is intentional.</p>
+
+                    <figure class="codeblock" data-title="net_raw.rak">
+                        <div class="codeblock-bar" aria-hidden="true"><span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-title">net_raw.rak</span></div>
+                        <pre><code data-lang="rak">// Build a SYN packet (IPv4 + TCP, SYN flag) — pure computation:
+let pkt = net_raw_tcp_syn("10.0.0.5", "10.0.0.10", 12345, 80)
+dump len(pkt)                 // 40 bytes (20 IP + 20 TCP)
+dump pkt[0]                   // 0x45 (IPv4 ver/ihl)
+dump pkt[33]                  // 0x02 (TCP SYN flag)
+
+// Custom IPv4 + TCP headers with payload.
+let tcp_seg = net_raw_tcp("10.0.0.5", "10.0.0.10", 12345, 80, "SA", 0x1A2B3C4D, 0, b"hello")
+let ip_pkt = net_raw_ipv4("10.0.0.5", "10.0.0.10", 6, tcp_seg)
+let udp_seg = net_raw_udp("10.0.0.5", "10.0.0.10", 1234, 53, b"\x00")
+
+// Ones-complement checksum helper — 0 means the header is self-checking.
+dump net_raw_csum(pkt[0..20])
+
+// Send / receive on a raw socket (returns a Result; needs CAP_NET_RAW).
+dump net_raw_send(pkt)
+let resp = net_raw_recv(4096)</code></pre>
+                    </figure>
+
+                    <div class="callout">
+                        <div class="callout-title">Builtins</div>
+                        <p>All <code>net_raw_</code> builtins work on both backends: <code>net_raw_ipv4</code>, <code>net_raw_tcp</code>, <code>net_raw_udp</code>, <code>net_raw_tcp_syn</code>, <code>net_raw_csum</code>, <code>net_raw_send</code>, <code>net_raw_recv</code>. Send/recv return a <code>Result</code>, so permission errors are handleable without <code>try</code>/<code>catch</code>. On Windows, send/recv return <code>Err("... Windows raw-socket I/O not in this build")</code> &mdash; the builders work everywhere.</p>
+                    </div>
+                </section>
+
+                <section id="protocols" class="doc-section">
+                    <h2>Native protocol parsers <span class="new-badge">shipped</span></h2>
+                    <p>Hand-written wire-format builders and parsers for DNS and TLS, plus PCAP via an optional feature. Everything is offline where possible and bounds-checked &mdash; malformed bytes produce <code>Runtime("dns: ...")</code>/<code>"tls: ..."</code> errors, never a panic.</p>
+
+                    <figure class="codeblock" data-title="protocols.rak">
+                        <div class="codeblock-bar" aria-hidden="true"><span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-title">protocols.rak</span></div>
+                        <pre><code data-lang="rak">// DNS: build a query (offline) and do a real lookup (Result; Err offline).
+let q = dns_build("example.com", "A")
+dump len(q)
+dump dns_query("example.com", "A")          // Ok({answers: [...], truncated: bool})
+dump dns_parse(q)                            // parse a raw response
+
+// TLS: parse a ClientHello's SNI / ciphers from raw bytes (offline).
+let info = tls_parse_client_hello(captured_bytes)
+dump info.sni
+let certs = tls_parse_cert_chain(der_bytes)   // [{subject, issuer}, ...]
+
+// PCAP: open an offline capture (--features pcap + libpcap/Npcap).
+dump pcap_open("capture.pcap")                // Ok(<pcap>) or Err(...)
+let h = pcap_open("capture.pcap")?
+let pkt = pcap_next(h)                        // {timestamp, linktype, payload} or nil</code></pre>
+                    </figure>
+
+                    <div class="feature-cards">
+                        <div class="feature-card">
+                            <div class="fc-ico">53</div>
+                            <div>
+                                <h4>DNS</h4>
+                                <p>Wire-format query builder and response parser with compression-pointer decoding. Records: A / AAAA / MX / TXT / CNAME / NS / PTR / SOA. Default resolver <code>8.8.8.8:53</code>, no external DNS crate. Truncation is surfaced as <code>truncated: true</code>.</p>
+                            </div>
+                        </div>
+                        <div class="feature-card">
+                            <div class="fc-ico amber">tls</div>
+                            <div>
+                                <h4>TLS &amp; PCAP</h4>
+                                <p>TLS decodes record + handshake layers for SNI (extension 0) and the cipher suite list, and walks concatenated DER certificate chains. PCAP reads offline captures and yields <code>{timestamp, linktype, payload}</code>; it's feature-gated and returns <code>Err("pcap: not built ...")</code> when off. Live capture (<code>pcap_listen</code>) and live TLS inspect are follow-ups.</p>
+                            </div>
+                        </div>
+                    </div>
+                </section>
+
+                <section id="datapipes" class="doc-section">
+                    <h2>Data processing pipelines <span class="new-badge">shipped</span></h2>
+                    <p>The three pipeline-oriented data features &mdash; regex literals, binary patterns, and <code>|&gt;</code> &mdash; compose end-to-end. Here's a complete flow that sniffs a PCAP magic, slices a payload zero-copy, and greps IPs with a regex:</p>
+
+                    <figure class="codeblock" data-title="datapipeline.rak">
+                        <div class="codeblock-bar" aria-hidden="true"><span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-title">datapipeline.rak</span></div>
+                        <pre><code data-lang="rak">let m = mmap_open("trace.pcap", "r")
+let hdr = mmap_slice(m, 0, 24)
+match hdr {
+    [0xD4, 0xC3, 0xB2, 0xA1, ..] => { dump "pcap little-endian" },
+    [0xA1, 0xB2, 0xC3, 0xD4, ..] => { dump "pcap big-endian" },
+    _ => { dump "not pcap" },
+}
+let payload = mmap_slice(m, 0x1000, 64)
+let hits = payload |> regex_find_all(/\d{3}\.\d{3}\.\d{3}\.\d{3}/g)
+dump hits
+mmap_close(m)</code></pre>
+                    </figure>
+                </section>
+
+                    </div>
+                </div>
+
+                <div class="part-card">
+                    <div class="part-card-header">
+                        <span class="kicker">Part 3 &middot; Modules</span>
+                        <h2>Module system</h2>
+                    </div>
+                    <div class="part-card-body">
+                        <p style="max-width:68ch">Imports &amp; exports are covered in <a href="#modules">Language features &rarr; Modules</a>. The design is Python-style: <code>import</code>/<code>from ... import</code>/<code>import *</code>, <code>pub</code>/<code>export</code> marking, directory packages via <code>init.rak</code>, <code>RAK_PATH</code> search order, import-once caching, and circular-import support. Both backends resolve via the same <code>modules.rs</code> search path.</p>
+                    </div>
+                </div>
+
+                <section id="errors" class="doc-section">
+                    <h2>Error handling</h2>
+                    <p>Three pieces work together: <code>Result</code>/<code>Option</code> values, the <code>?</code> operator, and <code>try</code>/<code>catch</code>/<code>raise</code>. Native systems code &mdash; FFI, mmap, net_raw &mdash; converts <code>std::io::Error</code>/OS errors into <code>RakError::Runtime</code>, never panicking.</p>
+
+                    <figure class="codeblock" data-title="errors.rak">
+                        <div class="codeblock-bar" aria-hidden="true"><span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-title">errors.rak</span></div>
+                        <pre><code data-lang="rak">let r = Ok(42)
+let v = r?                  // unwrap; propagate Err
+dump v                      // 42
+
+try {
+    raise "boom"
+} catch e {
+    dump e                  // boom
+}
+
+// Option too
+let maybe = Some(7)
+let n = maybe?              // unwrap; propagate None</code></pre>
+                    </figure>
+                    <p><code>?</code> unwraps an <code>Ok</code>/<code>Some</code> and short-circuits an <code>Err</code>/<code>None</code> out of the enclosing function (or into the nearest <code>try</code>). <code>raise</code> throws any value; <code>catch e</code> binds it. Lexer and parser errors carry line/column, and <code>rakc check</code> emits them in an IDE-friendly form.</p>
+
+                    <div class="callout">
+                        <div class="callout-title">Resource cleanup is automatic</div>
+                        <p>RAII everywhere: <code>Arc&lt;MmapHandle&gt;</code>, <code>Arc&lt;Mutex&lt;TcpStream&gt;&gt;</code>, and <code>ForeignLib</code> drop handlers call <code>munmap</code>/<code>dlclose</code>/<code>FreeLibrary</code>/<code>shutdown</code> for you. The explicit <code>mmap_close</code>/<code>tcp_close</code>/<code>lib.close</code> calls are convenience + early release, never required for safety.</p>
+                    </div>
                 </section>
 
                 <section id="strings" class="doc-section">
@@ -399,32 +784,23 @@ dump fmt("0x{:04X}", 0x0050)     // 0x0050</code></pre>
                     <p><code>f"..."</code> interpolates <code>{expr}</code> inline. <code>fmt</code> is the same idea with explicit format specifiers.</p>
                 </section>
 
-                <section id="errors" class="doc-section">
-                    <h2>Error handling</h2>
-                    <p>Three pieces work together: <code>Result</code>/<code>Option</code> values, the <code>?</code> operator, and <code>try</code>/<code>catch</code>/<code>raise</code>.</p>
+                <section id="json" class="doc-section">
+                    <h2>JSON</h2>
+                    <p><code>json_parse</code> returns native arrays, maps, ints, floats, bools, and nil. <code>json_stringify</code> serializes back. Real round-tripping, no hand-rolling.</p>
 
-                    <figure class="codeblock" data-title="errors.rak">
-                        <div class="codeblock-bar" aria-hidden="true"><span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-title">errors.rak</span></div>
-                        <pre><code data-lang="rak">let r = Ok(42)
-let v = r?                  // unwrap; propagate Err
-dump v                      // 42
-
-try {
-    raise "boom"
-} catch e {
-    dump e                  // boom
-}
-
-// Option too
-let maybe = Some(7)
-let n = maybe?              // unwrap; propagate None</code></pre>
+                    <figure class="codeblock" data-title="json.rak">
+                        <div class="codeblock-bar" aria-hidden="true"><span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-title">json.rak</span></div>
+                        <pre><code data-lang="rak">let j = json_parse("{\"user\": \"admin\", \"id\": 7}")
+dump j.user                       // admin
+dump j.id                         // 7
+dump json_stringify(j)            // {"user":"admin","id":7}
+dump json_keys(j)                 // [user, id]</code></pre>
                     </figure>
-                    <p><code>?</code> unwraps an <code>Ok</code>/<code>Some</code> and short-circuits an <code>Err</code>/<code>None</code> out of the enclosing function (or into the nearest <code>try</code>). <code>raise</code> throws any value; <code>catch e</code> binds it.</p>
                 </section>
 
                 <section id="concurrency" class="doc-section">
                     <h2>Concurrency</h2>
-                    <p><code>spawn</code> launches a thread, <code>thread_join</code> waits, and <code>channel()</code> gives a sender/receiver pair. TCP networking is built in.</p>
+                    <p><code>spawn</code> launches a thread, <code>thread_join</code> waits, and <code>channel()</code> gives a sender/receiver pair. TCP networking is built in; for concurrent I/O prefer the async runtime (&sect; Async &amp; futures).</p>
 
                     <figure class="codeblock" data-title="concurrency.rak">
                         <div class="codeblock-bar" aria-hidden="true"><span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-title">concurrency.rak</span></div>
@@ -444,23 +820,9 @@ tcp_close(stream)</code></pre>
                     </figure>
                 </section>
 
-                <section id="json" class="doc-section">
-                    <h2>JSON</h2>
-                    <p><code>json_parse</code> returns native arrays, maps, ints, floats, bools, and nil. <code>json_stringify</code> serializes back. Real round-tripping, no hand-rolling.</p>
-
-                    <figure class="codeblock" data-title="json.rak">
-                        <div class="codeblock-bar" aria-hidden="true"><span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-title">json.rak</span></div>
-                        <pre><code data-lang="rak">let j = json_parse("{\"user\": \"admin\", \"id\": 7}")
-dump j.user                       // admin
-dump j.id                         // 7
-dump json_stringify(j)            // {"user":"admin","id":7}
-dump json_keys(j)                 // [user, id]</code></pre>
-                    </figure>
-                </section>
-
                 <section id="vm" class="doc-section">
                     <h2>Bytecode VM</h2>
-                    <p>Same language, two runtimes. The VM compiles the AST to a stack-based bytecode chunk and runs it &mdash; about 6&times; faster than the tree-walker on compute-heavy scripts.</p>
+                    <p>Same language, two runtimes. The VM compiles the AST to a stack-based bytecode chunk and runs it &mdash; about 6&times; faster than the tree-walker on compute-heavy scripts. The unsupported features below fail fast with <code>VM does not support ...</code> rather than producing wrong results.</p>
 
                     <figure class="codeblock" data-title="bench.rak">
                         <div class="codeblock-bar" aria-hidden="true"><span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-title">bench.rak</span></div>
@@ -473,8 +835,28 @@ dump fib(28)</code></pre>
 
                     <div class="callout tip">
                         <div class="callout-title">Run it</div>
-                        <p><code>rakc bench bench.rak</code> prints both timings. The VM supports functions, recursion, arrays/tuples/maps, indexing, match, interpolation, regex literals, and the pipeline. Trait protocols and method dispatch are interpreter-only for now.</p>
+                        <p><code>rakc bench bench.rak</code> prints both timings. The VM supports functions, recursion, arrays/tuples/maps, indexing, match, interpolation, regex literals, the pipeline, macros, FFI, mmap, async I/O natives, and raw-socket builders.</p>
                     </div>
+
+                    <h3 id="coverage">Coverage matrix</h3>
+                    <table>
+                        <thead><tr><th>Feature</th><th>Interpreter</th><th>VM</th></tr></thead>
+                        <tbody>
+                            <tr><td>Pipeline <code>|&gt;</code></td><td class="tick">yes</td><td class="tick">yes (desugar)</td></tr>
+                            <tr><td>Regex literals</td><td class="tick">yes (methods + builtins)</td><td class="tick">yes (builtins)</td></tr>
+                            <tr><td>Binary pattern matching</td><td class="tick">yes</td><td class="cross">no (graceful error)</td></tr>
+                            <tr><td>Trait protocols</td><td class="tick">yes</td><td class="cross">no (graceful error)</td></tr>
+                            <tr><td>Method-call dispatch</td><td class="tick">yes</td><td class="cross">no (no dispatch layer)</td></tr>
+                            <tr><td>FFI</td><td class="tick">yes</td><td class="tick">yes (natives + Op::FFICall)</td></tr>
+                            <tr><td>Memory-mapped files</td><td class="tick">yes (slice/range/pattern)</td><td class="tick">yes (natives + single-byte index)</td></tr>
+                            <tr><td>Async / futures</td><td class="tick">yes (deferred bodies + I/O)</td><td class="tick">yes (Op::Await + I/O natives)</td></tr>
+                            <tr><td>Raw sockets (forging)</td><td class="tick">yes (builders + unix send/recv)</td><td class="tick">yes (builders + Result send/recv)</td></tr>
+                            <tr><td>DNS / TLS / PCAP</td><td class="tick">yes</td><td class="tick">yes (same builtins)</td></tr>
+                            <tr><td>Macros &amp; constants</td><td class="tick">yes (expand + exec)</td><td class="tick">yes (expand at compile time)</td></tr>
+                            <tr><td>Imports &amp; exports</td><td class="tick">yes (whole/from/star/pkg/cycles)</td><td class="tick">yes (no pkg.sub nesting)</td></tr>
+                        </tbody>
+                    </table>
+                    <p>The VM's <code>compile_stmt</code>/<code>compile_expr</code>/<code>compile_pattern</code> return <code>VM does not support ...</code> for unsupported nodes, so an interpreter-only program fails fast on the VM with a clear message.</p>
                 </section>
 
                 <section id="stdlib" class="doc-section">
@@ -499,13 +881,8 @@ dump file_read("out.txt")
 dump file_exists("out.txt")    // true
 for f in file_list(".") { dump f }</code></pre>
                     </figure>
-                </section>
 
-                <section id="osint" class="doc-section">
-                    <h2>OSINT and hacking</h2>
-                    <p>Rak started as an OSINT scripting tool. <code>scan</code> and <code>fetch</code> are first-class statements with callback blocks.</p>
-
-                    <h3>Port scanning</h3>
+                    <h3>OSINT &amp; reconnaissance</h3>
                     <figure class="codeblock" data-title="osint_scan.rak">
                         <div class="codeblock-bar" aria-hidden="true"><span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-title">osint_scan.rak</span></div>
                         <pre><code data-lang="rak">scan "192.168.1.1" {
@@ -520,13 +897,9 @@ for f in file_list(".") { dump f }</code></pre>
 // or as a function, for for-loops
 for port in scan_ports(target, { range: [0x0016, 0x0050] }) {
     dump fmt("Open: 0x{:04X}", port)
-}</code></pre>
-                    </figure>
+}
 
-                    <h3>Web reconnaissance</h3>
-                    <figure class="codeblock" data-title="osint_web.rak">
-                        <div class="codeblock-bar" aria-hidden="true"><span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-title">osint_web.rak</span></div>
-                        <pre><code data-lang="rak">fetch "https://example.com" {
+fetch "https://example.com" {
     method: "GET"
 } {
     dump headers["Server"]
@@ -598,6 +971,19 @@ dump codes                     // [200]</code></pre>
 dump kind(b"\x89PNG\x0d\x0a")</code></pre>
                     </figure>
 
+                    <h3>PCAP header sniffing over an mmap slice</h3>
+                    <figure class="codeblock" data-title="pcapsniff.rak">
+                        <div class="codeblock-bar" aria-hidden="true"><span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-title">pcapsniff.rak</span></div>
+                        <pre><code data-lang="rak">let m = mmap_open("trace.pcap", "r")
+let base = mmap_slice(m, 0, 24)
+match base {
+    [0xD4, 0xC3, 0xB2, 0xA1, ..] => { dump "little-endian pcap" },
+    [0xA1, 0xB2, 0xC3, 0xD4, ..] => { dump "big-endian pcap" },
+    _ => { dump "not pcap" },
+}
+mmap_close(m)</code></pre>
+                    </figure>
+
                     <h3>Custom iterable type (traits)</h3>
                     <figure class="codeblock" data-title="range_type.rak">
                         <div class="codeblock-bar" aria-hidden="true"><span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-title">range_type.rak</span></div>
@@ -627,12 +1013,12 @@ fetch "https://example.com" { method: "GET" } {
     dump sha256(body)
 }</code></pre>
                     </figure>
-                </section>
 
-                <div class="callout warn" style="margin-top:2rem">
-                    <div class="callout-title">What's specified, not shipped</div>
-                    <p>The systems-level modules &mdash; FFI (<code>libffi</code>), memory-mapped files, an async event loop, raw-socket forging, and native DNS/TLS/PCAP parsers &mdash; are fully designed in <a href="https://github.com/Louiml/Rak/blob/main/docs/rak-features-spec.md" target="_blank" rel="noopener">rak-features-spec.md</a> and are the next milestone.</p>
-                </div>
+                    <div class="callout" style="margin-top:2rem">
+                        <div class="callout-title">Spec-driven</div>
+                        <p>Everything documented here is specified in <a href="https://github.com/Louiml/Rak/blob/main/docs/rak-features-spec.md" target="_blank" rel="noopener">rak-features-spec.md</a>, including exact Rust-level architecture, error handling, edge cases, and VM subset notes.</p>
+                    </div>
+                </section>
 
             </article>
 
@@ -643,7 +1029,7 @@ fetch "https://example.com" { method: "GET" } {
 <footer>
     <div class="container footer-inner">
         <p>Rak &copy; 2026 Louiml &middot; MIT License</p>
-        <p><a href="index.html">Overview</a> &middot; <a href="https://github.com/Louiml/Rak/releases/tag/v0.3.1" target="_blank" rel="noopener">v0.3.1</a> &middot; <a href="https://github.com/Louiml/Rak" target="_blank" rel="noopener">GitHub</a></p>
+        <p><a href="index.html">Overview</a> &middot; <a href="https://github.com/Louiml/Rak/releases" target="_blank" rel="noopener">v0.4.0</a> &middot; <a href="https://github.com/Louiml/Rak" target="_blank" rel="noopener">GitHub</a></p>
     </div>
 </footer>
 

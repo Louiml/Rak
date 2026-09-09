@@ -6,7 +6,8 @@
   var KEYWORDS = new Set([
     'let', 'mut', 'fn', 'return', 'if', 'else', 'for', 'while', 'loop', 'break', 'continue',
     'use', 'dump', 'trace', 'scan', 'fetch', 'in', 'struct', 'enum', 'impl', 'trait', 'match',
-    'try', 'catch', 'raise', 'throw', 'async', 'await', 'spawn', 'type', 'as', 'mod', 'pub'
+    'try', 'catch', 'raise', 'throw', 'async', 'await', 'spawn', 'type', 'as', 'mod', 'pub',
+    'macro', 'const', 'extern', 'import', 'from', 'export', 'pipe'
   ]);
   // Keywords that produce a value (so a following '/' is division, not a regex).
   var VALUE_WORDS = new Set(['true', 'false', 'nil', 'open', 'port', 'banner']);
@@ -30,7 +31,18 @@
     'html_select', 'html_links', 'html_images', 'html_forms', 'html_count', 'file_write',
     'file_read', 'file_exists', 'file_size', 'file_list', 'file_delete', 'file_mkdir',
     'file_copy', 'json_parse', 'json_stringify', 'json_get', 'json_path', 'json_keys',
-    'json_find_all'
+    'json_find_all',
+    // systems & OSINT builtins
+    'ffi_load', 'ffi_ptr', 'ffi_alloc', 'ffi_read', 'ffi_write', 'ffi_free',
+    'ffi_cstr_to_string', 'ffi_string_to_cstr',
+    'mmap_open', 'mmap_slice', 'mmap_size', 'mmap_close', 'mmap_find',
+    'mmap_lines', 'mmap_lines_off',
+    'http_get_async', 'tcp_probe', 'tcp_connect_async',
+    'net_raw_ipv4', 'net_raw_tcp', 'net_raw_udp', 'net_raw_tcp_syn', 'net_raw_csum',
+    'net_raw_send', 'net_raw_recv',
+    'dns_build', 'dns_query', 'dns_parse',
+    'tls_parse_client_hello', 'tls_parse_cert_chain',
+    'pcap_open', 'pcap_next'
   ]);
   var TWO = ['|>', '=>', '::', '..', '==', '!=', '<=', '>=', '&&', '||', '<<', '>>', '->', '+=', '-=', '*=', '/=', '%='];
 
@@ -128,6 +140,12 @@
         var suf = line.slice(j).match(/^(f32|f64|i8|i16|i32|i64|u8|u16|u32|u64)/);
         if (suf) j += suf[0].length;
         var num = line.slice(i, j); emit('tok-number', num); i = j; sig('tok-number', num); continue;
+      }
+
+      // macro var placeholder ($param)
+      if (c === '$' && /[a-zA-Z_]/.test(line[i + 1] || '')) {
+        var j = i + 1; while (j < line.length && /[a-zA-Z0-9_]/.test(line[j])) j++;
+        var mv = line.slice(i, j); emit('tok-keyword', mv); i = j; continue;
       }
 
       // identifier / keyword / type / builtin
@@ -285,11 +303,43 @@
     });
   }
 
+  function initThemeToggle() {
+    var root = document.documentElement;
+    var btn = document.getElementById('theme-toggle');
+    if (!btn) return;
+
+    var stored = null;
+    try { stored = localStorage.getItem('rak-theme'); } catch (err) {}
+    var mq = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)');
+    var theme = stored || (mq && mq.matches ? 'dark' : 'light');
+
+    function apply(t) {
+      root.setAttribute('data-theme', t);
+      btn.textContent = t === 'dark' ? 'light' : 'dark';
+      var meta = document.querySelector('meta[name="theme-color"]');
+      if (meta) meta.setAttribute('content', t === 'dark' ? '#141312' : '#fdfcfc');
+      try { localStorage.setItem('rak-theme', t); } catch (err) {}
+    }
+
+    apply(theme);
+
+    if (!stored && mq) {
+      var onChange = function (e) { apply(e.matches ? 'dark' : 'light'); };
+      if (mq.addEventListener) mq.addEventListener('change', onChange);
+      else if (mq.addListener) mq.addListener(onChange);
+    }
+
+    btn.addEventListener('click', function () {
+      apply(root.getAttribute('data-theme') === 'dark' ? 'light' : 'dark');
+    });
+  }
+
   document.addEventListener('DOMContentLoaded', function () {
     highlightBlocks();
     initCopyButtons();
     initReveals();
     initProgressBars();
     initScrollSpy();
+    initThemeToggle();
   });
 })();
