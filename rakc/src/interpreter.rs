@@ -90,6 +90,8 @@ pub enum Value {
     MmapSlice(Arc<rak_stdlib::mmap::MmapHandle>, usize, usize),
     /// An async future (`async fn` or an async I/O builtin).
     Future(Arc<FutureHandle>),
+    /// A PCAP capture handle (`pcap_open`).
+    Pcap(Arc<Mutex<rak_stdlib::pcap::PcapHandle>>),
 }
 
 impl fmt::Debug for Value {
@@ -187,6 +189,7 @@ impl fmt::Display for Value {
             Value::Mmap(_) => write!(f, "<mmap>"),
             Value::MmapSlice(_, _, n) => write!(f, "<mmap-slice {}B>", n),
             Value::Future(_) => write!(f, "<future>"),
+            Value::Pcap(_) => write!(f, "<pcap>"),
         }
     }
 }
@@ -2967,6 +2970,102 @@ impl Interpreter {
                     Err(e) => Ok(Value::Result(None, Some(Box::new(Value::String(e))))),
                 }
             }
+            // --- DNS ---
+            "dns_query" => {
+                let name = self.val_to_string(args.first())?;
+                let rtype = self.val_to_string(args.get(1)).unwrap_or_else(|_| "A".to_string());
+                let server = args.get(2).map(|v| v.to_string());
+                match rak_stdlib::dns::query(&name, &rtype, server.as_deref()) {
+                    Ok(resp) => {
+                        let answers: Vec<Value> = resp.answers.into_iter().map(|r| {
+                            Value::Map(HashMap::from([
+                                ("name".to_string(), Value::String(r.name)),
+                                ("type".to_string(), Value::String(r.rtype)),
+                                ("ttl".to_string(), Value::Int(r.ttl as i64)),
+                                ("rdata".to_string(), Value::String(r.rdata)),
+                            ]))
+                        }).collect();
+                        let m = Value::Map(HashMap::from([
+                            ("answers".to_string(), Value::Array(answers)),
+                            ("truncated".to_string(), Value::Bool(resp.truncated)),
+                        ]));
+                        Ok(Value::Result(Some(Box::new(m)), None))
+                    }
+                    Err(e) => Ok(Value::Result(None, Some(Box::new(Value::String(e))))),
+                }
+            }
+            "dns_build" => {
+                let name = self.val_to_string(args.first())?;
+                let rtype = self.val_to_string(args.get(1)).unwrap_or_else(|_| "A".to_string());
+                Ok(Value::Bytes(rak_stdlib::dns::build_query(&name, &rtype)))
+            }
+            "dns_parse" => {
+                let msg = self.val_to_bytes(args.first())?;
+                match rak_stdlib::dns::parse_response(&msg) {
+                    Ok(resp) => {
+                        let answers: Vec<Value> = resp.answers.into_iter().map(|r| {
+                            Value::Map(HashMap::from([
+                                ("name".to_string(), Value::String(r.name)),
+                                ("type".to_string(), Value::String(r.rtype)),
+                                ("ttl".to_string(), Value::Int(r.ttl as i64)),
+                                ("rdata".to_string(), Value::String(r.rdata)),
+                            ]))
+                        }).collect();
+                        Ok(Value::Map(HashMap::from([
+                            ("answers".to_string(), Value::Array(answers)),
+                            ("truncated".to_string(), Value::Bool(resp.truncated)),
+                        ])))
+                    }
+                    Err(e) => Err(crate::RakError::Runtime(e)),
+                }
+            }
+            // --- TLS ---
+            "tls_parse_client_hello" => {
+                let bytes = self.val_to_bytes(args.first())?;
+                match rak_stdlib::tls::parse_client_hello(&bytes) {
+                    Ok(info) => {
+                        let ciphers: Vec<Value> = info.ciphers.into_iter().map(|c| Value::Hex(c as u64)).collect();
+                        Ok(Value::Map(HashMap::from([
+                            ("sni".to_string(), Value::String(info.sni)),
+                            ("ciphers".to_string(), Value::Array(ciphers)),
+                        ])))
+                    }
+                    Err(e) => Err(crate::RakError::Runtime(e)),
+                }
+            }
+            "tls_parse_cert_chain" => {
+                let der = self.val_to_bytes(args.first())?;
+                let certs: Vec<Value> = rak_stdlib::tls::parse_cert_chain(&der).into_iter().map(|c| {
+                    Value::Map(HashMap::from([
+                        ("subject".to_string(), Value::String(c.subject)),
+                        ("issuer".to_string(), Value::String(c.issuer)),
+                    ]))
+                }).collect();
+                Ok(Value::Array(certs))
+            }
+            // --- PCAP ---
+            "pcap_open" => {
+                let path = self.val_to_string(args.first())?;
+                match rak_stdlib::pcap::open(&path) {
+                    Ok(h) => Ok(Value::Result(Some(Box::new(Value::Pcap(Arc::new(Mutex::new(h))))), None)),
+                    Err(e) => Ok(Value::Result(None, Some(Box::new(Value::String(e))))),
+                }
+            }
+            "pcap_next" => {
+                let h = match args.first() {
+                    Some(Value::Pcap(h)) => h.clone(),
+                    _ => return Err(crate::RakError::Runtime("pcap_next(handle)".to_string())),
+                };
+                let mut guard = h.lock().unwrap();
+                match rak_stdlib::pcap::next(&mut guard) {
+                    Some(p) => Ok(Value::Map(HashMap::from([
+                        ("timestamp".to_string(), Value::Int(p.timestamp)),
+                        ("linktype".to_string(), Value::Int(p.linktype)),
+                        ("payload".to_string(), Value::Bytes(p.payload)),
+                    ]))),
+                    None => Ok(Value::Nil),
+                }
+            }
             // --- Regex builtins ---
             "regex_new" => {
                 let pattern = self.val_to_string(args.first())?;
@@ -3091,6 +3190,7 @@ impl Value {
             Value::Mmap(_) => "mmap".to_string(),
             Value::MmapSlice(_, _, _) => "mmap-slice".to_string(),
             Value::Future(_) => "future".to_string(),
+            Value::Pcap(_) => "pcap".to_string(),
             _ => "<opaque>".to_string(),
         }
     }
@@ -3596,5 +3696,25 @@ mod tests {
         let output = interp.run_source(src).unwrap();
         // On any platform this is a Result (Ok on privileged unix, Err otherwise).
         assert!(output.iter().any(|l| l.contains("Ok(") || l.contains("Err(")), "got: {:?}", output);
+    }
+
+    // --- DNS ---
+
+    #[test]
+    fn test_interpreter_dns_build() {
+        let mut interp = Interpreter::new();
+        let src = "let q = dns_build(\"example.com\", \"A\"); dump len(q); dump q[12]";
+        let output = interp.run_source(src).unwrap();
+        assert!(output.iter().any(|l| l.contains("[DUMP] 29")), "got: {:?}", output);
+        assert!(output.iter().any(|l| l.contains("[DUMP] 7")), "got: {:?}", output); // first label len
+    }
+
+    #[test]
+    fn test_interpreter_tls_parse_short_input_errors() {
+        let mut interp = Interpreter::new();
+        // A too-short input yields a clear error (caught here).
+        let src = "try { let info = tls_parse_client_hello(b\"\"); dump info } catch e { dump \"short\" }";
+        let output = interp.run_source(src).unwrap();
+        assert!(output.iter().any(|l| l.contains("[DUMP] short")), "got: {:?}", output);
     }
 }

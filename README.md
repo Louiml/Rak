@@ -102,6 +102,16 @@ dump pkt[33]           // 0x02 (SYN flag)
 dump net_raw_send(pkt) // Ok(40) on a privileged unix box, Err(...) otherwise
 ```
 
+**Protocol parsers (DNS / TLS / PCAP).** Hand-rolled DNS wire-format builder/parser + UDP query (no external DNS crate — works air-gapped). TLS ClientHello SNI extraction and DER cert-chain parsing via `x509-parser`. PCAP offline capture behind the `pcap` cargo feature (libpcap/Npcap). All return `Result`s so they degrade gracefully offline / without the feature.
+
+```rak
+dump dns_query("example.com", "A")      // Ok({answers: [{name, type, ttl, rdata}, ...], truncated})
+let q = dns_build("example.com", "A")   // raw query bytes (offline)
+let info = tls_parse_client_hello(bytes) // {sni, ciphers}
+let certs = tls_parse_cert_chain(der)    // [{subject, issuer}, ...]
+dump pcap_open("capture.pcap")           // Ok(<pcap>) or Err(...)
+```
+
 ## Build a standalone executable
 
 ```bash
@@ -497,6 +507,7 @@ Rak/
 │   ├── mmap.rak            Memory-mapped files: zero-copy slice/search/lines
 │   ├── async.rak           Async event loop: async fn / await / tcp_probe
 │   ├── net_raw.rak         Raw sockets: forge IPv4/TCP/UDP packets
+│   ├── parsers.rak         DNS / TLS / PCAP wire-format parsers
 │   └── stdlib_demo.rak     String, array, and math builtins
 ```
 

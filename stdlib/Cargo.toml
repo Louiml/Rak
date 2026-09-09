@@ -13,6 +13,8 @@ libloading = "0.8"
 memmap2 = "0.9"
 socket2 = "0.5"
 libc = "0.2"
+x509-parser = "0.16"
+pcap = { version = "2", optional = true }
 md-5 = "0.10"
 sha1 = "0.10"
 sha2 = "0.10"
@@ -20,3 +22,8 @@ base64 = "0.22"
 urlencoding = "2.1"
 scraper = "0.20"
 serde_json = "1.0"
+
+[features]
+default = []
+# PCAP live/offline capture needs libpcap (Linux) / Npcap (Windows) installed.
+pcap = ["dep:pcap"]

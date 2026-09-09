@@ -1,0 +1,26 @@
+// DNS / TLS / PCAP parsers — wire-format inspection.
+//
+//   rakc run examples/parsers.rak   (interpreter)
+//   rakc vm  examples/parsers.rak   (bytecode VM)
+//
+// DNS: build a query, do a real lookup (Result; degrades gracefully offline).
+// TLS: parse a ClientHello's SNI from raw bytes (see tls_parse_client_hello,
+// covered by unit tests). PCAP: open an offline capture (needs the `pcap`
+// cargo feature + libpcap/Npcap).
+
+// --- DNS: build a query and inspect its wire format (no network). ---
+let q = dns_build("example.com", "A")
+dump fmt("dns query = {} bytes", len(q))
+dump fmt("id = 0x{:04X}", q[0] * 256 + q[1])
+
+// Real DNS lookup (Result: Ok({answers, truncated}) or Err offline).
+dump dns_query("example.com", "A")
+
+// --- PCAP: open an offline capture (Result; Err without the feature/file). ---
+dump pcap_open("capture.pcap")
+
+// --- TLS: parse a ClientHello's SNI from raw bytes:
+//   let info = tls_parse_client_hello(captured_bytes)
+//   dump info.sni
+//   let certs = tls_parse_cert_chain(der_bytes)
+//   for c in certs { dump c.subject; dump c.issuer }

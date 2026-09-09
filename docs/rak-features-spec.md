@@ -682,56 +682,75 @@ let resp = net_raw_recv(4096)
 
 ---
 
-### 2.3 Native protocol parsers  **[SPEC]**
+### 2.3 Native protocol parsers  **[SHIPPED]**
 
 #### Syntax
 ```rak
-use net.dns
-let resp = dns.query("example.com", "A")          // -> DnsResponse
-for a in resp.answers { dump a.rdata }             // 93.184.216.34
-let pkt = dns.build("example.com", "MX", recurse=true)
-dns.send("8.8.8.8", pkt)
+// DNS: build a query (offline) and do a real lookup (Result; Err offline).
+let q = dns_build("example.com", "A")
+dump len(q)
+dump dns_query("example.com", "A")          // Ok({answers: [...], truncated: bool})
+dump dns_parse(q)                             // parse a raw response
 
-use tls.handshake
-let info = tls.inspect("example.com:443")         // -> { sni, cipher, cert_chain }
+// TLS: parse a ClientHello's SNI / ciphers from raw bytes (offline).
+let info = tls_parse_client_hello(captured_bytes)
 dump info.sni
-for cert in info.cert_chain { dump cert.subject; dump cert.issuer }
+let certs = tls_parse_cert_chain(der_bytes)   // [{subject, issuer}, ...]
 
-use pcap
-let cap = pcap.pcap_listen("eth0", "tcp port 80")  // live capture
-for pkt in cap { dump pkt.timestamp; dump pkt.payload }
-let f = pcap.pcap_open("capture.pcap")            // offline
-for pkt in f { ... }
+// PCAP: open an offline capture (needs --features pcap + libpcap/Npcap).
+dump pcap_open("capture.pcap")                 // Ok(<pcap>) or Err(...)
+let h = pcap_open("capture.pcap")?
+let pkt = pcap_next(h)                        // {timestamp, linktype, payload} or nil
 ```
 
+> Builtins use the `dns_*` / `tls_*` / `pcap_*` prefix. `dns_query` and
+> `pcap_open` return a `Result` so they degrade gracefully (offline /
+> feature-off).
+
 #### Architecture
-- **DNS** (`stdlib/dns.rs`): a hand-written wire-format
-  builder/`parser`. Header (id, flags, qdcount, ...) + question/answer
-  records. `Value::Struct` for `DnsResponse { answers: array<DnsRecord> }`.
-  Record types A/AAAA/MX/TXT/CNAME/PTR/NS/SOA. No external DNS crate — direct
-  UDP `socket2` to port 53, so it works in air-gapped OSINT setups.
-- **TLS** (`stdlib/tls.rs`): a `ClientHello`/`ServerHello` parser that reads
-  the raw handshake bytes from a `tcp_connect` socket (no TLS termination —
-  pure inspection). Extracts SNI from the ClientHello extension, the cipher
-  suite list, and parses the certificate chain (DER→spki/issuer/subject via
-  `x509-parser` crate). Useful for passive SNI enumeration and JA3/JA4
-  fingerprinting.
-- **PCAP** (`stdlib/pcap.rs`): wraps the `pcap` crate (libpcap/Npcap). Live
-  `pcap_listen(iface, bpf)` and offline `pcap_open(path)`. Each packet is a
-  `Value::Struct { timestamp: i64, linktype: int, payload: bytes }`. The
-  iterator is `Iterable`-compatible (works with `for x in cap`).
+- **DNS** (`stdlib/dns.rs`): hand-written wire-format builder (`build_query`)
+  and parser (`parse_response`) with compression-pointer decoding. Records:
+  A/AAAA/MX/TXT/CNAME/NS/PTR/SOA. `query(name, rtype, server?)` sends a UDP
+  datagram to `8.8.8.8:53` (default) via `std::net::UdpSocket` — no external
+  DNS crate, works air-gapped with a local resolver.
+- **TLS** (`stdlib/tls.rs`): `parse_client_hello(bytes)` decodes the TLS
+  record + handshake layers to extract SNI (extension 0) and the cipher
+  suite list; `parse_cert_chain(der)` walks a concatenated DER chain via
+  `x509-parser` → `{subject, issuer}` per cert. Pure inspection (no TLS
+  termination).
+- **PCAP** (`stdlib/pcap.rs`): gated behind the `pcap` Cargo feature (the
+  `pcap` crate needs libpcap/Npcap at build time). When the feature is off,
+  `pcap_open` returns `Err("pcap: not built ...")`; when on, `open(path)`
+  reads an offline capture and `next(handle)` yields
+  `{timestamp, linktype, payload}`.
+- `interpreter.rs` + `vm.rs`: `dns_*`, `tls_*`, `pcap_*` builtins registered
+  in both backends; a `Value::Pcap(Arc<Mutex<PcapHandle>>)` variant holds the
+  handle.
 
 #### Error handling & edge cases
-- **DNS truncation** (TC flag) → the parser returns the partial answers plus
-  `Runtime("dns: truncated response, retry over TCP")` guidance.
-- **Malformed wire bytes** → `Runtime("dns: bad offset / truncated record")`,
-  never a panic; all parsers bounds-check every slice.
-- **TLS inspection** stops at the first unparseable record and returns what
-  was decoded plus a `partial: true` flag, so a broken server doesn't lose
-  the SNI that was already observed.
-- **libpcap/Npcap missing** → `Runtime("pcap: libpcap not found ...")` with
-  platform install hints. The feature is gated behind `--features pcap`.
-- **BPF compile error** → `Runtime("pcap: bad filter '...': <msg>")`.
+- **DNS truncation** (TC flag) → `truncated: true` in the response map.
+- **Malformed wire bytes** → `Runtime("dns: ...")` / `"tls: ..."`, never a
+  panic; all parsers bounds-check every slice.
+- **DNS / PCAP failure** → the `Err` arm of a `Result` carries the OS / parse
+  message, so callers handle it without `try`/`catch` (which the VM subset
+  does not implement).
+- **PCAP feature off** → `pcap_open` returns
+  `Err("pcap: not built (build rak-stdlib with --features pcap; needs
+  libpcap/Npcap)")`.
+
+#### Errata (deviations from the original [SPEC])
+- **Free-function `dns_*` / `tls_*` / `pcap_*` builtins** instead of `use
+  net.dns` / `use tls.handshake` / `use pcap` module syntax — Rak modules are
+  file-based, so prefix builtins are used.
+- **Live `tls.inspect(host:port)`** (send a ClientHello, read ServerHello +
+  cert chain) is **not implemented**; the offline `tls_parse_client_hello` /
+  `tls_parse_cert_chain` parsers are. Live inspect is a follow-up.
+- **PCAP `pcap_listen`** (live capture with a BPF filter) is not wired up;
+  only offline `pcap_open` + `pcap_next`. The `pcap` crate dep is optional
+  (default-off) because it requires libpcap/Npcap installed to build.
+- **`dns_query` / `pcap_open` return a `Result`** (not a raw value) so the
+  offline / feature-off / parse-failure cases are handleable on both
+  backends.
 
 ---
 
@@ -791,7 +810,8 @@ mmap_close(m)
 | Memory-mapped files | yes (slice/range/pattern) | yes (natives + single-byte index) |
 | Async (`async fn`/`await`/I/O futures) | yes (deferred bodies + I/O) | yes (`Op::Await` + I/O natives; `async fn` runs sync) |
 | Raw sockets (packet forging) | yes (builders + unix send/recv) | yes (builders + `Result` send/recv) |
-| DNS / TLS / PCAP / macros | spec | spec |
+| DNS / TLS / PCAP | yes (dns_query/build/parse, tls parse, pcap open/next) | yes (same builtins; `Result` for query/open) |
+| macros | spec | spec |
 
 The VM's `compile_stmt`/`compile_expr`/`compile_pattern` return
 `Err("VM does not support ...")` for unsupported nodes, so running an

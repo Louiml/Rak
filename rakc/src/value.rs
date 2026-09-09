@@ -59,6 +59,7 @@ pub enum Value {
     ForeignPtr(u64),
     Mmap(Arc<rak_stdlib::mmap::MmapHandle>),
     MmapSlice(Arc<rak_stdlib::mmap::MmapHandle>, usize, usize),
+    Pcap(Arc<std::sync::Mutex<rak_stdlib::pcap::PcapHandle>>),
 }
 
 impl Value {
@@ -96,6 +97,7 @@ impl Value {
             Value::ForeignPtr(_) => "ptr",
             Value::Mmap(_) => "mmap",
             Value::MmapSlice(_, _, _) => "mmap-slice",
+            Value::Pcap(_) => "pcap",
         }
     }
 
@@ -252,6 +254,7 @@ impl fmt::Display for Value {
             Value::ForeignPtr(p) => write!(f, "0x{:X}", p),
             Value::Mmap(_) => write!(f, "<mmap>"),
             Value::MmapSlice(_, _, n) => write!(f, "<mmap-slice {}B>", n),
+            Value::Pcap(_) => write!(f, "<pcap>"),
         }
     }
 }

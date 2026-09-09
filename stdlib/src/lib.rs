@@ -8,6 +8,9 @@ pub mod js;
 pub mod ffi;
 pub mod mmap;
 pub mod net_raw;
+pub mod dns;
+pub mod tls;
+pub mod pcap;
 
 pub use net::*;
 pub use crypto::*;

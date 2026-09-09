@@ -457,6 +457,95 @@ impl Vm {
                 Err(e) => Ok(Value::Result(None, Some(Box::new(Value::String(Arc::from(e.as_str())))))),
             }
         });
+        // --- DNS ---
+        self.insert_native("dns_query", |args| {
+            let name = native_str(args.first());
+            let rtype = { let r = native_str(args.get(1)); if r.is_empty() { "A".to_string() } else { r } };
+            let server = args.get(2).map(|v| native_str(Some(v)));
+            match rak_stdlib::dns::query(&name, &rtype, server.as_deref()) {
+                Ok(resp) => {
+                    let answers: Vec<Value> = resp.answers.into_iter().map(|r| {
+                        let mut m = HashMap::new();
+                        m.insert("name".to_string(), Value::String(Arc::from(r.name.as_str())));
+                        m.insert("type".to_string(), Value::String(Arc::from(r.rtype.as_str())));
+                        m.insert("ttl".to_string(), Value::I64(r.ttl as i64));
+                        m.insert("rdata".to_string(), Value::String(Arc::from(r.rdata.as_str())));
+                        Value::Map(Arc::from(m))
+                    }).collect();
+                    let mut out = HashMap::new();
+                    out.insert("answers".to_string(), Value::Array(Arc::from(answers)));
+                    out.insert("truncated".to_string(), Value::Bool(resp.truncated));
+                    Ok(Value::Result(Some(Box::new(Value::Map(Arc::from(out)))), None))
+                }
+                Err(e) => Ok(Value::Result(None, Some(Box::new(Value::String(Arc::from(e.as_str())))))),
+            }
+        });
+        self.insert_native("dns_build", |args| {
+            let name = native_str(args.first());
+            let rtype = { let r = native_str(args.get(1)); if r.is_empty() { "A".to_string() } else { r } };
+            Ok(Value::Bytes(Arc::from(rak_stdlib::dns::build_query(&name, &rtype).as_slice())))
+        });
+        self.insert_native("dns_parse", |args| {
+            let msg = native_bytes(args.first());
+            let resp = rak_stdlib::dns::parse_response(&msg)?;
+            let answers: Vec<Value> = resp.answers.into_iter().map(|r| {
+                let mut m = HashMap::new();
+                m.insert("name".to_string(), Value::String(Arc::from(r.name.as_str())));
+                m.insert("type".to_string(), Value::String(Arc::from(r.rtype.as_str())));
+                m.insert("ttl".to_string(), Value::I64(r.ttl as i64));
+                m.insert("rdata".to_string(), Value::String(Arc::from(r.rdata.as_str())));
+                Value::Map(Arc::from(m))
+            }).collect();
+            let mut out = HashMap::new();
+            out.insert("answers".to_string(), Value::Array(Arc::from(answers)));
+            out.insert("truncated".to_string(), Value::Bool(resp.truncated));
+            Ok(Value::Map(Arc::from(out)))
+        });
+        // --- TLS ---
+        self.insert_native("tls_parse_client_hello", |args| {
+            let bytes = native_bytes(args.first());
+            let info = rak_stdlib::tls::parse_client_hello(&bytes)?;
+            let ciphers: Vec<Value> = info.ciphers.into_iter().map(|c| Value::Hex(c as u64, 16)).collect();
+            let mut out = HashMap::new();
+            out.insert("sni".to_string(), Value::String(Arc::from(info.sni.as_str())));
+            out.insert("ciphers".to_string(), Value::Array(Arc::from(ciphers)));
+            Ok(Value::Map(Arc::from(out)))
+        });
+        self.insert_native("tls_parse_cert_chain", |args| {
+            let der = native_bytes(args.first());
+            let certs: Vec<Value> = rak_stdlib::tls::parse_cert_chain(&der).into_iter().map(|c| {
+                let mut m = HashMap::new();
+                m.insert("subject".to_string(), Value::String(Arc::from(c.subject.as_str())));
+                m.insert("issuer".to_string(), Value::String(Arc::from(c.issuer.as_str())));
+                Value::Map(Arc::from(m))
+            }).collect();
+            Ok(Value::Array(Arc::from(certs)))
+        });
+        // --- PCAP ---
+        self.insert_native("pcap_open", |args| {
+            let path = native_str(args.first());
+            match rak_stdlib::pcap::open(&path) {
+                Ok(h) => Ok(Value::Result(Some(Box::new(Value::Pcap(Arc::new(Mutex::new(h))))), None)),
+                Err(e) => Ok(Value::Result(None, Some(Box::new(Value::String(Arc::from(e.as_str())))))),
+            }
+        });
+        self.insert_native("pcap_next", |args| {
+            let h = match args.first() {
+                Some(Value::Pcap(h)) => h.clone(),
+                _ => return Err("pcap_next(handle)".to_string()),
+            };
+            let mut guard = h.lock().unwrap();
+            match rak_stdlib::pcap::next(&mut guard) {
+                Some(p) => {
+                    let mut m = HashMap::new();
+                    m.insert("timestamp".to_string(), Value::I64(p.timestamp));
+                    m.insert("linktype".to_string(), Value::I64(p.linktype));
+                    m.insert("payload".to_string(), Value::Bytes(Arc::from(p.payload.as_slice())));
+                    Ok(Value::Map(Arc::from(m)))
+                }
+                None => Ok(Value::Nil),
+            }
+        });
         // --- Memory-mapped files ---
         self.insert_native("mmap_open", |args| {
             let path = native_str(args.first());
@@ -1125,5 +1214,20 @@ mod tests {
     fn test_vm_net_raw_send_returns_result() {
         let out = run("let pkt = net_raw_tcp_syn(\"10.0.0.5\", \"10.0.0.10\", 12345, 80); dump net_raw_send(pkt)");
         assert!(out.iter().any(|l| l.contains("Ok(") || l.contains("Err(")), "got: {:?}", out);
+    }
+
+    // --- DNS ---
+
+    #[test]
+    fn test_vm_dns_build() {
+        let out = run("let q = dns_build(\"example.com\", \"A\"); dump len(q); dump q[12]");
+        assert!(out.iter().any(|l| l.contains("[DUMP] 29")), "got: {:?}", out);
+        assert!(out.iter().any(|l| l.contains("[DUMP] 7")), "got: {:?}", out);
+    }
+
+    #[test]
+    fn test_vm_pcap_open_returns_result() {
+        let out = run("dump pcap_open(\"nope.pcap\")");
+        assert!(out.iter().any(|l| l.contains("Err(")), "got: {:?}", out);
     }
 }
