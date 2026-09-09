@@ -394,6 +394,11 @@ impl Compiler {
                 self.emit_op(Op::LoadConst);
                 self.emit_u16(ci);
             }
+            Expr::Bytes(b) => {
+                let ci = self.emit_const(Value::Bytes(Arc::from(b.as_slice())));
+                self.emit_op(Op::LoadConst);
+                self.emit_u16(ci);
+            }
             Expr::Bool(b) => {
                 self.emit_op(if *b { Op::True } else { Op::False });
             }

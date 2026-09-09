@@ -406,6 +406,57 @@ impl Vm {
             });
             Ok(Value::Future(Arc::new(FutureHandle { state: Mutex::new(VmFutureState::Pending(jh)) })))
         });
+        // --- Raw sockets / packet forging ---
+        self.insert_native("net_raw_csum", |args| {
+            Ok(Value::I64(rak_stdlib::net_raw::csum16(&native_bytes(args.first())) as i64))
+        });
+        self.insert_native("net_raw_ipv4", |args| {
+            let src = native_str(args.first());
+            let dst = native_str(args.get(1));
+            let proto = args.get(2).and_then(|v| v.as_u64()).unwrap_or(6) as u8;
+            let payload = native_bytes(args.get(3));
+            Ok(Value::Bytes(Arc::from(rak_stdlib::net_raw::ipv4(&src, &dst, proto, &payload)?.as_slice())))
+        });
+        self.insert_native("net_raw_tcp", |args| {
+            let src_ip = native_str(args.first());
+            let dst_ip = native_str(args.get(1));
+            let src_port = args.get(2).and_then(|v| v.as_u64()).unwrap_or(0) as u16;
+            let dst_port = args.get(3).and_then(|v| v.as_u64()).unwrap_or(0) as u16;
+            let flags = { let f = native_str(args.get(4)); if f.is_empty() { "S".to_string() } else { f } };
+            let seq = args.get(5).and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+            let ack = args.get(6).and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+            let payload = native_bytes(args.get(7));
+            Ok(Value::Bytes(Arc::from(rak_stdlib::net_raw::tcp(&src_ip, &dst_ip, src_port, dst_port, &flags, seq, ack, &payload)?.as_slice())))
+        });
+        self.insert_native("net_raw_udp", |args| {
+            let src_ip = native_str(args.first());
+            let dst_ip = native_str(args.get(1));
+            let src_port = args.get(2).and_then(|v| v.as_u64()).unwrap_or(0) as u16;
+            let dst_port = args.get(3).and_then(|v| v.as_u64()).unwrap_or(0) as u16;
+            let payload = native_bytes(args.get(4));
+            Ok(Value::Bytes(Arc::from(rak_stdlib::net_raw::udp(&src_ip, &dst_ip, src_port, dst_port, &payload)?.as_slice())))
+        });
+        self.insert_native("net_raw_tcp_syn", |args| {
+            let src = native_str(args.first());
+            let dst = native_str(args.get(1));
+            let src_port = args.get(2).and_then(|v| v.as_u64()).unwrap_or(12345) as u16;
+            let dport = args.get(3).and_then(|v| v.as_u64()).unwrap_or(80) as u16;
+            Ok(Value::Bytes(Arc::from(rak_stdlib::net_raw::tcp_syn(&src, &dst, src_port, dport)?.as_slice())))
+        });
+        self.insert_native("net_raw_send", |args| {
+            let pkt = native_bytes(args.first());
+            match rak_stdlib::net_raw::send(&pkt) {
+                Ok(n) => Ok(Value::Result(Some(Box::new(Value::I64(n as i64))), None)),
+                Err(e) => Ok(Value::Result(None, Some(Box::new(Value::String(Arc::from(e.as_str())))))),
+            }
+        });
+        self.insert_native("net_raw_recv", |args| {
+            let max = args.first().and_then(|v| v.as_u64()).unwrap_or(4096) as usize;
+            match rak_stdlib::net_raw::recv(max) {
+                Ok(b) => Ok(Value::Result(Some(Box::new(Value::Bytes(Arc::from(b.as_slice())))), None)),
+                Err(e) => Ok(Value::Result(None, Some(Box::new(Value::String(Arc::from(e.as_str())))))),
+            }
+        });
         // --- Memory-mapped files ---
         self.insert_native("mmap_open", |args| {
             let path = native_str(args.first());
@@ -675,6 +726,9 @@ impl Vm {
                             let i = *i as usize;
                             let b = if i < *n { h.as_slice()[off + i] as i64 } else { 0 };
                             frame.push(Value::I64(b));
+                        }
+                        (Value::Bytes(b), Value::I64(i)) => {
+                            frame.push(Value::I64(b.get(*i as usize).copied().unwrap_or(0) as i64));
                         }
                         _ => { frame.push(Value::Nil); }
                     }
@@ -1049,5 +1103,27 @@ mod tests {
     fn test_vm_async_tcp_probe() {
         let out = run("dump await tcp_probe(\"127.0.0.1\", 9999, 100)");
         assert!(out.iter().any(|l| l.contains("[DUMP] false")), "got: {:?}", out);
+    }
+
+    // --- Raw sockets / packet forging ---
+
+    #[test]
+    fn test_vm_net_raw_syn() {
+        let out = run("let pkt = net_raw_tcp_syn(\"10.0.0.5\", \"10.0.0.10\", 12345, 80); dump len(pkt); dump pkt[0]; dump pkt[9]");
+        assert!(out.iter().any(|l| l.contains("[DUMP] 40")), "got: {:?}", out);
+        assert!(out.iter().any(|l| l.contains("[DUMP] 69")), "got: {:?}", out); // 0x45
+        assert!(out.iter().any(|l| l.contains("[DUMP] 6")), "got: {:?}", out);
+    }
+
+    #[test]
+    fn test_vm_net_raw_udp() {
+        let out = run("let u = net_raw_udp(\"10.0.0.5\", \"10.0.0.10\", 1234, 53, b\"\"); dump len(u)");
+        assert!(out.iter().any(|l| l.contains("[DUMP] 8")), "got: {:?}", out);
+    }
+
+    #[test]
+    fn test_vm_net_raw_send_returns_result() {
+        let out = run("let pkt = net_raw_tcp_syn(\"10.0.0.5\", \"10.0.0.10\", 12345, 80); dump net_raw_send(pkt)");
+        assert!(out.iter().any(|l| l.contains("Ok(") || l.contains("Err(")), "got: {:?}", out);
     }
 }

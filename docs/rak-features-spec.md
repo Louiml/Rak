@@ -613,50 +613,72 @@ let body = await http_get_async("https://example.com")
 
 ---
 
-### 2.2 Raw sockets & packet forging  **[SPEC]**
+### 2.2 Raw sockets & packet forging  **[SHIPPED]**
 
 #### Syntax
 ```rak
-use net_raw
+// Build a SYN packet (IPv4 + TCP, SYN flag) — pure computation, no privileges.
+let pkt = net_raw_tcp_syn("10.0.0.5", "10.0.0.10", 12345, 80)
+dump len(pkt)                 // 40 bytes (20 IP + 20 TCP)
+dump pkt[0]                   // 0x45 (IPv4 ver/ihl)
+dump pkt[33]                  // 0x02 (TCP SYN flag)
 
-// SYN scan a target:
-let pkt = net_raw.tcp_syn(src="10.0.0.5", dst="10.0.0.10", dport=80)
-net_raw.send(pkt)
+// Custom IPv4 + TCP headers with payload.
+let tcp_seg = net_raw_tcp("10.0.0.5", "10.0.0.10", 12345, 80, "SA", 0x1A2B3C4D, 0, b"hello")
+let ip_pkt = net_raw_ipv4("10.0.0.5", "10.0.0.10", 6, tcp_seg)
 
-// Custom IPv4 + TCP headers:
-let ip = net_raw.ipv4(src="10.0.0.5", dst="10.0.0.10", proto=6, payload=tcp_bytes)
-let tcp = net_raw.tcp(src=12345, dst=80, flags="S", seq=0x1A2B3C4D, payload=b"")
-net_raw.send(ip + tcp)
+// UDP segment.
+let udp_seg = net_raw_udp("10.0.0.5", "10.0.0.10", 1234, 53, b"\x00")
 
-// Capture flags from a response:
-let resp = net_raw.recv(4096)
-match resp {
-    [0x45, ..] => { dump "IPv4 reply" },
-    _ => { dump "other" },
-}
+// Ones-complement checksum helper.
+dump net_raw_csum(pkt[0..20])  // 0 (the IP header is self-checking)
+
+// Send / receive on a raw socket (returns a Result; needs CAP_NET_RAW).
+dump net_raw_send(pkt)
+let resp = net_raw_recv(4096)
 ```
 
+> Builtins use the `net_raw_` prefix (`net_raw_ipv4`, `net_raw_tcp`,
+> `net_raw_udp`, `net_raw_tcp_syn`, `net_raw_csum`, `net_raw_send`,
+> `net_raw_recv`). Send/recv return a `Result` so callers handle the permission
+> error without `try`/`catch`.
+
 #### Architecture
-- New crate deps `socket2` (raw socket creation, `SOCK_RAW`,
-  `IPPROTO_TCP`/`IPPROTO_RAW`), `libc` for `setsockopt(IP_HDRINCL)`.
-- `stdlib/net_raw.rs` (new):
-  - `tcp_syn`, `tcp`, `ipv4`, `udp` builders returning `Value::Bytes` with
-    correct checksums (IP header checksum, TCP/UDP checksum over the IPv4
-    pseudo-header). A `csum16` helper computes the ones-complement sum.
-  - `send(buf)`, `recv(max)`, `open_iface(name)`.
-- Requires `CAP_NET_RAW` / Administrator / `SO_RAW` — surfaced as a clear
-  runtime error if missing.
+- New crate deps `socket2` (raw socket creation) and `libc` (for `IP_HDRINCL`
+  on unix).
+- `stdlib/net_raw.rs`: `csum16` (ones-complement sum); `ipv4`, `tcp`, `udp`,
+  `tcp_syn` builders that compute correct IP-header and TCP/UDP-over-IPv4-
+  pseudo-header checksums; `send`/`recv` open a `SOCK_RAW` / `IPPROTO_RAW`
+  socket (`IP_HDRINCL` on unix) and send/receive.
+- `interpreter.rs` + `vm.rs`: `net_raw_*` builtins registered in both
+  backends. Send/recv return `Value::Result`; on a permission failure the
+  `Err` arm carries the OS message.
+- VM: `Expr::Bytes` literals are now compiled to `Value::Bytes` constants,
+  and `Op::IndexGet` handles `Value::Bytes` single-byte reads (and the
+  interpreter adds `Bytes` range slicing → sub-`bytes`).
 
 #### Error handling & edge cases
-- **Permission denied** → `Runtime("net_raw: CAP_NET_RAW required (run as
-  root/Administrator)")`.
-- **Checksums** are computed by the stdlib, not the kernel, when
-  `IP_HDRINCL` is set; an invalid checksum is *not* an error (forging
-  malformed packets is intentional) but is logged via `trace`.
-- **Platform**: raw sockets on Windows use `WSAIoctl(SIO_RCVALL)` on a
-  `SOCK_RAW` bound to an interface; the same `net_raw` API is exposed.
-- **Buffer sizes** are bounds-checked; oversized payloads are truncated with
-  a warning, not a panic.
+- **Permission denied** → `Err("net_raw: open raw socket failed (need
+  CAP_NET_RAW/Administrator): <os err>")`, surfaced as the `Err` of a `Result`.
+- **Checksums** are computed by the stdlib, not the kernel (`IP_HDRINCL`);
+  an invalid checksum is *not* an error (forging malformed packets is
+  intentional).
+- **Platform**: send/recv are unix-only in this build (raw-socket I/O on
+  Windows needs Npcap/Administrator and is not wired up); the packet
+  builders are cross-platform. On Windows, `net_raw_send`/`recv` return
+  `Err("... Windows raw-socket I/O not in this build")`.
+- **Bad IPv4 address** → `Err("net_raw: bad IPv4 address '...'")`.
+
+#### Errata (deviations from the original [SPEC])
+- **Free-function `net_raw_*` builtins** instead of a `use net_raw` module
+  with `net_raw.tcp_syn(...)` method syntax — Rak modules are file-based, so
+  the prefix-builtin form is used.
+- **Windows raw-socket I/O** (`WSAIoctl(SIO_RCVALL)` / Npcap) is not
+  implemented; only the unix `SOCK_RAW` path is wired up. Packet builders
+  work on all platforms.
+- **Send/recv return a `Result`** (not a raw `int`/`bytes`) so the permission
+  error is handleable without VM `try`/`catch` (which the VM subset does not
+  implement).
 
 ---
 
@@ -768,7 +790,8 @@ mmap_close(m)
 | FFI | yes | yes (natives + `Op::FFICall`/`Op::FFIClose`) |
 | Memory-mapped files | yes (slice/range/pattern) | yes (natives + single-byte index) |
 | Async (`async fn`/`await`/I/O futures) | yes (deferred bodies + I/O) | yes (`Op::Await` + I/O natives; `async fn` runs sync) |
-| raw sockets / DNS / TLS / PCAP / macros | spec | spec |
+| Raw sockets (packet forging) | yes (builders + unix send/recv) | yes (builders + `Result` send/recv) |
+| DNS / TLS / PCAP / macros | spec | spec |
 
 The VM's `compile_stmt`/`compile_expr`/`compile_pattern` return
 `Err("VM does not support ...")` for unsupported nodes, so running an

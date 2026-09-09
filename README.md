@@ -92,6 +92,16 @@ let body = await http_get_async("https://example.com")
 dump string(body)
 ```
 
+**Raw sockets & packet forging.** Build IPv4/TCP/UDP headers with correct ones-complement checksums and send them on a raw socket. The packet builders are pure computation and run anywhere; `net_raw_send`/`recv` need `CAP_NET_RAW`/Administrator (unix) and return a `Result`.
+
+```rak
+let pkt = net_raw_tcp_syn("10.0.0.5", "10.0.0.10", 12345, 80)
+dump len(pkt)          // 40 bytes
+dump pkt[0]            // 0x45 (IPv4)
+dump pkt[33]           // 0x02 (SYN flag)
+dump net_raw_send(pkt) // Ok(40) on a privileged unix box, Err(...) otherwise
+```
+
 ## Build a standalone executable
 
 ```bash
@@ -486,6 +496,7 @@ Rak/
 │   ├── ffi_dynamic.rak     FFI dynamic loader (lib.call/lib.sym/lib.close)
 │   ├── mmap.rak            Memory-mapped files: zero-copy slice/search/lines
 │   ├── async.rak           Async event loop: async fn / await / tcp_probe
+│   ├── net_raw.rak         Raw sockets: forge IPv4/TCP/UDP packets
 │   └── stdlib_demo.rak     String, array, and math builtins
 ```
 

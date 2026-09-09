@@ -1103,6 +1103,19 @@ impl Interpreter {
                     if i >= *n { return Err(crate::RakError::Runtime("Index out of bounds".to_string())); }
                     return Ok(Value::Int(h.as_slice()[base + i] as i64));
                 }
+                if let Value::Bytes(b) = &obj_val {
+                    if let Expr::Range(lo, hi) = idx.as_ref() {
+                        let len = b.len();
+                        let s = lo.as_ref().map(|e| self.eval_expr(e)).transpose()?.and_then(|v| v.as_i64()).unwrap_or(0).max(0) as usize;
+                        let e = hi.as_ref().map(|e| self.eval_expr(e)).transpose()?.and_then(|v| v.as_i64()).unwrap_or(len as i64).min(len as i64).max(0) as usize;
+                        if s > e { return Err(crate::RakError::Runtime("bytes slice: start > end".to_string())); }
+                        return Ok(Value::Bytes(b[s..e].to_vec()));
+                    }
+                    let idx_val = self.eval_expr(idx)?;
+                    if let Value::Int(i) = idx_val {
+                        return b.get(i as usize).map(|v| Value::Int(*v as i64)).ok_or_else(|| crate::RakError::Runtime("Index out of bounds".to_string()));
+                    }
+                }
                 let idx_val = self.eval_expr(idx)?;
                 let tn = obj_val.type_name();
                 if let Some(func) = self
@@ -2905,6 +2918,55 @@ impl Interpreter {
                     state: Mutex::new(FutureState::Pending(jh)),
                 })))
             }
+            // --- Raw sockets / packet forging ---
+            "net_raw_csum" => Ok(Value::Int(rak_stdlib::net_raw::csum16(&self.val_to_bytes(args.first())?) as i64)),
+            "net_raw_ipv4" => {
+                let src = self.val_to_string(args.first())?;
+                let dst = self.val_to_string(args.get(1))?;
+                let proto = args.get(2).and_then(|v| v.as_u64()).unwrap_or(6) as u8;
+                let payload = self.val_to_bytes(args.get(3))?;
+                Ok(Value::Bytes(rak_stdlib::net_raw::ipv4(&src, &dst, proto, &payload).map_err(crate::RakError::Runtime)?))
+            }
+            "net_raw_tcp" => {
+                let src_ip = self.val_to_string(args.first())?;
+                let dst_ip = self.val_to_string(args.get(1))?;
+                let src_port = args.get(2).and_then(|v| v.as_u64()).unwrap_or(0) as u16;
+                let dst_port = args.get(3).and_then(|v| v.as_u64()).unwrap_or(0) as u16;
+                let flags = self.val_to_string(args.get(4)).unwrap_or_else(|_| "S".to_string());
+                let seq = args.get(5).and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+                let ack = args.get(6).and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+                let payload = self.val_to_bytes(args.get(7))?;
+                Ok(Value::Bytes(rak_stdlib::net_raw::tcp(&src_ip, &dst_ip, src_port, dst_port, &flags, seq, ack, &payload).map_err(crate::RakError::Runtime)?))
+            }
+            "net_raw_udp" => {
+                let src_ip = self.val_to_string(args.first())?;
+                let dst_ip = self.val_to_string(args.get(1))?;
+                let src_port = args.get(2).and_then(|v| v.as_u64()).unwrap_or(0) as u16;
+                let dst_port = args.get(3).and_then(|v| v.as_u64()).unwrap_or(0) as u16;
+                let payload = self.val_to_bytes(args.get(4))?;
+                Ok(Value::Bytes(rak_stdlib::net_raw::udp(&src_ip, &dst_ip, src_port, dst_port, &payload).map_err(crate::RakError::Runtime)?))
+            }
+            "net_raw_tcp_syn" => {
+                let src = self.val_to_string(args.first())?;
+                let dst = self.val_to_string(args.get(1))?;
+                let src_port = args.get(2).and_then(|v| v.as_u64()).unwrap_or(12345) as u16;
+                let dport = args.get(3).and_then(|v| v.as_u64()).unwrap_or(80) as u16;
+                Ok(Value::Bytes(rak_stdlib::net_raw::tcp_syn(&src, &dst, src_port, dport).map_err(crate::RakError::Runtime)?))
+            }
+            "net_raw_send" => {
+                let pkt = self.val_to_bytes(args.first())?;
+                match rak_stdlib::net_raw::send(&pkt) {
+                    Ok(n) => Ok(Value::Result(Some(Box::new(Value::Int(n as i64))), None)),
+                    Err(e) => Ok(Value::Result(None, Some(Box::new(Value::String(e))))),
+                }
+            }
+            "net_raw_recv" => {
+                let max = args.first().and_then(|v| v.as_u64()).unwrap_or(4096) as usize;
+                match rak_stdlib::net_raw::recv(max) {
+                    Ok(b) => Ok(Value::Result(Some(Box::new(Value::Bytes(b))), None)),
+                    Err(e) => Ok(Value::Result(None, Some(Box::new(Value::String(e))))),
+                }
+            }
             // --- Regex builtins ---
             "regex_new" => {
                 let pattern = self.val_to_string(args.first())?;
@@ -3504,5 +3566,35 @@ mod tests {
         let src = "dump await tcp_probe(\"127.0.0.1\", 9999, 100)";
         let output = interp.run_source(src).unwrap();
         assert!(output.iter().any(|l| l.contains("[DUMP] false")), "got: {:?}", output);
+    }
+
+    // --- Raw sockets / packet forging ---
+
+    #[test]
+    fn test_interpreter_net_raw_syn() {
+        let mut interp = Interpreter::new();
+        let src = "let pkt = net_raw_tcp_syn(\"10.0.0.5\", \"10.0.0.10\", 12345, 80); dump len(pkt); dump pkt[0]; dump pkt[9]";
+        let output = interp.run_source(src).unwrap();
+        assert!(output.iter().any(|l| l.contains("[DUMP] 40")), "got: {:?}", output);
+        assert!(output.iter().any(|l| l.contains("[DUMP] 69")), "got: {:?}", output); // 0x45 = 69
+        assert!(output.iter().any(|l| l.contains("[DUMP] 6")), "got: {:?}", output);
+    }
+
+    #[test]
+    fn test_interpreter_net_raw_ipv4_checksum_self_check() {
+        let mut interp = Interpreter::new();
+        // The IP header (with its checksum) is self-checking: csum16 == 0.
+        let src = "let pkt = net_raw_ipv4(\"10.0.0.5\", \"10.0.0.10\", 6, b\"\"); dump net_raw_csum(pkt[0..20])";
+        let output = interp.run_source(src).unwrap();
+        assert!(output.iter().any(|l| l.contains("[DUMP] 0")), "got: {:?}", output);
+    }
+
+    #[test]
+    fn test_interpreter_net_raw_send_returns_result() {
+        let mut interp = Interpreter::new();
+        let src = "let pkt = net_raw_tcp_syn(\"10.0.0.5\", \"10.0.0.10\", 12345, 80); dump net_raw_send(pkt)";
+        let output = interp.run_source(src).unwrap();
+        // On any platform this is a Result (Ok on privileged unix, Err otherwise).
+        assert!(output.iter().any(|l| l.contains("Ok(") || l.contains("Err(")), "got: {:?}", output);
     }
 }

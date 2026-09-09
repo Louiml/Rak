@@ -1,0 +1,31 @@
+// Raw sockets & packet forging: build IPv4/TCP/UDP headers with correct
+// checksums, and send them on a raw socket (needs CAP_NET_RAW / Administrator).
+//
+//   rakc run examples/net_raw.rak     (interpreter)
+//   rakc vm  examples/net_raw.rak     (bytecode VM)
+//
+// The packet builders are pure computation and run anywhere. `net_raw_send`
+// requires privileges; on Windows / unprivileged runs it returns a clear
+// error instead of crashing.
+
+// Build a SYN packet: 10.0.0.5:12345 -> 10.0.0.10:80 (proto TCP).
+let pkt = net_raw_tcp_syn("10.0.0.5", "10.0.0.10", 12345, 80)
+dump fmt("syn packet = {} bytes", len(pkt))
+
+// Inspect the forged header bytes (hex).
+dump fmt("byte 0  = 0x{:02X} (IPv4 ver/ihl)", pkt[0])
+dump fmt("byte 9  = 0x{:02X} (proto: 6=TCP)", pkt[9])
+dump fmt("byte 33 = 0x{:02X} (TCP flags: SYN=0x02)", pkt[33])
+dump fmt("csum   = 0x{:04X}", net_raw_csum(pkt))
+
+// A custom IPv4 + TCP segment with payload.
+let tcp_seg = net_raw_tcp("10.0.0.5", "10.0.0.10", 12345, 80, "SA", 0x1A2B3C4D, 0, b"hello")
+let ip_pkt = net_raw_ipv4("10.0.0.5", "10.0.0.10", 6, tcp_seg)
+dump fmt("custom ip+tcp = {} bytes", len(ip_pkt))
+
+// A UDP DNS-style query (53 is DNS).
+let udp_seg = net_raw_udp("10.0.0.5", "10.0.0.10", 1234, 53, b"\x00")
+dump fmt("udp segment = {} bytes", len(udp_seg))
+
+// Attempt to send (returns a Result; errors without privileges — expected here).
+dump net_raw_send(pkt)
