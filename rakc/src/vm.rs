@@ -173,8 +173,17 @@ pub fn make_foreign_native(decl: crate::ast::ForeignFn, lib_path: Option<String>
 pub struct ChannelHandle {
     pub id: u64,
 }
+
+/// State of a VM `Value::Future`. Async I/O builtins produce `Pending`
+/// (Tokio `JoinHandle`); `await` resolves them.
+pub enum VmFutureState {
+    Ready(Value),
+    Pending(tokio::task::JoinHandle<Value>),
+    Polled,
+}
+
 pub struct FutureHandle {
-    pub id: u64,
+    pub state: Mutex<VmFutureState>,
 }
 
 pub struct Vm {
@@ -376,6 +385,26 @@ impl Vm {
             let addr = { let h = lib.lock().unwrap(); rak_stdlib::ffi::sym_addr(&h, &symbol)? };
             let ret = unsafe { rak_stdlib::ffi::call_int(addr, &marshalled) };
             Ok(Value::I64(ret as i64))
+        });
+        // --- Async I/O (Tokio-backed futures) ---
+        self.insert_native("http_get_async", |args| {
+            let url = native_str(args.first());
+            let jh = crate::async_rt::runtime().spawn_blocking(move || {
+                match rak_stdlib::net::http_get(&url, None) {
+                    Ok(r) => Value::String(Arc::from(r.body.as_str())),
+                    Err(e) => Value::String(Arc::from(format!("error: {}", e).as_str())),
+                }
+            });
+            Ok(Value::Future(Arc::new(FutureHandle { state: Mutex::new(VmFutureState::Pending(jh)) })))
+        });
+        self.insert_native("tcp_probe", |args| {
+            let host = native_str(args.first());
+            let port = args.get(1).and_then(|v| v.as_u64()).unwrap_or(80) as u16;
+            let timeout_ms = args.get(2).and_then(|v| v.as_u64()).unwrap_or(1000) as u64;
+            let jh = crate::async_rt::runtime().spawn_blocking(move || {
+                Value::Bool(rak_stdlib::net::tcp_scan(&host, port, timeout_ms))
+            });
+            Ok(Value::Future(Arc::new(FutureHandle { state: Mutex::new(VmFutureState::Pending(jh)) })))
         });
         // --- Memory-mapped files ---
         self.insert_native("mmap_open", |args| {
@@ -697,6 +726,26 @@ impl Vm {
                     let _ = frame.pop();
                     frame.push(Value::Nil);
                 }
+                Op::Await => {
+                    let v = frame.pop();
+                    let resolved = match v {
+                        Value::Future(h) => {
+                            let state = std::mem::replace(&mut *h.state.lock().unwrap(), VmFutureState::Polled);
+                            match state {
+                                VmFutureState::Ready(v) => v,
+                                VmFutureState::Pending(jh) => {
+                                    let joined = crate::async_rt::runtime().block_on(async { jh.await })
+                                        .map_err(|e| format!("await: task failed: {}", e))?;
+                                    *h.state.lock().unwrap() = VmFutureState::Ready(joined.clone());
+                                    joined
+                                }
+                                VmFutureState::Polled => return Err("await: future already polled".to_string()),
+                            }
+                        }
+                        other => other,
+                    };
+                    frame.push(resolved);
+                }
             }
         }
         Ok(())
@@ -986,5 +1035,19 @@ mod tests {
         assert!(out.iter().any(|l| l.contains("[DUMP] 5")), "got: {:?}", out);
         assert!(out.iter().any(|l| l.contains("[DUMP] 3")), "got: {:?}", out);
         let _ = std::fs::remove_file(&path);
+    }
+
+    // --- Async ---
+
+    #[test]
+    fn test_vm_async_fn_await() {
+        let out = run("async fn double(x) { return x * 2 } dump await double(21)");
+        assert!(out.iter().any(|l| l.contains("[DUMP] 42")), "got: {:?}", out);
+    }
+
+    #[test]
+    fn test_vm_async_tcp_probe() {
+        let out = run("dump await tcp_probe(\"127.0.0.1\", 9999, 100)");
+        assert!(out.iter().any(|l| l.contains("[DUMP] false")), "got: {:?}", out);
     }
 }

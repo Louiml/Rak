@@ -545,6 +545,10 @@ impl Compiler {
                 self.emit_u16(ci);
                 self.emit_op(Op::FieldGet);
             }
+            Expr::Await(inner) => {
+                self.compile_expr(inner)?;
+                self.emit_op(Op::Await);
+            }
             Expr::Interp { template, parts } => {
                 let fmt_str = interp_to_fmt(template);
                 let fmt_ci = self.const_str("fmt");

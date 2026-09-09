@@ -1,0 +1,31 @@
+// Async event loop: concurrent I/O with `async fn`, `await`, and futures.
+//
+//   rakc run examples/async.rak     (interpreter)
+//   rakc vm  examples/async.rak     (bytecode VM)
+//
+// `tcp_probe` and `http_get_async` run on a Tokio runtime and return a
+// `Future`; `await` blocks until the I/O completes. `async fn` bodies run on
+// the first `await`.
+
+// An async function returns a Future; the body runs when awaited.
+async fn probe(host, port) {
+    let open = await tcp_probe(host, port, 200)
+    if open {
+        return fmt("0x{:04X} open", port)
+    }
+    return fmt("0x{:04X} closed", port)
+}
+
+// Probe a few localhost ports.
+dump await probe("127.0.0.1", 80)
+dump await probe("127.0.0.1", 445)
+dump await probe("127.0.0.1", 9999)
+
+// A future can be stored and awaited later.
+let f = tcp_probe("127.0.0.1", 22, 200)
+let open = await f
+dump fmt("port 22 open = {}", open)
+
+// http_get_async works the same way (needs network):
+//   let body = await http_get_async("https://example.com")
+//   dump string(body)

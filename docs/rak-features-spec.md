@@ -536,7 +536,7 @@ assert_nonneg!(port)
 
 ## Part 2 — OSINT & Security Capabilities
 
-### 2.1 Built-in async I/O & event loop  **[SPEC]**
+### 2.1 Built-in async I/O & event loop  **[SHIPPED]**
 
 #### Syntax
 ```rak
@@ -545,52 +545,71 @@ async fn fetch(host: string) -> string {
     return r.body
 }
 
-// Concurrent scan of tens of thousands of hosts:
-let results = {}
-await for host in targets {
-    let banner = await tcp_probe(host, 80)
-    results[host] = banner
-}
+// A future can be stored and awaited later:
+let f = tcp_probe(host, 80, 200)
+let open = await f
 
-// event-driven select
-select {
-    msg = rx.recv()    => { dump msg },
-    _ = timeout(1000)  => { dump "timed out" },
-}
+// http_get_async and tcp_probe run on the Tokio runtime and return a Future;
+// `await` blocks until the I/O completes.
+let body = await http_get_async("https://example.com")
 ```
 
+> `async fn` returns a **deferred future** whose body runs on the first `await`.
+> `http_get_async` / `tcp_probe` / `tcp_connect_async` spawn real Tokio tasks
+> (`spawn_blocking` for the sync `ureq`/`std::net` calls) and return a
+> pending `Future`; `await` resolves them via the runtime's `block_on`.
+
 #### Architecture
-- New crate dep `tokio` (already a workspace dep) with `features =
-  ["rt-multi-thread", "net", "io-util", "macros", "time"]`.
-- A `Runtime` thread is started lazily on first `await`/`spawn` of an async
-  block: a `tokio::runtime::Runtime` stored in a `once_cell::sync::Lazy` /
-  `Arc<Runtime>`.
-- `ast.rs`: `Expr::Function { ..., is_async: true }` already exists;
-  `Expr::Await` already exists (currently a no-op in the interpreter). New
-  `Stmt::AwaitFor`, `Expr::Select { arms: Vec<(Pattern, Expr, Vec<Stmt>)> }`.
-- `value.rs`/`interpreter.rs`: `Value::Future(Arc<FutureHandle>)` where
-  `FutureHandle` is a `Mutex<Option<tokio::sync::oneshot::Receiver<Value>>>`
-  or a `tokio::task::JoinHandle`. `await` polls the runtime (blocking the
-  interpreter thread via `tokio::runtime::Handle::block_on`) and resumes.
-- Async networking lives in `stdlib/net_async.rs` (`http_get_async`,
-  `tcp_probe`, `tcp_connect_async`) returning `Value::Future`.
-- The event loop is **epoll** on Linux / **IOCP** on Windows via Tokio's
-  `mio`/`windows` internals — Rak itself is unaware of the platform driver.
+- New crate dep `tokio` (always on) with `rt-multi-thread`, `net`, `io-util`,
+  `macros`, `time`, `sync`. A lazily-started `tokio::runtime::Runtime` lives in
+  `async_rt.rs` (`OnceLock`), shared by the interpreter and the VM.
+- `interpreter.rs`: `Value::Future(Arc<FutureHandle>)` where `FutureHandle`
+  holds `Mutex<FutureState>` and `FutureState` is `Ready(Value)` |
+  `Pending(tokio::task::JoinHandle<Value>)` | `Deferred { params, body,
+  closure, args }` | `Polled`. `async fn` calls return a `Deferred` future (the
+  body is not run yet). `Expr::Await` resolves a future: `Ready` → value,
+  `Pending` → `runtime.block_on(handle.await)`, `Deferred` → run the body on
+  the interpreter thread (via `call_function_values` with `is_async = false`)
+  and cache as `Ready`. `Expr::Spawn` runs a function on a native thread
+  (legacy `spawn`) and passes a `Future` through (async I/O is already
+  concurrent).
+- VM (`value.rs` + `vm.rs` + `compiler.rs` + `bytecode.rs`): mirrored
+  `Value::Future(Arc<FutureHandle>)` with `VmFutureState { Ready, Pending,
+  Polled }`, async I/O natives (`http_get_async`, `tcp_probe`) registered in
+  `register_natives`, a new `Op::Await` opcode (compiled from `Expr::Await`)
+  that resolves a future via `runtime.block_on`. `async fn` on the VM compiles
+  to a `Closure` whose body runs synchronously on call (so `await` on the
+  result is a no-op) — see Errata.
+- Parser: `async fn` is now recognised at statement level (`async` followed by
+  `fn` dispatches to `parse_fn`, which consumes `async` as `is_async`); `async
+  { ... }` remains an async block.
 
 #### Error handling & edge cases
-- **Blocking the runtime**: the tree-walker `await` uses `block_on` on the
-  interpreter thread; async tasks run on the multi-thread Tokio runtime, so
-  `await` does not stall the executor.
-- **No thread-per-connection**: tens of thousands of concurrent TCP probes
-  run as tasks on the Tokio runtime with ~2 KB stacks each, vs the current
-  `std::thread::spawn` (~2 MB stacks).
-- **`await` outside `async`** → `Runtime("await outside async context")`.
-- **`select` fairness** → each branch is polled once per iteration; the first
-  ready wins; ties resolve to the first arm (documented).
-- **Cancellation**: dropping a `FutureHandle` aborts the Tokio task
-  (`JoinHandle::abort`) to release resources.
-- **Panic in a task** → propagated as `Runtime("task panicked: <msg>")` on
-  `await`.
+- **`await` outside an async context** just resolves the value (or returns a
+  non-future unchanged) — Rak has no special "async context" requirement; the
+  interpreter thread blocks at each `await`.
+- **Panic in a task** → `Runtime("await: task failed: <join error>")`.
+- **`block_on` on the interpreter thread** does not stall the Tokio runtime:
+  async I/O tasks run on the multi-thread runtime's worker / blocking-pool
+  threads; `block_on` only parks the interpreter thread.
+- **Cancellation**: dropping a pending future aborts nothing eagerly (the
+  Tokio task completes in the background); `await` is the only resolution
+  point.
+
+#### Errata (deviations from the original [SPEC])
+- **`await for` and `select` are not implemented in this pass.** Concurrent
+  fan-out (tens of thousands of scans) would require `join_all` / `select`
+  primitives; deferred to a follow-up. The shipped subset covers `async fn`,
+  `await`, `spawn`, `http_get_async`, `tcp_probe`, `tcp_connect_async`.
+- **VM `async fn` is not deferred.** The bytecode VM has no interpreter to
+  drive a deferred body, so `async fn` compiles to a plain `Closure` whose
+  body runs synchronously on call; `await` on the (non-future) result returns
+  it. Real async I/O (`http_get_async` / `tcp_probe`) does return a
+  `Value::Future` on the VM and `Op::Await` blocks on it. Documented VM
+  subset.
+- **No `#[tokio::main]`**: the runtime is started lazily by the first
+  `await`/async-builtin call, so `rakc run`/`rakc vm` need no special entry
+  point.
 
 ---
 
@@ -748,7 +767,8 @@ mmap_close(m)
 | Method-call dispatch | yes | no (no dispatch layer) |
 | FFI | yes | yes (natives + `Op::FFICall`/`Op::FFIClose`) |
 | Memory-mapped files | yes (slice/range/pattern) | yes (natives + single-byte index) |
-| macros / async / raw sockets / DNS / TLS / PCAP | spec | spec |
+| Async (`async fn`/`await`/I/O futures) | yes (deferred bodies + I/O) | yes (`Op::Await` + I/O natives; `async fn` runs sync) |
+| raw sockets / DNS / TLS / PCAP / macros | spec | spec |
 
 The VM's `compile_stmt`/`compile_expr`/`compile_pattern` return
 `Err("VM does not support ...")` for unsupported nodes, so running an

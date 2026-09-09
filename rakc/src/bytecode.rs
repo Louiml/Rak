@@ -47,11 +47,14 @@ pub enum Op {
     FFICall,
     /// Pop a `ForeignLib` handle (best-effort early release). Push nil.
     FFIClose,
+    /// Pop a value; if it's a `Future`, resolve it (block on the async
+    /// runtime). Push the resolved value (or the value itself if not a future).
+    Await,
 }
 
 impl Op {
     pub fn from_u8(b: u8) -> Option<Op> {
-        if (b as usize) <= Op::LoopEnd as usize {
+        if (b as usize) <= Op::Await as usize {
             Some(unsafe { std::mem::transmute(b) })
         } else {
             None

@@ -6,6 +6,7 @@ pub mod value;
 pub mod bytecode;
 pub mod compiler;
 pub mod vm;
+pub mod async_rt;
 pub mod repl;
 
 #[cfg(feature = "gui")]

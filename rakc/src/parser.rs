@@ -203,9 +203,15 @@ impl<'a> Parser<'a> {
             Some(Token::Type) => self.parse_type_alias(),
             Some(Token::Extern) => self.parse_extern(),
             Some(Token::Async) => {
-                self.advance();
-                let body = self.parse_block()?;
-                Ok(Stmt::Async(body))
+                // `async fn ...` -> async function; `async { ... }` -> async block.
+                let is_fn = matches!(self.peek_n(1), Some(Token::Fn));
+                if is_fn {
+                    self.parse_fn()
+                } else {
+                    self.advance();
+                    let body = self.parse_block()?;
+                    Ok(Stmt::Async(body))
+                }
             }
             _ => {
                 let expr = self.parse_expr()?;
@@ -405,6 +411,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_fn(&mut self) -> Result<Stmt> {
+        let is_async = self.match_token(&Token::Async);
         self.expect(Token::Fn)?;
         let name = match self.peek() {
             Some(Token::Ident(n)) => {
@@ -431,7 +438,7 @@ impl<'a> Parser<'a> {
                 return_type,
                 body,
                 captures: vec![],
-                is_async: false,
+                is_async,
             }),
             type_hint: None,
         })

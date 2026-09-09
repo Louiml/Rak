@@ -30,7 +30,7 @@ The language started as an OSINT scripting tool. It grew into something bigger.
 
 **Type system.** Signed and unsigned ints (i8 through i64, u8 through u64), floats (f32, f64), typed literals like `42i32` and `3.14f64`, tuples, Result/Option, modules, closures with lexical scoping, generics, traits with method dispatch, pattern matching (including binary byte-pattern matching), and string interpolation with `f"hello {name}"`.
 
-**Concurrency.** `spawn` launches a thread, `thread_join` waits for it, `channel()` gives you a sender/receiver pair. TCP networking built in with `net_listen`, `net_accept`, `tcp_read`, `tcp_write`.
+**Concurrency.** `spawn` launches a thread, `thread_join` waits for it, `channel()` gives you a sender/receiver pair. TCP networking built in with `net_listen`, `net_accept`, `tcp_read`, `tcp_write`. Async I/O via a Tokio runtime: `async fn`/`await`, `http_get_async`, `tcp_probe`.
 
 **SQL server in Rak.** A full SQL engine, lexer through executor, written in the language itself. It serves queries over TCP. See `examples/sql_server.rak`.
 
@@ -77,6 +77,19 @@ dump mmap_find(m, "\xff\xd8\xff") // byte search -> offset
 for (off, len) in mmap_lines_off(m, "\n") {
     dump string(mmap_slice(m, off, len))
 }
+```
+
+**Async event loop.** `async fn`, `await`, and Tokio-backed async I/O. `http_get_async` / `tcp_probe` / `tcp_connect_async` run on a lazily-started multi-thread Tokio runtime and return a `Future`; `await` blocks until it resolves. Works on both the interpreter (deferred `async fn` bodies) and the bytecode VM (`Op::Await`).
+
+```rak
+async fn probe(host, port) {
+    let open = await tcp_probe(host, port, 200)
+    return open
+}
+dump await probe("127.0.0.1", 80)
+
+let body = await http_get_async("https://example.com")
+dump string(body)
 ```
 
 ## Build a standalone executable
@@ -472,6 +485,7 @@ Rak/
 │   ├── ffi.rak             FFI: extern bindings + raw memory (interpreter + VM)
 │   ├── ffi_dynamic.rak     FFI dynamic loader (lib.call/lib.sym/lib.close)
 │   ├── mmap.rak            Memory-mapped files: zero-copy slice/search/lines
+│   ├── async.rak           Async event loop: async fn / await / tcp_probe
 │   └── stdlib_demo.rak     String, array, and math builtins
 ```
 
@@ -491,7 +505,7 @@ Linux requires `libwebkit2gtk-4.1-dev`, `libgtk-3-dev`, `libayatana-appindicator
 
 The compiler is Rust. Logos handles lexing. The parser is hand-written recursive descent. Two backends: a tree-walking interpreter and a stack-based bytecode VM.
 
-The standard library uses `ureq` for HTTP, `scraper` for HTML parsing, `md-5`/`sha1`/`sha2` for hashing, `std::net` for TCP, `std::thread` and `mpsc` for concurrency. Real JSON via `serde_json`.
+The standard library uses `ureq` for HTTP, `scraper` for HTML parsing, `md-5`/`sha1`/`sha2` for hashing, `std::net` for TCP, `std::thread` and `mpsc` for concurrency, `libloading` for FFI, `memmap2` for memory-mapped files, and `tokio` for the async event loop. Real JSON via `serde_json`.
 
 The IDE is Tauri v2, Next.js, TypeScript, and Tailwind CSS. It runs Rak scripts as child processes, streams output, and has an integrated terminal.
 

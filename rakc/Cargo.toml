@@ -29,7 +29,8 @@ rustyline = "15"
 
 # LSP
 tower-lsp = { version = "0.20", optional = true }
-tokio = { version = "1", features = ["full"], optional = true }
+# Async event loop (always on; powers http_get_async / tcp_probe / await).
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "macros", "time", "sync"] }
 
 # Bindgen
 bindgen = { version = "0.70", optional = true }
@@ -49,7 +50,7 @@ default = []
 llvm = [] # "inkwell"
 jit = []
 gui = ["dep:wry", "dep:tao"]
-lsp = ["dep:tower-lsp", "dep:tokio"]
+lsp = ["dep:tower-lsp"]
 bindgen = ["dep:bindgen"]
 
 [[bin]]

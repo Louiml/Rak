@@ -7,6 +7,29 @@ use std::sync::mpsc;
 use std::thread::JoinHandle;
 use std::ffi::CString;
 
+fn async_runtime() -> &'static tokio::runtime::Runtime {
+    crate::async_rt::runtime()
+}
+
+/// The state of a `Value::Future`. A future is either already resolved, pending
+/// on a Tokio task (async I/O builtins), or a deferred `async fn` body that the
+/// interpreter runs on the first `await`.
+pub enum FutureState {
+    Ready(Value),
+    Pending(tokio::task::JoinHandle<Value>),
+    Deferred {
+        params: Vec<Param>,
+        body: Vec<Stmt>,
+        closure: Arc<Env>,
+        args: Vec<Value>,
+    },
+    Polled,
+}
+
+pub struct FutureHandle {
+    pub state: Mutex<FutureState>,
+}
+
 /// A compiled regular expression value. Stored behind an `Arc` so it can be
 /// cloned cheaply inside `Value`.
 pub struct RegexValue {
@@ -65,6 +88,8 @@ pub enum Value {
     Mmap(Arc<rak_stdlib::mmap::MmapHandle>),
     /// A zero-copy view into a `Mmap` (`mmap_slice`); keeps the mapping alive.
     MmapSlice(Arc<rak_stdlib::mmap::MmapHandle>, usize, usize),
+    /// An async future (`async fn` or an async I/O builtin).
+    Future(Arc<FutureHandle>),
 }
 
 impl fmt::Debug for Value {
@@ -161,6 +186,7 @@ impl fmt::Display for Value {
             Value::ForeignPtr(p) => write!(f, "0x{:X}", p),
             Value::Mmap(_) => write!(f, "<mmap>"),
             Value::MmapSlice(_, _, n) => write!(f, "<mmap-slice {}B>", n),
+            Value::Future(_) => write!(f, "<future>"),
         }
     }
 }
@@ -1235,8 +1261,14 @@ impl Interpreter {
                     other => Ok(other),
                 }
             }
-            Expr::Await(inner) => self.eval_expr(inner),
-            Expr::Spawn(inner) => self.eval_expr(inner),
+            Expr::Await(inner) => {
+                let fv = self.eval_expr(inner)?;
+                self.await_future(fv)
+            }
+            Expr::Spawn(inner) => {
+                let v = self.eval_expr(inner)?;
+                self.spawn_value(v)
+            }
             Expr::Raise(inner) => {
                 let v = self.eval_expr(inner)?;
                 self.env.define("__raised__", v.clone());
@@ -1424,7 +1456,18 @@ impl Interpreter {
     }
 
     fn call_function_values(&mut self, params: &[Param], body: &[Stmt], closure: &Arc<Env>, is_async: bool, arg_vals: Vec<Value>) -> crate::Result<Value> {
-        let _ = is_async;
+        if is_async {
+            // An async function does not run its body at call time; it returns a
+            // deferred future whose body is driven on the first `await`.
+            return Ok(Value::Future(Arc::new(FutureHandle {
+                state: Mutex::new(FutureState::Deferred {
+                    params: params.to_vec(),
+                    body: body.to_vec(),
+                    closure: closure.clone(),
+                    args: arg_vals,
+                }),
+            })));
+        }
         let saved_returning = self.returning;
         self.returning = false;
         let saved_env = self.env.clone();
@@ -1447,6 +1490,63 @@ impl Interpreter {
         self.env = saved_env;
         self.returning = saved_returning;
         Ok(ret)
+    }
+
+    /// Resolve a `Value::Future`. A ready future returns its value; a pending
+    /// Tokio-backed future (async I/O builtin) is awaited via `block_on`; a
+    /// deferred `async fn` body is run on the interpreter thread. Awaiting a
+    /// non-future value returns it unchanged.
+    fn await_future(&mut self, fv: Value) -> crate::Result<Value> {
+        let handle = match fv {
+            Value::Future(h) => h,
+            other => return Ok(other),
+        };
+        let state = std::mem::replace(&mut *handle.state.lock().unwrap(), FutureState::Polled);
+        match state {
+            FutureState::Ready(v) => Ok(v),
+            FutureState::Pending(jh) => {
+                let joined = async_runtime().block_on(async { jh.await })
+                    .map_err(|e| crate::RakError::Runtime(format!("await: task failed: {}", e)))?;
+                *handle.state.lock().unwrap() = FutureState::Ready(joined.clone());
+                Ok(joined)
+            }
+            FutureState::Deferred { params, body, closure, args } => {
+                let result = self.call_function_values(&params, &body, &closure, false, args)?;
+                *handle.state.lock().unwrap() = FutureState::Ready(result.clone());
+                Ok(result)
+            }
+            FutureState::Polled => Err(crate::RakError::Runtime("await: future already polled".to_string())),
+        }
+    }
+
+    /// `spawn` a value: a `Future` is returned as-is (async I/O is already
+    /// concurrent); a function runs on a native thread (legacy `spawn`).
+    fn spawn_value(&mut self, v: Value) -> crate::Result<Value> {
+        match v {
+            Value::Future(_) => Ok(v),
+            Value::Function { params: _, body, closure, .. } => {
+                let body = body.clone();
+                let closure = closure.clone();
+                let handle: JoinHandle<Value> = std::thread::spawn(move || {
+                    let mut interp = Interpreter::new();
+                    interp.env = (*closure).clone();
+                    interp.env.push_scope();
+                    for s in &body {
+                        let _ = interp.exec_stmt(s);
+                        if interp.returning {
+                            break;
+                        }
+                    }
+                    if interp.returning {
+                        std::mem::replace(&mut interp.return_value, Value::Nil)
+                    } else {
+                        Value::Nil
+                    }
+                });
+                Ok(Value::JoinHandle(Arc::new(Mutex::new(Some(handle)))))
+            }
+            other => Ok(other),
+        }
     }
 
     /// Dispatch a user-defined method `obj.method(args...)`, passing `obj` as
@@ -2765,6 +2865,46 @@ impl Interpreter {
                 let offs = rak_stdlib::mmap::lines_off(&h, delim.as_bytes());
                 Ok(Value::Array(offs.into_iter().map(|(o, l)| Value::Tuple(vec![Value::Int(o as i64), Value::Int(l as i64)])).collect()))
             }
+            // --- Async I/O (Tokio-backed futures) ---
+            "http_get_async" => {
+                let url = self.val_to_string(args.first())?;
+                let jh = async_runtime().spawn_blocking(move || {
+                    match rak_stdlib::net::http_get(&url, None) {
+                        Ok(r) => Value::String(r.body),
+                        Err(e) => Value::String(format!("error: {}", e)),
+                    }
+                });
+                Ok(Value::Future(Arc::new(FutureHandle {
+                    state: Mutex::new(FutureState::Pending(jh)),
+                })))
+            }
+            "tcp_probe" => {
+                let host = self.val_to_string(args.first())?;
+                let port = args.get(1).and_then(|v| v.as_u64()).unwrap_or(80) as u16;
+                let timeout_ms = args.get(2).and_then(|v| v.as_u64()).unwrap_or(1000) as u64;
+                let jh = async_runtime().spawn_blocking(move || {
+                    Value::Bool(rak_stdlib::net::tcp_scan(&host, port, timeout_ms))
+                });
+                Ok(Value::Future(Arc::new(FutureHandle {
+                    state: Mutex::new(FutureState::Pending(jh)),
+                })))
+            }
+            "tcp_connect_async" => {
+                let addr = self.val_to_string(args.first())?;
+                let jh = async_runtime().spawn_blocking(move || {
+                    use std::net::TcpStream;
+                    match TcpStream::connect(&addr) {
+                        Ok(s) => {
+                            s.set_nonblocking(false).ok();
+                            Value::TcpStream(Arc::new(Mutex::new(s)))
+                        }
+                        Err(_) => Value::Nil,
+                    }
+                });
+                Ok(Value::Future(Arc::new(FutureHandle {
+                    state: Mutex::new(FutureState::Pending(jh)),
+                })))
+            }
             // --- Regex builtins ---
             "regex_new" => {
                 let pattern = self.val_to_string(args.first())?;
@@ -2888,6 +3028,7 @@ impl Value {
             Value::ForeignPtr(_) => "ptr".to_string(),
             Value::Mmap(_) => "mmap".to_string(),
             Value::MmapSlice(_, _, _) => "mmap-slice".to_string(),
+            Value::Future(_) => "future".to_string(),
             _ => "<opaque>".to_string(),
         }
     }
@@ -3336,5 +3477,32 @@ mod tests {
         assert!(output.iter().any(|l| l.contains("[DUMP] 3")), "got: {:?}", output); // 3 lines
         assert!(output.iter().any(|l| l.contains("[DUMP] pcap")), "got: {:?}", output);
         let _ = std::fs::remove_file(&path);
+    }
+
+    // --- Async ---
+
+    #[test]
+    fn test_interpreter_async_fn_await() {
+        let mut interp = Interpreter::new();
+        let src = "async fn double(x) { return x * 2 } dump await double(21)";
+        let output = interp.run_source(src).unwrap();
+        assert!(output.iter().any(|l| l.contains("[DUMP] 42")), "got: {:?}", output);
+    }
+
+    #[test]
+    fn test_interpreter_async_fn_deferred() {
+        // The body runs only on await; the future is a deferred value before.
+        let mut interp = Interpreter::new();
+        let src = "async fn sq(x) { return x * x } let f = sq(6); dump await f";
+        let output = interp.run_source(src).unwrap();
+        assert!(output.iter().any(|l| l.contains("[DUMP] 36")), "got: {:?}", output);
+    }
+
+    #[test]
+    fn test_interpreter_async_tcp_probe() {
+        let mut interp = Interpreter::new();
+        let src = "dump await tcp_probe(\"127.0.0.1\", 9999, 100)";
+        let output = interp.run_source(src).unwrap();
+        assert!(output.iter().any(|l| l.contains("[DUMP] false")), "got: {:?}", output);
     }
 }
