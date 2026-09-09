@@ -1,0 +1,9 @@
+// A directory package: `import mymod` runs this init.rak.
+pub let PI = 3.14
+pub fn add(a, b) { return a + b }
+export fn mul(a, b) { return a * b }
+pub const MAX = 256
+
+// A private helper (not exported) — invisible to importers.
+fn _hidden(x) { return x + 1 }
+let _priv = 99

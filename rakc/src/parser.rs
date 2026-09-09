@@ -103,7 +103,41 @@ impl<'a> Parser<'a> {
         while self.peek().is_some() {
             if self.check(&Token::Use) {
                 self.advance();
-                imports.push(self.parse_import()?);
+                imports.push(self.parse_import(false)?);
+                self.semi()?;
+            } else if self.check(&Token::Import) {
+                self.advance();
+                imports.push(self.parse_import(false)?);
+                self.semi()?;
+            } else if self.check(&Token::From) {
+                imports.push(self.parse_from_import(false)?);
+                self.semi()?;
+            } else if (self.check(&Token::Pub) || self.check(&Token::Export))
+                && matches!(self.peek_n(1), Some(Token::Use))
+            {
+                // `pub use m` / `export use m` / `pub use {a} from m` re-export.
+                self.advance(); // pub/export
+                self.advance(); // use
+                imports.push(self.parse_reexport()?);
+                self.semi()?;
+            } else if (self.check(&Token::Pub) || self.check(&Token::Export))
+                && matches!(self.peek_n(1), Some(Token::Import))
+            {
+                // `pub import m` / `export import m` — re-export a whole module.
+                self.advance(); // pub/export
+                self.advance(); // import
+                let mut imp = self.parse_import(false)?;
+                imp.reexport = true;
+                imports.push(imp);
+                self.semi()?;
+            } else if (self.check(&Token::Pub) || self.check(&Token::Export))
+                && matches!(self.peek_n(1), Some(Token::From))
+            {
+                // `pub from m import ...` — re-export names.
+                self.advance(); // pub/export
+                let mut imp = self.parse_from_import(false)?;
+                imp.reexport = true;
+                imports.push(imp);
                 self.semi()?;
             } else {
                 items.push(self.parse_stmt()?);
@@ -112,7 +146,7 @@ impl<'a> Parser<'a> {
         Ok(Module { imports, items })
     }
 
-    fn parse_import(&mut self) -> Result<Import> {
+    fn parse_import(&mut self, reexport: bool) -> Result<Import> {
         if let Some(Token::String(s)) = self.peek() {
             let s = s.clone();
             self.advance();
@@ -127,7 +161,15 @@ impl<'a> Parser<'a> {
             } else {
                 None
             };
-            return Ok(Import { path: vec![s], is_file: true, alias });
+            return Ok(Import {
+                path: vec![s],
+                is_file: true,
+                alias,
+                kind: ImportKind::Whole,
+                from_names: vec![],
+                star: false,
+                reexport,
+            });
         }
 
         let mut path = vec![];
@@ -156,11 +198,143 @@ impl<'a> Parser<'a> {
         } else {
             None
         };
-        Ok(Import { path, is_file: false, alias })
+        Ok(Import {
+            path,
+            is_file: false,
+            alias,
+            kind: ImportKind::Whole,
+            from_names: vec![],
+            star: false,
+            reexport,
+        })
+    }
+
+    /// Parse `from m import x, y as z` / `from m import *`.
+    fn parse_from_import(&mut self, reexport: bool) -> Result<Import> {
+        self.expect(Token::From)?;
+        // The module target: a file path string or a dotted name.
+        let (path, is_file) = if let Some(Token::String(s)) = self.peek() {
+            let s = s.clone();
+            self.advance();
+            (vec![s], true)
+        } else {
+            let mut path = vec![];
+            if let Some(Token::Ident(name)) = self.peek() {
+                path.push(name.clone());
+                self.advance();
+            } else {
+                return Err(self.perr("Expected module name after 'from'".to_string()));
+            }
+            while self.match_token(&Token::Dot) || self.match_token(&Token::ColonColon) {
+                if let Some(Token::Ident(name)) = self.peek() {
+                    path.push(name.clone());
+                    self.advance();
+                } else {
+                    return Err(self.perr("Expected identifier after path separator".to_string()));
+                }
+            }
+            (path, false)
+        };
+        self.expect(Token::Import)?;
+        // `*` or a comma-separated name list with optional `as alias`.
+        if self.match_token(&Token::Star) {
+            return Ok(Import {
+                path,
+                is_file,
+                alias: None,
+                kind: ImportKind::From,
+                from_names: vec![],
+                star: true,
+                reexport,
+            });
+        }
+        let mut names = vec![];
+        loop {
+            let n = self.expect_ident()?;
+            let alias = if self.match_token(&Token::As) {
+                Some(self.expect_ident()?)
+            } else {
+                None
+            };
+            names.push((n, alias));
+            if !self.match_token(&Token::Comma) {
+                break;
+            }
+        }
+        Ok(Import {
+            path,
+            is_file,
+            alias: None,
+            kind: ImportKind::From,
+            from_names: names,
+            star: false,
+            reexport,
+        })
+    }
+
+    /// Parse `pub use m` / `pub use {a, b} from m` — a re-export. `pub`/`use`
+    /// already consumed; this parses the target.
+    fn parse_reexport(&mut self) -> Result<Import> {
+        // `pub use {a, b} from m` — selective re-export from a module.
+        if self.match_token(&Token::LBrace) {
+            let mut names = vec![];
+            loop {
+                let n = self.expect_ident()?;
+                let alias = if self.match_token(&Token::As) {
+                    Some(self.expect_ident()?)
+                } else {
+                    None
+                };
+                names.push((n, alias));
+                if !self.match_token(&Token::Comma) {
+                    break;
+                }
+            }
+            self.expect(Token::RBrace)?;
+            self.expect(Token::From)?;
+            let (path, is_file) = self.parse_reexport_target()?;
+            return Ok(Import {
+                path,
+                is_file,
+                alias: None,
+                kind: ImportKind::From,
+                from_names: names,
+                star: false,
+                reexport: true,
+            });
+        }
+        // `pub use m` — re-export the whole module (or `pub use m as n`).
+        let mut imp = self.parse_import(true)?;
+        imp.reexport = true;
+        Ok(imp)
+    }
+
+    fn parse_reexport_target(&mut self) -> Result<(Vec<String>, bool)> {
+        if let Some(Token::String(s)) = self.peek() {
+            let s = s.clone();
+            self.advance();
+            return Ok((vec![s], true));
+        }
+        let mut path = vec![];
+        if let Some(Token::Ident(name)) = self.peek() {
+            path.push(name.clone());
+            self.advance();
+        } else {
+            return Err(self.perr("Expected module name".to_string()));
+        }
+        while self.match_token(&Token::Dot) || self.match_token(&Token::ColonColon) {
+            if let Some(Token::Ident(name)) = self.peek() {
+                path.push(name.clone());
+                self.advance();
+            } else {
+                return Err(self.perr("Expected identifier after path separator".to_string()));
+            }
+        }
+        Ok((path, false))
     }
 
     fn parse_stmt(&mut self) -> Result<Stmt> {
-        if self.check(&Token::Pub) {
+        if self.check(&Token::Pub) || self.check(&Token::Export) {
             self.advance();
             let inner = self.parse_stmt()?;
             return Ok(Stmt::Export(Box::new(inner)));
@@ -597,7 +771,7 @@ impl<'a> Parser<'a> {
         if abi != "C" {
             return Err(self.perr(format!("Unsupported ABI '{}' (only \"C\" is supported)", abi)));
         }
-        let lib = if matches!(self.peek(), Some(Token::Ident(n)) if n == "from") {
+        let lib = if matches!(self.peek(), Some(Token::From)) {
             self.advance();
             match self.peek() {
                 Some(Token::String(s)) => {
@@ -1896,6 +2070,45 @@ mod tests {
                 _ => panic!("expected Expr::MacroInvoke"),
             },
             _ => panic!("expected Stmt::Dump"),
+        }
+    }
+
+    #[test]
+    fn test_parse_import_forms() {
+        let cases = vec![
+            ("import math", ImportKind::Whole, false, false, 0, false, false),
+            ("import math as m", ImportKind::Whole, false, false, 0, false, false),
+            ("import \"./m.rak\"", ImportKind::Whole, true, false, 0, false, false),
+            ("from math import add", ImportKind::From, false, false, 1, false, false),
+            ("from math import add as plus, mul as times", ImportKind::From, false, false, 2, false, false),
+            ("from math import *", ImportKind::From, false, false, 0, true, false),
+            ("pub use math", ImportKind::Whole, false, false, 0, false, true),
+            ("pub use {add, mul} from math", ImportKind::From, false, false, 2, false, true),
+        ];
+        for (src, kind, is_file, _has_alias, n_names, star, reexport) in cases {
+            let tokens = tokenize(src).unwrap();
+            let module = parse(&tokens, src).unwrap();
+            assert_eq!(module.imports.len(), 1, "for {:?}", src);
+            let imp = &module.imports[0];
+            assert_eq!(imp.kind, kind, "kind for {:?}", src);
+            assert_eq!(imp.is_file, is_file, "is_file for {:?}", src);
+            assert_eq!(imp.from_names.len(), n_names, "names for {:?}", src);
+            assert_eq!(imp.star, star, "star for {:?}", src);
+            assert_eq!(imp.reexport, reexport, "reexport for {:?}", src);
+        }
+    }
+
+    #[test]
+    fn test_parse_export_keyword_alias_for_pub() {
+        let source = "export fn add(a, b) { return a + b }";
+        let tokens = tokenize(source).unwrap();
+        let module = parse(&tokens, source).unwrap();
+        match &module.items[0] {
+            Stmt::Export(inner) => match inner.as_ref() {
+                Stmt::Let { name, .. } => assert_eq!(name, "add"),
+                _ => panic!("expected Export(Let)"),
+            },
+            _ => panic!("expected Stmt::Export"),
         }
     }
 }

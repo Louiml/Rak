@@ -889,6 +889,20 @@ impl Vm {
                     };
                     frame.push(resolved);
                 }
+                Op::BuildModule => {
+                    let n = frame.code.code[frame.ip] as usize;
+                    frame.ip += 1;
+                    let mut m = HashMap::new();
+                    for _ in 0..n {
+                        let v = frame.pop();
+                        let k = match frame.pop() {
+                            Value::String(s) => s.to_string(),
+                            _ => return Err("BuildModule: name must be a string".to_string()),
+                        };
+                        m.insert(k, v);
+                    }
+                    frame.push(Value::Map(Arc::from(m)));
+                }
             }
         }
         Ok(())
@@ -1255,5 +1269,42 @@ mod tests {
     fn test_vm_const_binding() {
         let out = run("const MAX = 256; dump MAX");
         assert!(out.iter().any(|l| l.contains("[DUMP] 256")), "got: {:?}", out);
+    }
+
+    // --- Imports & exports (VM) ---
+
+    #[test]
+    fn test_vm_import_whole_and_from() {
+        let dir = std::env::temp_dir().join(format!("rak_vm_import_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("m.rak"), "pub let PI = 3.14\npub fn add(a, b) { return a + b }").unwrap();
+        let src = "import m\ndump m.PI\ndump m.add(2, 3)\nfrom m import add as plus\ndump plus(10, 20)";
+        let tokens = crate::lexer::tokenize(src).unwrap();
+        let module = crate::parser::parse(&tokens, src).unwrap();
+        let chunk = crate::compiler::compile_module_in(&module, dir.to_string_lossy().as_ref()).unwrap();
+        let mut vm = Vm::new();
+        let out = vm.run(&chunk).unwrap();
+        assert!(out.iter().any(|l| l.contains("[DUMP] 3.14")), "got: {:?}", out);
+        assert!(out.iter().any(|l| l.contains("[DUMP] 5")), "got: {:?}", out);
+        assert!(out.iter().any(|l| l.contains("[DUMP] 30")), "got: {:?}", out);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_vm_import_star() {
+        let dir = std::env::temp_dir().join(format!("rak_vm_star_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("m.rak"), "pub let X = 1\npub let Y = 2").unwrap();
+        let src = "let X = 99\nfrom m import *\ndump X\ndump Y";
+        let tokens = crate::lexer::tokenize(src).unwrap();
+        let module = crate::parser::parse(&tokens, src).unwrap();
+        let chunk = crate::compiler::compile_module_in(&module, dir.to_string_lossy().as_ref()).unwrap();
+        let mut vm = Vm::new();
+        let out = vm.run(&chunk).unwrap();
+        assert!(out.iter().any(|l| l.contains("[DUMP] 99")), "got: {:?}", out);
+        assert!(out.iter().any(|l| l.contains("[DUMP] 2")), "got: {:?}", out);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

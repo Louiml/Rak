@@ -50,11 +50,14 @@ pub enum Op {
     /// Pop a value; if it's a `Future`, resolve it (block on the async
     /// runtime). Push the resolved value (or the value itself if not a future).
     Await,
+    /// Build a `Value::Module` from `n` (name, value) pairs. Operand: `n` (1 byte).
+    /// Pops `2*n` values (alternating name string, value), pushes the Module.
+    BuildModule,
 }
 
 impl Op {
     pub fn from_u8(b: u8) -> Option<Op> {
-        if (b as usize) <= Op::Await as usize {
+        if (b as usize) <= Op::BuildModule as usize {
             Some(unsafe { std::mem::transmute(b) })
         } else {
             None

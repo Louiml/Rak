@@ -2,6 +2,7 @@ use crate::ast::*;
 use crate::bytecode::{Chunk, Op};
 use crate::value::Value;
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 pub struct Compiler {
@@ -12,6 +13,14 @@ pub struct Compiler {
     func_closures: HashMap<String, Value>,
     /// `macro name(params) { body }` definitions, for compile-time expansion.
     macros: HashMap<String, (Vec<Param>, Vec<Stmt>)>,
+    /// Names exported by the module currently being compiled (`pub`/`export`).
+    current_exports: Vec<String>,
+    /// Import-once cache: canonical module path → its exported global names.
+    module_cache: HashMap<std::path::PathBuf, Vec<String>>,
+    /// Modules currently being inlined (circular-import detection).
+    compiling: std::collections::HashSet<std::path::PathBuf>,
+    /// Base directory for resolving name-based imports of the current module.
+    base_dir: String,
 }
 
 impl Compiler {
@@ -23,20 +32,47 @@ impl Compiler {
             func_names: std::collections::HashSet::new(),
             func_closures: HashMap::new(),
             macros: HashMap::new(),
+            current_exports: Vec::new(),
+            module_cache: HashMap::new(),
+            compiling: std::collections::HashSet::new(),
+            base_dir: ".".to_string(),
         }
     }
 
     pub fn compile(&mut self, module: &Module) -> Result<Chunk, String> {
+        self.current_exports.clear();
+        // Pre-pass: collect top-level functions (incl. `pub fn`), macros (incl.
+        // `pub macro`), externs, and the exported-name list.
         for stmt in &module.items {
-            if let Stmt::Let { name, value, .. } = stmt {
-                if let Expr::Function { params, body, .. } = value.as_ref() {
-                    self.func_names.insert(name.clone());
-                    let closure = self.compile_function(name, params, body)?;
-                    self.func_closures.insert(name.clone(), closure);
+            match stmt {
+                Stmt::Let { name, value, .. } => {
+                    if let Expr::Function { params, body, .. } = value.as_ref() {
+                        self.func_names.insert(name.clone());
+                        let closure = self.compile_function(name, params, body)?;
+                        self.func_closures.insert(name.clone(), closure);
+                    }
                 }
-            }
-            if let Stmt::MacroDef { name, params, body } = stmt {
-                self.macros.insert(name.clone(), (params.clone(), body.clone()));
+                Stmt::Export(inner) => match inner.as_ref() {
+                    Stmt::Let { name, value, .. } => {
+                        if let Expr::Function { params, body, .. } = value.as_ref() {
+                            self.func_names.insert(name.clone());
+                            let closure = self.compile_function(name, params, body)?;
+                            self.func_closures.insert(name.clone(), closure);
+                        }
+                        self.current_exports.push(name.clone());
+                    }
+                    Stmt::Const { name, .. } | Stmt::Struct { name, .. } | Stmt::Enum { name, .. } => {
+                        self.current_exports.push(name.clone());
+                    }
+                    Stmt::MacroDef { name, params, body } => {
+                        self.macros.insert(name.clone(), (params.clone(), body.clone()));
+                    }
+                    _ => {}
+                },
+                Stmt::MacroDef { name, params, body } => {
+                    self.macros.insert(name.clone(), (params.clone(), body.clone()));
+                }
+                _ => {}
             }
         }
         // Register `extern "C"` declarations as native-fn globals, so
@@ -63,9 +99,27 @@ impl Compiler {
             self.emit_op(Op::StoreGlobal);
             self.emit_u16(ci);
         }
+        // Process imports: inline imported modules' exported items as globals
+        // and emit linkage (`import m` builds a Value::Module, `from m import
+        // x` copies/aliases globals).
+        let imports = module.imports.clone();
+        for imp in &imports {
+            self.compile_import(imp)?;
+        }
+        // Compile the module's own non-function items.
         for stmt in &module.items {
             if let Stmt::Let { value, .. } = stmt {
                 if matches!(value.as_ref(), Expr::Function { .. }) {
+                    continue;
+                }
+            }
+            if let Stmt::Export(inner) = stmt {
+                if let Stmt::Let { value, .. } = inner.as_ref() {
+                    if matches!(value.as_ref(), Expr::Function { .. }) {
+                        continue; // already compiled as a closure in the pre-pass
+                    }
+                }
+                if matches!(inner.as_ref(), Stmt::MacroDef { .. }) {
                     continue;
                 }
             }
@@ -82,6 +136,239 @@ impl Compiler {
         Ok(std::mem::replace(&mut self.chunk, Chunk::new()))
     }
 
+    /// Resolve an import spec's target (file path or dotted name) to a file.
+    fn resolve_target(&self, spec: &Import) -> Result<crate::modules::DottedResolve, String> {
+        if spec.is_file {
+            let rel = &spec.path[0];
+            let full = if Path::new(rel).is_absolute() {
+                PathBuf::from(rel)
+            } else {
+                Path::new(&self.base_dir).join(rel)
+            };
+            Ok(crate::modules::DottedResolve { init: None, leaf: full })
+        } else {
+            crate::modules::resolve_dotted(Path::new(&self.base_dir), &spec.path).ok_or_else(|| {
+                format!("import: cannot find module '{}' (searched: {}, packages, RAK_PATH)", spec.path.join("."), self.base_dir)
+            })
+        }
+    }
+
+    /// Inline an imported module's exported items as globals into the current
+    /// chunk (recursively, cached). Returns the exported global names.
+    fn inline_module(&mut self, leaf: PathBuf, init: Option<PathBuf>) -> Result<Vec<String>, String> {
+        let canon = crate::modules::canonical(&leaf);
+        if let Some(names) = self.module_cache.get(&canon).cloned() {
+            return Ok(names);
+        }
+        if self.compiling.contains(&canon) {
+            return Ok(self.module_cache.get(&canon).cloned().unwrap_or_default());
+        }
+        // Load the package init first.
+        if let Some(init_path) = init {
+            let _ = self.inline_module(init_path.clone(), None)?;
+        }
+        self.compiling.insert(canon.clone());
+        self.module_cache.insert(canon.clone(), Vec::new()); // partial for cycles
+
+        let source = std::fs::read_to_string(&leaf)
+            .map_err(|e| format!("import: cannot read '{}': {}", leaf.display(), e))?;
+        let tokens = crate::lexer::tokenize(&source).map_err(|e| e.to_string())?;
+        let module = crate::parser::parse(&tokens, &source).map_err(|e| e.to_string())?;
+        let saved_base = self.base_dir.clone();
+        if let Some(parent) = leaf.parent() {
+            self.base_dir = parent.to_string_lossy().to_string();
+        }
+        let saved_exports = std::mem::take(&mut self.current_exports);
+
+        // Pre-pass for this imported module: collect fns (incl. pub fn), macros,
+        // externs. Exported names are recorded in `self.current_exports`.
+        let mut local_closures: Vec<(String, Value)> = Vec::new();
+        let mut local_foreigns: Vec<(String, Value)> = Vec::new();
+        for stmt in &module.items {
+            match stmt {
+                Stmt::Let { name, value, .. } => {
+                    if let Expr::Function { params, body, .. } = value.as_ref() {
+                        self.func_names.insert(name.clone());
+                        let cl = self.compile_function(name, params, body)?;
+                        self.func_closures.insert(name.clone(), cl.clone());
+                        local_closures.push((name.clone(), cl));
+                    }
+                }
+                Stmt::Export(inner) => match inner.as_ref() {
+                    Stmt::Let { name, value, .. } => {
+                        if let Expr::Function { params, body, .. } = value.as_ref() {
+                            self.func_names.insert(name.clone());
+                            let cl = self.compile_function(name, params, body)?;
+                            self.func_closures.insert(name.clone(), cl.clone());
+                            local_closures.push((name.clone(), cl));
+                        }
+                        self.current_exports.push(name.clone());
+                    }
+                    Stmt::Const { name, .. } | Stmt::Struct { name, .. } | Stmt::Enum { name, .. } => {
+                        self.current_exports.push(name.clone());
+                    }
+                    Stmt::MacroDef { name, params, body } => {
+                        self.macros.insert(name.clone(), (params.clone(), body.clone()));
+                    }
+                    _ => {}
+                },
+                Stmt::MacroDef { name, params, body } => {
+                    self.macros.insert(name.clone(), (params.clone(), body.clone()));
+                }
+                Stmt::Extern { lib, decls, .. } => {
+                    for decl in decls {
+                        let native = crate::vm::make_foreign_native(decl.clone(), lib.clone());
+                        local_foreigns.push((decl.name.clone(), native));
+                    }
+                }
+                _ => {}
+            }
+        }
+        for (n, cl) in &local_closures {
+            self.load_const(cl.clone());
+            let ci = self.const_str(n);
+            self.emit_op(Op::StoreGlobal);
+            self.emit_u16(ci);
+        }
+        for (n, nf) in &local_foreigns {
+            self.load_const(nf.clone());
+            let ci = self.const_str(n);
+            self.emit_op(Op::StoreGlobal);
+            self.emit_u16(ci);
+        }
+        // Process this module's own imports (recursive inline).
+        for imp in &module.imports {
+            self.compile_import(imp)?;
+        }
+        // Compile its non-fn items (pub let/const/struct/enum...).
+        for stmt in &module.items {
+            if let Stmt::Let { value, .. } = stmt {
+                if matches!(value.as_ref(), Expr::Function { .. }) {
+                    continue;
+                }
+            }
+            if let Stmt::Export(inner) = stmt {
+                if let Stmt::Let { value, .. } = inner.as_ref() {
+                    if matches!(value.as_ref(), Expr::Function { .. }) {
+                        continue;
+                    }
+                }
+                if matches!(inner.as_ref(), Stmt::MacroDef { .. }) {
+                    continue;
+                }
+            }
+            if matches!(stmt, Stmt::Extern { .. }) {
+                continue;
+            }
+            if matches!(stmt, Stmt::MacroDef { .. }) {
+                continue;
+            }
+            self.compile_stmt(stmt)?;
+        }
+
+        // Capture this module's exports (including re-exports added during
+        // import processing) and restore the parent's export list.
+        let local_exports = std::mem::replace(&mut self.current_exports, saved_exports);
+        self.module_cache.insert(canon.clone(), local_exports.clone());
+        self.base_dir = saved_base;
+        self.compiling.remove(&canon);
+        Ok(local_exports)
+    }
+
+    /// Emit, at run time, a `Value::Module` built from `exports` (a list of
+    /// global names), then `StoreGlobal name`.
+    fn emit_build_module(&mut self, exports: &[String], name: &str) {
+        for n in exports {
+            // BuildModule pops (value, name) per pair, so push name then value.
+            let ki = self.const_str(n);
+            self.emit_op(Op::LoadConst);
+            self.emit_u16(ki);
+            let ci = self.const_str(n);
+            self.emit_op(Op::LoadGlobal);
+            self.emit_u16(ci);
+        }
+        self.emit_op(Op::BuildModule);
+        self.emit_byte(exports.len() as u8);
+        let gi = self.const_str(name);
+        self.emit_op(Op::StoreGlobal);
+        self.emit_u16(gi);
+    }
+
+    fn compile_import(&mut self, import: &Import) -> Result<(), String> {
+        let resolved = self.resolve_target(import)?;
+        match import.kind {
+            ImportKind::Whole => {
+                let exports = self.inline_module(resolved.leaf.clone(), resolved.init.clone())?;
+                let bind_name = if let Some(a) = &import.alias {
+                    a.clone()
+                } else if import.is_file {
+                    Path::new(&import.path[0]).file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| import.path[0].clone())
+                } else {
+                    import.path[0].clone()
+                };
+                if import.reexport {
+                    // Re-export all of the module's exports from the current module.
+                    for n in &exports {
+                        if !self.current_exports.contains(n) {
+                            self.current_exports.push(n.clone());
+                        }
+                    }
+                    return Ok(());
+                }
+                if import.is_file || import.path.len() == 1 {
+                    self.emit_build_module(&exports, &bind_name);
+                } else {
+                    // `import pkg.sub` directory-package nesting on the VM
+                    // requires per-module global scopes; use `from pkg.sub
+                    // import x` instead (documented VM subset).
+                    return Err("import pkg.sub: VM nesting not supported in this build (use from pkg.sub import x)".to_string());
+                }
+                Ok(())
+            }
+            ImportKind::From => {
+                let exports = self.inline_module(resolved.leaf.clone(), resolved.init.clone())?;
+                if import.reexport {
+                    if import.star {
+                        for n in &exports {
+                            if !self.current_exports.contains(n) {
+                                self.current_exports.push(n.clone());
+                            }
+                        }
+                    } else {
+                        for (n, _) in &import.from_names {
+                            if !exports.contains(n) {
+                                return Err(format!("from {} import {}: '{}' is not exported", import.path.join("."), n, n));
+                            }
+                            if !self.current_exports.contains(n) {
+                                self.current_exports.push(n.clone());
+                            }
+                        }
+                    }
+                    return Ok(());
+                }
+                if import.star {
+                    // All exported globals are already inlined; nothing to copy.
+                    return Ok(());
+                }
+                for (n, alias) in &import.from_names {
+                    if !exports.contains(n) {
+                        return Err(format!("from {} import {}: '{}' is not exported", import.path.join("."), n, n));
+                    }
+                    if let Some(a) = alias {
+                        let ci = self.const_str(n);
+                        self.emit_op(Op::LoadGlobal);
+                        self.emit_u16(ci);
+                        let ai = self.const_str(a);
+                        self.emit_op(Op::StoreGlobal);
+                        self.emit_u16(ai);
+                    }
+                    // No alias: the global `n` is already present (inlined).
+                }
+                Ok(())
+            }
+        }
+    }
+
     fn compile_function(&self, name: &str, params: &[Param], body: &[Stmt]) -> Result<Value, String> {
         let mut sub = Compiler::new();
         sub.scope_depth = 1;
@@ -91,6 +378,8 @@ impl Compiler {
         sub.func_names = self.func_names.clone();
         sub.func_closures = self.func_closures.clone();
         sub.macros = self.macros.clone();
+        sub.module_cache = self.module_cache.clone();
+        sub.base_dir = self.base_dir.clone();
         for s in body {
             sub.compile_stmt(s)?;
         }
@@ -248,6 +537,40 @@ impl Compiler {
                 }
             }
             Stmt::MacroDef { .. } => {} // registered in the pre-pass
+            Stmt::Export(inner) => {
+                // Compile the inner declaration; `pub fn`/`pub macro` are
+                // already handled in the pre-pass, so only `pub let` (non-fn),
+                // `pub const`, and (unsupported) `pub struct`/`pub enum` reach here.
+                match inner.as_ref() {
+                    Stmt::Let { name, value, .. } => {
+                        self.compile_expr(value)?;
+                        if self.scope_depth == 0 {
+                            let ci = self.const_str(name);
+                            self.emit_op(Op::StoreGlobal);
+                            self.emit_u16(ci);
+                        } else {
+                            let slot = self.add_local(name.clone());
+                            self.emit_op(Op::StoreLocal);
+                            self.emit_byte(slot);
+                        }
+                    }
+                    Stmt::Const { name, value } => {
+                        self.compile_expr(value)?;
+                        if self.scope_depth == 0 {
+                            let ci = self.const_str(name);
+                            self.emit_op(Op::StoreGlobal);
+                            self.emit_u16(ci);
+                        } else {
+                            let slot = self.add_local(name.clone());
+                            self.emit_op(Op::StoreLocal);
+                            self.emit_byte(slot);
+                        }
+                    }
+                    other => {
+                        return Err(format!("VM does not support exporting: {:?}", other));
+                    }
+                }
+            }
             other => {
                 return Err(format!("VM does not support statement: {:?}", other));
             }
@@ -612,6 +935,12 @@ impl Compiler {
                 self.compile_expr(inner)?;
                 self.emit_op(Op::Await);
             }
+            Expr::Function { params, body, .. } => {
+                // Compile a function literal to a closure constant (used by
+                // `pub fn` inlining and nested function values).
+                let closure = self.compile_function("<anon>", params, body)?;
+                self.load_const(closure);
+            }
             Expr::MacroVar(name) => {
                 return Err(format!("macro variable '${}' used outside a macro body", name));
             }
@@ -789,6 +1118,14 @@ fn interp_to_fmt(template: &str) -> String {
 
 pub fn compile_module(module: &Module) -> Result<Chunk, String> {
     let mut c = Compiler::new();
+    c.compile(module)
+}
+
+/// Compile a module located at `file`, resolving name-based imports relative
+/// to its parent directory. Used for VM module loading.
+pub fn compile_module_in(module: &Module, base_dir: &str) -> Result<Chunk, String> {
+    let mut c = Compiler::new();
+    c.base_dir = base_dir.to_string();
     c.compile(module)
 }
 

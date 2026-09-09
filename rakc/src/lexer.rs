@@ -82,6 +82,12 @@ pub enum Token {
     Macro,
     #[token("const")]
     Const,
+    #[token("import")]
+    Import,
+    #[token("from")]
+    From,
+    #[token("export")]
+    Export,
 
     /// A macro placeholder `$name` inside a macro body.
     #[regex(r"\$[a-zA-Z_][a-zA-Z0-9_]*", |lex| lex.slice()[1..].to_string())]

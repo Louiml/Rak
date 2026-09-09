@@ -7,6 +7,7 @@ pub mod bytecode;
 pub mod compiler;
 pub mod vm;
 pub mod async_rt;
+pub mod modules;
 pub mod repl;
 
 #[cfg(feature = "gui")]
@@ -43,5 +44,12 @@ pub fn compile(source: &str) -> Result<()> {
 /// Evaluate Rak code in interpreter mode.
 pub fn eval(source: &str) -> Result<Vec<String>> {
     let mut interpreter = interpreter::Interpreter::new();
+    interpreter.run_source(source)
+}
+
+/// Evaluate Rak code in interpreter mode with a base directory (used to resolve
+/// name-based `import m` relative to the importing file).
+pub fn eval_in(source: &str, base_dir: &str) -> Result<Vec<String>> {
+    let mut interpreter = interpreter::Interpreter::with_base_dir(base_dir.to_string());
     interpreter.run_source(source)
 }

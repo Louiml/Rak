@@ -807,6 +807,92 @@ mmap_close(m)
 
 ---
 
+## Part 3 — Module system (imports & exports)
+
+### 3.1 Imports & exports  **[SHIPPED]**
+
+Python-style modules with explicit `pub`/`export`, name-based resolution,
+`from ... import`, directory packages, import-once caching, and circular-import
+support. Works on both the interpreter and the bytecode VM.
+
+#### Syntax
+```rak
+// Whole-module import (binds the module; access via m.x)
+import "./math.rak"          // file path -> binds "math"
+import math                  // name: dir -> ./packages/ -> RAK_PATH, m.rak or m/init.rak
+import math as m             // alias
+use math                     // back-compat: same as import
+
+// from-import (binds names directly)
+from math import add
+from math import add as plus, mul as times
+from math import *           // all exports; local bindings win on clash
+
+// Directory packages
+import pkg                   // runs pkg/init.rak
+import pkg.sub               // runs pkg/init.rak + pkg/sub.rak (interpreter)
+
+// Exports (pub and export are equivalent)
+pub let PI = 3.14
+export fn add(a, b) { return a + b }
+pub const MAX = 256
+pub struct Vec3 { x: int, y: int, z: int }
+
+// Re-exports
+pub use math                 // re-export all of math from this module
+pub use {add, mul} from math // re-export named
+```
+
+#### Architecture
+- `ast.rs`: `Import` extended with `kind: ImportKind { Whole, From }`,
+  `from_names: Vec<(String, Option<String>)>`, `star`, `reexport`.
+- `lexer.rs`: `import`, `from`, `export` keywords (alongside `pub`/`use`).
+- `parser.rs`: `parse_module` collects `import`/`from`/`use`/`pub use ...`/
+  `pub from ... import`; `parse_stmt` treats `export` like `pub` (wraps in
+  `Stmt::Export`).
+- `modules.rs` (new): `resolve_dotted(importer_dir, parts)` searches
+  `importer_dir`, `./packages/`, `RAK_PATH` (in order) for `<name>.rak` then
+  `<name>/init.rak`. Shared by both backends.
+- Interpreter: a `module_cache: HashMap<PathBuf, ModuleEntry>` (exports +
+  macros) + `loading_modules` set. `load_module_file` inserts an empty entry
+  before executing (so circular imports see a partial), runs the module's own
+  imports + items, collecting every `Export(<kind>)` into the entry. `load_import`
+  handles Whole/From/Reexport, directory packages (`pkg` bound as a Module
+  containing `sub`), `import *` (locals win), and macro import (registers in
+  `self.macros`).
+- VM (`compiler.rs` + `vm.rs` + `bytecode.rs`): a compile-time `module_cache`
+  + `compiling` set; `inline_module` compiles each imported module's exported
+  items as globals in the current chunk (recursively, cached, cycle-aware). A
+  new `Op::BuildModule` builds a `Value::Module` from a list of exported global
+  names at run time; `from m import x` copies/aliases globals; `from m import *`
+  is a no-op (already inlined); re-exports add to the module's export list.
+  `compile_module_in(module, base_dir)` resolves name-based imports relative to
+  the file.
+
+#### Error handling & edge cases
+- **Missing module** → `Runtime("import: cannot find module 'm' (searched: dir, packages, RAK_PATH)")`.
+- **Missing name** → `Runtime("from m import x: 'x' is not exported")`.
+- **Circular imports** → return the partially-built entry (Python semantics);
+  a name not yet defined at the cycle point is a `Undefined variable` error.
+- **Import-once** → modules are cached by canonical path; re-importing returns
+  the cached entry without re-running.
+- **`from m import *`** → never overwrites an existing local binding.
+- **`pub`/`export`** mark items exported; unmarked top-level names are private
+  to the module.
+
+#### Errata (VM subset)
+- **`import pkg.sub`** (directory-package nested access) is interpreter-only;
+  the VM's flat-globals architecture can't isolate per-module scopes. Use
+  `from pkg.sub import x` on the VM.
+- **`pub struct`/`pub enum`** are exported on the interpreter; the VM (which
+  has no `Value::StructDef`/`EnumDef`) errors on struct/enum export — use
+  `pub let`/`fn`/`const`/`macro` for cross-VM modules.
+- **Non-pub top-level** of an imported module is inlined as globals on the VM
+  (visible to the importer); the interpreter keeps them in the module's
+  private scope.
+
+---
+
 ## Cross-cutting concerns
 
 ### Error model
@@ -837,6 +923,7 @@ mmap_close(m)
 | Raw sockets (packet forging) | yes (builders + unix send/recv) | yes (builders + `Result` send/recv) |
 | DNS / TLS / PCAP | yes (dns_query/build/parse, tls parse, pcap open/next) | yes (same builtins; `Result` for query/open) |
 | Compile-time macros (`macro`/`name!`/`const`) | yes (expand + exec) | yes (expand at compile time) |
+| Imports & exports (`import`/`from`/`pub`) | yes (whole/from/star/pkg/cycles) | yes (whole/from/star; no `pkg.sub` nesting) |
 
 The VM's `compile_stmt`/`compile_expr`/`compile_pattern` return
 `Err("VM does not support ...")` for unsupported nodes, so running an

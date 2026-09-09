@@ -177,7 +177,8 @@ fn main() {
 
     match cmd.as_str() {
         "run" => {
-            match rakc::eval(&source) {
+            let base_dir = std::path::Path::new(file).parent().map(|p| p.to_string_lossy().to_string()).unwrap_or_else(|| ".".to_string());
+            match rakc::eval_in(&source, &base_dir) {
                 Ok(output) => {
                     for line in &output {
                         println!("{}", line);
@@ -229,11 +230,12 @@ fn main() {
             }
         }
         "vm" => {
+            let base_dir = std::path::Path::new(file).parent().map(|p| p.to_string_lossy().to_string()).unwrap_or_else(|| ".".to_string());
             match rakc::lexer::tokenize(&source) {
                 Ok(tokens) => {
                     match rakc::parser::parse(&tokens, &source) {
                         Ok(ast) => {
-                            match rakc::compiler::compile_module(&ast) {
+                            match rakc::compiler::compile_module_in(&ast, &base_dir) {
                                 Ok(chunk) => {
                                     let mut vm = rakc::vm::Vm::new();
                                     match vm.run(&chunk) {

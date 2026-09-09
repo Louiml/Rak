@@ -1,7 +1,7 @@
 use crate::ast::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::sync::mpsc;
 use std::thread::JoinHandle;
@@ -287,6 +287,19 @@ pub struct Interpreter {
     ffi_allocs: HashMap<u64, usize>,
     /// `macro name(params) { body }` definitions, keyed by macro name.
     macros: HashMap<String, crate::ast::Stmt>,
+    /// Import-once module cache: canonical file path → the module's exported
+    /// names + macros. Supports circular imports (a module in
+    /// `loading_modules` returns its partially-built entry).
+    module_cache: HashMap<PathBuf, ModuleEntry>,
+    /// Modules currently being loaded (for circular-import detection).
+    loading_modules: HashSet<PathBuf>,
+}
+
+/// A loaded module's exported runtime values and macro definitions.
+#[derive(Clone)]
+struct ModuleEntry {
+    exports: HashMap<String, Value>,
+    macros: HashMap<String, crate::ast::Stmt>,
 }
 
 /// An `extern "C"` declaration plus the (lazily resolved) library it lives in.
@@ -312,6 +325,8 @@ impl Interpreter {
             foreign_default_lib: None,
             ffi_allocs: HashMap::new(),
             macros: HashMap::new(),
+            module_cache: HashMap::new(),
+            loading_modules: HashSet::new(),
         }
     }
 
@@ -330,6 +345,8 @@ impl Interpreter {
             foreign_default_lib: None,
             ffi_allocs: HashMap::new(),
             macros: HashMap::new(),
+            module_cache: HashMap::new(),
+            loading_modules: HashSet::new(),
         }
     }
 
@@ -349,57 +366,245 @@ impl Interpreter {
         self.run(&module)
     }
 
-    fn load_import(&mut self, import: &Import) -> crate::Result<()> {
-        if import.is_file {
-            let rel = &import.path[0];
+    /// Resolve an import spec's target to a file (and optional package init).
+    fn resolve_target(&self, spec: &Import) -> crate::Result<crate::modules::DottedResolve> {
+        if spec.is_file {
+            let rel = &spec.path[0];
             let full = if Path::new(rel).is_absolute() {
-                rel.clone()
+                PathBuf::from(rel)
             } else {
-                Path::new(&self.base_dir)
-                    .join(rel)
-                    .to_string_lossy()
-                    .to_string()
+                Path::new(&self.base_dir).join(rel)
             };
-            let source = std::fs::read_to_string(&full).map_err(|e| {
-                crate::RakError::Runtime(format!("Cannot import '{}': {}", full, e))
-            })?;
-            let tokens = crate::lexer::tokenize(&source)?;
-            let module = crate::parser::parse(&tokens, &source)?;
-            let saved_base = self.base_dir.clone();
-            if let Some(parent) = Path::new(&full).parent() {
-                self.base_dir = parent.to_string_lossy().to_string();
+            Ok(crate::modules::DottedResolve { init: None, leaf: full })
+        } else {
+            crate::modules::resolve_dotted(Path::new(&self.base_dir), &spec.path).ok_or_else(|| {
+                crate::RakError::Runtime(format!(
+                    "import: cannot find module '{}' (searched: {}, packages, RAK_PATH)",
+                    spec.path.join("."),
+                    self.base_dir
+                ))
+            })
+        }
+    }
+
+    /// Load a module file once (cached). Returns its exported names + macros.
+    /// Circular imports return the partially-built entry (Python semantics).
+    fn load_module_file(&mut self, leaf: PathBuf, init: Option<PathBuf>) -> crate::Result<ModuleEntry> {
+        let canon = crate::modules::canonical(&leaf);
+        if let Some(entry) = self.module_cache.get(&canon).cloned() {
+            return Ok(entry);
+        }
+        if self.loading_modules.contains(&canon) {
+            // Cycle: return whatever has been exported so far.
+            return Ok(self.module_cache.get(&canon).cloned().unwrap_or_else(|| ModuleEntry {
+                exports: HashMap::new(),
+                macros: HashMap::new(),
+            }));
+        }
+        // Load the package init first (binds the package's own exports).
+        if let Some(init_path) = init {
+            let _ = self.load_module_file(init_path.clone(), None)?;
+        }
+
+        self.loading_modules.insert(canon.clone());
+        // Insert an empty entry so cyclic imports during execution see a partial.
+        self.module_cache.insert(canon.clone(), ModuleEntry { exports: HashMap::new(), macros: HashMap::new() });
+
+        let source = std::fs::read_to_string(&leaf).map_err(|e| {
+            crate::RakError::Runtime(format!("import: cannot read '{}': {}", leaf.display(), e))
+        })?;
+        let tokens = crate::lexer::tokenize(&source)?;
+        let module = crate::parser::parse(&tokens, &source)?;
+        let saved_base = self.base_dir.clone();
+        if let Some(parent) = leaf.parent() {
+            self.base_dir = parent.to_string_lossy().to_string();
+        }
+        self.env.push_scope();
+
+        // Process the module's own imports (its deps + re-exports).
+        for imp in &module.imports {
+            self.load_import(imp)?;
+        }
+        // Execute the module's items, collecting `pub`/`export` declarations.
+        for stmt in &module.items {
+            self.exec_stmt(stmt)?;
+            if let Stmt::Export(inner) = stmt {
+                self.collect_export(inner)?;
             }
-            let mut exports = HashMap::new();
-            self.env.push_scope();
-            for stmt in &module.items {
-                if let Stmt::Export(inner) = stmt {
-                    if let Stmt::Let { name, value, .. } = inner.as_ref() {
-                        let v = self.eval_expr(value)?;
-                        self.env.define(name, v.clone());
-                        exports.insert(name.clone(), v);
-                    } else {
-                        self.exec_stmt(inner)?;
+        }
+
+        self.env.pop_scope();
+        self.base_dir = saved_base;
+
+        let entry = self.module_cache.get(&canon).cloned().unwrap_or_else(|| ModuleEntry {
+            exports: HashMap::new(),
+            macros: HashMap::new(),
+        });
+        self.loading_modules.remove(&canon);
+        Ok(entry)
+    }
+
+    /// Add a `pub`/`export` declaration's value to the current module's export
+    /// map (and register exported macros).
+    fn collect_export(&mut self, inner: &Stmt) -> crate::Result<()> {
+        let canon_key = self.loading_modules.iter().last().cloned();
+        let name = match inner {
+            Stmt::Let { name, .. } | Stmt::Const { name, .. } | Stmt::Struct { name, .. } | Stmt::Enum { name, .. } => Some(name.clone()),
+            Stmt::MacroDef { name, .. } => {
+                if let Some(canon) = canon_key.as_ref() {
+                    if let Some(entry) = self.module_cache.get_mut(canon) {
+                        entry.macros.insert(name.clone(), inner.clone());
                     }
-                } else {
-                    self.exec_stmt(stmt)?;
+                }
+                None
+            }
+            _ => None,
+        };
+        if let Some(name) = name {
+            let val = self.env.get(&name).unwrap_or(Value::Nil);
+            if let Some(canon) = canon_key.as_ref() {
+                if let Some(entry) = self.module_cache.get_mut(canon) {
+                    entry.exports.insert(name, val);
                 }
             }
-            let _ = self.env.pop_scope();
-            self.base_dir = saved_base;
-            let key = import
-                .alias
-                .clone()
-                .unwrap_or_else(|| Path::new(rel).file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default());
-            if !exports.is_empty() {
-                self.env.define(&key, Value::Module(exports));
+        }
+        Ok(())
+    }
+
+    fn load_import(&mut self, import: &Import) -> crate::Result<()> {
+        match import.kind {
+            ImportKind::Whole => self.load_whole_import(import),
+            ImportKind::From => self.load_from_import(import),
+        }
+    }
+
+    fn load_whole_import(&mut self, import: &Import) -> crate::Result<()> {
+        let resolved = self.resolve_target(import)?;
+        let entry = self.load_module_file(resolved.leaf.clone(), resolved.init.clone())?;
+        // Determine the bind name.
+        let bind_name = if let Some(a) = &import.alias {
+            a.clone()
+        } else if import.is_file {
+            Path::new(&import.path[0]).file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| import.path[0].clone())
+        } else {
+            import.path[0].clone() // top package name for `import pkg.sub`
+        };
+
+        if import.reexport {
+            // Re-export all of the module's exports from the current module.
+            self.add_reexports(&entry.exports, &entry.macros);
+            return Ok(());
+        }
+
+        // Bind the whole module.
+        let module_val = Value::Module(entry.exports.clone());
+        if import.is_file || import.path.len() == 1 {
+            self.env.define(&bind_name, module_val);
+        } else {
+            // `import pkg.sub`: bind `pkg` as a module containing `sub`.
+            let sub_name = import.path.last().unwrap().clone();
+            let mut pkg_exports = if let Some(Value::Module(m)) = self.env.get(&bind_name) {
+                m
+            } else {
+                HashMap::new()
+            };
+            pkg_exports.insert(sub_name, module_val);
+            self.env.define(&bind_name, Value::Module(pkg_exports));
+        }
+        Ok(())
+    }
+
+    fn load_from_import(&mut self, import: &Import) -> crate::Result<()> {
+        let resolved = self.resolve_target(import)?;
+        let entry = self.load_module_file(resolved.leaf.clone(), resolved.init.clone())?;
+
+        if import.reexport {
+            if import.star {
+                self.add_reexports(&entry.exports, &entry.macros);
+            } else {
+                for (n, alias) in &import.from_names {
+                    let val = entry.exports.get(n).cloned().ok_or_else(|| {
+                        crate::RakError::Runtime(format!("from {} import {}: '{}' is not exported", import.path.join("."), n, n))
+                    })?;
+                    let out = alias.clone().unwrap_or_else(|| n.clone());
+                    self.add_reexport(&out, val);
+                }
+                for (n, _) in &import.from_names {
+                    if let Some(mdef) = entry.macros.get(n).cloned() {
+                        self.add_reexport_macro(n.clone(), mdef);
+                    }
+                }
             }
             return Ok(());
         }
-        self.output.push(format!("[USE] {}", import.path.join("::")));
-        if let Some(alias) = &import.alias {
-            self.output.push(format!("[USE] as {}", alias));
+
+        if import.star {
+            // `from m import *` — copy all exports without overwriting locals.
+            for (n, v) in &entry.exports {
+                if self.env.get(n).is_none() {
+                    self.env.define(n, v.clone());
+                }
+            }
+            for (n, mdef) in &entry.macros {
+                if !self.macros.contains_key(n) {
+                    self.macros.insert(n.clone(), mdef.clone());
+                }
+            }
+            return Ok(());
+        }
+
+        for (n, alias) in &import.from_names {
+            let val = entry.exports.get(n).cloned().ok_or_else(|| {
+                crate::RakError::Runtime(format!("from {} import {}: '{}' is not exported", import.path.join("."), n, n))
+            })?;
+            let out = alias.clone().unwrap_or_else(|| n.clone());
+            self.env.define(&out, val);
+        }
+        // Import macros too.
+        for (n, alias) in &import.from_names {
+            if let Some(mdef) = entry.macros.get(n).cloned() {
+                let out = alias.clone().unwrap_or_else(|| n.clone());
+                self.macros.insert(out, mdef);
+            }
         }
         Ok(())
+    }
+
+    /// Add a set of exports/macros to the module currently being built (for
+    /// `pub use m` re-exports).
+    fn add_reexports(&mut self, exports: &HashMap<String, Value>, macros: &HashMap<String, crate::ast::Stmt>) {
+        let canon = match self.loading_modules.iter().last().cloned() {
+            Some(c) => c,
+            None => return,
+        };
+        if let Some(entry) = self.module_cache.get_mut(&canon) {
+            for (n, v) in exports {
+                entry.exports.entry(n.clone()).or_insert_with(|| v.clone());
+            }
+            for (n, m) in macros {
+                entry.macros.entry(n.clone()).or_insert_with(|| m.clone());
+            }
+        }
+    }
+
+    fn add_reexport(&mut self, name: &str, val: Value) {
+        let canon = match self.loading_modules.iter().last().cloned() {
+            Some(c) => c,
+            None => return,
+        };
+        if let Some(entry) = self.module_cache.get_mut(&canon) {
+            entry.exports.insert(name.to_string(), val);
+        }
+    }
+
+    fn add_reexport_macro(&mut self, name: String, mdef: crate::ast::Stmt) {
+        let canon = match self.loading_modules.iter().last().cloned() {
+            Some(c) => c,
+            None => return,
+        };
+        if let Some(entry) = self.module_cache.get_mut(&canon) {
+            entry.macros.insert(name, mdef);
+        }
     }
 
     fn exec_stmt(&mut self, stmt: &Stmt) -> crate::Result<()> {
@@ -3877,5 +4082,74 @@ mod tests {
         let src = "const MAX = 256; dump MAX";
         let output = interp.run_source(src).unwrap();
         assert!(output.iter().any(|l| l.contains("[DUMP] 256")), "got: {:?}", output);
+    }
+
+    // --- Imports & exports ---
+
+    fn write_import_module(dir: &std::path::Path, name: &str, src: &str) -> std::path::PathBuf {
+        let p = dir.join(name);
+        std::fs::write(&p, src).unwrap();
+        p
+    }
+
+    #[test]
+    fn test_interpreter_import_whole_and_from() {
+        let dir = std::env::temp_dir().join(format!("rak_import_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        write_import_module(&dir, "m.rak", "pub let PI = 3.14\npub fn add(a, b) { return a + b }\nexport fn mul(a, b) { return a * b }");
+        let main = "import m\ndump m.PI\ndump m.add(2, 3)\nfrom m import add as plus\ndump plus(10, 20)\nfrom m import *\ndump mul(4, 5)";
+        let mut interp = Interpreter::with_base_dir(dir.to_string_lossy().to_string());
+        let output = interp.run_source(main).unwrap();
+        assert!(output.iter().any(|l| l.contains("[DUMP] 3.14")), "got: {:?}", output);
+        assert!(output.iter().any(|l| l.contains("[DUMP] 5")), "got: {:?}", output);
+        assert!(output.iter().any(|l| l.contains("[DUMP] 30")), "got: {:?}", output);
+        assert!(output.iter().any(|l| l.contains("[DUMP] 20")), "got: {:?}", output);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_interpreter_import_star_locals_win() {
+        let dir = std::env::temp_dir().join(format!("rak_import_star_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        write_import_module(&dir, "m.rak", "pub let X = 1\npub let Y = 2");
+        let main = "let X = 99\nfrom m import *\ndump X\ndump Y";
+        let mut interp = Interpreter::with_base_dir(dir.to_string_lossy().to_string());
+        let output = interp.run_source(main).unwrap();
+        assert!(output.iter().any(|l| l.contains("[DUMP] 99")), "got: {:?}", output); // local wins
+        assert!(output.iter().any(|l| l.contains("[DUMP] 2")), "got: {:?}", output);     // imported
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_interpreter_import_directory_package() {
+        let dir = std::env::temp_dir().join(format!("rak_import_pkg_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("pkg")).unwrap();
+        write_import_module(dir.join("pkg").as_path(), "init.rak", "pub let A = 7\npub fn b(x) { return x + 1 }");
+        write_import_module(dir.join("pkg").as_path(), "sub.rak", "pub let C = 42");
+        let main = "import pkg\ndump pkg.A\ndump pkg.b(1)\nimport pkg.sub\ndump pkg.sub.C";
+        let mut interp = Interpreter::with_base_dir(dir.to_string_lossy().to_string());
+        let output = interp.run_source(main).unwrap();
+        assert!(output.iter().any(|l| l.contains("[DUMP] 7")), "got: {:?}", output);
+        assert!(output.iter().any(|l| l.contains("[DUMP] 2")), "got: {:?}", output);
+        assert!(output.iter().any(|l| l.contains("[DUMP] 42")), "got: {:?}", output);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_interpreter_import_once_cached() {
+        let dir = std::env::temp_dir().join(format!("rak_import_once_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // m.rak increments a counter file on each execution; import-once means
+        // importing twice runs it once.
+        write_import_module(&dir, "m.rak", "pub let N = 1");
+        let main = "import m\nimport m\ndump m.N";
+        let mut interp = Interpreter::with_base_dir(dir.to_string_lossy().to_string());
+        let output = interp.run_source(main).unwrap();
+        assert!(output.iter().any(|l| l.contains("[DUMP] 1")), "got: {:?}", output);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

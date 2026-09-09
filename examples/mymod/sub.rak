@@ -1,0 +1,6 @@
+// A submodule of the mymod package: `import mymod.sub`.
+pub let SUB_NAME = "sub"
+pub fn sub_add(a, b) { return a + b }
+
+// Re-export names from another module (demonstrates `pub use ... from`).
+pub use {add} from "./init.rak"

@@ -167,11 +167,53 @@ let deps = { net: "user/rak-net", crypto: "user/rak-crypto" }
 let entry = "lib.rak"
 ```
 
-Import installed packages by file path. No new syntax needed:
+Import installed packages by file path or by name (Python-style). See the
+Imports & exports section below for the full syntax.
 
 ```rak
-use "./packages/mylib/lib.rak"
+use "./packages/mylib/lib.rak"   // file-path (back-compat)
+import mylib                     // name -> searches dir, ./packages/, RAK_PATH
 ```
+
+## Imports & exports
+
+Rak has a Python-style module system with explicit `pub`/`export`, name-based
+resolution, `from ... import`, directory packages, import-once caching, and
+circular-import support. Works on both the interpreter and the bytecode VM.
+
+```rak
+// Whole-module import (binds the module; access via m.x)
+import "./math.rak"          // file path -> binds "math"
+import math                  // name: searches dir, ./packages/, RAK_PATH for math.rak
+import math as m             // alias
+use math                     // back-compat: same as import
+
+// from-import (binds names directly)
+from math import add
+from math import add as plus, mul as times
+from math import *           // all exports; local bindings win on clash
+
+// Directory packages: `import pkg` runs pkg/init.rak; `import pkg.sub`
+// runs pkg/init.rak + pkg/sub.rak (interpreter; use `from pkg.sub import x`
+// on the VM).
+import pkg
+import pkg.sub
+
+// Exports — both `pub` and `export` mark an item as exported (let/fn/const/
+// struct/enum/macro):
+pub let PI = 3.14
+export fn add(a, b) { return a + b }
+pub const MAX = 256
+
+// Re-exports
+pub use math                 // re-export all of math from this module
+pub use {add, mul} from math // re-export named
+```
+
+Module resolution for a name `m`: the importing file's directory, then
+`./packages/`, then the `RAK_PATH` env var (`;` on Windows, `:` on Unix),
+trying `m.rak` then `m/init.rak`. Modules are imported once (cached); a
+circular import returns the partially-initialized module (Python semantics).
 
 ## SQL server
 
@@ -522,6 +564,7 @@ Rak/
 │   ├── net_raw.rak         Raw sockets: forge IPv4/TCP/UDP packets
 │   ├── parsers.rak         DNS / TLS / PCAP wire-format parsers
 │   ├── macros.rak          Compile-time macros: macro / name! / const
+│   ├── import_demo.rak    Python-style import / from / export (with mymod/ package)
 │   └── stdlib_demo.rak     String, array, and math builtins
 ```
 

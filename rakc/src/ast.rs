@@ -323,11 +323,31 @@ pub struct Module {
     pub items: Vec<Stmt>,
 }
 
+/// The two import shapes: whole-module (`import m`) and from-import
+/// (`from m import x`).
+#[derive(Debug, Clone, PartialEq)]
+pub enum ImportKind {
+    /// `import m` / `use m` / `import "./f.rak"` — bind the whole module.
+    Whole,
+    /// `from m import x, y as z` / `from m import *` — bind selected names.
+    From,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Import {
+    /// Module target: a file path (single string element when `is_file`) or a
+    /// dotted name (`["pkg", "sub"]`).
     pub path: Vec<String>,
     pub is_file: bool,
     pub alias: Option<String>,
+    pub kind: ImportKind,
+    /// `from m import x, y as z` — `(name, alias)` pairs.
+    pub from_names: Vec<(String, Option<String>)>,
+    /// `from m import *`.
+    pub star: bool,
+    /// `pub use ...` / `export use ...` — re-export the names from this module
+    /// instead of binding them in the importer's scope.
+    pub reexport: bool,
 }
 
 /// A single foreign function declaration inside an `extern "C" { ... }` block.

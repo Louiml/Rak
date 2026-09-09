@@ -6,7 +6,7 @@ const KEYWORDS: &[&str] = &[
     "scan", "fetch", "dump", "trace", "loop", "if", "else", "fn", "let", "mut",
     "return", "use", "mod", "pub", "struct", "enum", "impl", "match", "for",
     "while", "break", "continue", "true", "false", "nil", "in",
-    "try", "catch", "raise", "throw", "trait", "async", "await", "spawn", "as", "type", "extern",
+    "try", "catch", "raise", "throw", "trait", "async", "await", "spawn", "as", "type", "extern", "macro", "const", "import", "from", "export",
 ];
 
 const TYPES: &[&str] = &[

@@ -1,0 +1,40 @@
+// Python-style imports & exports. Runs on the interpreter.
+//   rakc run examples/import_demo.rak
+//
+// Demonstrates: whole-module import, alias, from-import (single/alias/multi/star),
+// directory packages, submodules, and re-exports.
+
+// Whole-module import (name resolves to examples/mymod/init.rak).
+import mymod
+dump mymod.PI            // 3.14
+dump mymod.add(2, 3)     // 5
+dump mymod.mul(4, 5)     // 20
+dump mymod.MAX           // 256
+
+// Alias the module.
+import mymod as m
+dump m.add(1, 1)         // 2
+
+// from-import: single, alias, multi.
+from mymod import add
+dump add(10, 20)         // 30
+from mymod import add as plus, mul as times
+dump plus(7, 8)          // 15
+dump times(6, 7)         // 42
+
+// from-import * (locals win on clash).
+let PI = "local-pi"
+from mymod import *
+dump PI                  // "local-pi" (local wins)
+dump mul(3, 3)           // 9 (imported)
+
+// Directory package submodule: `from mymod.sub import ...` (VM-compatible;
+// `import mymod.sub` nested access is interpreter-only on the VM subset).
+from mymod.sub import sub_add, SUB_NAME, add
+dump SUB_NAME                 // "sub"
+dump sub_add(100, 1)          // 101
+dump add(5, 6)                // 11 (sub re-exports `add` from init)
+
+// File-path import (back-compat with `use`).
+use "./mymod/init.rak"
+dump init.add(9, 9)           // 18
