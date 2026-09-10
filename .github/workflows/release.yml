@@ -189,12 +189,12 @@ jobs:
           } else {
             throw "IDE binary not found (expected target/release/app.exe or rak-ide.exe)"
           }
-          Copy-Item ide/src-tauri/resources/rakc.exe ide/src-tauri/resources/rakpkg.exe ide-portable\ -ErrorAction SilentlyContinue
+          Copy-Item -Path ide/src-tauri/resources/rakc.exe,ide/src-tauri/resources/rakpkg.exe -Destination ide-portable\ -ErrorAction SilentlyContinue
           Compress-Archive -Path ide-portable\* -DestinationPath staging/rak-ide-windows-x86_64.zip -Force
           # Offline bundle (zip).
           New-Item -ItemType Directory -Force -Path bundle\ide | Out-Null
           Expand-Archive -Path staging/rak-ide-windows-x86_64.zip -DestinationPath bundle\ide -Force
-          Copy-Item staging/rakc-windows-x86_64.exe staging/rakpkg-windows-x86_64.exe bundle\
+          Copy-Item -Path staging/rakc-windows-x86_64.exe,staging/rakpkg-windows-x86_64.exe -Destination bundle\
           Compress-Archive -Path bundle\* -DestinationPath staging/rak-bundle-windows-x86_64.zip -Force
 
       - name: Upload rakc.exe to release
