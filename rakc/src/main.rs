@@ -3,7 +3,7 @@ use std::fs;
 use std::io::{self, Read, Write};
 use std::path::PathBuf;
 
-const VERSION: &str = "0.5.0";
+const VERSION: &str = "0.5.1";
 const PAYLOAD_MAGIC: u64 = 0x52414B5F50434B; // "RAK_PCK" as u64
 
 fn print_usage() {

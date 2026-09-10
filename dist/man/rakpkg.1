@@ -1,0 +1,42 @@
+.TH RAKPKG 1 "2026-09-10" "rakpkg 0.5.0" "Rak package manager"
+.SH NAME
+rakpkg \- Git-based package manager for the Rak language
+.SH SYNOPSIS
+.B rakpkg
+.I <command>
+.RI [ <args> ]
+.SH COMMANDS
+.TP
+.B init [name]
+Create a new package (\fBpackage.rak\fR + \fBlib.rak\fR).
+.TP
+.B add <user/repo>
+Add a dependency from a GitHub repo (git clone into \fB.rak/packages/\fR).
+.TP
+.B install
+Install all dependencies from \fBpackage.rak\fR.
+.TP
+.B run
+Run the entry point via \fBrakc run\fR.
+.TP
+.B build
+Build to a standalone executable via \fBrakc build\fR.
+.TP
+.B list
+List installed packages.
+.TP
+.B remove <name>
+Remove a package.
+.SH MANIFEST
+The manifest is a Rak file (\fBpackage.rak\fR):
+.PP
+.RS
+.nf
+let name = "mylib"
+let version = "0.1.0"
+let deps = { net: "user/rak-net", crypto: "user/rak-crypto" }
+let entry = "lib.rak"
+.fi
+.RE
+.SH SEE ALSO
+.BR rakc (1)

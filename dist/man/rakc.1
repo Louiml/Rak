@@ -1,0 +1,52 @@
+.TH RAKC 1 "2026-09-10" "rakc 0.5.0" "Rak compiler"
+.SH NAME
+rakc \- compiler and interpreter for the Rak programming language
+.SH SYNOPSIS
+.B rakc
+.I <command>
+.RI [ <file> ]
+.SH COMMANDS
+.TP
+.B run <file>
+Run a Rak script on the tree-walking interpreter.
+.TP
+.B vm <file>
+Run on the bytecode VM (~6x faster).
+.TP
+.B build <file>
+Build a standalone executable with the source embedded.
+.TP
+.B bench <file>
+Benchmark interpreter vs VM.
+.TP
+.B check <file>
+Lex and parse, print diagnostics with line/column.
+.TP
+.B lex <file>
+Print tokens.
+.TP
+.B parse <file>
+Print the AST.
+.TP
+.B repl
+Start an interactive REPL.
+.TP
+.B lsp
+Start the language server (stdio).
+.TP
+.B bindgen <h>
+Generate Rak bindings from a C header.
+.SH ENVIRONMENT
+.TP
+.B RAK_PATH
+Search path for \fBimport\fR name-based module resolution (\fB;\fR on Windows,
+\fB:\fR on Unix).
+.SH EXAMPLES
+.PP
+Run a script:
+.B rakc run examples/hello.rak
+.PP
+Build a standalone binary:
+.B rakc build examples/hello.rak
+.SH SEE ALSO
+.BR rakpkg (1)

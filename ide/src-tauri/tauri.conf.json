@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "rak-ide",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "identifier": "com.ryuzaki.rak-ide",
   "build": {
     "frontendDist": "../out",

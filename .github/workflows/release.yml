@@ -54,6 +54,9 @@ jobs:
       - name: Build rakpkg
         run: cargo build --release --bin rakpkg
 
+      - name: Build rak-setup
+        run: cargo build --release --bin rak-setup
+
       - name: Copy binaries for IDE bundling
         run: |
           mkdir -p ide/src-tauri/resources
@@ -69,16 +72,54 @@ jobs:
         env:
           CI: true
 
+      - name: Stage arch-suffixed assets + portable IDE + offline bundle
+        run: |
+          set -e
+          mkdir -p staging
+          cp target/release/rakc            staging/rakc-linux-x86_64
+          cp target/release/rakpkg          staging/rakpkg-linux-x86_64
+          cp target/release/rak-setup       staging/rak-setup-linux-x86_64
+          chmod +x staging/*
+          # Portable IDE archive: the raw Tauri app binary + bundled resources.
+          mkdir -p ide-portable
+          cp target/release/rak-ide ide-portable/rak-ide
+          cp ide/src-tauri/resources/rakc ide/src-tauri/resources/rakpkg ide-portable/ 2>/dev/null || true
+          chmod +x ide-portable/rak-ide
+          tar -czf staging/rak-ide-linux-x86_64.tar.gz -C ide-portable .
+          # Offline bundle: rakc + rakpkg + ide/ (single tar.gz for `--offline`).
+          mkdir -p bundle/ide
+          tar -xzf staging/rak-ide-linux-x86_64.tar.gz -C bundle/ide
+          cp staging/rakc-linux-x86_64 staging/rakpkg-linux-x86_64 bundle/
+          tar -czf staging/rak-bundle-linux-x86_64.tar.gz -C bundle .
+
       - name: Upload rakc to release
         uses: softprops/action-gh-release@v2
         with:
-          files: target/release/rakc
+          files: staging/rakc-linux-x86_64
           tag_name: ${{ needs.create-release.outputs.tag }}
 
       - name: Upload rakpkg to release
         uses: softprops/action-gh-release@v2
         with:
-          files: target/release/rakpkg
+          files: staging/rakpkg-linux-x86_64
+          tag_name: ${{ needs.create-release.outputs.tag }}
+
+      - name: Upload rak-setup to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: staging/rak-setup-linux-x86_64
+          tag_name: ${{ needs.create-release.outputs.tag }}
+
+      - name: Upload portable IDE archive to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: staging/rak-ide-linux-x86_64.tar.gz
+          tag_name: ${{ needs.create-release.outputs.tag }}
+
+      - name: Upload offline bundle to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: staging/rak-bundle-linux-x86_64.tar.gz
           tag_name: ${{ needs.create-release.outputs.tag }}
 
       - name: Upload .deb to release
@@ -113,6 +154,9 @@ jobs:
       - name: Build rakpkg
         run: cargo build --release --bin rakpkg
 
+      - name: Build rak-setup
+        run: cargo build --release --bin rak-setup
+
       - name: Copy binaries for IDE bundling
         run: |
           New-Item -ItemType Directory -Force -Path ide/src-tauri/resources
@@ -127,16 +171,52 @@ jobs:
         env:
           CI: true
 
+      - name: Stage arch-suffixed assets + portable IDE + offline bundle
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path staging | Out-Null
+          Copy-Item target/release/rakc.exe        staging/rakc-windows-x86_64.exe
+          Copy-Item target/release/rakpkg.exe      staging/rakpkg-windows-x86_64.exe
+          Copy-Item target/release/rak-setup.exe   staging/rak-setup-windows-x86_64.exe
+          # Portable IDE archive: the raw Tauri app exe + bundled resources.
+          New-Item -ItemType Directory -Force -Path ide-portable | Out-Null
+          Copy-Item target/release/rak-ide.exe ide-portable/rak-ide.exe
+          Copy-Item ide/src-tauri/resources/rakc.exe ide/src-tauri/resources/rakpkg.exe ide-portable\ -ErrorAction SilentlyContinue
+          Compress-Archive -Path ide-portable\* -DestinationPath staging/rak-ide-windows-x86_64.zip -Force
+          # Offline bundle (zip).
+          New-Item -ItemType Directory -Force -Path bundle\ide | Out-Null
+          Expand-Archive -Path staging/rak-ide-windows-x86_64.zip -DestinationPath bundle\ide -Force
+          Copy-Item staging/rakc-windows-x86_64.exe staging/rakpkg-windows-x86_64.exe bundle\
+          Compress-Archive -Path bundle\* -DestinationPath staging/rak-bundle-windows-x86_64.zip -Force
+
       - name: Upload rakc.exe to release
         uses: softprops/action-gh-release@v2
         with:
-          files: target/release/rakc.exe
+          files: staging/rakc-windows-x86_64.exe
           tag_name: ${{ needs.create-release.outputs.tag }}
 
       - name: Upload rakpkg.exe to release
         uses: softprops/action-gh-release@v2
         with:
-          files: target/release/rakpkg.exe
+          files: staging/rakpkg-windows-x86_64.exe
+          tag_name: ${{ needs.create-release.outputs.tag }}
+
+      - name: Upload rak-setup.exe to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: staging/rak-setup-windows-x86_64.exe
+          tag_name: ${{ needs.create-release.outputs.tag }}
+
+      - name: Upload portable IDE zip to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: staging/rak-ide-windows-x86_64.zip
+          tag_name: ${{ needs.create-release.outputs.tag }}
+
+      - name: Upload offline bundle to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: staging/rak-bundle-windows-x86_64.zip
           tag_name: ${{ needs.create-release.outputs.tag }}
 
       - name: Upload NSIS installer to release

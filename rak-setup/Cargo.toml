@@ -1,0 +1,26 @@
+[package]
+name = "rak-setup"
+version.workspace = true
+edition = "2021"
+authors = ["Ryuzaki"]
+license = "MIT OR Apache-2.0"
+description = "Custom interactive installer for the Rak programming language (rakc, rakpkg, IDE)."
+
+[[bin]]
+name = "rak-setup"
+path = "src/main.rs"
+
+[dependencies]
+dialoguer = "0.11"
+ureq = { version = "2.12", default-features = false, features = ["tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+dirs = "5"
+
+[target.'cfg(not(windows))'.dependencies]
+flate2 = "1"
+tar = "0.4"
+
+[target.'cfg(windows)'.dependencies]
+zip = "0.6"

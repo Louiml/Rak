@@ -22,6 +22,10 @@ For Neovim (with `nvim-lspconfig`), configure `rakc lsp` as the command for `.ra
 
 ## Changelog
 
+### 0.5.1
+
+- **Custom installer** — `rak-setup` TUI wizard (net-install + offline bundle) now highlighted; `binstruct`/`evidence`/`rest` keywords carry over from 0.5.0.
+
 ### 0.5.0
 
 Syntax highlighting for the new **Forensic Structs** and **evidence provenance** features:

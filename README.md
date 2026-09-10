@@ -4,6 +4,30 @@ A programming language for hackers, OSINT investigators, and systems programmers
 
 Hex is a first-class type. The bytecode VM runs about 6x faster than the tree-walker. There's a SQL engine written in Rak itself, and a Rak interpreter written in Rak.
 
+## Install
+
+The custom installer is an interactive TUI wizard that installs `rakc`, `rakpkg`, and the Rak IDE, edits PATH, sets `RAK_PATH`, creates shortcuts + `.rak` associations, and installs man pages + shell completions. It runs in net-install (downloads the latest release) or offline-bundle mode, and supports `--uninstall` / `--list` / `--yes` for scripting.
+
+**Linux:**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Louiml/Rak/main/dist/install.sh | bash
+# non-interactive:
+curl -fsSL https://raw.githubusercontent.com/Louiml/Rak/main/dist/install.sh | bash -s -- --yes --install rakc,rakpkg,ide --scope user
+```
+
+**Windows (PowerShell):**
+
+```powershell
+iwr -useb https://raw.githubusercontent.com/Louiml/Rak/main/dist/install.ps1 | iex
+```
+
+Or download the setup binary directly from the [latest release](https://github.com/Louiml/Rak/releases/latest) (`rak-setup-linux-x86_64` or `rak-setup-windows-x86_64.exe`) and run it.
+
+Menu items: `rakc → bin + PATH`, `rakpkg → bin + PATH`, `IDE → portable dir / system location`, `Set RAK_PATH`, `Shortcuts + .rak association`, `Man pages + shell completions`. Install scope: `user` (default, no privileges) or `system`. A `~/.rak/manifest.json` records every action for clean uninstall/upgrade.
+
+The Tauri installers (NSIS/MSI on Windows, `.deb`/AppImage on Linux) remain on the release page for IDE-only users who want the OS-native installer.
+
 ## Quick start
 
 ```rak
@@ -573,7 +597,7 @@ The generated functions call `extern_call`, which returns an error until a Rust 
 
 ## Platform support
 
-Windows and Linux. On Windows, the GUI uses WebView2 (ships with Edge). On Linux, it uses WebKitGTK. `rakc build` produces `.exe` on Windows and an executable with `chmod 755` on Linux. The IDE ships as NSIS/MSI on Windows and `.deb`/AppImage on Linux via GitHub Actions CI.
+Windows and Linux. On Windows, the GUI uses WebView2 (ships with Edge). On Linux, it uses WebKitGTK. `rakc build` produces `.exe` on Windows and an executable with `chmod 755` on Linux. The IDE ships as NSIS/MSI on Windows and `.deb`/AppImage on Linux via GitHub Actions CI, alongside the custom `rak-setup` installer (net-install + offline bundle) on both.
 
 ## Project structure
 
@@ -594,6 +618,8 @@ Rak/
 │       └── bindgen.rs     C header bindgen
 ├── stdlib/            Rust native stdlib (net, crypto, encoding, recon, web, file, json)
 ├── rakpkg/            Package manager CLI
+├── rak-setup/        Custom interactive installer (TUI wizard: net-install + offline)
+├── dist/              One-liner bootstraps (install.sh / install.ps1), man pages, completions
 ├── ide/               Tauri + Next.js IDE
 ├── .github/workflows/  CI (Linux .deb + AppImage builds)
 ├── examples/

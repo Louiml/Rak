@@ -4,11 +4,12 @@ members = [
     "ide/src-tauri",
     "stdlib",
     "rakpkg",
+    "rak-setup",
 ]
 resolver = "2"
 
 [workspace.package]
-version = "0.5.0"
+version = "0.5.1"
 edition = "2021"
 authors = ["Ryuzaki"]
 license = "MIT OR Apache-2.0"
