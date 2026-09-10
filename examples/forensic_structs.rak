@@ -1,0 +1,67 @@
+// Forensic Structs + evidence provenance — the headline Rak feature.
+//
+//   rakc run examples/forensic_structs.rak   (interpreter)
+//   rakc vm  examples/forensic_structs.rak    (bytecode VM)
+//
+// `binstruct` is a declarative wire-format DSL: declare a layout once, get both
+// a decoder and an encoder for free (round-trip). Every decoded value is
+// wrapped in an `evidence<T>` tag carrying where/when/how it was collected, so
+// `report(...)` can emit a defensible, chain-of-custody-cited findings report.
+// This is the unmet OSINT need: not "scan" but "prove where each fact came
+// from".
+
+binstruct DnsHeader {
+    id:      u16be
+    flags:   u16be
+    qdcount: u16be
+    ancount: u16be
+    nscount: u16be
+    arcount: u16be
+}
+
+binstruct TcpHeader {
+    sport:   u16be
+    dport:   u16be
+    seq:     u32be
+    ack:     u32be
+    offset:  u8
+    flags:   u8
+    window:  u16be
+    csum:    u16be
+    urgptr:  u16be
+    payload: rest
+}
+
+dump "=== Forensic Structs: decode a real DNS query ==="
+
+// Use the stdlib's dns_build() to produce real wire bytes, then decode the
+// header with a binstruct — proving the layout matches the Rust builder.
+let q = dns_build("example.com", "A")
+let hdr = DnsHeader.decode(q)
+dump fmt("id      = 0x{:04X}", hdr.id)
+dump fmt("qdcount = {}", hdr.qdcount)
+dump fmt("ancount = {}", hdr.ancount)
+
+dump "=== Round-trip: decode -> encode -> decode ==="
+
+let raw = b"\x12\x34\x01\x02\x05\x00\x00\x00hello-payload"
+let h = DnsHeader.decode(raw)
+dump h.id
+let back = DnsHeader.encode(h)
+let h2 = DnsHeader.decode(back)
+dump h2.id
+
+dump "=== Evidence provenance + cited report ==="
+
+// Wrap a manually-collected fact with a root provenance tag.
+let ip = evidence<string> from "93.184.216.34"
+dump fmt("ip = {}", ip)
+
+// cite() chains provenance: the stdlib collector produces a raw value, and we
+// tag it with tool + target so the report can cite it.
+let answers = cite(dns_query("example.com", "A"), "dns_query", "example.com")
+let cited_ip = cite(ip, "manual", "investigator-notes")
+
+// report() walks each evidence's provenance chain and emits numbered,
+// source-cited assertions — the chain-of-custody output an investigator needs.
+dump report(cited_ip, answers)

@@ -24,6 +24,8 @@ scan "127.0.0.1" {
 
 The language started as an OSINT scripting tool. It grew into something bigger.
 
+**Forensic Structs & evidence provenance.** Declare a binary wire format once with `binstruct` and get both a decoder and an encoder for free (round-trip). Every decoded value is wrapped in an `evidence<T>` provenance tag carrying where/when/how it was collected, so `report(...)` emits a chain-of-custody-cited findings report. No other language bakes provenance into the value model — this only makes sense in a hex-first, OSINT-first language.
+
 **Bytecode VM.** `rakc vm` runs bytecode. Benchmarks show about 6x speedup over the tree-walking interpreter. Run `rakc bench file.rak` to see both.
 
 **Data pipelines.** A `|>` pipeline operator, regex literals (`/\d+/g`) with method syntax, and binary pattern matching over byte slices — built for OSINT log and PCAP triage.
@@ -124,6 +126,60 @@ dump pair!(1, 2)          // [1, 2]
 const MAX_LEN = 256
 dump MAX_LEN
 ```
+
+## Forensic Structs & evidence provenance
+
+A declarative wire-format DSL (`binstruct`) plus a provenance-typed value
+(`evidence<T>`) — the OSINT differentiator. Declare a binary layout once and
+get both a **decoder** and an **encoder** for free (round-trip); every decoded
+value is wrapped in an evidence tag carrying where/when/how it was collected, so
+`report(...)` emits a chain-of-custody-cited findings report. No other language
+bakes provenance into the value model — this only makes sense in a hex-first,
+OSINT-first language.
+
+```rak
+binstruct DnsHeader {
+    id:      u16be
+    flags:   u16be
+    qdcount: u16be
+    ancount: u16be
+    nscount: u16be
+    arcount: u16be
+}
+
+let q = dns_build("example.com", "A")
+let h = DnsHeader.decode(q)        // -> evidence<struct> with provenance
+dump h.id                          // 0x1234
+dump h.qdcount                     // 1
+let back = DnsHeader.encode(h)     // round-trip back to bytes
+```
+
+Field types: `u8`/`u16`/`u32`/`u64` and signed `i8`..`i64`, each with an optional
+`be`/`le` endianness suffix (default big-endian); `bytes(n)` for a fixed run of
+raw bytes; `rest` for the trailing remainder; and a nested binstruct name for a
+`Ref` field. Works on both the interpreter and the bytecode VM (compile-time
+codegen to per-struct native-fn globals — no new VM opcodes).
+
+Evidence provenance:
+
+```rak
+let ip = evidence<string> from "93.184.216.34"          // root tag
+let answers = cite(dns_query("example.com", "A"), "dns_query", "example.com")
+dump report(ip, answers)   // numbered assertions + cited sources (tool/target/ts)
+dump provenance(ip)        // {tool, target, ts, raw_offset, raw_len, parent}
+dump strip_evidence(ip)    // 93.184.216.34
+```
+
+- `evidence<T> from expr` — wrap a value in a root provenance tag.
+- `cite(value, tool?, target?)` — wrap a value, chaining `parent` to any
+  existing evidence so provenance merges transitively.
+- `report(evidence, ...)` — render a Markdown-style report with numbered,
+  source-cited assertions (the chain-of-custody output an investigator needs).
+- `provenance(value)` — the provenance chain as a map.
+- `strip_evidence(value)` — drop the provenance wrapper, return the inner value.
+
+Field access and indexing transparently unwrap evidence, so
+`evidence<struct>.field` reads through to the inner struct.
 
 ## Build a standalone executable
 
@@ -565,6 +621,7 @@ Rak/
 │   ├── parsers.rak         DNS / TLS / PCAP wire-format parsers
 │   ├── macros.rak          Compile-time macros: macro / name! / const
 │   ├── import_demo.rak    Python-style import / from / export (with mymod/ package)
+│   ├── forensic_structs.rak  binstruct decode/encode round-trip + evidence provenance
 │   └── stdlib_demo.rak     String, array, and math builtins
 ```
 

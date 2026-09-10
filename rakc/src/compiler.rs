@@ -13,6 +13,10 @@ pub struct Compiler {
     func_closures: HashMap<String, Value>,
     /// `macro name(params) { body }` definitions, for compile-time expansion.
     macros: HashMap<String, (Vec<Param>, Vec<Stmt>)>,
+    /// `binstruct Name { ... }` definitions, keyed by name. Registered in the
+    /// compile pre-pass so `Name.decode(...)` / `Name.encode(...)` resolve at
+    /// compile time to native-fn globals.
+    binstructs: HashMap<String, Vec<BinField>>,
     /// Names exported by the module currently being compiled (`pub`/`export`).
     current_exports: Vec<String>,
     /// Import-once cache: canonical module path → its exported global names.
@@ -32,6 +36,7 @@ impl Compiler {
             func_names: std::collections::HashSet::new(),
             func_closures: HashMap::new(),
             macros: HashMap::new(),
+            binstructs: HashMap::new(),
             current_exports: Vec::new(),
             module_cache: HashMap::new(),
             compiling: std::collections::HashSet::new(),
@@ -72,8 +77,28 @@ impl Compiler {
                 Stmt::MacroDef { name, params, body } => {
                     self.macros.insert(name.clone(), (params.clone(), body.clone()));
                 }
+                Stmt::BinStructDef { name, fields } => {
+                    self.binstructs.insert(name.clone(), fields.clone());
+                }
                 _ => {}
             }
+        }
+        // Bake a self-contained decode/encode native for each `binstruct` and
+        // register it as a global (so `Name.decode(...)` lowers to a plain
+        // `Op::Call` on a `Value::NativeFn` — no new VM opcodes).
+        let bin_names: Vec<String> = self.binstructs.keys().cloned().collect();
+        for name in &bin_names {
+            let resolved = resolve_binstruct(name, &self.binstructs)?;
+            let dn = make_bin_decode_native(name.clone(), resolved.clone());
+            let en = make_bin_encode_native(name.clone(), resolved);
+            self.load_const(dn);
+            let ci = self.const_str(&format!("__bin_decode_{}", name));
+            self.emit_op(Op::StoreGlobal);
+            self.emit_u16(ci);
+            self.load_const(en);
+            let ci = self.const_str(&format!("__bin_encode_{}", name));
+            self.emit_op(Op::StoreGlobal);
+            self.emit_u16(ci);
         }
         // Register `extern "C"` declarations as native-fn globals, so
         // `getpid()` resolves to `Op::Call` on a `Value::NativeFn`.
@@ -127,6 +152,9 @@ impl Compiler {
                 continue;
             }
             if matches!(stmt, Stmt::MacroDef { .. }) {
+                continue;
+            }
+            if matches!(stmt, Stmt::BinStructDef { .. }) {
                 continue;
             }
             self.compile_stmt(stmt)?;
@@ -215,6 +243,9 @@ impl Compiler {
                 Stmt::MacroDef { name, params, body } => {
                     self.macros.insert(name.clone(), (params.clone(), body.clone()));
                 }
+                Stmt::BinStructDef { name, fields } => {
+                    self.binstructs.insert(name.clone(), fields.clone());
+                }
                 Stmt::Extern { lib, decls, .. } => {
                     for decl in decls {
                         let native = crate::vm::make_foreign_native(decl.clone(), lib.clone());
@@ -233,6 +264,23 @@ impl Compiler {
         for (n, nf) in &local_foreigns {
             self.load_const(nf.clone());
             let ci = self.const_str(n);
+            self.emit_op(Op::StoreGlobal);
+            self.emit_u16(ci);
+        }
+        // Bake per-binstruct decode/encode natives for this module's binstructs.
+        let bin_names: Vec<String> = self.binstructs.keys().cloned().collect();
+        for name in &bin_names {
+            // Only bake binstructs defined in this module (not ones already
+            // present from a parent compile) — skip if already baked this run.
+            let resolved = resolve_binstruct(name, &self.binstructs)?;
+            let dn = make_bin_decode_native(name.clone(), resolved.clone());
+            let en = make_bin_encode_native(name.clone(), resolved);
+            self.load_const(dn);
+            let ci = self.const_str(&format!("__bin_decode_{}", name));
+            self.emit_op(Op::StoreGlobal);
+            self.emit_u16(ci);
+            self.load_const(en);
+            let ci = self.const_str(&format!("__bin_encode_{}", name));
             self.emit_op(Op::StoreGlobal);
             self.emit_u16(ci);
         }
@@ -261,6 +309,9 @@ impl Compiler {
                 continue;
             }
             if matches!(stmt, Stmt::MacroDef { .. }) {
+                continue;
+            }
+            if matches!(stmt, Stmt::BinStructDef { .. }) {
                 continue;
             }
             self.compile_stmt(stmt)?;
@@ -878,6 +929,32 @@ impl Compiler {
                         self.emit_op(Op::FFIClose);
                         return Ok(());
                     }
+                    // `Name.decode(bytes)` / `Name.encode(value)` where `Name`
+                    // is a registered `binstruct` — lower to a call to a
+                    // per-binstruct baked native global `__bin_decode_<Name>` /
+                    // `__bin_encode_<Name>` (self-contained closure, built in
+                    // the pre-pass — matches the `make_foreign_native` precedent,
+                    // no new VM opcodes).
+                    if let Expr::Ident(name) = obj.as_ref() {
+                        if self.binstructs.contains_key(name) {
+                            let native_name = match method.as_str() {
+                                "decode" => format!("__bin_decode_{}", name),
+                                "encode" => format!("__bin_encode_{}", name),
+                                _ => String::new(),
+                            };
+                            if !native_name.is_empty() {
+                                let ni = self.const_str(&native_name);
+                                self.emit_op(Op::LoadGlobal);
+                                self.emit_u16(ni);
+                                for a in args {
+                                    self.compile_expr(a)?;
+                                }
+                                self.emit_op(Op::Call);
+                                self.emit_byte(args.len() as u8);
+                                return Ok(());
+                            }
+                        }
+                    }
                 }
                 self.compile_expr(callee)?;
                 for a in args {
@@ -969,6 +1046,18 @@ impl Compiler {
                 let ci = self.emit_const(v);
                 self.emit_op(Op::LoadConst);
                 self.emit_u16(ci);
+            }
+            Expr::EvidenceFrom { value } => {
+                // `evidence<T> from expr` — on the VM, evaluate the inner value
+                // and wrap it in a `Value::Evidence` with a root provenance via
+                // the `__evidence_from` native. Call convention: [callee, arg]
+                // then Call(argc=1).
+                let ci = self.const_str("__evidence_from");
+                self.emit_op(Op::LoadGlobal);
+                self.emit_u16(ci);
+                self.compile_expr(value)?;
+                self.emit_op(Op::Call);
+                self.emit_byte(1);
             }
             other => {
                 return Err(format!("VM does not support expression: {:?}", other));
@@ -1149,4 +1238,261 @@ fn make_regex_value(pattern: &str, flags: &str) -> Result<Value, String> {
         flags: flags.to_string(),
         re,
     })))
+}
+
+/// A `binstruct` field with any nested `Ref` resolved to its concrete fields at
+/// compile time, so the VM decode/encode natives are fully self-contained.
+#[derive(Clone)]
+struct ResolvedBinField {
+    name: String,
+    kind: ResolvedBinKind,
+}
+
+#[derive(Clone)]
+enum ResolvedBinKind {
+    Uint { bits: u8, endian: Endian },
+    Int { bits: u8, endian: Endian },
+    Bytes(usize),
+    Rest,
+    Ref(Vec<ResolvedBinField>),
+}
+
+/// Resolve a `binstruct`'s flat field list (expanding `Ref` fields recursively)
+/// into a self-contained `Vec<ResolvedBinField>`. Errors on unknown nested refs
+/// or cycles.
+fn resolve_binstruct(name: &str, all: &HashMap<String, Vec<BinField>>) -> Result<Vec<ResolvedBinField>, String> {
+    fn resolve_one(
+        name: &str,
+        all: &HashMap<String, Vec<BinField>>,
+        seen: &mut std::collections::HashSet<String>,
+    ) -> Result<Vec<ResolvedBinField>, String> {
+        if !seen.insert(name.to_string()) {
+            return Err(format!("binstruct '{}': circular ref", name));
+        }
+        let fields = all
+            .get(name)
+            .ok_or_else(|| format!("unknown binstruct '{}'", name))?;
+        let mut out = Vec::with_capacity(fields.len());
+        for f in fields {
+            let kind = match &f.kind {
+                BinKind::Uint { bits, endian } => ResolvedBinKind::Uint { bits: *bits, endian: *endian },
+                BinKind::Int { bits, endian } => ResolvedBinKind::Int { bits: *bits, endian: *endian },
+                BinKind::Bytes(n) => ResolvedBinKind::Bytes(*n),
+                BinKind::Rest => ResolvedBinKind::Rest,
+                BinKind::Ref(r) => ResolvedBinKind::Ref(resolve_one(r, all, seen)?),
+            };
+            out.push(ResolvedBinField { name: f.name.clone(), kind });
+        }
+        Ok(out)
+    }
+    let mut seen = std::collections::HashSet::new();
+    resolve_one(name, all, &mut seen)
+}
+
+fn now_secs_vm() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Build a self-contained `Value::NativeFn` that decodes raw bytes per the
+/// resolved binstruct layout, returning a `Value::Evidence` wrapping a
+/// `Value::Struct`. Used by the VM via `Op::Call` — no new opcode.
+fn make_bin_decode_native(name: String, fields: Vec<ResolvedBinField>) -> Value {
+    use crate::value::Provenance;
+    let nm: Arc<str> = Arc::from(name.as_str());
+    Value::NativeFn(
+        Arc::from(format!("__bin_decode_{}", name).as_str()),
+        Arc::new(move |args: &[Value]| {
+            let bytes: Vec<u8> = match args.first() {
+                Some(Value::Bytes(b)) => b.to_vec(),
+                Some(Value::MmapSlice(h, off, n)) => {
+                    let s = h.as_slice();
+                    let st = (*off).min(s.len());
+                    let en = (off + n).min(s.len());
+                    s[st..en].to_vec()
+                }
+                Some(Value::Mmap(h)) => h.as_slice().to_vec(),
+                Some(Value::String(s)) => s.to_string().into_bytes(),
+                Some(v) => v.to_string().into_bytes(),
+                None => return Err("decode expects bytes".to_string()),
+            };
+            let mut off = 0usize;
+            let mut map: HashMap<String, Value> = HashMap::new();
+            for f in &fields {
+                let (v, no) = decode_resolved(f, &bytes, off)?;
+                map.insert(f.name.clone(), v);
+                off = no;
+            }
+            let prov = Arc::new(Provenance {
+                tool: format!("binstruct:{}", nm),
+                target: String::new(),
+                ts: now_secs_vm(),
+                raw_offset: Some(0),
+                raw_len: Some(bytes.len() as u64),
+                parent: None,
+            });
+            Ok(Value::Evidence {
+                inner: Box::new(Value::Struct {
+                    name: Arc::from(nm.as_ref()),
+                    fields: Arc::from(map),
+                }),
+                provenance: prov,
+            })
+        }),
+    )
+}
+
+/// Decode a single resolved field. Returns `(value, new_offset)`.
+fn decode_resolved(
+    f: &ResolvedBinField,
+    bytes: &[u8],
+    off: usize,
+) -> Result<(Value, usize), String> {
+    use crate::ast::Endian::*;
+    match &f.kind {
+        ResolvedBinKind::Rest => {
+            let v = if off >= bytes.len() { Vec::new() } else { bytes[off..].to_vec() };
+            Ok((Value::Bytes(Arc::from(v.as_slice())), bytes.len()))
+        }
+        ResolvedBinKind::Bytes(n) => {
+            if off + n > bytes.len() {
+                return Err(format!("binstruct: field '{}' outruns buffer", f.name));
+            }
+            Ok((Value::Bytes(Arc::from(&bytes[off..off + n])), off + n))
+        }
+        ResolvedBinKind::Uint { bits, endian } => {
+            let n = (*bits as usize) / 8;
+            if off + n > bytes.len() {
+                return Err(format!("binstruct: field '{}' outruns buffer", f.name));
+            }
+            let mut acc: u64 = 0;
+            match endian {
+                Big => for i in 0..n { acc = (acc << 8) | bytes[off + i] as u64; },
+                Little => for i in 0..n { acc |= (bytes[off + i] as u64) << (8 * i); },
+            }
+            Ok((Value::Hex(acc, *bits as usize), off + n))
+        }
+        ResolvedBinKind::Int { bits, endian } => {
+            let n = (*bits as usize) / 8;
+            if off + n > bytes.len() {
+                return Err(format!("binstruct: field '{}' outruns buffer", f.name));
+            }
+            let mut acc: u64 = 0;
+            match endian {
+                Big => for i in 0..n { acc = (acc << 8) | bytes[off + i] as u64; },
+                Little => for i in 0..n { acc |= (bytes[off + i] as u64) << (8 * i); },
+            }
+            let v = match *bits {
+                8 => bytes[off] as i8 as i64,
+                16 => acc as u16 as i16 as i64,
+                32 => acc as u32 as i32 as i64,
+                64 => acc as i64,
+                _ => acc as i64,
+            };
+            Ok((Value::I64(v), off + n))
+        }
+        ResolvedBinKind::Ref(inner) => {
+            let mut map: HashMap<String, Value> = HashMap::new();
+            let mut io = off;
+            for nf in inner {
+                let (v, no) = decode_resolved(nf, bytes, io)?;
+                map.insert(nf.name.clone(), v);
+                io = no;
+            }
+            Ok((
+                Value::Struct {
+                    name: Arc::from("nested"),
+                    fields: Arc::from(map),
+                },
+                io,
+            ))
+        }
+    }
+}
+
+/// Build a self-contained `Value::NativeFn` that encodes a struct/map back
+/// into raw bytes per the resolved binstruct layout. Inverse of decode.
+fn make_bin_encode_native(name: String, fields: Vec<ResolvedBinField>) -> Value {
+    let _ = &name;
+    Value::NativeFn(
+        Arc::from(format!("__bin_encode_{}", name).as_str()),
+        Arc::new(move |args: &[Value]| {
+            let val = args.first().cloned().unwrap_or(Value::Nil);
+            let inner = match &val {
+                Value::Evidence { inner, .. } => (**inner).clone(),
+                other => other.clone(),
+            };
+            let map = match inner {
+                Value::Struct { fields, .. } => (*fields).clone(),
+                Value::Map(m) => (*m).clone(),
+                other => return Err(format!("encode expects struct/map, got {}", other.type_name())),
+            };
+            let mut out: Vec<u8> = Vec::new();
+            for f in &fields {
+                encode_resolved(f, &map, &mut out)?;
+            }
+            Ok(Value::Bytes(Arc::from(out.as_slice())))
+        }),
+    )
+}
+
+fn encode_resolved(
+    f: &ResolvedBinField,
+    map: &HashMap<String, Value>,
+    out: &mut Vec<u8>,
+) -> Result<(), String> {
+    use crate::ast::Endian::*;
+    let val = match map.get(&f.name) {
+        Some(v) => match v {
+            Value::Evidence { inner, .. } => (**inner).clone(),
+            other => other.clone(),
+        },
+        None => Value::Nil,
+    };
+    match &f.kind {
+        ResolvedBinKind::Rest => match val {
+            Value::Bytes(b) => out.extend(b.iter()),
+            Value::String(s) => out.extend(s.to_string().into_bytes()),
+            _ => {}
+        },
+        ResolvedBinKind::Bytes(n) => {
+            let b = match val {
+                Value::Bytes(b) => b.to_vec(),
+                Value::String(s) => s.to_string().into_bytes(),
+                _ => vec![0u8; *n],
+            };
+            let mut padded = b;
+            if padded.len() < *n { padded.resize(*n, 0); }
+            out.extend(padded.into_iter().take(*n));
+        }
+        ResolvedBinKind::Uint { bits, endian } => {
+            let v = val.as_u64().unwrap_or(0);
+            let n = (*bits as usize) / 8;
+            match endian {
+                Big => for i in (0..n).rev() { out.push(((v >> (8 * i)) & 0xFF) as u8); },
+                Little => for i in 0..n { out.push(((v >> (8 * i)) & 0xFF) as u8); },
+            }
+        }
+        ResolvedBinKind::Int { bits, endian } => {
+            let v = val.as_i64().unwrap_or(0) as u64;
+            let n = (*bits as usize) / 8;
+            match endian {
+                Big => for i in (0..n).rev() { out.push(((v >> (8 * i)) & 0xFF) as u8); },
+                Little => for i in 0..n { out.push(((v >> (8 * i)) & 0xFF) as u8); },
+            }
+        }
+        ResolvedBinKind::Ref(inner) => {
+            let inner_map = match val {
+                Value::Struct { fields, .. } => (*fields).clone(),
+                Value::Map(m) => (*m).clone(),
+                other => return Err(format!("encode: nested field '{}' expects struct, got {}", f.name, other.type_name())),
+            };
+            for nf in inner {
+                encode_resolved(nf, &inner_map, out)?;
+            }
+        }
+    }
+    Ok(())
 }

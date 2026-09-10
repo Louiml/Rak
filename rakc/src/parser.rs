@@ -389,6 +389,7 @@ impl<'a> Parser<'a> {
                     Ok(Stmt::Async(body))
                 }
             }
+            Some(Token::BinStruct) => self.parse_binstruct(),
             _ => {
                 let expr = self.parse_expr()?;
                 self.semi()?;
@@ -844,6 +845,84 @@ impl<'a> Parser<'a> {
         Ok(Stmt::Const { name, value: Box::new(value) })
     }
 
+    /// Parse `binstruct Name { field: type, ... }`.
+    fn parse_binstruct(&mut self) -> Result<Stmt> {
+        self.expect(Token::BinStruct)?;
+        let name = self.expect_ident()?;
+        self.expect(Token::LBrace)?;
+        let mut fields = Vec::new();
+        while !self.check(&Token::RBrace) && self.peek().is_some() {
+            let fname = self.expect_ident()?;
+            self.expect(Token::Colon)?;
+            let kind = self.parse_bin_kind()?;
+            let repeat = if self.check(&Token::Colon) {
+                self.advance();
+                let e = self.parse_expr()?;
+                Some(Box::new(e))
+            } else {
+                None
+            };
+            fields.push(BinField { name: fname, kind, repeat });
+            self.match_token(&Token::Comma);
+            self.match_token(&Token::Semi);
+        }
+        self.expect(Token::RBrace)?;
+        Ok(Stmt::BinStructDef { name, fields })
+    }
+
+    /// Parse a `binstruct` field type: `u16be`, `u4`, `i32le`, `bytes`, `rest`,
+    /// `bytes(4)`, or a nested binstruct name.
+    fn parse_bin_kind(&mut self) -> Result<BinKind> {
+        let name = self.expect_ident()?;
+        if name == "rest" {
+            return Ok(BinKind::Rest);
+        }
+        if name == "bytes" {
+            if self.match_token(&Token::LParen) {
+                let n = self.expect_int()?;
+                self.expect(Token::RParen)?;
+                return Ok(BinKind::Bytes(n as usize));
+            }
+            return Ok(BinKind::Bytes(0));
+        }
+        // `u16be` / `u16le` / `i8` / `u32` etc. — width + endianness.
+        if let Some(rest) = name.strip_prefix(['u', 'i']) {
+            let signed = name.starts_with('i');
+            let (bits_str, endian) = if let Some(base) = rest.strip_suffix("le") {
+                (base, Endian::Little)
+            } else if let Some(base) = rest.strip_suffix("be") {
+                (base, Endian::Big)
+            } else {
+                (rest, Endian::Big)
+            };
+            if let Ok(bits) = bits_str.parse::<u8>() {
+                if bits > 0 && bits <= 64 && bits % 8 == 0 {
+                    if signed {
+                        return Ok(BinKind::Int { bits, endian });
+                    } else {
+                        return Ok(BinKind::Uint { bits, endian });
+                    }
+                }
+            }
+        }
+        // Nested binstruct reference.
+        Ok(BinKind::Ref(name))
+    }
+
+    fn expect_int(&mut self) -> Result<i64> {
+        match self.peek().cloned() {
+            Some(Token::Int(i)) => {
+                self.advance();
+                Ok(i)
+            }
+            Some(Token::Hex(h)) => {
+                self.advance();
+                Ok(h as i64)
+            }
+            _ => Err(self.perr("Expected integer".to_string())),
+        }
+    }
+
     fn expect_ident(&mut self) -> Result<String> {
         match self.peek() {
             Some(Token::Ident(n)) => {
@@ -989,6 +1068,15 @@ impl<'a> Parser<'a> {
                             let err = self.parse_type()?;
                             self.expect(Token::Gt)?;
                             Type::Result(Box::new(ok), Box::new(err))
+                        } else {
+                            Type::Custom(name)
+                        }
+                    }
+                    "evidence" => {
+                        if self.match_token(&Token::Lt) {
+                            let inner = self.parse_type()?;
+                            self.expect(Token::Gt)?;
+                            Type::Evidence(Box::new(inner))
                         } else {
                             Type::Custom(name)
                         }
@@ -1618,6 +1706,7 @@ impl<'a> Parser<'a> {
             Some(Token::If) => self.parse_if_expr(),
             Some(Token::Match) => self.parse_match_expr(),
             Some(Token::Fn) => self.parse_lambda(),
+            Some(Token::Evidence) => self.parse_evidence(),
             Some(Token::LParen) => {
                 self.advance();
                 if self.check(&Token::RParen) {
@@ -1765,6 +1854,22 @@ impl<'a> Parser<'a> {
                 captures: vec![],
             })
         }
+    }
+
+    /// Parse `evidence<T> from expr`. The concrete inner type `T` is parsed and
+    /// discarded for now (the runtime tag carries the source); the value and
+    /// its source expression are the payload users interact with.
+    fn parse_evidence(&mut self) -> Result<Expr> {
+        self.expect(Token::Evidence)?;
+        if self.match_token(&Token::Lt) {
+            let _ = self.parse_type()?;
+            self.expect(Token::Gt)?;
+        }
+        self.expect(Token::From)?;
+        let value = self.parse_expr()?;
+        Ok(Expr::EvidenceFrom {
+            value: Box::new(value),
+        })
     }
 }
 

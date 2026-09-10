@@ -603,6 +603,89 @@ impl Vm {
             let tup: Vec<Value> = offs.into_iter().map(|(o, l)| Value::Tuple(Arc::from([Value::I64(o as i64), Value::I64(l as i64)]))).collect();
             Ok(Value::Array(Arc::from(tup)))
         });
+        // --- Forensic Structs / evidence provenance (VM) ---
+        self.insert_native("__evidence_from", |args| {
+            let v = args.first().cloned().unwrap_or(Value::Nil);
+            let prov = Arc::new(crate::value::Provenance {
+                tool: "manual".to_string(),
+                target: String::new(),
+                ts: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0),
+                raw_offset: None,
+                raw_len: None,
+                parent: match &v {
+                    Value::Evidence { provenance, .. } => Some(provenance.clone()),
+                    _ => None,
+                },
+            });
+            Ok(Value::Evidence {
+                inner: Box::new(unwrap_vm_evidence(&v)),
+                provenance: prov,
+            })
+        });
+        self.insert_native("cite", |args| {
+            let v = args.first().cloned().unwrap_or(Value::Nil);
+            let tool = match args.get(1) {
+                Some(Value::String(s)) => s.to_string(),
+                _ => "manual".to_string(),
+            };
+            let target = match args.get(2) {
+                Some(Value::String(s)) => s.to_string(),
+                _ => String::new(),
+            };
+            let parent = match &v {
+                Value::Evidence { provenance, .. } => Some(provenance.clone()),
+                _ => None,
+            };
+            let prov = Arc::new(crate::value::Provenance {
+                tool,
+                target,
+                ts: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0),
+                raw_offset: None,
+                raw_len: None,
+                parent,
+            });
+            Ok(Value::Evidence {
+                inner: Box::new(unwrap_vm_evidence(&v)),
+                provenance: prov,
+            })
+        });
+        self.insert_native("strip_evidence", |args| {
+            Ok(unwrap_vm_evidence(args.first().unwrap_or(&Value::Nil)))
+        });
+        self.insert_native("provenance", |args| {
+            provenance_to_vm_value(args.first().unwrap_or(&Value::Nil))
+        });
+        self.insert_native("report", |args| {
+            let mut out = String::new();
+            for (i, a) in args.iter().enumerate() {
+                let inner = unwrap_vm_evidence(a);
+                out.push_str(&format!("{}. {}\n", i + 1, inner));
+            }
+            out.push_str("\n--- Sources ---\n");
+            for (i, a) in args.iter().enumerate() {
+                if let Value::Evidence { provenance, .. } = a {
+                    let mut chain: Vec<Arc<crate::value::Provenance>> = Vec::new();
+                    let mut cur = Some(provenance.clone());
+                    while let Some(p) = cur {
+                        chain.push(p.clone());
+                        cur = p.parent.clone();
+                    }
+                    for p in chain.into_iter().rev() {
+                        let t = if p.target.is_empty() { String::new() } else { format!(" target={}", p.target) };
+                        out.push_str(&format!("[{}] tool={}{} ts={}\n", i + 1, p.tool, t, p.ts));
+                    }
+                } else {
+                    out.push_str(&format!("[{}] tool=manual\n", i + 1));
+                }
+            }
+            Ok(Value::String(Arc::from(out.as_str())))
+        });
     }
 
     fn insert_native(&mut self, name: &str, f: impl Fn(&[Value]) -> Result<Value, String> + Send + Sync + 'static) {
@@ -794,6 +877,7 @@ impl Vm {
                 Op::IndexGet => {
                     let idx = frame.pop();
                     let obj = frame.pop();
+                    let obj = unwrap_vm_evidence(&obj);
                     match (&obj, &idx) {
                         (Value::Array(a), Value::I64(i)) => {
                             frame.push(a.get(*i as usize).cloned().unwrap_or(Value::Nil));
@@ -825,6 +909,8 @@ impl Vm {
                 Op::FieldGet => {
                     let field = frame.pop();
                     let obj = frame.pop();
+                    // Transparently unwrap an evidence tag for field access.
+                    let obj = unwrap_vm_evidence(&obj);
                     match (&obj, &field) {
                         (Value::Map(m), Value::String(k)) => {
                             frame.push(m.get(k.as_ref()).cloned().unwrap_or(Value::Nil));
@@ -959,6 +1045,41 @@ fn native_bytes(v: Option<&Value>) -> Vec<u8> {
         Some(Value::I64(i)) => i.to_le_bytes().to_vec(),
         Some(v) => v.to_string().into_bytes(),
         None => Vec::new(),
+    }
+}
+
+/// Recursively unwrap a `Value::Evidence` wrapper to its inner value.
+fn unwrap_vm_evidence(v: &Value) -> Value {
+    match v {
+        Value::Evidence { inner, .. } => unwrap_vm_evidence(inner),
+        other => other.clone(),
+    }
+}
+
+/// Render a value's provenance chain as a VM map (mirrors the interpreter's
+/// `provenance` builtin).
+fn provenance_to_vm_value(v: &Value) -> Result<Value, String> {
+    match v {
+        Value::Evidence { provenance, .. } => {
+            let mut m: HashMap<String, Value> = HashMap::new();
+            m.insert("tool".to_string(), Value::String(Arc::from(provenance.tool.as_str())));
+            m.insert("target".to_string(), Value::String(Arc::from(provenance.target.as_str())));
+            m.insert("ts".to_string(), Value::I64(provenance.ts as i64));
+            if let Some(o) = provenance.raw_offset {
+                m.insert("raw_offset".to_string(), Value::I64(o as i64));
+            }
+            if let Some(l) = provenance.raw_len {
+                m.insert("raw_len".to_string(), Value::I64(l as i64));
+            }
+            if let Some(p) = &provenance.parent {
+                m.insert("parent".to_string(), provenance_to_vm_value(&Value::Evidence {
+                    inner: Box::new(Value::Nil),
+                    provenance: p.clone(),
+                })?);
+            }
+            Ok(Value::Map(Arc::from(m)))
+        }
+        _ => Ok(Value::Nil),
     }
 }
 
@@ -1306,5 +1427,50 @@ mod tests {
         assert!(out.iter().any(|l| l.contains("[DUMP] 99")), "got: {:?}", out);
         assert!(out.iter().any(|l| l.contains("[DUMP] 2")), "got: {:?}", out);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // --- Forensic Structs (binstruct) + evidence provenance (VM) ---
+
+    #[test]
+    fn test_vm_binstruct_decode() {
+        let out = run(r#"binstruct Hdr { id: u16be, ver: u8, kind: u8, rest: rest }
+let raw = b"\x12\x34\x01\x02hello"
+let h = Hdr.decode(raw)
+dump h.id
+dump h.ver
+dump h.kind
+dump len(h.rest)"#);
+        assert!(out.iter().any(|l| l == "[DUMP] 0x1234"), "id got: {:?}", out);
+        assert!(out.iter().any(|l| l == "[DUMP] 0x01"), "ver got: {:?}", out);
+        assert!(out.iter().any(|l| l == "[DUMP] 0x02"), "kind got: {:?}", out);
+        assert!(out.iter().any(|l| l == "[DUMP] 5"), "rest len got: {:?}", out);
+    }
+
+    #[test]
+    fn test_vm_binstruct_encode_roundtrip() {
+        let out = run(r#"binstruct Hdr { id: u16be, n: u32le }
+let raw = b"\x12\x34\x05\x00\x00\x00"
+let h = Hdr.decode(raw)
+let back = Hdr.encode(h)
+dump back[0]
+dump back[2]
+let h2 = Hdr.decode(back)
+dump h2.id"#);
+        // back[0] = 0x12 (bytes index -> Int) ; back[2] = 5
+        assert!(out.iter().any(|l| l == "[DUMP] 18"), "back[0] got: {:?}", out);
+        assert!(out.iter().any(|l| l == "[DUMP] 5"), "back[2] got: {:?}", out);
+        assert!(out.iter().any(|l| l == "[DUMP] 0x1234"), "h2.id got: {:?}", out);
+    }
+
+    #[test]
+    fn test_vm_evidence_from_and_report() {
+        let out = run(r#"let ip = evidence<string> from "93.184.216.34"
+dump ip
+dump strip_evidence(ip)
+let r = report(ip)
+dump r"#);
+        assert!(out.iter().any(|l| l.contains("[DUMP] 93.184.216.34")), "ip got: {:?}", out);
+        assert!(out.iter().any(|l| l.contains("tool=manual")), "report got: {:?}", out);
+        assert!(out.iter().any(|l| l.contains("Sources")), "report got: {:?}", out);
     }
 }

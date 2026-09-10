@@ -924,6 +924,8 @@ pub use {add, mul} from math // re-export named
 | DNS / TLS / PCAP | yes (dns_query/build/parse, tls parse, pcap open/next) | yes (same builtins; `Result` for query/open) |
 | Compile-time macros (`macro`/`name!`/`const`) | yes (expand + exec) | yes (expand at compile time) |
 | Imports & exports (`import`/`from`/`pub`) | yes (whole/from/star/pkg/cycles) | yes (whole/from/star; no `pkg.sub` nesting) |
+| Forensic Structs (`binstruct`/`.decode`/`.encode`) | yes (registry + codec) | yes (compile-time baked natives, no new opcodes) |
+| Evidence provenance (`evidence<T>`/`cite`/`report`) | yes (Value::Evidence + builtins) | yes (mirrored Value::Evidence + natives) |
 
 The VM's `compile_stmt`/`compile_expr`/`compile_pattern` return
 `Err("VM does not support ...")` for unsupported nodes, so running an
@@ -936,3 +938,115 @@ than producing wrong results.
   and all five trait protocols (Display, Debug, Iterable, Index, IndexMut).
 - Example programs in `examples/pipeline.rak`, `examples/regex.rak`,
   `examples/binary_patterns.rak`, `examples/traits.rak` run on `rakc run`.
+
+---
+
+## Part 4 — Forensic Structs & evidence provenance  **[SHIPPED]**
+
+Two fused features, neither of which exists in any production language, and
+both of which only make sense in a hex-first, OSINT-first language:
+
+1. **`binstruct`** — a declarative wire-format DSL that compiles to both a
+   decoder and an encoder (round-trip), the Kaitai-Struct / Zig-comptime dream
+   as a native language construct.
+2. **`evidence<T>`** — provenance as a first-class type-system layer: every
+   collected value carries where/when/how it was collected, merging
+   transitively through `cite`/pipelines, so `report(...)` emits a defensible,
+   chain-of-custody-cited findings report.
+
+### Syntax
+
+```rak
+binstruct DnsHeader {
+    id:      u16be
+    flags:   u16be
+    qdcount: u16be
+    ancount: u16be
+    nscount: u16be
+    arcount: u16be
+}
+
+let h = DnsHeader.decode(bytes)     // -> evidence<struct> (auto-provenance)
+dump h.id                            // 0x1234
+let raw = DnsHeader.encode(h)        // round-trip back to bytes
+
+let ip = evidence<string> from "93.184.216.34"
+let cited = cite(dns_query("example.com", "A"), "dns_query", "example.com")
+dump report(ip, cited)               // numbered assertions + cited sources
+```
+
+Field types: `u8`/`u16`/`u32`/`u64` and signed `i8`..`i64`, each with an
+optional `be`/`le` endianness suffix (default big-endian); `bytes(n)` for a
+fixed run of raw bytes; `rest` for the trailing remainder; and a nested
+binstruct name for a `Ref` field.
+
+### Architecture
+
+- `lexer.rs`: `binstruct` and `evidence` keywords.
+- `ast.rs`: `Stmt::BinStructDef { name, fields: Vec<BinField> }`, `BinField`
+  `{ name, kind, repeat }`, `BinKind { Uint{bits,endian}, Int{bits,endian},
+  Bytes(usize), Rest, Ref(String) }`, `Endian { Big, Little }`,
+  `Type::Evidence(Box<Type>)`, `Expr::EvidenceFrom { value }`.
+- `parser.rs`: `parse_binstruct` (field list with `name: type` + optional
+  `repeat: <expr>`), `parse_bin_kind` (width+endianness, `bytes(n)`, `rest`,
+  nested name), `parse_evidence` (`evidence<T> from expr`), and `evidence<T>`
+  in `parse_type`.
+- Interpreter (`interpreter.rs`): a `binstructs: HashMap<String, Vec<BinField>>`
+  registry populated by `Stmt::BinStructDef`; `Name.decode(bytes)` /
+  `Name.encode(value)` dispatched in `eval_call`'s method-call branch when the
+  receiver `Ident` is a registered binstruct. `Value::Evidence { inner,
+  provenance }` with a `Provenance { tool, target, ts, raw_offset, raw_len,
+  parent }` chain. Builtins `report`, `cite`, `strip_evidence`, `provenance`.
+  Field access / indexing transparently unwrap evidence.
+- VM (`compiler.rs` + `value.rs` + `vm.rs`): **compile-time codegen to VM — no
+  new opcodes.** The compiler pre-pass bakes a self-contained
+  `Value::NativeFn` for each binstruct's decode and encode (with `Ref` fields
+  resolved recursively at bake time into a `ResolvedBinField` tree), registered
+  as globals `__bin_decode_<Name>` / `__bin_encode_<Name>`. `Name.decode(...)`
+  lowers to `Op::LoadGlobal; Op::Call` on that native. `evidence<T> from expr`
+  lowers to a call to the `__evidence_from` native. `Value::Evidence` is
+  mirrored in `value.rs` with its own `Provenance`; `FieldGet`/`IndexGet`
+  unwrap evidence; `report`/`cite`/`strip_evidence`/`provenance` are registered
+  as VM natives.
+
+### Error handling & edge cases
+- **Unknown binstruct** in `.decode`/`.encode` or a nested `Ref` →
+  `Runtime/Compile("unknown binstruct '...'")`.
+- **Field outruns buffer** → `Runtime("binstruct: field '...' outruns buffer
+  (off+n > len)")`; never a panic, all reads are bounds-checked.
+- **Circular binstruct ref** → `Compile("binstruct '...': circular ref")`
+  (detected at resolve time).
+- **Non-byte-aligned widths** (`u4`, `u6`) fall through to a nested-`Ref`
+  lookup and error as unknown — nibble/bitfield support is future work; the
+  shipped subset covers all byte-aligned wire formats (DNS, TCP, IPv4, UDP,
+  TLS records).
+- **`encode` on a non-struct/map** → `Runtime("encode expects struct/map,
+  got <type>")`.
+- **Evidence is observational, not a barrier**: `evidence<struct>.field`
+  reads through to the inner struct; `==` compares inner values, ignoring
+  provenance; `is_truthy`/`as_i64`/display unwrap.
+
+### Errata (deviations from the original [SPEC])
+- **Auto-wrapping collectors** was deliberately NOT done — it would change the
+  return shape of every collector and break the existing 121 tests. Instead,
+  provenance is **explicit** via `evidence<T> from` (root tag) and `cite(value,
+  tool, target)` (chained tag), which is non-magic and keeps existing
+  behaviour intact. Auto-propagation through `|>` remains future work.
+- **Dogfooding** is demonstrated by `examples/forensic_structs.rak`, which
+  decodes real DNS queries produced by the stdlib `dns_build()` and verifies
+  the binstruct layout matches the Rust builder's wire bytes. The hand-rolled
+  Rust builders in `stdlib/dns.rs` / `stdlib/net_raw.rs` are kept (the
+  packet-forging path needs ones-complement checksums and platform sockets
+  that binstruct encoding doesn't express); the binstruct path is the
+  declarative *inspection* layer alongside them.
+- **Nibble/bitfield fields** (`u4`, `u6`) are not implemented — only
+  byte-aligned widths (multiples of 8, 8..64) are accepted. This covers all
+  shipped wire formats; bit-level packing is a follow-up.
+
+### Verification
+- `cargo test -p rakc` — 129 unit tests pass, including new tests for
+  binstruct decode/encode round-trip, nested `Ref`, DNS-header-against-stdlib
+  dogfood, evidence `from`/`report`, and `cite` chain provenance — on both the
+  interpreter and the VM.
+- `examples/forensic_structs.rak` runs on both `rakc run` and `rakc vm`,
+  decoding real DNS queries, round-tripping, and emitting a cited report.

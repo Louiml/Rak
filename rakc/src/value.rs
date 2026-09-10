@@ -60,6 +60,23 @@ pub enum Value {
     Mmap(Arc<rak_stdlib::mmap::MmapHandle>),
     MmapSlice(Arc<rak_stdlib::mmap::MmapHandle>, usize, usize),
     Pcap(Arc<std::sync::Mutex<rak_stdlib::pcap::PcapHandle>>),
+    /// A provenance-tagged value (`evidence<T>`).
+    Evidence {
+        inner: Box<Value>,
+        provenance: Arc<Provenance>,
+    },
+}
+
+/// Provenance metadata for an `evidence`-typed value on the VM. Mirrors the
+/// interpreter's `Provenance`.
+#[derive(Clone)]
+pub struct Provenance {
+    pub tool: String,
+    pub target: String,
+    pub ts: u64,
+    pub raw_offset: Option<u64>,
+    pub raw_len: Option<u64>,
+    pub parent: Option<Arc<Provenance>>,
 }
 
 impl Value {
@@ -98,6 +115,7 @@ impl Value {
             Value::Mmap(_) => "mmap",
             Value::MmapSlice(_, _, _) => "mmap-slice",
             Value::Pcap(_) => "pcap",
+            Value::Evidence { .. } => "evidence",
         }
     }
 
@@ -115,12 +133,18 @@ impl Value {
             Value::F64(v) => Some(*v as i64),
             Value::Hex(v, _) => Some(*v as i64),
             Value::ForeignPtr(p) => Some(*p as i64),
+            Value::Evidence { inner, .. } => inner.as_i64(),
             _ => None,
         }
     }
 
     pub fn as_u64(&self) -> Option<u64> {
-        self.as_i64().map(|v| v as u64)
+        match self {
+            Value::Hex(v, _) => Some(*v),
+            Value::ForeignPtr(p) => Some(*p),
+            Value::Evidence { inner, .. } => inner.as_u64(),
+            _ => self.as_i64().map(|v| v as u64),
+        }
     }
 
     pub fn as_f64(&self) -> Option<f64> {
@@ -155,6 +179,7 @@ impl Value {
             Value::Option(None) => false,
             Value::Result(Some(_), _) => true,
             Value::Result(None, _) => false,
+            Value::Evidence { inner, .. } => inner.is_truthy(),
             _ => true,
         }
     }
@@ -186,6 +211,9 @@ impl PartialEq for Value {
             (Value::ForeignPtr(a), Value::ForeignPtr(b)) => a == b,
             (Value::Closure { code: a, .. }, Value::Closure { code: b, .. }) => Arc::ptr_eq(a, b),
             (Value::NativeFn(na, _), Value::NativeFn(nb, _)) => na == nb,
+            (Value::Evidence { inner: a, .. }, Value::Evidence { inner: b, .. }) => a == b,
+            (Value::Evidence { inner: a, .. }, other) => (**a).eq(other),
+            (other, Value::Evidence { inner: b, .. }) => other.eq(&**b),
             _ => std::mem::discriminant(self) == std::mem::discriminant(other),
         }
     }
@@ -255,6 +283,7 @@ impl fmt::Display for Value {
             Value::Mmap(_) => write!(f, "<mmap>"),
             Value::MmapSlice(_, _, n) => write!(f, "<mmap-slice {}B>", n),
             Value::Pcap(_) => write!(f, "<pcap>"),
+            Value::Evidence { inner, .. } => write!(f, "{}", inner),
         }
     }
 }
@@ -336,5 +365,6 @@ pub fn type_of(t: &Type) -> String {
         Type::F32 | Type::F64 => "float".to_string(),
         Type::Ptr(_) => "ptr".to_string(),
         Type::Void => "void".to_string(),
+        Type::Evidence(inner) => format!("evidence<{}>", type_of(inner)),
     }
 }

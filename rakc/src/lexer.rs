@@ -88,6 +88,10 @@ pub enum Token {
     From,
     #[token("export")]
     Export,
+    #[token("binstruct")]
+    BinStruct,
+    #[token("evidence")]
+    Evidence,
 
     /// A macro placeholder `$name` inside a macro body.
     #[regex(r"\$[a-zA-Z_][a-zA-Z0-9_]*", |lex| lex.slice()[1..].to_string())]

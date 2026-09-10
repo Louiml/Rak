@@ -78,6 +78,10 @@ pub enum Expr {
         name: String,
         args: Vec<Expr>,
     },
+    /// `evidence<T> from expr` — wrap a value in an evidence (provenance) tag.
+    EvidenceFrom {
+        value: Box<Expr>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -195,6 +199,43 @@ pub enum Stmt {
         name: String,
         value: Box<Expr>,
     },
+    /// `binstruct Name { field: type, ... }` — a declarative wire-format
+    /// layout that compiles to both a decoder and an encoder.
+    BinStructDef {
+        name: String,
+        fields: Vec<BinField>,
+    },
+}
+
+/// A single field inside a `binstruct` declaration.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BinField {
+    pub name: String,
+    pub kind: BinKind,
+    /// When set, the field is an array of `kind` with the given length
+    /// (evaluated at decode/encode time). `None` means a scalar field.
+    pub repeat: Option<Box<Expr>>,
+}
+
+/// The wire-kind of a `binstruct` field.
+#[derive(Debug, Clone, PartialEq)]
+pub enum BinKind {
+    /// An unsigned integer with the given bit width (multiple of 8).
+    Uint { bits: u8, endian: Endian },
+    /// A signed integer with the given bit width.
+    Int { bits: u8, endian: Endian },
+    /// A fixed-length run of raw bytes.
+    Bytes(usize),
+    /// Everything remaining in the buffer.
+    Rest,
+    /// A nested `binstruct` referred to by name.
+    Ref(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Endian {
+    Big,
+    Little,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -268,6 +309,8 @@ pub enum Type {
     Ptr(Box<Type>),
     /// C `void`, used as an FFI return type for functions returning nothing.
     Void,
+    /// A provenance-tagged value (`evidence<T>`).
+    Evidence(Box<Type>),
 }
 
 #[derive(Debug, Clone, PartialEq)]

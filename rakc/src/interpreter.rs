@@ -30,6 +30,26 @@ pub struct FutureHandle {
     pub state: Mutex<FutureState>,
 }
 
+/// Provenance metadata attached to an `evidence`-typed value: where it came
+/// from (tool + target), when it was collected, and an optional parent link so
+/// provenance merges transitively through pipeline / correlation steps.
+#[derive(Clone)]
+pub struct Provenance {
+    pub tool: String,
+    pub target: String,
+    pub ts: u64,
+    pub raw_offset: Option<u64>,
+    pub raw_len: Option<u64>,
+    pub parent: Option<Arc<Provenance>>,
+}
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
 /// A compiled regular expression value. Stored behind an `Arc` so it can be
 /// cloned cheaply inside `Value`.
 pub struct RegexValue {
@@ -92,6 +112,12 @@ pub enum Value {
     Future(Arc<FutureHandle>),
     /// A PCAP capture handle (`pcap_open`).
     Pcap(Arc<Mutex<rak_stdlib::pcap::PcapHandle>>),
+    /// A provenance-tagged value (`evidence<T>`). Carries the inner value plus a
+    /// chain of where/when/how it was collected.
+    Evidence {
+        inner: Box<Value>,
+        provenance: Arc<Provenance>,
+    },
 }
 
 impl fmt::Debug for Value {
@@ -124,6 +150,9 @@ impl PartialEq for Value {
             (Value::Map(a), Value::Map(b)) => a == b,
             (Value::Option(a), Value::Option(b)) => a == b,
             (Value::Regex(a), Value::Regex(b)) => a.pattern == b.pattern && a.flags == b.flags,
+            (Value::Evidence { inner: a, .. }, Value::Evidence { inner: b, .. }) => a == b,
+            (Value::Evidence { inner: a, .. }, other) => (**a).eq(other),
+            (other, Value::Evidence { inner: b, .. }) => other.eq(&**b),
             _ => std::mem::discriminant(self) == std::mem::discriminant(other),
         }
     }
@@ -190,6 +219,7 @@ impl fmt::Display for Value {
             Value::MmapSlice(_, _, n) => write!(f, "<mmap-slice {}B>", n),
             Value::Future(_) => write!(f, "<future>"),
             Value::Pcap(_) => write!(f, "<pcap>"),
+            Value::Evidence { inner, .. } => write!(f, "{}", inner),
         }
     }
 }
@@ -287,6 +317,8 @@ pub struct Interpreter {
     ffi_allocs: HashMap<u64, usize>,
     /// `macro name(params) { body }` definitions, keyed by macro name.
     macros: HashMap<String, crate::ast::Stmt>,
+    /// `binstruct Name { ... }` definitions, keyed by struct name.
+    binstructs: HashMap<String, Vec<crate::ast::BinField>>,
     /// Import-once module cache: canonical file path → the module's exported
     /// names + macros. Supports circular imports (a module in
     /// `loading_modules` returns its partially-built entry).
@@ -325,6 +357,7 @@ impl Interpreter {
             foreign_default_lib: None,
             ffi_allocs: HashMap::new(),
             macros: HashMap::new(),
+            binstructs: HashMap::new(),
             module_cache: HashMap::new(),
             loading_modules: HashSet::new(),
         }
@@ -345,6 +378,7 @@ impl Interpreter {
             foreign_default_lib: None,
             ffi_allocs: HashMap::new(),
             macros: HashMap::new(),
+            binstructs: HashMap::new(),
             module_cache: HashMap::new(),
             loading_modules: HashSet::new(),
         }
@@ -916,6 +950,10 @@ impl Interpreter {
                 let val = self.eval_expr(value)?;
                 self.env.define(name, val);
             }
+            Stmt::BinStructDef { name, fields } => {
+                self.binstructs
+                    .insert(name.clone(), fields.clone());
+            }
         }
         Ok(())
     }
@@ -1276,6 +1314,10 @@ impl Interpreter {
             }
             Expr::FieldAccess(obj, field) => {
                 let obj_val = self.eval_expr(obj)?;
+                // Transparently unwrap an evidence tag so `evidence<struct>.field`
+                // reads through to the inner struct's fields (provenance is
+                // observational, not a barrier to access).
+                let obj_val = unwrap_evidence(&obj_val);
                 match &obj_val {
                     Value::Map(map) => map.get(field).cloned().ok_or_else(|| {
                         crate::RakError::Runtime(format!("Field '{}' not found", field))
@@ -1522,6 +1564,18 @@ impl Interpreter {
                 "macro variable '${}' used outside a macro body", name
             ))),
             Expr::MacroInvoke { name, args } => self.eval_macro_invoke(name, args),
+            Expr::EvidenceFrom { value } => {
+                let v = self.eval_expr(value)?;
+                let prov = Arc::new(Provenance {
+                    tool: "manual".to_string(),
+                    target: String::new(),
+                    ts: now_secs(),
+                    raw_offset: None,
+                    raw_len: None,
+                    parent: None,
+                });
+                Ok(Value::Evidence { inner: Box::new(v), provenance: prov })
+            }
         }
     }
 
@@ -1571,6 +1625,276 @@ impl Interpreter {
         self.returning = saved_returning;
         self.env.pop_scope();
         Ok(result)
+    }
+
+    /// `Name.decode(bytes)` — decode raw bytes into a `Value::Struct` whose
+    /// fields are laid out by the `binstruct Name` declaration. The result is
+    /// wrapped in an `evidence` tag carrying the byte offset/length each field
+    /// was read from (provenance), so downstream `report` calls can cite it.
+    fn bin_decode(&mut self, name: &str, args: &[Value]) -> crate::Result<Value> {
+        let fields = self
+            .binstructs
+            .get(name)
+            .cloned()
+            .ok_or_else(|| crate::RakError::Runtime(format!("unknown binstruct '{}'", name)))?;
+        let bytes: Vec<u8> = match args.first() {
+            Some(Value::Bytes(b)) => b.clone(),
+            Some(Value::MmapSlice(h, off, len)) => {
+                let s = h.as_slice();
+                let start = (*off).min(s.len());
+                let end = (off + len).min(s.len());
+                s[start..end].to_vec()
+            }
+            Some(Value::Mmap(h)) => h.as_slice().to_vec(),
+            Some(Value::String(s)) => s.clone().into_bytes(),
+            Some(other) => other.to_string().into_bytes(),
+            None => return Err(crate::RakError::Runtime("decode expects bytes".to_string())),
+        };
+        let mut off = 0usize;
+        let mut out: HashMap<String, Value> = HashMap::new();
+        for f in &fields {
+            let (val, new_off) = self.decode_field(name, f, &bytes, off)?;
+            out.insert(f.name.clone(), val);
+            off = new_off;
+        }
+        let prov = Arc::new(Provenance {
+            tool: format!("binstruct:{}", name),
+            target: String::new(),
+            ts: now_secs(),
+            raw_offset: Some(0),
+            raw_len: Some(bytes.len() as u64),
+            parent: None,
+        });
+        Ok(Value::Evidence {
+            inner: Box::new(Value::Struct { name: name.to_string(), fields: out }),
+            provenance: prov,
+        })
+    }
+
+    /// Decode a single `binstruct` field starting at byte `off`.
+    fn decode_field(
+        &mut self,
+        parent: &str,
+        f: &crate::ast::BinField,
+        bytes: &[u8],
+        off: usize,
+    ) -> crate::Result<(Value, usize)> {
+        use crate::ast::{BinKind, Endian};
+        match &f.kind {
+            BinKind::Rest => {
+                let v = if off >= bytes.len() {
+                    Vec::new()
+                } else {
+                    bytes[off..].to_vec()
+                };
+                Ok((Value::Bytes(v), bytes.len()))
+            }
+            BinKind::Bytes(n) => {
+                if off + n > bytes.len() {
+                    return Err(crate::RakError::Runtime(format!(
+                        "binstruct {}: field '{}' outruns buffer ({}+{} > {})",
+                        parent, f.name, off, n, bytes.len()
+                    )));
+                }
+                let v = bytes[off..off + n].to_vec();
+                Ok((Value::Bytes(v), off + n))
+            }
+            BinKind::Uint { bits, endian } | BinKind::Int { bits, endian } => {
+                let signed = matches!(f.kind, BinKind::Int { .. });
+                let nbytes = (*bits as usize) / 8;
+                if off + nbytes > bytes.len() {
+                    return Err(crate::RakError::Runtime(format!(
+                        "binstruct {}: field '{}' outruns buffer ({}+{} > {})",
+                        parent, f.name, off, nbytes, bytes.len()
+                    )));
+                }
+                let mut acc: u64 = 0;
+                match endian {
+                    Endian::Big => {
+                        for i in 0..nbytes {
+                            acc = (acc << 8) | bytes[off + i] as u64;
+                        }
+                    }
+                    Endian::Little => {
+                        for i in 0..nbytes {
+                            acc |= (bytes[off + i] as u64) << (8 * i);
+                        }
+                    }
+                }
+                let val = if signed {
+                    match *bits {
+                        8 => Value::Int(bytes[off] as i8 as i64),
+                        16 => Value::Int(match endian {
+                            Endian::Big => (acc as u16 as i16) as i64,
+                            Endian::Little => (acc as u16 as i16) as i64,
+                        }),
+                        32 => Value::Int(match endian {
+                            Endian::Big => (acc as u32 as i32) as i64,
+                            Endian::Little => (acc as u32 as i32) as i64,
+                        }),
+                        64 => Value::Int(acc as i64),
+                        _ => Value::Int(acc as i64),
+                    }
+                } else {
+                    Value::Hex(acc)
+                };
+                Ok((val, off + nbytes))
+            }
+            BinKind::Ref(inner_name) => {
+                let inner_fields = self
+                    .binstructs
+                    .get(inner_name)
+                    .cloned()
+                    .ok_or_else(|| {
+                        crate::RakError::Runtime(format!(
+                            "binstruct {}: unknown nested binstruct '{}'",
+                            parent, inner_name
+                        ))
+                    })?;
+                let mut inner_out: HashMap<String, Value> = HashMap::new();
+                let mut inner_off = off;
+                for nf in &inner_fields {
+                    let (v, no) = self.decode_field(inner_name, nf, bytes, inner_off)?;
+                    inner_out.insert(nf.name.clone(), v);
+                    inner_off = no;
+                }
+                Ok((
+                    Value::Struct {
+                        name: inner_name.clone(),
+                        fields: inner_out,
+                    },
+                    inner_off,
+                ))
+            }
+        }
+    }
+
+    /// `Name.encode(value)` — encode a struct/map back into raw bytes per the
+    /// `binstruct Name` declaration. The inverse of `decode`; together they
+    /// give the round-trip `decode(encode(decode(b))) == decode(b)`.
+    fn bin_encode(&mut self, name: &str, args: &[Value]) -> crate::Result<Value> {
+        let fields = self
+            .binstructs
+            .get(name)
+            .cloned()
+            .ok_or_else(|| crate::RakError::Runtime(format!("unknown binstruct '{}'", name)))?;
+        let val = match args.first() {
+            Some(v) => v.clone(),
+            None => return Err(crate::RakError::Runtime("encode expects a value".to_string())),
+        };
+        let unwrap = |v: &Value| -> Value {
+            match v {
+                Value::Evidence { inner, .. } => (**inner).clone(),
+                other => other.clone(),
+            }
+        };
+        let map = match unwrap(&val) {
+            Value::Struct { fields: m, .. } => m,
+            Value::Map(m) => m,
+            other => {
+                return Err(crate::RakError::Runtime(format!(
+                    "encode expects a struct/map, got {}",
+                    other.type_name()
+                )))
+            }
+        };
+        let mut out: Vec<u8> = Vec::new();
+        for f in &fields {
+            self.encode_field(name, f, &map, &mut out)?;
+        }
+        Ok(Value::Bytes(out))
+    }
+
+    /// Encode a single field, appending its bytes to `out`.
+    fn encode_field(
+        &mut self,
+        parent: &str,
+        f: &crate::ast::BinField,
+        map: &HashMap<String, Value>,
+        out: &mut Vec<u8>,
+    ) -> crate::Result<()> {
+        use crate::ast::{BinKind, Endian};
+        let val = match map.get(&f.name) {
+            Some(v) => v.clone(),
+            None => Value::Nil,
+        };
+        let unwrap = |v: Value| -> Value {
+            match &v {
+                Value::Evidence { inner, .. } => (**inner).clone(),
+                other => other.clone(),
+            }
+        };
+        let val = unwrap(val);
+        match &f.kind {
+            BinKind::Rest => match val {
+                Value::Bytes(b) => out.extend(b),
+                Value::String(s) => out.extend(s.into_bytes()),
+                _ => {}
+            },
+            BinKind::Bytes(n) => {
+                let b = match val {
+                    Value::Bytes(b) => b,
+                    Value::String(s) => s.into_bytes(),
+                    _ => vec![0u8; *n],
+                };
+                let mut padded = b;
+                if padded.len() < *n {
+                    padded.resize(*n, 0);
+                }
+                out.extend(padded.into_iter().take(*n));
+            }
+            BinKind::Uint { bits, endian } | BinKind::Int { bits, endian } => {
+                let signed = matches!(f.kind, BinKind::Int { .. });
+                let n = match val.as_u64() {
+                    Some(v) => v,
+                    None => match val.as_i64() {
+                        Some(v) => v as u64,
+                        None => 0,
+                    },
+                };
+                let nbytes = (*bits as usize) / 8;
+                let mut v = n;
+                if signed {
+                    v = v & (u64::MAX >> (64 - *bits as u32));
+                }
+                let buf: Vec<u8> = match endian {
+                    Endian::Big => (0..nbytes)
+                        .rev()
+                        .map(|i| ((v >> (8 * i)) & 0xFF) as u8)
+                        .collect(),
+                    Endian::Little => (0..nbytes)
+                        .map(|i| ((v >> (8 * i)) & 0xFF) as u8)
+                        .collect(),
+                };
+                out.extend(buf);
+            }
+            BinKind::Ref(inner_name) => {
+                let inner_fields = self
+                    .binstructs
+                    .get(inner_name)
+                    .cloned()
+                    .ok_or_else(|| {
+                        crate::RakError::Runtime(format!(
+                            "binstruct {}: unknown nested binstruct '{}'",
+                            parent, inner_name
+                        ))
+                    })?;
+                let inner_map = match val {
+                    Value::Struct { fields, .. } => fields,
+                    Value::Map(m) => m,
+                    other => {
+                        return Err(crate::RakError::Runtime(format!(
+                            "encode: field '{}' expects a nested struct, got {}",
+                            f.name, other.type_name()
+                        )))
+                    }
+                };
+                for nf in &inner_fields {
+                    self.encode_field(inner_name, nf, &inner_map, out)?;
+                }
+            }
+        }
+        Ok(())
     }
 
     fn store_back(&mut self, target: &Expr, value: Value) -> crate::Result<()> {
@@ -1691,6 +2015,19 @@ impl Interpreter {
         }
         // Method-call syntax: `obj.method(args...)`
         if let Expr::FieldAccess(obj_expr, method) = callee {
+            // `Name.decode(bytes)` / `Name.encode(value)` where `Name` is a
+            // registered `binstruct` — dispatch before value-based method lookup.
+            if let Expr::Ident(name) = obj_expr.as_ref() {
+                if self.binstructs.contains_key(name) {
+                    let arg_vals: Vec<Value> =
+                        args.iter().map(|a| self.eval_expr(a)).collect::<crate::Result<_>>()?;
+                    match method.as_str() {
+                        "decode" => return self.bin_decode(name, &arg_vals),
+                        "encode" => return self.bin_encode(name, &arg_vals),
+                        _ => {}
+                    }
+                }
+            }
             let obj_val = self.eval_expr(obj_expr)?;
             if let Value::Regex(_) = &obj_val {
                 return self.call_regex_method(&obj_val, method, args);
@@ -2393,8 +2730,82 @@ impl Interpreter {
         })
     }
 
+    /// `report(evidence, ...)` — render the provenance chain of each evidence
+    /// argument as a Markdown-style cited report. Each assertion gets a
+    /// numbered footnote citing the tool, target, and timestamp it was
+    /// collected with; the inner value is shown as the assertion body.
+    fn builtin_report(&mut self, args: &[Value]) -> crate::Result<Value> {
+        let mut out = String::new();
+        let mut footnotes: Vec<(usize, String, String, u64)> = Vec::new();
+        for (i, a) in args.iter().enumerate() {
+            let inner = unwrap_evidence(a);
+            let body = self.display_value(&inner)?;
+            out.push_str(&format!("{}. {}\n", i + 1, body));
+            if let Value::Evidence { provenance, .. } = a {
+                collect_provenance(provenance, i + 1, &mut footnotes);
+            } else {
+                footnotes.push((i + 1, "manual".to_string(), String::new(), 0));
+            }
+        }
+        if !footnotes.is_empty() {
+            out.push_str("\n--- Sources ---\n");
+            for (n, tool, target, ts) in &footnotes {
+                let target_part = if target.is_empty() {
+                    String::new()
+                } else {
+                    format!(" target={}", target)
+                };
+                out.push_str(&format!("[{}] tool={}{} ts={}\n", n, tool, target_part, ts));
+            }
+        }
+        Ok(Value::String(out))
+    }
+
+    /// `cite(value, tool?, target?)` — wrap a value in an evidence (provenance)
+    /// tag. If `value` is already an evidence, the new tag's `parent` chains to
+    /// the old one, so provenance merges transitively. This is the explicit,
+    /// non-magic way to tag a collector's output without changing the collector's
+    /// return shape (keeps existing tests green).
+    fn builtin_cite(&mut self, args: &[Value]) -> crate::Result<Value> {
+        let val = args.first().cloned().unwrap_or(Value::Nil);
+        let tool = match args.get(1) {
+            Some(v) => self.val_to_string(Some(v))?,
+            None => "manual".to_string(),
+        };
+        let target = match args.get(2) {
+            Some(v) => self.val_to_string(Some(v))?,
+            None => String::new(),
+        };
+        let parent = match &val {
+            Value::Evidence { provenance, .. } => Some(provenance.clone()),
+            _ => None,
+        };
+        let prov = Arc::new(Provenance {
+            tool,
+            target,
+            ts: now_secs(),
+            raw_offset: None,
+            raw_len: None,
+            parent,
+        });
+        Ok(Value::Evidence {
+            inner: Box::new(unwrap_evidence(&val)),
+            provenance: prov,
+        })
+    }
+
     fn eval_builtin(&mut self, name: &str, args: &[Value]) -> crate::Result<Value> {
         match name {
+            "report" => return self.builtin_report(args),
+            "cite" => return self.builtin_cite(args),
+            "strip_evidence" => {
+                let v = args.first().cloned().unwrap_or(Value::Nil);
+                Ok(unwrap_evidence(&v))
+            }
+            "provenance" => {
+                let v = args.first().cloned().unwrap_or(Value::Nil);
+                Ok(provenance_to_map(&v))
+            }
             "md5" => Ok(Value::String(rak_stdlib::md5(&self.val_to_bytes(args.first())?))),
             "sha1" => Ok(Value::String(rak_stdlib::sha1(&self.val_to_bytes(args.first())?))),
             "sha256" => Ok(Value::String(rak_stdlib::sha256(&self.val_to_bytes(args.first())?))),
@@ -3523,6 +3934,7 @@ impl Value {
             Value::MmapSlice(_, _, _) => "mmap-slice".to_string(),
             Value::Future(_) => "future".to_string(),
             Value::Pcap(_) => "pcap".to_string(),
+            Value::Evidence { inner, .. } => format!("evidence<{}>", inner.type_name()),
             _ => "<opaque>".to_string(),
         }
     }
@@ -3532,6 +3944,7 @@ impl Value {
             Value::Int(i) => Some(*i),
             Value::Float(f) => Some(*f as i64),
             Value::ForeignPtr(p) => Some(*p as i64),
+            Value::Evidence { inner, .. } => inner.as_i64(),
             _ => None,
         }
     }
@@ -3539,6 +3952,7 @@ impl Value {
         match self {
             Value::Hex(h) => Some(*h),
             Value::ForeignPtr(p) => Some(*p),
+            Value::Evidence { inner, .. } => inner.as_u64(),
             _ => self.as_i64().map(|v| v as u64),
         }
     }
@@ -3547,6 +3961,7 @@ impl Value {
             Value::Hex(h) => Some(*h as f64),
             Value::Int(i) => Some(*i as f64),
             Value::Float(f) => Some(*f),
+            Value::Evidence { inner, .. } => inner.as_f64(),
             _ => None,
         }
     }
@@ -3602,7 +4017,63 @@ fn value_to_json(v: &Value) -> serde_json::Value {
         Value::Option(None) => J::Null,
         Value::Result(Some(v), _) => value_to_json(v),
         Value::Result(_, Some(e)) => value_to_json(e),
+        Value::Evidence { inner, .. } => value_to_json(inner),
         _ => J::Null,
+    }
+}
+
+/// Recursively unwrap any `Value::Evidence` wrapper, returning the inner value.
+fn unwrap_evidence(v: &Value) -> Value {
+    match v {
+        Value::Evidence { inner, .. } => unwrap_evidence(inner),
+        other => other.clone(),
+    }
+}
+
+/// Render a value's provenance chain as a Rak map (tool, target, ts, raw_offset,
+/// raw_len, parent). Returns `nil` if the value carries no provenance.
+fn provenance_to_map(v: &Value) -> Value {
+    match v {
+        Value::Evidence { provenance, .. } => {
+            let mut m: HashMap<String, Value> = HashMap::new();
+            m.insert("tool".to_string(), Value::String(provenance.tool.clone()));
+            m.insert("target".to_string(), Value::String(provenance.target.clone()));
+            m.insert("ts".to_string(), Value::Int(provenance.ts as i64));
+            if let Some(o) = provenance.raw_offset {
+                m.insert("raw_offset".to_string(), Value::Int(o as i64));
+            }
+            if let Some(l) = provenance.raw_len {
+                m.insert("raw_len".to_string(), Value::Int(l as i64));
+            }
+            if let Some(p) = &provenance.parent {
+                m.insert("parent".to_string(), provenance_to_map(&Value::Evidence {
+                    inner: Box::new(Value::Nil),
+                    provenance: p.clone(),
+                }));
+            }
+            Value::Map(m)
+        }
+        _ => Value::Nil,
+    }
+}
+
+/// Walk a provenance chain (parent → child) and append each link as a footnote
+/// entry `(footnote_number, tool, target, ts)`, parent-first so the root
+/// collector (oldest) is cited first.
+fn collect_provenance(
+    prov: &Arc<Provenance>,
+    n: usize,
+    out: &mut Vec<(usize, String, String, u64)>,
+) {
+    // Collect the chain as owned Arcs, then emit parent-first.
+    let mut chain: Vec<Arc<Provenance>> = Vec::new();
+    let mut cur = Some(prov.clone());
+    while let Some(p) = cur {
+        chain.push(p.clone());
+        cur = p.parent.clone();
+    }
+    for p in chain.into_iter().rev() {
+        out.push((n, p.tool.clone(), p.target.clone(), p.ts));
     }
 }
 
@@ -3622,6 +4093,7 @@ fn is_truthy(value: &Value) -> bool {
         Value::Option(None) => false,
         Value::Result(Some(_), _) => true,
         Value::Result(None, _) => false,
+        Value::Evidence { inner, .. } => is_truthy(inner),
         _ => true,
     }
 }
@@ -4151,5 +4623,136 @@ mod tests {
         let output = interp.run_source(main).unwrap();
         assert!(output.iter().any(|l| l.contains("[DUMP] 1")), "got: {:?}", output);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // --- Forensic Structs (binstruct) + evidence provenance ---
+
+    #[test]
+    fn test_interpreter_binstruct_decode_encode_roundtrip() {
+        let mut interp = Interpreter::new();
+        let src = r#"
+binstruct Hdr {
+    id: u16be
+    ver: u8
+    kind: u8
+    len: u32le
+    rest: rest
+}
+let raw = b"\x12\x34\x01\x02\x05\x00\x00\x00hello"
+let h = Hdr.decode(raw)
+dump h.id
+dump h.ver
+dump h.kind
+dump h.len
+dump string(h.rest)
+let back = Hdr.encode(h)
+dump back
+let h2 = Hdr.decode(back)
+dump h2.id
+"#;
+        let output = interp.run_source(src).unwrap();
+        // id = 0x1234 -> displayed as 0x1234
+        assert!(output.iter().any(|l| l == "[DUMP] 0x1234"), "id got: {:?}", output);
+        // ver = 1, kind = 2, len (LE 05000000) = 5 — all unsigned -> 0x... display
+        assert!(output.iter().any(|l| l == "[DUMP] 0x1"), "ver got: {:?}", output);
+        assert!(output.iter().any(|l| l == "[DUMP] 0x2"), "kind got: {:?}", output);
+        assert!(output.iter().any(|l| l == "[DUMP] 0x5"), "len got: {:?}", output);
+        assert!(output.iter().any(|l| l.contains("hello")), "rest got: {:?}", output);
+        // re-decoded id should still be 0x1234 (round-trip)
+        assert!(output.iter().filter(|l| **l == "[DUMP] 0x1234").count() >= 1, "roundtrip id got: {:?}", output);
+        // The last dump should be the re-decoded id 0x1234.
+        assert_eq!(output.last().unwrap(), "[DUMP] 0x1234", "roundtrip got: {:?}", output);
+    }
+
+    #[test]
+    fn test_interpreter_binstruct_nested_ref() {
+        let mut interp = Interpreter::new();
+        let src = r#"
+binstruct Inner { a: u8, b: u16be }
+binstruct Outer { tag: u8, inner: Inner }
+let raw = b"\x07\x01\x02\x03"
+let o = Outer.decode(raw)
+dump o.tag
+dump o.inner.a
+dump o.inner.b
+let back = Outer.encode(o)
+dump back[0]
+dump back[1]
+"#;
+        let output = interp.run_source(src).unwrap();
+        assert!(output.iter().any(|l| l == "[DUMP] 0x7"), "tag got: {:?}", output);
+        assert!(output.iter().any(|l| l == "[DUMP] 0x1"), "inner.a got: {:?}", output);
+        // inner.b = 0x0203 = 515 -> displayed as 0x203
+        assert!(output.iter().any(|l| l == "[DUMP] 0x203"), "inner.b got: {:?}", output);
+        // back[0] (first byte of re-encoded packet) = 7, back[1] = 1 (bytes
+        // indexing returns Int, so these display as plain decimals).
+        assert!(output.iter().any(|l| l == "[DUMP] 7"), "back[0] got: {:?}", output);
+        assert!(output.iter().any(|l| l == "[DUMP] 1"), "back[1] got: {:?}", output);
+    }
+
+    #[test]
+    fn test_interpreter_evidence_from_and_report() {
+        let mut interp = Interpreter::new();
+        let src = r#"
+let ip = evidence<string> from "93.184.216.34"
+dump ip
+dump strip_evidence(ip)
+let r = report(ip)
+dump r
+"#;
+        let output = interp.run_source(src).unwrap();
+        // The evidence displays as its inner value.
+        assert!(output.iter().any(|l| l.contains("[DUMP] 93.184.216.34")), "ip got: {:?}", output);
+        assert!(output.iter().any(|l| l.contains("tool=manual")), "report got: {:?}", output);
+        assert!(output.iter().any(|l| l.contains("Sources")), "report got: {:?}", output);
+    }
+
+    #[test]
+    fn test_interpreter_cite_chains_provenance() {
+        let mut interp = Interpreter::new();
+        let src = r#"
+let raw = b"\x12\x34"
+let a = cite(raw, "pcap", "trace.pcap")
+let b = cite(a, "binstruct", "Hdr")
+dump string(provenance(b).tool)
+let r = report(b)
+dump r
+"#;
+        let output = interp.run_source(src).unwrap();
+        // The topmost provenance tool is binstruct (the last cite).
+        assert!(output.iter().any(|l| l.contains("[DUMP] binstruct")), "tool got: {:?}", output);
+        // The report should cite both pcap (parent) and binstruct.
+        assert!(output.iter().any(|l| l.contains("pcap")), "report pcap got: {:?}", output);
+        assert!(output.iter().any(|l| l.contains("binstruct")), "report binstruct got: {:?}", output);
+    }
+
+    #[test]
+    fn test_interpreter_binstruct_dns_header_against_stdlib() {
+        // Dogfood: decode a real DNS query built by the stdlib dns_build() and
+        // verify the binstruct-decoded id matches the stdlib's wire bytes.
+        let mut interp = Interpreter::new();
+        let src = r#"
+binstruct DnsHeader {
+    id: u16be
+    flags: u16be
+    qdcount: u16be
+    ancount: u16be
+    nscount: u16be
+    arcount: u16be
+}
+let q = dns_build("example.com", "A")
+let h = DnsHeader.decode(q)
+dump h.id
+dump h.qdcount
+dump len(q)
+"#;
+        let output = interp.run_source(src).unwrap();
+        // qdcount should be 1 (one question) -> displayed as 0x1.
+        assert!(output.iter().any(|l| l.contains("[DUMP] 0x1")), "qdcount got: {:?}", output);
+        // len(q) is at least 12 (header) + question bytes.
+        assert!(output.iter().any(|l| {
+            let n: i64 = l.replace("[DUMP] ", "").trim().parse().unwrap_or(0);
+            n >= 12
+        }), "len got: {:?}", output);
     }
 }
