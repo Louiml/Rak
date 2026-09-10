@@ -4,6 +4,7 @@
 
 use anyhow::{anyhow, Context, Result};
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use crate::manifest::{Action, Manifest};
@@ -327,8 +328,9 @@ fn create_shortcuts(cfg: &Config, manifest: &mut Manifest) -> Result<()> {
             ide_exe.display()
         );
         fs::write(&entry, content)?;
+        let entry_path = entry.clone();
         manifest.record(Action::DesktopEntry { path: entry });
-        status(&format!("created {}", manifest.actions.last().unwrap()));
+        status(&format!("created desktop entry {}", entry_path.display()));
     }
     #[cfg(target_os = "windows")]
     {

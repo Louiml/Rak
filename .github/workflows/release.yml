@@ -80,9 +80,10 @@ jobs:
           cp target/release/rakpkg          staging/rakpkg-linux-x86_64
           cp target/release/rak-setup       staging/rak-setup-linux-x86_64
           chmod +x staging/*
-          # Portable IDE archive: the raw Tauri app binary + bundled resources.
+          # Portable IDE archive: the raw Tauri app binary (cargo bin name is
+          # `app`) + bundled resources, renamed to `rak-ide`.
           mkdir -p ide-portable
-          cp target/release/rak-ide ide-portable/rak-ide
+          cp target/release/app ide-portable/rak-ide || cp target/release/rak-ide ide-portable/rak-ide
           cp ide/src-tauri/resources/rakc ide/src-tauri/resources/rakpkg ide-portable/ 2>/dev/null || true
           chmod +x ide-portable/rak-ide
           tar -czf staging/rak-ide-linux-x86_64.tar.gz -C ide-portable .
@@ -178,9 +179,16 @@ jobs:
           Copy-Item target/release/rakc.exe        staging/rakc-windows-x86_64.exe
           Copy-Item target/release/rakpkg.exe      staging/rakpkg-windows-x86_64.exe
           Copy-Item target/release/rak-setup.exe   staging/rak-setup-windows-x86_64.exe
-          # Portable IDE archive: the raw Tauri app exe + bundled resources.
+          # Portable IDE archive: the raw Tauri app exe (cargo bin name is
+          # `app`) + bundled resources, renamed to `rak-ide.exe`.
           New-Item -ItemType Directory -Force -Path ide-portable | Out-Null
-          Copy-Item target/release/rak-ide.exe ide-portable/rak-ide.exe
+          if (Test-Path target/release/app.exe) {
+            Copy-Item target/release/app.exe ide-portable/rak-ide.exe
+          } elseif (Test-Path target/release/rak-ide.exe) {
+            Copy-Item target/release/rak-ide.exe ide-portable/rak-ide.exe
+          } else {
+            throw "IDE binary not found (expected target/release/app.exe or rak-ide.exe)"
+          }
           Copy-Item ide/src-tauri/resources/rakc.exe ide/src-tauri/resources/rakpkg.exe ide-portable\ -ErrorAction SilentlyContinue
           Compress-Archive -Path ide-portable\* -DestinationPath staging/rak-ide-windows-x86_64.zip -Force
           # Offline bundle (zip).
