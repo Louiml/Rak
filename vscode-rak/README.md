@@ -22,6 +22,15 @@ For Neovim (with `nvim-lspconfig`), configure `rakc lsp` as the command for `.ra
 
 ## Changelog
 
+### 0.5.0
+
+Syntax highlighting for the new **Forensic Structs** and **evidence provenance** features:
+
+- **`binstruct`** — the `binstruct` keyword and declarative wire-format layout blocks (`binstruct Name { field: type, … }`).
+- **`evidence`** — the `evidence` keyword and `evidence<T> from expr` provenance-tag expressions.
+- **Field types** — `u8`..`u64`/`i8`..`i64` width types with `be`/`le` endianness suffixes, `bytes(n)`, `rest`, and nested binstruct refs.
+- **New builtins** — `report`, `cite`, `provenance`, `strip_evidence`, and the `Name.decode(...)` / `Name.encode(...)` binstruct methods.
+
 ### 0.4.0
 
 Syntax highlighting for the new Rak language features:

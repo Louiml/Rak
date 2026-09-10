@@ -3,7 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-const VERSION: &str = "0.4.0";
+const VERSION: &str = "0.5.0";
 const PACKAGES_DIR: &str = ".rak";
 const PACKAGES_SUBDIR: &str = "packages";
 const MANIFEST_FILE: &str = "package.rak";

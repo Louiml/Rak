@@ -105,11 +105,11 @@
       "patterns": [
         {
           "name": "keyword.control.rak",
-          "match": "\\b(if|else|for|while|loop|break|continue|return|match|try|catch|raise|throw|spawn|await|async|as|type|from|import)\\b"
+          "match": "\\b(if|else|for|while|loop|break|continue|return|match|try|catch|raise|throw|spawn|await|async|as|type|from|import|evidence)\\b"
         },
         {
           "name": "keyword.other.rak",
-          "match": "\\b(let|mut|fn|struct|enum|impl|trait|mod|pub|use|export|scan|fetch|dump|trace|macro|macro_rules|const|extern|in)\\b"
+          "match": "\\b(let|mut|fn|struct|enum|impl|trait|mod|pub|use|export|scan|fetch|dump|trace|macro|macro_rules|const|extern|binstruct|rest|in)\\b"
         },
         {
           "name": "constant.language.rak",
