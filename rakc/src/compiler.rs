@@ -549,7 +549,7 @@ impl Compiler {
                 }
                 self.patch_jump(jend);
             }
-            Stmt::While { cond, body } => {
+            Stmt::While { cond, body, .. } => {
                 let loop_start = self.chunk.code.len();
                 self.compile_expr(cond)?;
                 let jexit = self.emit_jump(Op::JumpIfFalse);
@@ -563,7 +563,7 @@ impl Compiler {
                 self.patch_jump(jexit);
                 self.emit_op(Op::Pop);
             }
-            Stmt::Loop(body) => {
+            Stmt::Loop { body, .. } => {
                 let loop_start = self.chunk.code.len();
                 self.begin_scope();
                 for s in body {
@@ -572,7 +572,7 @@ impl Compiler {
                 self.end_scope();
                 self.emit_jump_back(loop_start);
             }
-            Stmt::For { name, iterable, body } => self.compile_for(name, iterable, body)?,
+            Stmt::For { pattern, iterable, body, .. } => self.compile_for(pattern, iterable, body)?,
             Stmt::Const { name, value } => {
                 // `const NAME = expr` compiles like a `let` (eagerly evaluated
                 // at the call site and bound; immutable by convention).
@@ -687,7 +687,13 @@ impl Compiler {
         Ok(())
     }
 
-    fn compile_for(&mut self, name: &str, iterable: &Expr, body: &[Stmt]) -> Result<(), String> {
+    fn compile_for(&mut self, pattern: &Pattern, iterable: &Expr, body: &[Stmt]) -> Result<(), String> {
+        // VM support is limited to a single identifier binding; tuple/indexed
+        // `for i, x in …` patterns run on the interpreter only for now.
+        let name = match pattern {
+            Pattern::Ident(n) => n.as_str(),
+            other => return Err(format!("VM does not support for-pattern: {:?}", other)),
+        };
         match iterable {
             Expr::Range(lo, hi) => {
                 if let (Some(lo), Some(hi)) = (lo, hi) {
@@ -900,7 +906,10 @@ impl Compiler {
                 self.emit_u16(ci);
                 self.emit_op(Op::NewArray);
             }
-            Expr::Call { callee, args } => {
+            Expr::Call { callee, args, named } => {
+                if !named.is_empty() {
+                    return Err("VM does not support named arguments".to_string());
+                }
                 if let Expr::Ident(name) = callee.as_ref() {
                     if self.func_names.contains(name) {
                         let ci = self.const_str(name);

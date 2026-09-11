@@ -3,6 +3,7 @@ use logos::Logos;
 #[derive(Logos, Clone, Debug, PartialEq)]
 #[logos(skip r"[ \t\r\n\f]+")]
 #[logos(skip r"//[^\n]*\n?")]
+#[logos(skip r"/\*[^*]*\*+([^/*][^*]*\*+)*/")]
 pub enum Token {
     #[token("scan")]
     Scan,
@@ -46,6 +47,8 @@ pub enum Token {
     In,
     #[token("while")]
     While,
+    #[token("do")]
+    Do,
     #[token("break")]
     Break,
     #[token("continue")]
@@ -97,23 +100,32 @@ pub enum Token {
     #[regex(r"\$[a-zA-Z_][a-zA-Z0-9_]*", |lex| lex.slice()[1..].to_string())]
     MacroVar(String),
 
-    #[regex(r"0x[0-9A-Fa-f]+", |lex| hex_to_u64(lex.slice()))]
-    Hex(u64),
-
-    #[regex(r"[0-9]+\.[0-9]+([eE][+-]?[0-9]+)?", |lex| lex.slice().parse::<f64>().ok())]
+    #[regex(r"[0-9][0-9_]*\.[0-9][0-9_]*([eE][+-]?[0-9][0-9_]*)?", |lex| lex.slice().replace('_', "").parse::<f64>().ok())]
     Float(f64),
 
-    #[regex(r"[0-9]+\.[0-9]+([eE][+-]?[0-9]+)?f32", |lex| lex.slice()[..lex.slice().len()-3].parse::<f32>().ok())]
+    #[regex(r"[0-9][0-9_]*\.[0-9][0-9_]*([eE][+-]?[0-9][0-9_]*)?f32", |lex| lex.slice()[..lex.slice().len()-3].replace('_', "").parse::<f32>().ok())]
     Float32(f32),
 
-    #[regex(r"[0-9]+(i8|i16|i32|i64|u8|u16|u32|u64)", |lex| parse_typed_int(lex.slice()))]
+    #[regex(r"[0-9][0-9_]*(i8|i16|i32|i64|u8|u16|u32|u64)", |lex| parse_typed_int(lex.slice()))]
     TypedInt(TypedIntData),
 
-    #[regex(r"[0-9]+", |lex| lex.slice().parse::<i64>().ok())]
+    #[regex(r"0x[0-9A-Fa-f][0-9A-Fa-f_]*", |lex| hex_to_u64(lex.slice()))]
+    Hex(u64),
+
+    #[regex(r"[0-9][0-9_]*", |lex| lex.slice().replace('_', "").parse::<i64>().ok())]
     Int(i64),
 
     #[regex(r#""([^"\\]|\\.)*""#, |lex| parse_string(lex.slice()))]
     String(String),
+
+    /// Triple-quoted multiline string: escapes processed, newlines allowed.
+    /// (Embedded `"` are not supported inside; use `r"..."` or escape.)
+    #[regex(r#""""[^"]*""""#, |lex| parse_triple_string(lex.slice()))]
+    StringMulti(String),
+
+    /// Raw string `r"..."`: no escape processing, no embedded quotes.
+    #[regex(r#"r"([^"]*)""#, |lex| lex.slice()[2..lex.slice().len() - 1].to_string())]
+    StringRaw(String),
 
     #[regex(r#"f"([^"\\]|\\.)*""#, |lex| parse_interp(lex.slice()))]
     Interp(String),
@@ -123,6 +135,10 @@ pub enum Token {
 
     #[regex(r"'([^'\\]|\\x[0-9a-fA-F]{2}|\\.)'", |lex| parse_char(lex.slice()))]
     Char(char),
+
+    /// A loop label `'name` (used in `'lbl: for ...`, `break 'lbl`).
+    #[regex(r"'[a-zA-Z_][a-zA-Z0-9_]*", |lex| lex.slice()[1..].to_string())]
+    Label(String),
 
     /// A regular-expression literal `/pattern/flags`. Never produced
     /// directly by logos; synthesized in `tokenize()` after the fact.
@@ -183,6 +199,16 @@ pub enum Token {
     SlashEq,
     #[token("%=")]
     PercentEq,
+    #[token("&=")]
+    AmpersandEq,
+    #[token("|=")]
+    PipeEq,
+    #[token("^=")]
+    CaretEq,
+    #[token("<<=")]
+    ShlEq,
+    #[token(">>=")]
+    ShrEq,
 
     #[token("&&")]
     AndAnd,
@@ -191,6 +217,12 @@ pub enum Token {
 
     #[token("?")]
     Question,
+    #[token("??")]
+    QuestionQuestion,
+    #[token("?.")]
+    QuestionDot,
+    #[token("?[")]
+    QuestionLBracket,
 
     #[token(".")]
     Dot,
@@ -244,7 +276,7 @@ pub enum IntKind {
 }
 
 fn hex_to_u64(s: &str) -> Option<u64> {
-    u64::from_str_radix(&s[2..], 16).ok()
+    u64::from_str_radix(&s[2..].replace('_', ""), 16).ok()
 }
 
 fn parse_typed_int(s: &str) -> Option<TypedIntData> {
@@ -253,6 +285,7 @@ fn parse_typed_int(s: &str) -> Option<TypedIntData> {
     } else {
         return None;
     };
+    let value = num.replace('_', "").parse::<i64>().ok()?;
     let kind = match suffix {
         "i8" => IntKind::I8,
         "i16" => IntKind::I16,
@@ -264,7 +297,13 @@ fn parse_typed_int(s: &str) -> Option<TypedIntData> {
         "u64" => IntKind::U64,
         _ => return None,
     };
-    num.parse::<i64>().ok().map(|v| TypedIntData { value: v, kind })
+    Some(TypedIntData { value, kind })
+}
+
+fn parse_triple_string(s: &str) -> Option<String> {
+    // s is """..."""
+    let inner = &s[3..s.len() - 3];
+    unescape(inner)
 }
 
 fn parse_string(s: &str) -> Option<String> {
@@ -429,6 +468,8 @@ fn can_end_expr(t: &Token) -> bool {
             | Token::Float32(_)
             | Token::TypedInt(_)
             | Token::String(_)
+            | Token::StringMulti(_)
+            | Token::StringRaw(_)
             | Token::Interp(_)
             | Token::Bytes(_)
             | Token::Hex(_)

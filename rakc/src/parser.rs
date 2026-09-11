@@ -339,27 +339,39 @@ impl<'a> Parser<'a> {
             let inner = self.parse_stmt()?;
             return Ok(Stmt::Export(Box::new(inner)));
         }
+        // Labeled loop: `'name: loop/while/for …`
+        if let Some(Token::Label(l)) = self.peek() {
+            let label = l.clone();
+            self.advance();
+            self.expect(Token::Colon)?;
+            return self.parse_labeled_loop(Some(label));
+        }
         match self.peek() {
             Some(Token::Let) => self.parse_let(),
-            Some(Token::If) => Ok(Stmt::Expr(Box::new(self.parse_if_expr()?))),
-            Some(Token::Loop) => self.parse_loop(),
-            Some(Token::While) => self.parse_while(),
-            Some(Token::For) => self.parse_for(),
+            Some(Token::If) => {
+                if matches!(self.peek_n(1), Some(Token::Let)) {
+                    self.parse_if_let()
+                } else {
+                    Ok(Stmt::Expr(Box::new(self.parse_if_expr()?)))
+                }
+            }
+            Some(Token::Loop) => self.parse_loop(None),
+            Some(Token::While) => {
+                if matches!(self.peek_n(1), Some(Token::Let)) {
+                    self.parse_while_let()
+                } else {
+                    self.parse_while(None)
+                }
+            }
+            Some(Token::For) => self.parse_for(None),
+            Some(Token::Do) => self.parse_do_while(),
             Some(Token::Scan) => self.parse_scan(),
             Some(Token::Fetch) => self.parse_fetch(),
             Some(Token::Dump) => self.parse_dump(),
             Some(Token::Trace) => self.parse_trace(),
             Some(Token::Return) => self.parse_return(),
-            Some(Token::Break) => {
-                self.advance();
-                self.semi()?;
-                Ok(Stmt::Break)
-            }
-            Some(Token::Continue) => {
-                self.advance();
-                self.semi()?;
-                Ok(Stmt::Continue)
-            }
+            Some(Token::Break) => self.parse_break_continue(true),
+            Some(Token::Continue) => self.parse_break_continue(false),
             Some(Token::Fn) => self.parse_fn(),
             Some(Token::Struct) => self.parse_struct(),
             Some(Token::Enum) => self.parse_enum(),
@@ -379,7 +391,6 @@ impl<'a> Parser<'a> {
             Some(Token::Macro) => self.parse_macro(),
             Some(Token::Const) => self.parse_const(),
             Some(Token::Async) => {
-                // `async fn ...` -> async function; `async { ... }` -> async block.
                 let is_fn = matches!(self.peek_n(1), Some(Token::Fn));
                 if is_fn {
                     self.parse_fn()
@@ -396,6 +407,96 @@ impl<'a> Parser<'a> {
                 Ok(Stmt::Expr(Box::new(expr)))
             }
         }
+    }
+
+    fn parse_labeled_loop(&mut self, label: Option<String>) -> Result<Stmt> {
+        match self.peek() {
+            Some(Token::Loop) => self.parse_loop(label),
+            Some(Token::While) => {
+                if matches!(self.peek_n(1), Some(Token::Let)) {
+                    // while-let doesn't take a label in this minimal impl
+                    self.parse_while_let()
+                } else {
+                    self.parse_while(label)
+                }
+            }
+            Some(Token::For) => self.parse_for(label),
+            other => Err(self.perr(format!("Expected loop/while/for after label, found {:?}", other))),
+        }
+    }
+
+    fn parse_break_continue(&mut self, is_break: bool) -> Result<Stmt> {
+        self.advance(); // break / continue
+        let target = match self.peek() {
+            Some(Token::Label(l)) => {
+                let l = l.clone();
+                self.advance();
+                Some(BreakTarget::Label(l))
+            }
+            Some(Token::Int(n)) => {
+                let n = *n;
+                self.advance();
+                Some(BreakTarget::Depth(n as u32))
+            }
+            _ => None,
+        };
+        self.semi()?;
+        if is_break {
+            Ok(Stmt::Break(target))
+        } else {
+            Ok(Stmt::Continue(target))
+        }
+    }
+
+    fn parse_if_let(&mut self) -> Result<Stmt> {
+        self.expect(Token::If)?;
+        self.expect(Token::Let)?;
+        let pattern = self.parse_pattern()?;
+        self.expect(Token::Eq)?;
+        let value = self.parse_expr()?;
+        let then_branch = self.parse_block()?;
+        let else_branch = if self.match_token(&Token::Else) {
+            if self.check(&Token::If) {
+                // `else if …` (incl. else if let)
+                Some(vec![self.parse_stmt()?])
+            } else {
+                Some(self.parse_block()?)
+            }
+        } else {
+            None
+        };
+        Ok(Stmt::IfLet {
+            pattern,
+            value: Box::new(value),
+            then_branch,
+            else_branch,
+        })
+    }
+
+    fn parse_while_let(&mut self) -> Result<Stmt> {
+        self.expect(Token::While)?;
+        self.expect(Token::Let)?;
+        let pattern = self.parse_pattern()?;
+        self.expect(Token::Eq)?;
+        let value = self.parse_expr()?;
+        let body = self.parse_block()?;
+        Ok(Stmt::WhileLet {
+            pattern,
+            value: Box::new(value),
+            body,
+        })
+    }
+
+    fn parse_do_while(&mut self) -> Result<Stmt> {
+        self.expect(Token::Do)?;
+        let body = self.parse_block()?;
+        self.expect(Token::While)?;
+        let cond = self.parse_expr()?;
+        self.semi()?;
+        Ok(Stmt::DoWhile {
+            cond: Box::new(cond),
+            body,
+        })
     }
 
     fn parse_let(&mut self) -> Result<Stmt> {
@@ -470,40 +571,69 @@ impl<'a> Parser<'a> {
         })
     }
 
-    fn parse_loop(&mut self) -> Result<Stmt> {
+    fn parse_loop(&mut self, label: Option<String>) -> Result<Stmt> {
         self.expect(Token::Loop)?;
         let body = self.parse_block()?;
-        Ok(Stmt::Loop(body))
+        Ok(Stmt::Loop { label, body })
     }
 
-    fn parse_while(&mut self) -> Result<Stmt> {
+    fn parse_while(&mut self, label: Option<String>) -> Result<Stmt> {
         self.expect(Token::While)?;
         let cond = self.parse_expr()?;
         let body = self.parse_block()?;
         Ok(Stmt::While {
+            label,
             cond: Box::new(cond),
             body,
         })
     }
 
-    fn parse_for(&mut self) -> Result<Stmt> {
+    fn parse_for(&mut self, label: Option<String>) -> Result<Stmt> {
         self.expect(Token::For)?;
-        let name = match self.peek() {
-            Some(Token::Ident(n)) => {
-                let n = n.clone();
-                self.advance();
-                n
-            }
-            _ => return Err(self.perr("Expected variable name after 'for'".to_string())),
-        };
+        let pattern = self.parse_for_pattern()?;
         self.expect(Token::In)?;
         let iterable = self.parse_expr()?;
         let body = self.parse_block()?;
         Ok(Stmt::For {
-            name,
+            label,
+            pattern,
             iterable: Box::new(iterable),
             body,
         })
+    }
+
+    /// `for x in …` | `for i, x in …` | `for (i, x) in …`
+    fn parse_for_pattern(&mut self) -> Result<Pattern> {
+        if self.check(&Token::LParen) {
+            return self.parse_pattern();
+        }
+        let first = self.parse_simple_pattern_ident()?;
+        if self.match_token(&Token::Comma) {
+            let mut parts = vec![first];
+            loop {
+                parts.push(self.parse_simple_pattern_ident()?);
+                if !self.match_token(&Token::Comma) {
+                    break;
+                }
+            }
+            return Ok(Pattern::Tuple(parts));
+        }
+        Ok(first)
+    }
+
+    fn parse_simple_pattern_ident(&mut self) -> Result<Pattern> {
+        match self.peek() {
+            Some(Token::Ident(n)) => {
+                let n = n.clone();
+                self.advance();
+                if n == "_" {
+                    Ok(Pattern::Wild)
+                } else {
+                    Ok(Pattern::Ident(n))
+                }
+            }
+            _ => Err(self.perr("Expected pattern variable after 'for'".to_string())),
+        }
     }
 
     fn parse_scan(&mut self) -> Result<Stmt> {
@@ -804,7 +934,7 @@ impl<'a> Parser<'a> {
                 } else {
                     None
                 };
-                params.push(Param { name: pname, type_hint });
+                params.push(Param { name: pname, type_hint, default: None, rest: false, optional: false });
                 if !self.match_token(&Token::Comma) {
                     break;
                 }
@@ -1006,13 +1136,20 @@ impl<'a> Parser<'a> {
     fn parse_params(&mut self) -> Result<Vec<Param>> {
         let mut params = vec![];
         while !self.check(&Token::RParen) && !self.check(&Token::RBrace) && self.peek().is_some() {
+            let rest = self.match_token(&Token::Ellipsis); // ...name
             let name = self.expect_ident()?;
+            let optional = self.match_token(&Token::Question); // name?
             let type_hint = if self.match_token(&Token::Colon) {
                 Some(self.parse_type()?)
             } else {
                 None
             };
-            params.push(Param { name, type_hint });
+            let default = if self.match_token(&Token::Eq) { // name: T = default
+                Some(Box::new(self.parse_expr()?))
+            } else {
+                None
+            };
+            params.push(Param { name, type_hint, default, rest, optional });
             if !self.match_token(&Token::Comma) {
                 break;
             }
@@ -1131,7 +1268,33 @@ impl<'a> Parser<'a> {
             }
             return Ok(Pattern::Or(opts));
         }
-        self.parse_single_pattern()
+        let p = self.parse_single_pattern()?;
+        // Numeric range pattern: `1..5`, `0xA..0xF`.
+        if self.check(&Token::DotDot) && is_numeric_pattern(&p) {
+            // Only treat as range if a pattern follows `..` (not `..]` rest).
+            if self.is_pattern_start(self.peek_n(1)) {
+                self.advance(); // ..
+                let hi = self.parse_single_pattern()?;
+                return Ok(Pattern::Range(Box::new(p), Box::new(hi)));
+            }
+        }
+        Ok(p)
+    }
+
+    fn is_pattern_start(&self, tok: Option<&Token>) -> bool {
+        matches!(
+            tok,
+            Some(Token::Ident(_))
+                | Some(Token::Int(_))
+                | Some(Token::Hex(_))
+                | Some(Token::Char(_))
+                | Some(Token::String(_))
+                | Some(Token::True)
+                | Some(Token::False)
+                | Some(Token::Nil)
+                | Some(Token::LParen)
+                | Some(Token::LBracket)
+        )
     }
 
     fn parse_single_pattern(&mut self) -> Result<Pattern> {
@@ -1346,8 +1509,95 @@ impl<'a> Parser<'a> {
         Ok(left)
     }
 
+    /// `a ?? b` — nil-coalescing (right-assoc), looser than `?:`.
+    fn parse_coalesce(&mut self) -> Result<Expr> {
+        let left = self.parse_ternary()?;
+        if self.match_token(&Token::QuestionQuestion) {
+            let right = self.parse_coalesce()?;
+            return Ok(Expr::NilCoalesce(Box::new(left), Box::new(right)));
+        }
+        Ok(left)
+    }
+
+    /// `cond ? then : else` ternary, and postfix `expr?` (try). A `?` whose
+    /// next token can start an expression is a ternary; otherwise it's the
+    /// try operator.
+    fn parse_ternary(&mut self) -> Result<Expr> {
+        let left = self.parse_or()?;
+        if self.check(&Token::Question) {
+            if self.is_expr_start(self.peek_n(1)) {
+                self.advance(); // ?
+                let then = self.parse_assignment()?;
+                self.expect(Token::Colon)?;
+                let els = self.parse_ternary()?;
+                return Ok(Expr::Ternary {
+                    cond: Box::new(left),
+                    then: Box::new(then),
+                    els: Box::new(els),
+                });
+            }
+            self.advance(); // postfix try
+            return Ok(Expr::TryExpr(Box::new(left)));
+        }
+        Ok(left)
+    }
+
+    fn is_expr_start(&self, tok: Option<&Token>) -> bool {
+        matches!(
+            tok,
+            Some(Token::Ident(_))
+                | Some(Token::Int(_))
+                | Some(Token::Float(_))
+                | Some(Token::Float32(_))
+                | Some(Token::TypedInt(_))
+                | Some(Token::Hex(_))
+                | Some(Token::String(_))
+                | Some(Token::StringMulti(_))
+                | Some(Token::StringRaw(_))
+                | Some(Token::Interp(_))
+                | Some(Token::Bytes(_))
+                | Some(Token::Char(_))
+                | Some(Token::Regex(_))
+                | Some(Token::True)
+                | Some(Token::False)
+                | Some(Token::Nil)
+                | Some(Token::LParen)
+                | Some(Token::LBracket)
+                | Some(Token::LBrace)
+                | Some(Token::Bang)
+                | Some(Token::Minus)
+                | Some(Token::Tilde)
+                | Some(Token::Await)
+                | Some(Token::Spawn)
+                | Some(Token::Raise)
+        )
+    }
+
     fn parse_assignment(&mut self) -> Result<Expr> {
-        let mut expr = self.parse_or()?;
+        let mut expr = self.parse_coalesce()?;
+        // Multi/swap assignment: `a, b = b, a`
+        if self.check(&Token::Comma) && is_assignable(&expr) {
+            let saved = self.pos;
+            let mut targets = vec![expr.clone()];
+            let mut ok = true;
+            while self.match_token(&Token::Comma) {
+                let t = self.parse_or()?;
+                if !is_assignable(&t) { ok = false; break; }
+                targets.push(t);
+            }
+            if ok && self.match_token(&Token::Eq) {
+                let mut values = vec![self.parse_or()?];
+                while self.match_token(&Token::Comma) {
+                    values.push(self.parse_or()?);
+                }
+                return Ok(Expr::MultiAssign {
+                    targets,
+                    values,
+                });
+            }
+            // not a multi-assign; restore and fall through
+            self.pos = saved;
+        }
         if self.match_token(&Token::Eq) {
             let value = self.parse_expr()?;
             match expr {
@@ -1368,36 +1618,29 @@ impl<'a> Parser<'a> {
                 }
                 _ => return Err(self.perr("Invalid assignment target".to_string())),
             }
-        } else if self.match_token(&Token::PlusEq) {
+        } else if let Some(op) = self.match_compound_assign() {
             let value = self.parse_expr()?;
             if let Expr::Ident(name) = expr {
-                expr = Expr::CompoundAssign(CompoundOp::Add, name, Box::new(value));
+                expr = Expr::CompoundAssign(op, name, Box::new(value));
+            } else {
+                return Err(self.perr("Invalid compound-assignment target".to_string()));
             }
-        } else if self.match_token(&Token::MinusEq) {
-            let value = self.parse_expr()?;
-            if let Expr::Ident(name) = expr {
-                expr = Expr::CompoundAssign(CompoundOp::Sub, name, Box::new(value));
-            }
-        } else if self.match_token(&Token::StarEq) {
-            let value = self.parse_expr()?;
-            if let Expr::Ident(name) = expr {
-                expr = Expr::CompoundAssign(CompoundOp::Mul, name, Box::new(value));
-            }
-        } else if self.match_token(&Token::SlashEq) {
-            let value = self.parse_expr()?;
-            if let Expr::Ident(name) = expr {
-                expr = Expr::CompoundAssign(CompoundOp::Div, name, Box::new(value));
-            }
-        } else if self.match_token(&Token::PercentEq) {
-            let value = self.parse_expr()?;
-            if let Expr::Ident(name) = expr {
-                expr = Expr::CompoundAssign(CompoundOp::Rem, name, Box::new(value));
-            }
-        }
-        if self.match_token(&Token::Question) {
-            expr = Expr::TryExpr(Box::new(expr));
         }
         Ok(expr)
+    }
+
+    fn match_compound_assign(&mut self) -> Option<CompoundOp> {
+        if self.match_token(&Token::PlusEq) { return Some(CompoundOp::Add); }
+        if self.match_token(&Token::MinusEq) { return Some(CompoundOp::Sub); }
+        if self.match_token(&Token::StarEq) { return Some(CompoundOp::Mul); }
+        if self.match_token(&Token::SlashEq) { return Some(CompoundOp::Div); }
+        if self.match_token(&Token::PercentEq) { return Some(CompoundOp::Rem); }
+        if self.match_token(&Token::AmpersandEq) { return Some(CompoundOp::BitAnd); }
+        if self.match_token(&Token::PipeEq) { return Some(CompoundOp::BitOr); }
+        if self.match_token(&Token::CaretEq) { return Some(CompoundOp::BitXor); }
+        if self.match_token(&Token::ShlEq) { return Some(CompoundOp::Shl); }
+        if self.match_token(&Token::ShrEq) { return Some(CompoundOp::Shr); }
+        None
     }
 
     fn parse_or(&mut self) -> Result<Expr> {
@@ -1578,18 +1821,19 @@ impl<'a> Parser<'a> {
                     let name = name.clone();
                     self.advance(); // consume `!`
                     self.expect(Token::LParen)?;
-                    let args = self.parse_args()?;
+                    let (args, _named) = self.parse_args()?;
                     self.expect(Token::RParen)?;
                     expr = Expr::MacroInvoke { name, args };
                     continue;
                 }
             }
             if self.match_token(&Token::LParen) {
-                let args = self.parse_args()?;
+                let (args, named) = self.parse_args()?;
                 self.expect(Token::RParen)?;
                 expr = Expr::Call {
                     callee: Box::new(expr),
                     args,
+                    named,
                 };
             } else if self.match_token(&Token::Dot) {
                 if matches!(self.peek(), Some(Token::Int(_))) {
@@ -1615,7 +1859,20 @@ impl<'a> Parser<'a> {
                 let idx = self.parse_expr()?;
                 self.expect(Token::RBracket)?;
                 expr = Expr::Index(Box::new(expr), Box::new(idx));
-            } else if self.match_token(&Token::Question) {
+            } else if self.match_token(&Token::QuestionDot) {
+                let field = self.expect_ident()?;
+                expr = Expr::OptField(Box::new(expr), field);
+            } else if self.match_token(&Token::QuestionLBracket) {
+                let idx = self.parse_expr()?;
+                self.expect(Token::RBracket)?;
+                expr = Expr::OptIndex(Box::new(expr), Box::new(idx));
+            } else if self.check(&Token::Question) {
+                // A `?` that starts a ternary (`? expr :`) is handled higher up
+                // in parse_ternary; only consume the postfix try `expr?` here.
+                if self.is_expr_start(self.peek_n(1)) {
+                    break;
+                }
+                self.advance();
                 expr = Expr::TryExpr(Box::new(expr));
             } else if self.match_token(&Token::As) {
                 let t = self.parse_type()?;
@@ -1627,15 +1884,76 @@ impl<'a> Parser<'a> {
         Ok(expr)
     }
 
-    fn parse_args(&mut self) -> Result<Vec<Expr>> {
+    fn parse_args(&mut self) -> Result<(Vec<Expr>, Vec<(String, Expr)>)> {
         let mut args = vec![];
+        let mut named = vec![];
         while !self.check(&Token::RParen) && self.peek().is_some() {
+            // Named argument: `ident: expr` — only when an ident is immediately
+            // followed by `:` (and not `::`).
+            if let Some(Token::Ident(n)) = self.peek() {
+                if matches!(self.peek_n(1), Some(Token::Colon)) {
+                    let n = n.clone();
+                    self.advance(); // ident
+                    self.advance(); // :
+                    let v = self.parse_expr()?;
+                    named.push((n, v));
+                    if !self.match_token(&Token::Comma) {
+                        break;
+                    }
+                    continue;
+                }
+            }
             args.push(self.parse_expr()?);
             if !self.match_token(&Token::Comma) {
                 break;
             }
         }
-        Ok(args)
+        Ok((args, named))
+    }
+
+    /// `[elem for pat in iter if cond]`
+    fn parse_array_comprehension(&mut self, elem: Expr) -> Result<Expr> {
+        self.expect(Token::For)?;
+        let var = self.parse_for_pattern()?;
+        self.expect(Token::In)?;
+        let iterable = self.parse_expr()?;
+        let cond = if self.match_token(&Token::If) {
+            Some(Box::new(self.parse_expr()?))
+        } else {
+            None
+        };
+        self.expect(Token::RBracket)?;
+        Ok(Expr::Comprehension {
+            is_map: false,
+            var,
+            iterable: Box::new(iterable),
+            cond,
+            elem: Box::new(elem),
+            value: None,
+        })
+    }
+
+    /// `{key: value for pat in iter if cond}` — only when the map-like prefix
+    /// is followed by `for`.
+    fn parse_map_comprehension(&mut self, key: Expr, value: Expr) -> Result<Expr> {
+        self.expect(Token::For)?;
+        let var = self.parse_for_pattern()?;
+        self.expect(Token::In)?;
+        let iterable = self.parse_expr()?;
+        let cond = if self.match_token(&Token::If) {
+            Some(Box::new(self.parse_expr()?))
+        } else {
+            None
+        };
+        self.expect(Token::RBrace)?;
+        Ok(Expr::Comprehension {
+            is_map: true,
+            var,
+            iterable: Box::new(iterable),
+            cond,
+            elem: Box::new(key),
+            value: Some(Box::new(value)),
+        })
     }
 
     fn parse_primary(&mut self) -> Result<Expr> {
@@ -1666,6 +1984,16 @@ impl<'a> Parser<'a> {
                 Ok(Expr::TypedInt(d.value, map_int_kind(d.kind)))
             }
             Some(Token::String(s)) => {
+                self.advance();
+                Ok(Expr::String(s))
+            }
+            Some(Token::StringMulti(s)) => {
+                let s = s.clone();
+                self.advance();
+                Ok(Expr::String(s))
+            }
+            Some(Token::StringRaw(s)) => {
+                let s = s.clone();
                 self.advance();
                 Ok(Expr::String(s))
             }
@@ -1731,12 +2059,18 @@ impl<'a> Parser<'a> {
             }
             Some(Token::LBracket) => {
                 self.advance();
-                let mut elements = vec![];
-                while !self.check(&Token::RBracket) && self.peek().is_some() {
+                if self.check(&Token::RBracket) {
+                    self.advance();
+                    return Ok(Expr::Array(vec![]));
+                }
+                let first = self.parse_expr()?;
+                if self.check(&Token::For) {
+                    return self.parse_array_comprehension(first);
+                }
+                let mut elements = vec![first];
+                while self.match_token(&Token::Comma) {
+                    if self.check(&Token::RBracket) { break; }
                     elements.push(self.parse_expr()?);
-                    if !self.match_token(&Token::Comma) {
-                        break;
-                    }
                 }
                 self.expect(Token::RBracket)?;
                 Ok(Expr::Array(elements))
@@ -1794,8 +2128,25 @@ impl<'a> Parser<'a> {
         if matches!(self.peek(), Some(Token::Ident(_)))
             && matches!(self.peek_n(1), Some(Token::Colon))
         {
-            let mut pairs = vec![];
-            while !self.check(&Token::RBrace) && self.peek().is_some() {
+            let key = match self.peek() {
+                Some(Token::Ident(name)) => {
+                    let name = name.clone();
+                    self.advance();
+                    Expr::Ident(name)
+                }
+                _ => self.parse_expr()?,
+            };
+            self.expect(Token::Colon)?;
+            let value = self.parse_expr()?;
+            // Map comprehension: `key: value for ...`
+            if self.check(&Token::For) {
+                return self.parse_map_comprehension(key, value);
+            }
+            // Regular map: convert ident key to string literal.
+            let key = match key { Expr::Ident(n) => Expr::String(n), other => other };
+            let mut pairs = vec![(key, value)];
+            while self.match_token(&Token::Comma) {
+                if self.check(&Token::RBrace) { break; }
                 let key = match self.peek() {
                     Some(Token::Ident(name)) => {
                         let name = name.clone();
@@ -1807,9 +2158,6 @@ impl<'a> Parser<'a> {
                 self.expect(Token::Colon)?;
                 let value = self.parse_expr()?;
                 pairs.push((key, value));
-                if !self.match_token(&Token::Comma) {
-                    break;
-                }
             }
             self.expect(Token::RBrace)?;
             return Ok(Expr::Map(pairs));
@@ -1873,6 +2221,14 @@ impl<'a> Parser<'a> {
     }
 }
 
+fn is_assignable(e: &Expr) -> bool {
+    matches!(e, Expr::Ident(_) | Expr::Index(_, _) | Expr::FieldAccess(_, _))
+}
+
+fn is_numeric_pattern(p: &Pattern) -> bool {
+    matches!(p, Pattern::Hex(_) | Pattern::Int(_) | Pattern::Byte(_))
+}
+
 /// Desugar the pipeline operator `a |> b` into a call expression.
 ///
 /// `x |> f`              becomes  `f(x)`
@@ -1880,13 +2236,13 @@ impl<'a> Parser<'a> {
 /// `x |> SomeIdent`       becomes  `SomeIdent(x)`
 fn desugar_pipe(left: Expr, right: Expr) -> Expr {
     match right {
-        Expr::Call { callee, mut args } => {
+        Expr::Call { callee, mut args, named } => {
             let mut new_args = Vec::with_capacity(args.len() + 1);
             new_args.push(left);
             new_args.append(&mut args);
-            Expr::Call { callee, args: new_args }
+            Expr::Call { callee, args: new_args, named }
         }
-        other => Expr::Call { callee: Box::new(other), args: vec![left] },
+        other => Expr::Call { callee: Box::new(other), args: vec![left], named: vec![] },
     }
 }
 
@@ -2039,7 +2395,7 @@ mod tests {
         let module = parse(&tokens, source).unwrap();
         match &module.items[0] {
             Stmt::Let { value, .. } => match &**value {
-                Expr::Call { callee, args } => {
+                Expr::Call { callee, args, .. } => {
                     assert!(matches!(callee.as_ref(), Expr::Ident(n) if n == "f"));
                     assert_eq!(args.len(), 1);
                     assert!(matches!(&args[0], Expr::Ident(n) if n == "x"));

@@ -22,6 +22,7 @@ pub enum FutureState {
         body: Vec<Stmt>,
         closure: Arc<Env>,
         args: Vec<Value>,
+        named: Vec<(String, Value)>,
     },
     Polled,
 }
@@ -325,6 +326,23 @@ pub struct Interpreter {
     module_cache: HashMap<PathBuf, ModuleEntry>,
     /// Modules currently being loaded (for circular-import detection).
     loading_modules: HashSet<PathBuf>,
+    /// Pending loop control raised by `break`/`continue` (with optional label
+    /// or numeric depth). Loops consume it via `resolve_loop_signal`.
+    loop_signal: Option<LoopSignal>,
+}
+
+/// A `break`/`continue` signal unwinding through nested loops.
+#[derive(Debug, Clone)]
+enum LoopSignal {
+    Break { label: Option<String>, depth: u32 },
+    Continue { label: Option<String>, depth: u32 },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum LoopCtrl {
+    Next,
+    Break,
+    Continue,
 }
 
 /// A loaded module's exported runtime values and macro definitions.
@@ -360,6 +378,7 @@ impl Interpreter {
             binstructs: HashMap::new(),
             module_cache: HashMap::new(),
             loading_modules: HashSet::new(),
+            loop_signal: None,
         }
     }
 
@@ -381,6 +400,7 @@ impl Interpreter {
             binstructs: HashMap::new(),
             module_cache: HashMap::new(),
             loading_modules: HashSet::new(),
+            loop_signal: None,
         }
     }
 
@@ -687,62 +707,122 @@ impl Interpreter {
                     self.env.pop_scope();
                 }
             }
-            Stmt::Loop(body) => {
+            Stmt::IfLet { pattern, value, then_branch, else_branch } => {
+                let v = self.eval_expr(value)?;
+                let matched = self.pattern_matches(&pattern, &v)?;
+                if matched {
+                    self.env.push_scope();
+                    self.bind_pattern(&pattern, &v)?;
+                    for s in then_branch {
+                        self.exec_stmt(s)?;
+                        if self.returning { break; }
+                    }
+                    self.env.pop_scope();
+                } else if let Some(else_stmts) = else_branch {
+                    self.env.push_scope();
+                    for s in else_stmts {
+                        self.exec_stmt(s)?;
+                        if self.returning { break; }
+                    }
+                    self.env.pop_scope();
+                }
+            }
+            Stmt::Loop { label, body } => {
                 loop {
                     self.env.push_scope();
                     for s in body {
                         self.exec_stmt(s)?;
-                        if self.returning {
-                            break;
-                        }
+                        if self.returning { break; }
+                        if self.loop_signal.is_some() { break; }
                     }
                     if self.returning {
                         self.env.pop_scope();
                         break;
                     }
-                    if self.check_break_reset() {
-                        self.env.pop_scope();
+                    let ctrl = self.resolve_loop_signal(&label);
+                    self.env.pop_scope();
+                    if ctrl == LoopCtrl::Break {
                         break;
                     }
-                    if self.check_continue_reset() {
-                        self.env.pop_scope();
-                        continue;
-                    }
-                    self.env.pop_scope();
                 }
             }
-            Stmt::While { cond, body } => {
+            Stmt::While { label, cond, body } => {
                 while is_truthy(&self.eval_expr(cond)?) {
                     self.env.push_scope();
                     for s in body {
                         self.exec_stmt(s)?;
-                        if self.returning {
-                            break;
-                        }
+                        if self.returning { break; }
+                        if self.loop_signal.is_some() { break; }
                     }
                     if self.returning {
                         self.env.pop_scope();
                         break;
                     }
-                    let broke = self.check_break_reset();
-                    let _ = self.check_continue_reset();
+                    let ctrl = self.resolve_loop_signal(&label);
                     self.env.pop_scope();
-                    if broke {
+                    if ctrl == LoopCtrl::Break {
                         break;
                     }
                 }
             }
-            Stmt::For { name, iterable, body } => {
+            Stmt::DoWhile { cond, body } => {
+                loop {
+                    self.env.push_scope();
+                    for s in body {
+                        self.exec_stmt(s)?;
+                        if self.returning { break; }
+                        if self.loop_signal.is_some() { break; }
+                    }
+                    if self.returning {
+                        self.env.pop_scope();
+                        break;
+                    }
+                    let ctrl = self.resolve_loop_signal(&None);
+                    self.env.pop_scope();
+                    if ctrl == LoopCtrl::Break {
+                        break;
+                    }
+                    if !is_truthy(&self.eval_expr(cond)?) {
+                        break;
+                    }
+                }
+            }
+            Stmt::WhileLet { pattern, value, body } => {
+                loop {
+                    let v = self.eval_expr(value)?;
+                    self.env.push_scope();
+                    if !self.pattern_matches(&pattern, &v)? {
+                        self.env.pop_scope();
+                        break;
+                    }
+                    self.bind_pattern(&pattern, &v)?;
+                    for s in body {
+                        self.exec_stmt(s)?;
+                        if self.returning { break; }
+                        if self.loop_signal.is_some() { break; }
+                    }
+                    if self.returning {
+                        self.env.pop_scope();
+                        break;
+                    }
+                    let ctrl = self.resolve_loop_signal(&None);
+                    self.env.pop_scope();
+                    if ctrl == LoopCtrl::Break {
+                        break;
+                    }
+                }
+            }
+            Stmt::For { label, pattern, iterable, body } => {
                 let iter = self.eval_expr(iterable)?;
                 let tn = iter.type_name();
-                if let Some(func) = self
+                let items = if let Some(func) = self
                     .trait_impls
                     .get(&("Iterable".to_string(), tn.clone(), "iter".to_string()))
                     .cloned()
                 {
                     let produced = self.call_method_value(func, iter, &[])?;
                     match produced {
-                        Value::Array(items) => self.run_for_loop(name, items, body)?,
+                        Value::Array(items) => items,
                         other => {
                             return Err(crate::RakError::Runtime(format!(
                                 "Iterable::iter must return an array, got {}",
@@ -751,21 +831,31 @@ impl Interpreter {
                         }
                     }
                 } else {
+                    let is_idx = matches!(&pattern, Pattern::Tuple(p) if p.len() == 2);
                     match iter {
-                        Value::Array(arr) => self.run_for_loop(name, arr, body)?,
-                        Value::Tuple(t) => self.run_for_loop(name, t, body)?,
+                        Value::Array(arr) => {
+                            if is_idx {
+                                arr.iter().enumerate().map(|(i, v)| Value::Tuple(vec![Value::Int(i as i64), v.clone()])).collect()
+                            } else {
+                                arr
+                            }
+                        }
+                        Value::Tuple(t) => t,
                         Value::String(s) => {
-                            let chars: Vec<Value> = s.chars().map(|c| Value::String(c.to_string())).collect();
-                            self.run_for_loop(name, chars, body)?;
+                            if is_idx {
+                                s.chars().enumerate().map(|(i, c)| Value::Tuple(vec![Value::Int(i as i64), Value::String(c.to_string())])).collect()
+                            } else {
+                                s.chars().map(|c| Value::String(c.to_string())).collect()
+                            }
                         }
                         Value::Map(m) => {
-                            let entries: Vec<Value> = m.into_iter().map(|(k, v)| Value::Tuple(vec![Value::String(k), v])).collect();
-                            self.run_for_loop(name, entries, body)?;
+                            m.into_iter().map(|(k, v)| Value::Tuple(vec![Value::String(k), v])).collect()
                         }
-                        Value::Option(Some(v)) => self.run_for_loop(name, vec![*v], body)?,
+                        Value::Option(Some(v)) => vec![*v],
                         _ => return Err(crate::RakError::Runtime("Cannot iterate over this value".to_string())),
                     }
-                }
+                };
+                self.run_for_loop(pattern, label, items, body)?;
             }
             Stmt::Scan { target, options, body } => self.exec_scan(target, options, body)?,
             Stmt::Fetch { target, options, body } => self.exec_fetch(target, options, body)?,
@@ -793,11 +883,23 @@ impl Interpreter {
                 let s = self.debug_value(&val)?;
                 self.output.push(format!("[TRACE] {}", s));
             }
-            Stmt::Break => {
-                self.env.define("__break__", Value::Bool(true));
+            Stmt::Break(target) => {
+                let target = target.clone();
+                let (label, depth) = match target {
+                    Some(BreakTarget::Label(l)) => (Some(l), 1u32),
+                    Some(BreakTarget::Depth(n)) => (None, n),
+                    None => (None, 1u32),
+                };
+                self.loop_signal = Some(LoopSignal::Break { label, depth });
             }
-            Stmt::Continue => {
-                self.env.define("__continue__", Value::Bool(true));
+            Stmt::Continue(target) => {
+                let target = target.clone();
+                let (label, depth) = match target {
+                    Some(BreakTarget::Label(l)) => (Some(l), 1u32),
+                    Some(BreakTarget::Depth(n)) => (None, n),
+                    None => (None, 1u32),
+                };
+                self.loop_signal = Some(LoopSignal::Continue { label, depth });
             }
             Stmt::Mod { name, items } => {
                 self.env.push_scope();
@@ -958,41 +1060,67 @@ impl Interpreter {
         Ok(())
     }
 
-    fn run_for_loop(&mut self, name: &str, items: Vec<Value>, body: &[Stmt]) -> crate::Result<()> {
+    fn run_for_loop(&mut self, pattern: &Pattern, label: &Option<String>, items: Vec<Value>, body: &[Stmt]) -> crate::Result<()> {
         for item in items {
             self.env.push_scope();
-            self.env.define(name, item);
+            self.bind_pattern(pattern, &item)?;
             for s in body {
                 self.exec_stmt(s)?;
                 if self.returning {
                     break;
                 }
+                if self.loop_signal.is_some() {
+                    break;
+                }
             }
-            let broke = self.check_break_reset();
-            let _ = self.check_continue_reset();
-            self.env.pop_scope();
-            if self.returning || broke {
+            if self.returning {
+                self.env.pop_scope();
                 break;
+            }
+            let ctrl = self.resolve_loop_signal(label);
+            self.env.pop_scope();
+            match ctrl {
+                LoopCtrl::Break => break,
+                LoopCtrl::Continue | LoopCtrl::Next => continue,
             }
         }
         Ok(())
     }
 
-    fn check_break_reset(&mut self) -> bool {
-        if let Some(Value::Bool(true)) = self.env.get("__break__") {
-            self.env.assign("__break__", Value::Bool(false)).ok();
-            true
-        } else {
-            false
-        }
-    }
-
-    fn check_continue_reset(&mut self) -> bool {
-        if let Some(Value::Bool(true)) = self.env.get("__continue__") {
-            self.env.assign("__continue__", Value::Bool(false)).ok();
-            true
-        } else {
-            false
+    /// Consume (or propagate) the pending loop-control signal for the loop with
+    /// the given label. Unlabeled `break`/`continue` target the innermost loop;
+    /// `break N` pops N levels; a labeled break targets the loop with that label.
+    fn resolve_loop_signal(&mut self, label: &Option<String>) -> LoopCtrl {
+        let Some(sig) = self.loop_signal.take() else {
+            return LoopCtrl::Next;
+        };
+        match sig {
+            LoopSignal::Break { label: l, depth } => {
+                let target = match &l {
+                    None => depth == 1,
+                    Some(lname) => label.as_deref() == Some(lname.as_str()),
+                };
+                if target {
+                    LoopCtrl::Break
+                } else {
+                    let new_depth = if l.is_none() && depth > 1 { depth - 1 } else { depth };
+                    self.loop_signal = Some(LoopSignal::Break { label: l, depth: new_depth });
+                    LoopCtrl::Break
+                }
+            }
+            LoopSignal::Continue { label: l, depth } => {
+                let target = match &l {
+                    None => depth == 1,
+                    Some(lname) => label.as_deref() == Some(lname.as_str()),
+                };
+                if target {
+                    LoopCtrl::Continue
+                } else {
+                    let new_depth = if l.is_none() && depth > 1 { depth - 1 } else { depth };
+                    self.loop_signal = Some(LoopSignal::Continue { label: l, depth: new_depth });
+                    LoopCtrl::Break
+                }
+            }
         }
     }
 
@@ -1307,6 +1435,11 @@ impl Interpreter {
                     CompoundOp::Mul => BinOp::Mul,
                     CompoundOp::Div => BinOp::Div,
                     CompoundOp::Rem => BinOp::Rem,
+                    CompoundOp::BitAnd => BinOp::BitAnd,
+                    CompoundOp::BitOr => BinOp::BitOr,
+                    CompoundOp::BitXor => BinOp::BitXor,
+                    CompoundOp::Shl => BinOp::Shl,
+                    CompoundOp::Shr => BinOp::Shr,
                 };
                 let newv = self.eval_binary(&binop, &cur, &rv)?;
                 self.env.assign(name, newv.clone())?;
@@ -1436,7 +1569,7 @@ impl Interpreter {
                     is_async: false,
                 })
             }
-            Expr::Call { callee, args } => self.eval_call(callee, args),
+            Expr::Call { callee, args, named } => self.eval_call(callee, args, named),
             Expr::If { cond, then_branch, else_branch } => {
                 let v = self.eval_expr(cond)?;
                 if is_truthy(&v) {
@@ -1548,13 +1681,140 @@ impl Interpreter {
                 self.env.define("__raised__", v.clone());
                 Err(crate::RakError::Raise(v.to_string()))
             }
-            Expr::Path(segs) => self.eval_path(segs, &[]),
+            Expr::Path(segs) => self.eval_path(segs, &[], &[]),
             Expr::StructLit { name, fields } => {
                 let mut fmap = HashMap::new();
                 for (fname, fval) in fields {
                     fmap.insert(fname.clone(), self.eval_expr(fval)?);
                 }
                 Ok(Value::Struct { name: name.clone(), fields: fmap })
+            }
+            Expr::Ternary { cond, then, els } => {
+                if is_truthy(&self.eval_expr(cond)?) {
+                    self.eval_expr(then)
+                } else {
+                    self.eval_expr(els)
+                }
+            }
+            Expr::NilCoalesce(l, r) => {
+                let lv = self.eval_expr(l)?;
+                match &lv {
+                    Value::Nil => self.eval_expr(r),
+                    Value::Option(None) => self.eval_expr(r),
+                    other => Ok(other.clone()),
+                }
+            }
+            Expr::OptField(obj, field) => {
+                let obj_val = self.eval_expr(obj)?;
+                match &obj_val {
+                    Value::Nil => Ok(Value::Nil),
+                    Value::Option(None) => Ok(Value::Nil),
+                    _ => self.field_value(&obj_val, field).ok_or_else(|| {
+                        crate::RakError::Runtime(format!("Field '{}' not found", field))
+                    }),
+                }
+            }
+            Expr::OptIndex(obj, idx) => {
+                let obj_val = self.eval_expr(obj)?;
+                if matches!(obj_val, Value::Nil | Value::Option(None)) {
+                    return Ok(Value::Nil);
+                }
+                let idx_val = self.eval_expr(idx)?;
+                match (&obj_val, &idx_val) {
+                    (Value::Array(a), Value::Int(i)) => {
+                        a.get(*i as usize).cloned().ok_or_else(|| crate::RakError::Runtime("Index out of bounds".to_string()))
+                    }
+                    (Value::Tuple(t), Value::Int(i)) => {
+                        t.get(*i as usize).cloned().ok_or_else(|| crate::RakError::Runtime("Index out of bounds".to_string()))
+                    }
+                    (Value::String(s), Value::Int(i)) => {
+                        s.chars().nth(*i as usize).map(|c| Value::String(c.to_string())).ok_or_else(|| crate::RakError::Runtime("Index out of bounds".to_string()))
+                    }
+                    (Value::Map(m), Value::String(k)) => {
+                        m.get(k).cloned().ok_or_else(|| crate::RakError::Runtime(format!("Key '{}' not found", k)))
+                    }
+                    _ => Err(crate::RakError::Runtime("Invalid index operation".to_string())),
+                }
+            }
+            Expr::MultiAssign { targets, values } => {
+                let vals: Vec<Value> = values.iter().map(|e| self.eval_expr(e)).collect::<crate::Result<_>>()?;
+                if targets.len() != vals.len() {
+                    return Err(crate::RakError::Runtime(format!(
+                        "Multi-assign needs {} targets and {} values",
+                        targets.len(), vals.len()
+                    )));
+                }
+                let mut last = Value::Nil;
+                for (t, v) in targets.iter().zip(vals.into_iter()) {
+                    match t {
+                        Expr::Ident(name) => self.env.assign(name, v.clone())?,
+                        _ => self.store_back(t, v.clone())?,
+                    }
+                    last = v;
+                }
+                Ok(last)
+            }
+            Expr::Comprehension { is_map, var, iterable, cond, elem, value } => {
+                let iter = self.eval_expr(iterable)?;
+                let tn = iter.type_name();
+                let items = if let Some(func) = self
+                    .trait_impls
+                    .get(&("Iterable".to_string(), tn.clone(), "iter".to_string()))
+                    .cloned()
+                {
+                    let produced = self.call_method_value(func, iter, &[])?;
+                    match produced {
+                        Value::Array(items) => items,
+                        other => return Err(crate::RakError::Runtime(format!(
+                            "Iterable::iter must return an array, got {}", other.type_name()
+                        ))),
+                    }
+                } else {
+                    match iter {
+                        Value::Array(arr) => arr,
+                        Value::Tuple(t) => t,
+                        Value::String(s) => s.chars().map(|c| Value::String(c.to_string())).collect(),
+                        Value::Map(m) => m.into_iter().map(|(k, v)| Value::Tuple(vec![Value::String(k), v])).collect(),
+                        Value::Option(Some(v)) => vec![*v],
+                        _ => return Err(crate::RakError::Runtime("Cannot iterate over this value".to_string())),
+                    }
+                };
+                if *is_map {
+                    let mut out = HashMap::new();
+                    for item in items {
+                        self.env.push_scope();
+                        self.bind_pattern(var, &item)?;
+                        let keep = match cond {
+                            Some(c) => is_truthy(&self.eval_expr(c)?),
+                            None => true,
+                        };
+                        if keep {
+                            let k = self.eval_expr(elem)?.to_string();
+                            let v = match value {
+                                Some(ve) => self.eval_expr(ve)?,
+                                None => Value::Nil,
+                            };
+                            out.insert(k, v);
+                        }
+                        self.env.pop_scope();
+                    }
+                    Ok(Value::Map(out))
+                } else {
+                    let mut out = Vec::new();
+                    for item in items {
+                        self.env.push_scope();
+                        self.bind_pattern(var, &item)?;
+                        let keep = match cond {
+                            Some(c) => is_truthy(&self.eval_expr(c)?),
+                            None => true,
+                        };
+                        if keep {
+                            out.push(self.eval_expr(elem)?);
+                        }
+                        self.env.pop_scope();
+                    }
+                    Ok(Value::Array(out))
+                }
             }
             Expr::As(inner, ty) => {
                 let v = self.eval_expr(inner)?;
@@ -1951,7 +2211,7 @@ impl Interpreter {
         Err(crate::RakError::Runtime(format!("Undefined variable: {}", name)))
     }
 
-    fn eval_call(&mut self, callee: &Expr, args: &[Expr]) -> crate::Result<Value> {
+    fn eval_call(&mut self, callee: &Expr, args: &[Expr], named: &[(String, Expr)]) -> crate::Result<Value> {
         if let Expr::Ident(name) = callee {
             match name.as_str() {
                 "Some" => {
@@ -2000,18 +2260,24 @@ impl Interpreter {
             }
             if let Some(val) = self.env.get(name) {
                 if let Value::Function { params, body, closure, is_async } = val {
-                    return self.call_function(&params, &body, &closure, is_async, args);
+                    return self.call_function(&params, &body, &closure, is_async, args, named);
                 }
             }
             if let Some(decl) = self.foreign_fns.get(name).cloned() {
+                if !named.is_empty() {
+                    return Err(crate::RakError::Runtime(format!("named arguments not supported for extern '{}'", name)));
+                }
                 let arg_vals: Vec<Value> = args.iter().map(|a| self.eval_expr(a)).collect::<crate::Result<_>>()?;
                 return self.call_foreign(decl, &arg_vals);
+            }
+            if !named.is_empty() {
+                return Err(crate::RakError::Runtime(format!("named arguments not supported for builtin '{}'", name)));
             }
             let arg_vals: Vec<Value> = args.iter().map(|a| self.eval_expr(a)).collect::<crate::Result<_>>()?;
             return self.eval_builtin(name, &arg_vals);
         }
         if let Expr::Path(segs) = callee {
-            return self.eval_path(segs, args);
+            return self.eval_path(segs, args, named);
         }
         // Method-call syntax: `obj.method(args...)`
         if let Expr::FieldAccess(obj_expr, method) = callee {
@@ -2042,7 +2308,7 @@ impl Interpreter {
             // Fallback: a field that itself holds a callable (modules, etc.).
             if let Some(v) = self.field_value(&obj_val, method) {
                 if let Value::Function { params, body, closure, is_async } = v {
-                    return self.call_function(&params, &body, &closure, is_async, args);
+                    return self.call_function(&params, &body, &closure, is_async, args, named);
                 }
             }
             return Err(crate::RakError::Runtime(format!(
@@ -2052,7 +2318,7 @@ impl Interpreter {
         }
         let callee_val = self.eval_expr(callee)?;
         if let Value::Function { params, body, closure, is_async } = callee_val {
-            return self.call_function(&params, &body, &closure, is_async, args);
+            return self.call_function(&params, &body, &closure, is_async, args, named);
         }
         if let Value::Module(map) = callee_val {
             let _ = map;
@@ -2060,9 +2326,14 @@ impl Interpreter {
         Err(crate::RakError::Runtime("Cannot call non-function".to_string()))
     }
 
-    fn call_function(&mut self, params: &[Param], body: &[Stmt], closure: &Arc<Env>, is_async: bool, args: &[Expr]) -> crate::Result<Value> {
+    fn call_function(&mut self, params: &[Param], body: &[Stmt], closure: &Arc<Env>, is_async: bool, args: &[Expr], named: &[(String, Expr)]) -> crate::Result<Value> {
         let arg_vals: Vec<Value> = args.iter().map(|a| self.eval_expr(a)).collect::<crate::Result<_>>()?;
-        self.call_function_values(params, body, closure, is_async, arg_vals)
+        let named_vals: crate::Result<Vec<(String, Value)>> = named
+            .iter()
+            .map(|(n, e)| Ok((n.clone(), self.eval_expr(e)?)))
+            .collect();
+        let named_vals = named_vals?;
+        self.call_function_values(params, body, closure, is_async, arg_vals, named_vals)
     }
 
     /// Call a function value with already-evaluated argument values. Used by
@@ -2070,13 +2341,13 @@ impl Interpreter {
     /// before the call.
     fn call_function_with_values(&mut self, func: Value, arg_vals: Vec<Value>) -> crate::Result<Value> {
         if let Value::Function { params, body, closure, is_async } = func {
-            self.call_function_values(&params, &body, &closure, is_async, arg_vals)
+            self.call_function_values(&params, &body, &closure, is_async, arg_vals, vec![])
         } else {
             Err(crate::RakError::Runtime("value is not callable".to_string()))
         }
     }
 
-    fn call_function_values(&mut self, params: &[Param], body: &[Stmt], closure: &Arc<Env>, is_async: bool, arg_vals: Vec<Value>) -> crate::Result<Value> {
+    fn call_function_values(&mut self, params: &[Param], body: &[Stmt], closure: &Arc<Env>, is_async: bool, arg_vals: Vec<Value>, named_vals: Vec<(String, Value)>) -> crate::Result<Value> {
         if is_async {
             // An async function does not run its body at call time; it returns a
             // deferred future whose body is driven on the first `await`.
@@ -2086,6 +2357,7 @@ impl Interpreter {
                     body: body.to_vec(),
                     closure: closure.clone(),
                     args: arg_vals,
+                    named: named_vals,
                 }),
             })));
         }
@@ -2094,8 +2366,9 @@ impl Interpreter {
         let saved_env = self.env.clone();
         self.env = (**closure).clone();
         self.env.push_scope();
-        for (p, a) in params.iter().zip(arg_vals.iter()) {
-            self.env.define(&p.name, a.clone());
+        let bound = self.bind_params(params, &arg_vals, &named_vals)?;
+        for (name, v) in bound {
+            self.env.define(&name, v);
         }
         for s in body {
             self.exec_stmt(s)?;
@@ -2111,6 +2384,60 @@ impl Interpreter {
         self.env = saved_env;
         self.returning = saved_returning;
         Ok(ret)
+    }
+
+    /// Bind function arguments to params, applying positional fill, named
+    /// args, defaults, optional (nil), and rest collection. Returns name→value
+    /// pairs to define in the function scope.
+    fn bind_params(&mut self, params: &[Param], positional: &[Value], named: &[(String, Value)]) -> crate::Result<Vec<(String, Value)>> {
+        let mut bound: Vec<(String, Value)> = Vec::with_capacity(params.len());
+        let mut named_map: HashMap<String, Value> = named.iter().cloned().collect();
+        let mut pos_iter = positional.iter();
+        let mut saw_rest = false;
+
+        for p in params {
+            if p.rest {
+                saw_rest = true;
+                let rest_vals: Vec<Value> = pos_iter.by_ref().cloned().collect();
+                bound.push((p.name.clone(), Value::Array(rest_vals)));
+                continue;
+            }
+            if saw_rest {
+                return Err(crate::RakError::Runtime(format!("parameter '{}' follows a rest parameter", p.name)));
+            }
+            if let Some(v) = pos_iter.next() {
+                let v = v.clone();
+                if named_map.contains_key(&p.name) {
+                    return Err(crate::RakError::Runtime(format!("argument '{}' given twice (positional and named)", p.name)));
+                }
+                bound.push((p.name.clone(), v));
+                continue;
+            }
+            if let Some(v) = named_map.remove(&p.name) {
+                bound.push((p.name.clone(), v));
+                continue;
+            }
+            if let Some(d) = &p.default {
+                let dv = self.eval_expr(d)?;
+                bound.push((p.name.clone(), dv));
+                continue;
+            }
+            if p.optional {
+                bound.push((p.name.clone(), Value::Nil));
+                continue;
+            }
+            return Err(crate::RakError::Runtime(format!("missing required argument '{}'", p.name)));
+        }
+
+        let leftover = pos_iter.count();
+        if leftover > 0 {
+            return Err(crate::RakError::Runtime(format!("too many positional arguments ({} extra)", leftover)));
+        }
+        if !named_map.is_empty() {
+            let names: Vec<String> = named_map.keys().cloned().collect();
+            return Err(crate::RakError::Runtime(format!("unknown named argument(s): {}", names.join(", "))));
+        }
+        Ok(bound)
     }
 
     /// Resolve a `Value::Future`. A ready future returns its value; a pending
@@ -2131,8 +2458,8 @@ impl Interpreter {
                 *handle.state.lock().unwrap() = FutureState::Ready(joined.clone());
                 Ok(joined)
             }
-            FutureState::Deferred { params, body, closure, args } => {
-                let result = self.call_function_values(&params, &body, &closure, false, args)?;
+            FutureState::Deferred { params, body, closure, args, named } => {
+                let result = self.call_function_values(&params, &body, &closure, false, args, named)?;
                 *handle.state.lock().unwrap() = FutureState::Ready(result.clone());
                 Ok(result)
             }
@@ -2484,7 +2811,7 @@ impl Interpreter {
         }
     }
 
-    fn eval_path(&mut self, segs: &[String], args: &[Expr]) -> crate::Result<Value> {
+    fn eval_path(&mut self, segs: &[String], args: &[Expr], named: &[(String, Expr)]) -> crate::Result<Value> {
         if segs.len() >= 2 {
             let base = &segs[0];
             let variant = &segs[1];
@@ -2498,7 +2825,7 @@ impl Interpreter {
             if let Some(Value::Module(map)) = self.env.get(base) {
                 if let Some(v) = map.get(variant) {
                     if let Value::Function { params, body, closure, is_async } = v {
-                        return self.call_function(&params, &body, &closure, *is_async, args);
+                        return self.call_function(&params, &body, &closure, *is_async, args, named);
                     }
                     return Ok(v.clone());
                 }
@@ -2673,6 +3000,24 @@ impl Interpreter {
             }
             (Pattern::Byte(b), Value::Bytes(vals)) => vals.len() == 1 && vals[0] == *b,
             (Pattern::Byte(b), Value::Int(i)) => *i == (*b as i64),
+            (Pattern::Range(lo, hi), v) => {
+                let lo_val = match lo.as_ref() {
+                    Pattern::Int(i) => Some(*i),
+                    Pattern::Hex(h) => Some(*h as i64),
+                    Pattern::Byte(b) => Some(*b as i64),
+                    _ => None,
+                };
+                let hi_val = match hi.as_ref() {
+                    Pattern::Int(i) => Some(*i),
+                    Pattern::Hex(h) => Some(*h as i64),
+                    Pattern::Byte(b) => Some(*b as i64),
+                    _ => None,
+                };
+                match (lo_val, hi_val, v.as_i64()) {
+                    (Some(l), Some(h), Some(v)) => v >= l && v <= h,
+                    _ => false,
+                }
+            }
             (Pattern::Bytes(pats), Value::Bytes(vals)) => {
                 let mut vi = 0usize;
                 let mut pi = 0usize;
@@ -3865,14 +4210,23 @@ pub fn substitute_stmt(stmt: &Stmt, bindings: &HashMap<String, Expr>) -> Stmt {
             then_branch: substitute_stmts(then_branch, bindings),
             else_branch: else_branch.as_ref().map(|b| substitute_stmts(b, bindings)),
         },
-        Stmt::Loop(b) => Stmt::Loop(substitute_stmts(b, bindings)),
-        Stmt::While { cond, body } => Stmt::While {
+        Stmt::Loop { label, body } => Stmt::Loop {
+            label: label.clone(),
+            body: substitute_stmts(body, bindings),
+        },
+        Stmt::While { label, cond, body } => Stmt::While {
+            label: label.clone(),
             cond: Box::new(substitute_expr(cond, bindings)),
             body: substitute_stmts(body, bindings),
         },
-        Stmt::For { name, iterable, body } => Stmt::For {
-            name: name.clone(),
+        Stmt::For { label, pattern, iterable, body } => Stmt::For {
+            label: label.clone(),
+            pattern: pattern.clone(),
             iterable: Box::new(substitute_expr(iterable, bindings)),
+            body: substitute_stmts(body, bindings),
+        },
+        Stmt::DoWhile { cond, body } => Stmt::DoWhile {
+            cond: Box::new(substitute_expr(cond, bindings)),
             body: substitute_stmts(body, bindings),
         },
         Stmt::Dump { value, target } => Stmt::Dump {
@@ -3889,9 +4243,10 @@ pub fn substitute_expr(expr: &Expr, bindings: &HashMap<String, Expr>) -> Expr {
         Expr::MacroVar(name) => bindings.get(name).cloned().unwrap_or_else(|| Expr::MacroVar(name.clone())),
         Expr::Binary(op, l, r) => Expr::Binary(op.clone(), Box::new(substitute_expr(l, bindings)), Box::new(substitute_expr(r, bindings))),
         Expr::Unary(op, e) => Expr::Unary(op.clone(), Box::new(substitute_expr(e, bindings))),
-        Expr::Call { callee, args } => Expr::Call {
+        Expr::Call { callee, args, named } => Expr::Call {
             callee: Box::new(substitute_expr(callee, bindings)),
             args: args.iter().map(|a| substitute_expr(a, bindings)).collect(),
+            named: named.iter().map(|(n, e)| (n.clone(), substitute_expr(e, bindings))).collect(),
         },
         Expr::Index(o, i) => Expr::Index(Box::new(substitute_expr(o, bindings)), Box::new(substitute_expr(i, bindings))),
         Expr::FieldAccess(o, f) => Expr::FieldAccess(Box::new(substitute_expr(o, bindings)), f.clone()),
@@ -4754,5 +5109,210 @@ dump len(q)
             let n: i64 = l.replace("[DUMP] ", "").trim().parse().unwrap_or(0);
             n >= 12
         }), "len got: {:?}", output);
+    }
+
+    // --- Phase 1: common-language basics ---
+
+    #[test]
+    fn test_ternary() {
+        let mut interp = Interpreter::new();
+        let out = interp.run_source("dump 5 > 3 ? 1 : 2").unwrap();
+        assert!(out.iter().any(|l| l.contains("[DUMP] 1")), "got: {:?}", out);
+    }
+
+    #[test]
+    fn test_ternary_nested() {
+        let mut interp = Interpreter::new();
+        let out = interp.run_source("let n = 2\ndump n == 1 ? 10 : n == 2 ? 20 : 30").unwrap();
+        assert!(out.iter().any(|l| l.contains("[DUMP] 20")), "got: {:?}", out);
+    }
+
+    #[test]
+    fn test_do_while() {
+        let mut interp = Interpreter::new();
+        let out = interp.run_source("let i = 0\ndo {\n    i = i + 1\n} while i < 3\ndump i").unwrap();
+        assert!(out.iter().any(|l| l.contains("[DUMP] 3")), "got: {:?}", out);
+    }
+
+    #[test]
+    fn test_do_while_break() {
+        let src = "let i = 0\ndo {\n    i = i + 1\n    if i == 5 { break }\n} while i < 100\ndump i";
+        let mut interp = Interpreter::new();
+        let out = interp.run_source(src).unwrap();
+        assert!(out.iter().any(|l| l.contains("[DUMP] 5")), "got: {:?}", out);
+    }
+
+    #[test]
+    fn test_break_depth() {
+        let src = "let count = 0\nfor i in 1..3 {\n    for j in 1..3 {\n        if j == 2 { break 2 }\n        count = count + 1\n    }\n}\ndump count";
+        let mut interp = Interpreter::new();
+        let out = interp.run_source(src).unwrap();
+        assert!(out.iter().any(|l| l.contains("[DUMP] 1")), "got: {:?}", out);
+    }
+
+    #[test]
+    fn test_indexed_for() {
+        let mut interp = Interpreter::new();
+        let src = "let s = 0\nfor i, x in [10, 20, 30] {\n    s = s + i * x\n}\ndump s";
+        let out = interp.run_source(src).unwrap();
+        assert!(out.iter().any(|l| l.contains("[DUMP] 80")), "got: {:?}", out);
+    }
+
+    #[test]
+    fn test_if_let() {
+        let mut interp = Interpreter::new();
+        let src = "let opt = Some(42)\nif let Some(x) = opt {\n    dump x\n} else {\n    dump 0\n}";
+        let out = interp.run_source(src).unwrap();
+        assert!(out.iter().any(|l| l.contains("[DUMP] 42")), "got: {:?}", out);
+    }
+
+    #[test]
+    fn test_if_let_none() {
+        let mut interp = Interpreter::new();
+        let src = "let opt: Option<int> = None\nif let Some(x) = opt {\n    dump x\n} else {\n    dump 99\n}";
+        let out = interp.run_source(src).unwrap();
+        assert!(out.iter().any(|l| l.contains("[DUMP] 99")), "got: {:?}", out);
+    }
+
+    #[test]
+    fn test_nil_coalesce() {
+        let mut interp = Interpreter::new();
+        let out = interp.run_source("let x = nil\ndump x ?? 42").unwrap();
+        assert!(out.iter().any(|l| l.contains("[DUMP] 42")), "got: {:?}", out);
+    }
+
+    #[test]
+    fn test_optional_chaining() {
+        let mut interp = Interpreter::new();
+        let out = interp.run_source("let m = {a: 1}\ndump m?.a\nlet n = nil\ndump n?.b").unwrap();
+        assert!(out.iter().any(|l| l.contains("[DUMP] 1")), "got: {:?}", out);
+        assert!(out.iter().any(|l| l.contains("[DUMP] nil")), "got: {:?}", out);
+    }
+
+    #[test]
+    fn test_optional_indexing() {
+        let mut interp = Interpreter::new();
+        let out = interp.run_source("let arr = [1, 2, 3]\ndump arr?[0]\nlet n = nil\ndump n?[5]").unwrap();
+        assert!(out.iter().any(|l| l.contains("[DUMP] 1")), "got: {:?}", out);
+        assert!(out.iter().any(|l| l.contains("[DUMP] nil")), "got: {:?}", out);
+    }
+
+    #[test]
+    fn test_raw_string() {
+        let mut interp = Interpreter::new();
+        let out = interp.run_source(r#"let s = r"C:\path\to\file"
+dump s"#).unwrap();
+        assert!(out.iter().any(|l| l.contains("C:\\path\\to\\file")), "got: {:?}", out);
+    }
+
+    #[test]
+    fn test_underscore_literals() {
+        let mut interp = Interpreter::new();
+        let out = interp.run_source("dump 1_000_000").unwrap();
+        assert!(out.iter().any(|l| l.contains("[DUMP] 1000000")), "got: {:?}", out);
+    }
+
+    #[test]
+    fn test_block_comment() {
+        let mut interp = Interpreter::new();
+        let src = "/* block comment */ dump 42 /* end */";
+        let out = interp.run_source(src).unwrap();
+        assert!(out.iter().any(|l| l.contains("[DUMP] 42")), "got: {:?}", out);
+    }
+
+    #[test]
+    fn test_bitwise_compound_assign() {
+        let mut interp = Interpreter::new();
+        let src = "let x = 0xFF\nx &= 0x0F\ndump x\nlet y = 0x10\ny <<= 2\ndump y";
+        let out = interp.run_source(src).unwrap();
+        assert!(out.iter().any(|l| l == "[DUMP] 0xF"), "got: {:?}", out);
+        assert!(out.iter().any(|l| l == "[DUMP] 0x40"), "got: {:?}", out);
+    }
+
+    #[test]
+    fn test_swap_assignment() {
+        let mut interp = Interpreter::new();
+        let src = "let a = 1\nlet b = 2\na, b = b, a\ndump a\ndump b";
+        let out = interp.run_source(src).unwrap();
+        assert!(out.iter().any(|l| l.contains("[DUMP] 2")), "a=2, got: {:?}", out);
+        assert!(out.iter().any(|l| l.contains("[DUMP] 1")), "b=1, got: {:?}", out);
+    }
+
+    #[test]
+    fn test_range_pattern() {
+        let mut interp = Interpreter::new();
+        let src = "let n = 5\nmatch n {\n    1..3 => { dump \"low\" },\n    4..10 => { dump \"mid\" },\n    _ => { dump \"high\" },\n}";
+        let out = interp.run_source(src).unwrap();
+        assert!(out.iter().any(|l| l.contains("[DUMP] mid")), "got: {:?}", out);
+    }
+
+    #[test]
+    fn test_array_comprehension() {
+        let mut interp = Interpreter::new();
+        let src = "let evens = [x for x in 1..10 if x % 2 == 0]\ndump len(evens)";
+        let out = interp.run_source(src).unwrap();
+        // 1..10 inclusive => 2,4,6,8,10 => 5
+        assert!(out.iter().any(|l| l.contains("[DUMP] 5")), "got: {:?}", out);
+    }
+
+    #[test]
+    fn test_map_comprehension() {
+        let mut interp = Interpreter::new();
+        let src = "let m = {k: k * 2 for k in [1, 2, 3]}\ndump m[\"2\"]";
+        let out = interp.run_source(src).unwrap();
+        assert!(out.iter().any(|l| l.contains("[DUMP] 4")), "got: {:?}", out);
+    }
+
+    // --- Phase 2: function args ---
+
+    #[test]
+    fn test_default_args() {
+        let mut interp = Interpreter::new();
+        let src = "fn greet(name: string, greeting: string = \"Hello\") {\n    return greeting + \", \" + name\n}\ndump greet(\"World\")\ndump greet(\"Bob\", \"Hi\")";
+        let out = interp.run_source(src).unwrap();
+        assert!(out.iter().any(|l| l.contains("Hello, World")), "got: {:?}", out);
+        assert!(out.iter().any(|l| l.contains("Hi, Bob")), "got: {:?}", out);
+    }
+
+    #[test]
+    fn test_optional_args() {
+        let mut interp = Interpreter::new();
+        let src = "fn f(a: int, b?: int) {\n    return b\n}\ndump f(1)\ndump f(1, 2)";
+        let out = interp.run_source(src).unwrap();
+        assert!(out.iter().any(|l| l.contains("[DUMP] nil")), "got: {:?}", out);
+        assert!(out.iter().any(|l| l.contains("[DUMP] 2")), "got: {:?}", out);
+    }
+
+    #[test]
+    fn test_rest_args() {
+        let mut interp = Interpreter::new();
+        let src = "fn sum_all(...nums: array) {\n    let s = 0\n    for n in nums {\n        s = s + n\n    }\n    return s\n}\ndump sum_all(1, 2, 3, 4, 5)";
+        let out = interp.run_source(src).unwrap();
+        assert!(out.iter().any(|l| l.contains("[DUMP] 15")), "got: {:?}", out);
+    }
+
+    #[test]
+    fn test_named_args() {
+        let mut interp = Interpreter::new();
+        let src = "fn create(name: string, age: int, admin: bool) {\n    return name\n}\ndump create(\"alice\", age: 30, admin: true)";
+        let out = interp.run_source(src).unwrap();
+        assert!(out.iter().any(|l| l.contains("[DUMP] alice")), "got: {:?}", out);
+    }
+
+    #[test]
+    fn test_named_args_reorder() {
+        let mut interp = Interpreter::new();
+        let src = "fn f(a: int, b: int, c: int) {\n    return b\n}\ndump f(1, c: 3, b: 2)";
+        let out = interp.run_source(src).unwrap();
+        assert!(out.iter().any(|l| l.contains("[DUMP] 2")), "got: {:?}", out);
+    }
+
+    #[test]
+    fn test_combined_args() {
+        let mut interp = Interpreter::new();
+        let src = "fn f(a: int, b: int = 10, ...rest: array) {\n    return len(rest)\n}\ndump f(1, 2, 3, 4, 5)\ndump f(1)";
+        let out = interp.run_source(src).unwrap();
+        assert!(out.iter().any(|l| l.contains("[DUMP] 3")), "got: {:?}", out);
+        assert!(out.iter().any(|l| l.contains("[DUMP] 0")), "got: {:?}", out);
     }
 }

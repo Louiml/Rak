@@ -45,6 +45,8 @@ pub enum Expr {
     Call {
         callee: Box<Expr>,
         args: Vec<Expr>,
+        /// `f(a, x: 10)` — `name: value` pairs.
+        named: Vec<(String, Expr)>,
     },
     If {
         cond: Box<Expr>,
@@ -65,6 +67,34 @@ pub enum Expr {
     Await(Box<Expr>),
     Spawn(Box<Expr>),
     Raise(Box<Expr>),
+    /// `cond ? then : else` — ternary expression.
+    Ternary {
+        cond: Box<Expr>,
+        then: Box<Expr>,
+        els: Box<Expr>,
+    },
+    /// `a ?? b` — nil-coalescing: `b` if `a` is nil/None, else `a`.
+    NilCoalesce(Box<Expr>, Box<Expr>),
+    /// `obj?.field` — optional field access (nil if obj is nil/None).
+    OptField(Box<Expr>, String),
+    /// `obj?[idx]` — optional index.
+    OptIndex(Box<Expr>, Box<Expr>),
+    /// `target1, target2 = value1, value2` — multiple / swap assignment.
+    MultiAssign {
+        targets: Vec<Expr>,
+        values: Vec<Expr>,
+    },
+    /// `[x for x in iter if cond]` / `{k: v for k2 in iter if cond}` — comprehension.
+    Comprehension {
+        is_map: bool,
+        var: Pattern,
+        iterable: Box<Expr>,
+        cond: Option<Box<Expr>>,
+        /// array: the element expression; map: the key expression.
+        elem: Box<Expr>,
+        /// map only: the value expression.
+        value: Option<Box<Expr>>,
+    },
     Path(Vec<String>),
     StructLit {
         name: String,
@@ -91,6 +121,18 @@ pub enum CompoundOp {
     Mul,
     Div,
     Rem,
+    BitAnd,
+    BitOr,
+    BitXor,
+    Shl,
+    Shr,
+}
+
+/// A `break`/`continue` target: a named loop label or a numeric depth.
+#[derive(Debug, Clone, PartialEq)]
+pub enum BreakTarget {
+    Label(String),
+    Depth(u32),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -109,13 +151,36 @@ pub enum Stmt {
         then_branch: Vec<Stmt>,
         else_branch: Option<Vec<Stmt>>,
     },
-    Loop(Vec<Stmt>),
+    /// `do { … } while cond;`
+    DoWhile {
+        cond: Box<Expr>,
+        body: Vec<Stmt>,
+    },
+    /// `if let P = e { … } else { … }`
+    IfLet {
+        pattern: Pattern,
+        value: Box<Expr>,
+        then_branch: Vec<Stmt>,
+        else_branch: Option<Vec<Stmt>>,
+    },
+    /// `while let P = e { … }`
+    WhileLet {
+        pattern: Pattern,
+        value: Box<Expr>,
+        body: Vec<Stmt>,
+    },
+    Loop {
+        label: Option<String>,
+        body: Vec<Stmt>,
+    },
     While {
+        label: Option<String>,
         cond: Box<Expr>,
         body: Vec<Stmt>,
     },
     For {
-        name: String,
+        label: Option<String>,
+        pattern: Pattern,
         iterable: Box<Expr>,
         body: Vec<Stmt>,
     },
@@ -136,8 +201,8 @@ pub enum Stmt {
     Trace {
         value: Box<Expr>,
     },
-    Break,
-    Continue,
+    Break(Option<BreakTarget>),
+    Continue(Option<BreakTarget>),
     Mod {
         name: String,
         items: Vec<Stmt>,
@@ -317,6 +382,12 @@ pub enum Type {
 pub struct Param {
     pub name: String,
     pub type_hint: Option<Type>,
+    /// Default value: `fn f(x: int = 0)`. Evaluated in the closure env on call.
+    pub default: Option<Box<Expr>>,
+    /// `fn f(...xs: array)` — collects leftover positionals into an array.
+    pub rest: bool,
+    /// `fn f(x?: int)` — optional: missing ⇒ nil (sugar for default = nil).
+    pub optional: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
