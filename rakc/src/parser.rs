@@ -2125,25 +2125,37 @@ impl<'a> Parser<'a> {
             self.advance();
             return Ok(Expr::Map(vec![]));
         }
-        if matches!(self.peek(), Some(Token::Ident(_)))
-            && matches!(self.peek_n(1), Some(Token::Colon))
-        {
-            let key = match self.peek() {
+        // A map literal starts when the first entry's key is either an
+        // identifier followed by `:` (the conventional `{ k: v }`) or a string
+        // literal followed by `:` (the `{ "k": v }` JSON-style form).
+        let is_map_key = |tok: Option<&Token>, next: Option<&Token>| -> bool {
+            matches!(tok, Some(Token::Ident(_)) | Some(Token::String(_))) && matches!(next, Some(Token::Colon))
+        };
+        if is_map_key(self.peek(), self.peek_n(1)) {
+            // Parse the first key as its raw form (Ident or String). An ident
+            // key is converted to a string literal for a plain map, but kept
+            // as an ident for a map comprehension (`key: value for ...`), which
+            // treats `key` as a normal expression.
+            let first_key = match self.peek() {
                 Some(Token::Ident(name)) => {
                     let name = name.clone();
                     self.advance();
                     Expr::Ident(name)
                 }
+                Some(Token::String(s)) => {
+                    let s = s.clone();
+                    self.advance();
+                    Expr::String(s)
+                }
                 _ => self.parse_expr()?,
             };
             self.expect(Token::Colon)?;
             let value = self.parse_expr()?;
-            // Map comprehension: `key: value for ...`
             if self.check(&Token::For) {
-                return self.parse_map_comprehension(key, value);
+                return self.parse_map_comprehension(first_key, value);
             }
-            // Regular map: convert ident key to string literal.
-            let key = match key { Expr::Ident(n) => Expr::String(n), other => other };
+            // Regular map: convert an ident key to a string literal.
+            let key = match first_key { Expr::Ident(n) => Expr::String(n), other => other };
             let mut pairs = vec![(key, value)];
             while self.match_token(&Token::Comma) {
                 if self.check(&Token::RBrace) { break; }
@@ -2152,6 +2164,11 @@ impl<'a> Parser<'a> {
                         let name = name.clone();
                         self.advance();
                         Expr::String(name)
+                    }
+                    Some(Token::String(s)) => {
+                        let s = s.clone();
+                        self.advance();
+                        Expr::String(s)
                     }
                     _ => self.parse_expr()?,
                 };

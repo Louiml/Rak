@@ -1,0 +1,4 @@
+let name = "my-package"
+let version = "0.1.0"
+let deps = {}
+let entry = "lib.rak"

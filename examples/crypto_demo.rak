@@ -1,0 +1,15 @@
+// Native cryptography (#1): HMAC, AES-GCM, Ed25519 — no FFI needed.
+dump hmac_sha256("key", "the quick brown fox")
+
+let key = b"\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f\x10\x11\x12\x13\x14\x15\x16\x17\x18\x19\x1a\x1b\x1c\x1d\x1e\x1f"
+let nonce = b"\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b"
+let ct = aes_gcm_encrypt(key, nonce, b"secret payload")
+dump hex_encode(ct)
+dump aes_gcm_decrypt(key, nonce, ct)   // recovers "secret payload"
+
+let pair = ed25519_keypair(b"\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f\x10\x11\x12\x13\x14\x15\x16\x17\x18\x19\x1a\x1b\x1c\x1d\x1e\x1f")
+let pk = pair.0
+let sk = pair.1
+let sig = ed25519_sign(sk, b"message")
+dump ed25519_verify(pk, sig, b"message")     // true
+dump ed25519_verify(pk, sig, b"tampered")    // false

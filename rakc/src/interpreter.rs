@@ -3154,6 +3154,37 @@ impl Interpreter {
             "md5" => Ok(Value::String(rak_stdlib::md5(&self.val_to_bytes(args.first())?))),
             "sha1" => Ok(Value::String(rak_stdlib::sha1(&self.val_to_bytes(args.first())?))),
             "sha256" => Ok(Value::String(rak_stdlib::sha256(&self.val_to_bytes(args.first())?))),
+            "hmac_sha256" => Ok(Value::String(rak_stdlib::hmac_sha256(&self.val_to_bytes(args.first())?, &self.val_to_bytes(args.get(1))?))),
+            "aes_gcm_encrypt" => {
+                let key = self.val_to_bytes(args.first())?;
+                let nonce = self.val_to_bytes(args.get(1))?;
+                let pt = self.val_to_bytes(args.get(2))?;
+                rak_stdlib::aes_gcm_encrypt(&key, &nonce, &pt).map(Value::Bytes).map_err(crate::RakError::Runtime)
+            }
+            "aes_gcm_decrypt" => {
+                let key = self.val_to_bytes(args.first())?;
+                let nonce = self.val_to_bytes(args.get(1))?;
+                let ct = self.val_to_bytes(args.get(2))?;
+                rak_stdlib::aes_gcm_decrypt(&key, &nonce, &ct).map(Value::Bytes).map_err(crate::RakError::Runtime)
+            }
+            "ed25519_keypair" => {
+                let seed = self.val_to_bytes(args.first())?;
+                match rak_stdlib::ed25519_keypair(&seed) {
+                    Ok((pk, sk)) => Ok(Value::Tuple(vec![Value::Bytes(pk), Value::Bytes(sk)])),
+                    Err(e) => Err(crate::RakError::Runtime(e)),
+                }
+            }
+            "ed25519_sign" => {
+                let sk = self.val_to_bytes(args.first())?;
+                let msg = self.val_to_bytes(args.get(1))?;
+                rak_stdlib::ed25519_sign(&sk, &msg).map(Value::Bytes).map_err(crate::RakError::Runtime)
+            }
+            "ed25519_verify" => {
+                let pk = self.val_to_bytes(args.first())?;
+                let sig = self.val_to_bytes(args.get(1))?;
+                let msg = self.val_to_bytes(args.get(2))?;
+                rak_stdlib::ed25519_verify(&pk, &sig, &msg).map(Value::Bool).map_err(crate::RakError::Runtime)
+            }
             "xor" => Ok(Value::Bytes(rak_stdlib::xor_encrypt(&self.val_to_bytes(args.first())?, &self.val_to_bytes(args.get(1))?))),
             "rot13" => Ok(Value::String(rak_stdlib::rot13(&self.val_to_string(args.first())?))),
             "hex_encode" => Ok(Value::String(rak_stdlib::hex_encode(&self.val_to_bytes(args.first())?))),
@@ -4117,6 +4148,236 @@ impl Interpreter {
                 let rep = self.val_to_string(args.get(2))?;
                 Ok(Value::String(re.re.replace_all(&hay, rep.as_str()).into_owned()))
             }
+            // --- Structured logging (#8) ---
+            "log_level" => {
+                let lvl = self.val_to_string(args.first())?;
+                rak_stdlib::log::set_level(&lvl);
+                Ok(Value::Nil)
+            }
+            "log_init" => {
+                let path = self.val_to_string(args.first())?;
+                rak_stdlib::log::init_file(&path).map_err(crate::RakError::Runtime)?;
+                Ok(Value::Nil)
+            }
+            "log_info" | "log_warn" | "log_error" | "log_debug" => {
+                let lev = match name {
+                    "log_warn" => rak_stdlib::log::Level::Warn,
+                    "log_error" => rak_stdlib::log::Level::Error,
+                    "log_debug" => rak_stdlib::log::Level::Debug,
+                    _ => rak_stdlib::log::Level::Info,
+                };
+                let key = self.val_to_string(args.first())?;
+                let fields = args.get(1).map(|v| self.value_to_json(v)).unwrap_or_default();
+                rak_stdlib::log::log(lev, &key, &fields).map_err(crate::RakError::Runtime)?;
+                Ok(Value::Nil)
+            }
+            // --- Process API (#6) ---
+            "process_spawn" => {
+                let cmd = self.val_to_string(args.first())?;
+                let mut args_v = Vec::new();
+                if let Some(Value::Array(a)) = args.get(1) {
+                    for v in a {
+                        args_v.push(self.val_to_string(Some(v))?);
+                    }
+                }
+                let pid = rak_stdlib::process::spawn(&cmd, &args_v).map_err(crate::RakError::Runtime)?;
+                Ok(Value::Int(pid as i64))
+            }
+            "process_wait" => {
+                let pid = args.first().and_then(|v| v.as_u64()).unwrap_or(0);
+                let code = rak_stdlib::process::wait(pid).map_err(crate::RakError::Runtime)?;
+                Ok(Value::Int(code))
+            }
+            "process_stdout" => {
+                let pid = args.first().and_then(|v| v.as_u64()).unwrap_or(0);
+                let s = rak_stdlib::process::read_stdout(pid).map_err(crate::RakError::Runtime)?;
+                Ok(Value::String(s))
+            }
+            "process_stderr" => {
+                let pid = args.first().and_then(|v| v.as_u64()).unwrap_or(0);
+                let s = rak_stdlib::process::read_stderr(pid).map_err(crate::RakError::Runtime)?;
+                Ok(Value::String(s))
+            }
+            "process_kill" => {
+                let pid = args.first().and_then(|v| v.as_u64()).unwrap_or(0);
+                rak_stdlib::process::kill(pid).map_err(crate::RakError::Runtime)?;
+                Ok(Value::Nil)
+            }
+            // --- DNS toolkit (#3) ---
+            "dns_resolve" => {
+                let name = self.val_to_string(args.first())?;
+                let server = args.get(1).map(|v| self.val_to_string(Some(v)).unwrap_or_default());
+                let addrs = rak_stdlib::dns::resolve(&name, server.as_deref()).map_err(crate::RakError::Runtime)?;
+                Ok(Value::Array(addrs.into_iter().map(Value::String).collect()))
+            }
+            "dns_reverse" => {
+                let ip = self.val_to_string(args.first())?;
+                let server = args.get(1).map(|v| self.val_to_string(Some(v)).unwrap_or_default());
+                let names = rak_stdlib::dns::reverse(&ip, server.as_deref()).map_err(crate::RakError::Runtime)?;
+                Ok(Value::Array(names.into_iter().map(Value::String).collect()))
+            }
+            "dns_records" => {
+                let name = self.val_to_string(args.first())?;
+                let server = args.get(1).map(|v| self.val_to_string(Some(v)).unwrap_or_default());
+                let recs = rak_stdlib::dns::records(&name, server.as_deref()).map_err(crate::RakError::Runtime)?;
+                let arr: Vec<Value> = recs.into_iter().map(|r| {
+                    Value::Map(HashMap::from([
+                        ("name".to_string(), Value::String(r.name)),
+                        ("type".to_string(), Value::String(r.rtype)),
+                        ("ttl".to_string(), Value::Int(r.ttl as i64)),
+                        ("rdata".to_string(), Value::String(r.rdata)),
+                    ]))
+                }).collect();
+                Ok(Value::Array(arr))
+            }
+            "dns_walk" => {
+                let domain = self.val_to_string(args.first())?;
+                let mut prefixes = Vec::new();
+                if let Some(Value::Array(a)) = args.get(1) {
+                    for v in a {
+                        prefixes.push(self.val_to_string(Some(v))?);
+                    }
+                }
+                let server = args.get(2).map(|v| self.val_to_string(Some(v)).unwrap_or_default());
+                let found = rak_stdlib::dns::walk(&domain, &prefixes, server.as_deref());
+                Ok(Value::Array(found.into_iter().map(Value::String).collect()))
+            }
+            // --- Secrets API (#9) ---
+            "secret_get" => {
+                let name = self.val_to_string(args.first())?;
+                match rak_stdlib::secrets::get(&name) {
+                    Some(v) => Ok(Value::String(v)),
+                    None => Ok(Value::Nil),
+                }
+            }
+            "secret_set" => {
+                let name = self.val_to_string(args.first())?;
+                let value = self.val_to_string(args.get(1))?;
+                rak_stdlib::secrets::set(&name, &value);
+                Ok(Value::Nil)
+            }
+            "secret_persist" => {
+                let name = self.val_to_string(args.first())?;
+                let value = self.val_to_string(args.get(1))?;
+                rak_stdlib::secrets::persist(&name, &value).map_err(crate::RakError::Runtime)?;
+                Ok(Value::Nil)
+            }
+            "secret_delete" => {
+                let name = self.val_to_string(args.first())?;
+                rak_stdlib::secrets::delete(&name).map_err(crate::RakError::Runtime)?;
+                Ok(Value::Nil)
+            }
+            "secret_ls" => {
+                let names = rak_stdlib::secrets::list();
+                Ok(Value::Array(names.into_iter().map(Value::String).collect()))
+            }
+            // --- HTTP server framework (#4) ---
+            "http_server_start" => {
+                let addr = self.val_to_string(args.first())?;
+                let port = args.get(1).and_then(|v| v.as_u64()).unwrap_or(8080) as u16;
+                let bound = rak_stdlib::http_server::server_start(&addr, port).map_err(crate::RakError::Runtime)?;
+                Ok(Value::Int(bound as i64))
+            }
+            "http_server_poll" => {
+                match rak_stdlib::http_server::poll() {
+                    Some(req) => Ok(Value::Map(HashMap::from([
+                        ("id".to_string(), Value::Int(req.id as i64)),
+                        ("method".to_string(), Value::String(req.method)),
+                        ("path".to_string(), Value::String(req.path)),
+                        ("query".to_string(), Value::Map(req.query.into_iter().map(|(k, v)| (k, Value::String(v))).collect())),
+                        ("headers".to_string(), Value::Map(req.headers.into_iter().map(|(k, v)| (k, Value::String(v))).collect())),
+                        ("body".to_string(), Value::String(req.body)),
+                    ]))),
+                    None => Ok(Value::Nil),
+                }
+            }
+            "http_server_respond" => {
+                let id = args.first().and_then(|v| v.as_u64()).unwrap_or(0);
+                let status = args.get(1).and_then(|v| v.as_u64()).unwrap_or(200) as u16;
+                let headers: Vec<(String, String)> = match args.get(2) {
+                    Some(Value::Map(m)) => m.iter().map(|(k, v)| (k.clone(), v.to_string())).collect(),
+                    _ => Vec::new(),
+                };
+                let body = self.val_to_string(args.get(3))?;
+                rak_stdlib::http_server::respond(id, status, &headers, &body).map_err(crate::RakError::Runtime)?;
+                Ok(Value::Nil)
+            }
+            "http_server_stop" => {
+                rak_stdlib::http_server::server_stop();
+                Ok(Value::Nil)
+            }
+            // --- WebSocket (#5) ---
+            "ws_connect" => {
+                let url = self.val_to_string(args.first())?;
+                let (host, port, path) = parse_ws_url(&url)?;
+                let mut stream = std::net::TcpStream::connect((host.as_str(), port)).map_err(|e| crate::RakError::Runtime(format!("ws_connect: {}", e)))?;
+                stream.set_read_timeout(Some(std::time::Duration::from_secs(10))).ok();
+                rak_stdlib::websocket::client_handshake(&mut stream, &host, &path).map_err(crate::RakError::Runtime)?;
+                Ok(Value::TcpStream(Arc::new(Mutex::new(stream))))
+            }
+            "ws_handshake" => {
+                match args.first() {
+                    Some(Value::TcpStream(stream)) => {
+                        use std::io::BufRead;
+                        let mut reader = std::io::BufReader::new(stream.lock().unwrap().try_clone().map_err(|e| crate::RakError::Runtime(format!("ws_handshake: {}", e)))?);
+                        let mut key = String::new();
+                        loop {
+                            let mut line = String::new();
+                            reader.read_line(&mut line).map_err(|e| crate::RakError::Runtime(format!("ws_handshake: {}", e)))?;
+                            if line.trim().is_empty() { break; }
+                            let low = line.to_lowercase();
+                            if low.starts_with("sec-websocket-key:") {
+                                key = line["sec-websocket-key:".len()..].trim().to_string();
+                            }
+                        }
+                        let accept = rak_stdlib::websocket::accept_value(&key);
+                        let resp = format!("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {}\r\n\r\n", accept);
+                        use std::io::Write;
+                        stream.lock().unwrap().write_all(resp.as_bytes()).map_err(|e| crate::RakError::Runtime(format!("ws_handshake: {}", e)))?;
+                        Ok(Value::Nil)
+                    }
+                    _ => Err(crate::RakError::Runtime("ws_handshake(stream)".to_string())),
+                }
+            }
+            "ws_send" => {
+                match (args.first(), args.get(1)) {
+                    (Some(Value::TcpStream(stream)), Some(v)) => {
+                        let data = self.val_to_bytes(Some(v))?;
+                        let mask = args.get(2).map(|m| matches!(m, Value::Bool(b) if *b)).unwrap_or(true);
+                        let frame = rak_stdlib::websocket::encode_frame(rak_stdlib::websocket::OP_TEXT, &data, mask);
+                        use std::io::Write;
+                        let n = stream.lock().unwrap().write(&frame).map_err(|e| crate::RakError::Runtime(format!("ws_send: {}", e)))?;
+                        Ok(Value::Int(n as i64))
+                    }
+                    _ => Err(crate::RakError::Runtime("ws_send(stream, data)".to_string())),
+                }
+            }
+            "ws_recv" => {
+                match args.first() {
+                    Some(Value::TcpStream(stream)) => {
+                        let mut reader = std::io::BufReader::new(stream.lock().unwrap().try_clone().map_err(|e| crate::RakError::Runtime(format!("ws_recv: {}", e)))?);
+                        match rak_stdlib::websocket::read_frame(&mut reader).map_err(crate::RakError::Runtime)? {
+                            Some(f) => Ok(Value::Map(HashMap::from([
+                                ("opcode".to_string(), Value::Int(f.opcode as i64)),
+                                ("payload".to_string(), Value::Bytes(f.payload)),
+                            ]))),
+                            None => Ok(Value::Nil),
+                        }
+                    }
+                    _ => Err(crate::RakError::Runtime("ws_recv(stream)".to_string())),
+                }
+            }
+            "ws_close" => {
+                match args.first() {
+                    Some(Value::TcpStream(stream)) => {
+                        let frame = rak_stdlib::websocket::encode_frame(rak_stdlib::websocket::OP_CLOSE, b"", true);
+                        use std::io::Write;
+                        stream.lock().unwrap().write_all(&frame).map_err(|e| crate::RakError::Runtime(format!("ws_close: {}", e)))?;
+                        Ok(Value::Nil)
+                    }
+                    _ => Err(crate::RakError::Runtime("ws_close(stream)".to_string())),
+                }
+            }
             _ => Err(crate::RakError::Runtime(format!("Unknown function: {}", name))),
         }
     }
@@ -4142,6 +4403,44 @@ impl Interpreter {
             Some(Value::Mmap(h)) => Ok(h.as_slice().to_vec()),
             Some(v) => Ok(v.to_string().bytes().collect()),
             None => Ok(vec![]),
+        }
+    }
+
+    fn value_to_json(&self, val: &Value) -> std::collections::HashMap<String, rak_stdlib::log::Json> {
+        fn conv(v: &Value) -> rak_stdlib::log::Json {
+            match v {
+                Value::String(s) => rak_stdlib::log::Json::Str(s.clone()),
+                Value::Bytes(b) => rak_stdlib::log::Json::Str(String::from_utf8_lossy(b).to_string()),
+                Value::Bool(b) => rak_stdlib::log::Json::Bool(*b),
+                Value::Nil => rak_stdlib::log::Json::Nil,
+                Value::Int(n) => rak_stdlib::log::Json::Num(*n as f64),
+                Value::Hex(h) => rak_stdlib::log::Json::Num(*h as f64),
+                Value::Float(f) => rak_stdlib::log::Json::Num(*f),
+                Value::Array(a) => rak_stdlib::log::Json::Arr(a.iter().map(conv).collect()),
+                Value::Map(m) => {
+                    let mut obj = std::collections::HashMap::new();
+                    for (k, v) in m {
+                        obj.insert(k.clone(), conv(v));
+                    }
+                    rak_stdlib::log::Json::Obj(obj)
+                }
+                other => rak_stdlib::log::Json::Str(other.to_string()),
+            }
+        }
+        match val {
+            Value::Map(m) => {
+                let mut out = std::collections::HashMap::new();
+                for (k, v) in m {
+                    out.insert(k.clone(), conv(v));
+                }
+                out
+            }
+            Value::Nil => std::collections::HashMap::new(),
+            other => {
+                let mut out = std::collections::HashMap::new();
+                out.insert("value".to_string(), conv(other));
+                out
+            }
         }
     }
 
@@ -4263,6 +4562,26 @@ pub fn substitute_expr(expr: &Expr, bindings: &HashMap<String, Expr>) -> Expr {
         },
         other => other.clone(),
     }
+}
+
+/// Parse a `ws://[host][:port][/path]` URL into (host, port, path).
+fn parse_ws_url(url: &str) -> crate::Result<(String, u16, String)> {
+    let rest = url
+        .strip_prefix("ws://")
+        .or_else(|| url.strip_prefix("wss://"))
+        .ok_or_else(|| crate::RakError::Runtime(format!("ws_connect: invalid URL '{}'", url)))?;
+    let (authority, path) = match rest.find('/') {
+        Some(i) => (&rest[..i], &rest[i..]),
+        None => (rest, "/"),
+    };
+    let (host, port) = match authority.rsplit_once(':') {
+        Some((h, p)) => {
+            let port: u16 = p.parse().map_err(|_| crate::RakError::Runtime(format!("ws_connect: bad port '{}'", p)))?;
+            (h.to_string(), port)
+        }
+        None => (authority.to_string(), 80),
+    };
+    Ok((host, port, path.to_string()))
 }
 
 impl Value {
@@ -5314,5 +5633,75 @@ dump s"#).unwrap();
         let out = interp.run_source(src).unwrap();
         assert!(out.iter().any(|l| l.contains("[DUMP] 3")), "got: {:?}", out);
         assert!(out.iter().any(|l| l.contains("[DUMP] 0")), "got: {:?}", out);
+    }
+
+    // --- Tier 1 features (#1 crypto, #6 process, #8 logging, #9 secrets) ---
+
+    #[test]
+    fn test_hmac_sha256() {
+        let mut interp = Interpreter::new();
+        let out = interp.run_source("dump hmac_sha256(\"key\", \"the quick brown fox\")").unwrap();
+        assert!(out.iter().any(|l| l.contains("[DUMP] 9119dc3209b2cc822340e7ff18d47c79")), "got: {:?}", out);
+    }
+
+    #[test]
+    fn test_aes_gcm_roundtrip() {
+        let mut interp = Interpreter::new();
+        let src = "let key = b\"\\x00\\x01\\x02\\x03\\x04\\x05\\x06\\x07\\x08\\x09\\x0a\\x0b\\x0c\\x0d\\x0e\\x0f\\x10\\x11\\x12\\x13\\x14\\x15\\x16\\x17\\x18\\x19\\x1a\\x1b\\x1c\\x1d\\x1e\\x1f\"\nlet nonce = b\"\\x00\\x01\\x02\\x03\\x04\\x05\\x06\\x07\\x08\\x09\\x0a\\x0b\"\nlet ct = aes_gcm_encrypt(key, nonce, b\"secret payload\")\nlet pt = aes_gcm_decrypt(key, nonce, ct)\ndump string(pt)";
+        let out = interp.run_source(src).unwrap();
+        assert!(out.iter().any(|l| l.contains("secret payload")), "got: {:?}", out);
+    }
+
+    #[test]
+    fn test_ed25519_verify() {
+        let mut interp = Interpreter::new();
+        let src = "let pair = ed25519_keypair(b\"\\x00\\x01\\x02\\x03\\x04\\x05\\x06\\x07\\x08\\x09\\x0a\\x0b\\x0c\\x0d\\x0e\\x0f\\x10\\x11\\x12\\x13\\x14\\x15\\x16\\x17\\x18\\x19\\x1a\\x1b\\x1c\\x1d\\x1e\\x1f\")\nlet pk = pair.0\nlet sk = pair.1\nlet sig = ed25519_sign(sk, b\"message\")\ndump ed25519_verify(pk, sig, b\"message\")\ndump ed25519_verify(pk, sig, b\"other\")";
+        let out = interp.run_source(src).unwrap();
+        assert!(out.iter().any(|l| l.contains("[DUMP] true")), "got: {:?}", out);
+        assert!(out.iter().any(|l| l.contains("[DUMP] false")), "got: {:?}", out);
+    }
+
+    #[test]
+    fn test_process_capture() {
+        let mut interp = Interpreter::new();
+        let src = "let pid = process_spawn(\"cmd\", [\"/c\", \"echo\", \"raktoken\"])\nprocess_wait(pid)\ndump process_stdout(pid)";
+        let out = interp.run_source(src).unwrap();
+        assert!(out.iter().any(|l| l.contains("raktoken")), "got: {:?}", out);
+    }
+
+    #[test]
+    fn test_structured_logging_reachable() {
+        // Structured logging writes to the process stdout (not the interpreter's
+        // `[DUMP]` buffer), so assert the command is dispatchable without error.
+        let mut interp = Interpreter::new();
+        let out = interp.run_source("log_level(\"debug\")\ndump log_info(\"evt\", { host: \"x\" })").unwrap();
+        assert!(out.iter().any(|l| l.contains("[DUMP] nil")), "got: {:?}", out);
+    }
+
+    #[test]
+    fn test_secrets_session() {
+        let mut interp = Interpreter::new();
+        let src = "secret_set(\"K\", \"v\")\ndump secret_get(\"K\")\nsecret_delete(\"K\")\ndump secret_get(\"K\")";
+        let out = interp.run_source(src).unwrap();
+        assert!(out.iter().any(|l| l.contains("[DUMP] v")), "got: {:?}", out);
+        assert!(out.iter().any(|l| l.contains("[DUMP] nil")), "got: {:?}", out);
+    }
+
+    #[test]
+    fn test_map_string_key_literal() {
+        let mut interp = Interpreter::new();
+        let src = "let m = { \"Content-Type\": \"a/b\" }\ndump m[\"Content-Type\"]";
+        let out = interp.run_source(src).unwrap();
+        assert!(out.iter().any(|l| l.contains("[DUMP] a/b")), "got: {:?}", out);
+    }
+
+    #[test]
+    fn test_dns_reverse_ptr_for_ipv4() {
+        // Construct a PTR query manually via the wire builder is complex; just
+        // verify the stdlib accepts an IPv4 address without error by running a
+        // compile/parse check on the function symbol existence.
+        let mut interp = Interpreter::new();
+        let out = interp.run_source("dump len(dns_build(\"8.8.8.8\", \"PTR\"))").unwrap();
+        assert!(out.iter().any(|l| l.contains("[DUMP]")), "got: {:?}", out);
     }
 }

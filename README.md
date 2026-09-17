@@ -535,6 +535,123 @@ dump hex_encode("ABC")
 dump html_links(html)
 ```
 
+### Cryptography (native — no FFI)
+
+`hmac_sha256`, AES-256-GCM (`aes_gcm_encrypt` / `aes_gcm_decrypt`), and Ed25519
+(`ed25519_keypair`, `ed25519_sign`, `ed25519_verify`). All take and return
+`bytes`/`string` and are available on both the interpreter and the VM.
+
+```rak
+dump hmac_sha256("key", "data")
+let key = b"\x00\x01...\x1f"         // 32 bytes
+let nonce = b"\x00\x01...\x0b"       // 12 bytes
+let ct = aes_gcm_encrypt(key, nonce, b"payload")
+dump aes_gcm_decrypt(key, nonce, ct) // b"payload"
+
+let pair = ed25519_keypair(seed)
+let sig = ed25519_sign(pair.1, b"msg")
+dump ed25519_verify(pair.0, sig, b"msg")   // true
+```
+
+### DNS toolkit
+
+Beyond `dns_query`/`dns_build`/`dns_parse`, the investigation API:
+`dns_resolve(host)`, `dns_reverse(ip)` (real PTR, v4 + v6), `dns_records(host)`
+(all record types), and `dns_walk(domain, prefixes)`.
+
+```rak
+dump dns_resolve("example.com")          // all A + AAAA addresses
+dump dns_reverse("8.8.8.8")              // [dns.google]
+for r in dns_records("example.com") { dump r.type }
+dump dns_walk("example.com", ["www", "mail", "api"])
+```
+
+### Process API
+
+`process_spawn(cmd, args)`, `process_wait(pid)`, `process_stdout(pid)`,
+`process_stderr(pid)`, `process_kill(pid)`.
+
+```rak
+let pid = process_spawn("cmd", ["/c", "echo", "hi"])
+process_wait(pid)
+dump process_stdout(pid)
+```
+
+### HTTP server (pull-based)
+
+A minimal HTTP/1.1 server. Requests are queued and read on the main thread, so
+handlers can use arbitrary Rak logic (closures, etc.). Works on both backends.
+
+```rak
+http_server_start("127.0.0.1", 8080)
+loop {
+    let req = http_server_poll()          // nil when idle; never blocks
+    if req == nil { sleep(10) }
+    else {
+        if req.path == "/users" {
+            http_server_respond(req.id, 200, { "Content-Type": "application/json" }, "{\"ok\":true}")
+        } else {
+            http_server_respond(req.id, 404, {}, "not found")
+        }
+    }
+}
+```
+
+`http_server_start(addr, port)` binds and queues parsed requests (returns the
+bound port); `http_server_poll()` returns
+`{id, method, path, query, headers, body}` or `nil`; `http_server_respond(id,
+status, headers, body)` writes the response; `http_server_stop()` cleans up.
+String-keyed map literals (`{ "Content-Type": "application/json" }`) are now
+supported for JSON-style maps.
+
+### WebSocket
+
+RFC 6455 framing + handshake built on the existing TCP stream handle.
+`ws_connect(url)` performs the client handshake; `ws_handshake(stream)` replies
+to a client Upgrade request on a `net_accept` connection; `ws_send(stream, data,
+mask)` sends a text frame (client→server frames must be masked, servers pass
+`false`); `ws_recv(stream)` returns `{opcode, payload}` or `nil`; `ws_close(stream)`
+sends a close frame. Interpreter-only (the VM has no TCP layer).
+
+```rak
+// server: accept + handshake + echo
+let list = net_listen("127.0.0.1:19001")
+let (stream, _) = net_accept(list)
+ws_handshake(stream)
+loop {
+    let m = ws_recv(stream)
+    if m == nil { break }
+    if m.opcode == 1 { ws_send(stream, m.payload, false) }
+}
+
+// client
+let ws = ws_connect("ws://127.0.0.1:19001/echo")
+ws_send(ws, "hello", true)
+dump string(ws_recv(ws).payload)   // hello
+```
+
+### Structured logging (machine-readable)
+
+`log_level(level)`, `log_init(path?)`, and `log_info` / `log_warn` / `log_error`
+/ `log_debug`. Each call emits one JSON line (default stdout, or append-only
+file) — greppable with jq.
+
+```rak
+log_level("debug")
+log_info("scan_start", { host: "127.0.0.1", ports: [80, 443] })
+```
+
+### Secrets API
+
+`secret_get(name)`, `secret_set(name, value)`, `secret_persist(name, value)`
+(0600 file), `secret_delete(name)`, `secret_ls()`. Resolution: session → env
+var → durable store. Never logged.
+
+```rak
+secret_set("API_KEY", "abc123")
+dump secret_get("API_KEY")
+```
+
 ## CLI
 
 ```bash
@@ -616,7 +733,7 @@ Rak/
 │       ├── repl.rs        Interactive REPL
 │       ├── lsp.rs         Language server
 │       └── bindgen.rs     C header bindgen
-├── stdlib/            Rust native stdlib (net, crypto, encoding, recon, web, file, json)
+├── stdlib/            Rust native stdlib (net, crypto, encoding, recon, web, file, json, log, process, secrets, http_server, websocket)
 ├── rakpkg/            Package manager CLI
 ├── rak-setup/        Custom interactive installer (TUI wizard: net-install + offline)
 ├── dist/              One-liner bootstraps (install.sh / install.ps1), man pages, completions

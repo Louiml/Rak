@@ -1,0 +1,2 @@
+// my-package - a Rak package
+dump "Hello from my-package!"

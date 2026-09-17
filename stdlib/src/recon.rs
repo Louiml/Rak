@@ -16,11 +16,9 @@ pub fn dns_lookup(hostname: &str) -> Vec<IpAddr> {
     results
 }
 
-/// Reverse DNS lookup for an IP address
+/// Reverse DNS lookup for an IP address (real PTR query).
 pub fn reverse_dns(ip: &str) -> Option<String> {
-    // This would use dns-lookup crate for real reverse DNS
-    // For now, return a placeholder
-    Some(format!("host.{}.in-addr.arpa", ip.replace('.', "-")))
+    crate::dns::reverse(ip, None).ok().and_then(|mut names| if names.is_empty() { None } else { Some(names.remove(0)) })
 }
 
 /// Enumerate common subdomains

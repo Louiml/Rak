@@ -32,6 +32,14 @@ const BUILTINS: &[&str] = &[
     "sleep", "now_ms", "args", "env_get", "env_set", "ord", "chr", "substr",
     "print", "dbg", "exit", "Some", "None", "Ok", "Err",
     "gui_open", "gui_update", "gui_title", "gui_close", "gui_wait", "gui_callback",
+    "log_level", "log_init", "log_info", "log_warn", "log_error", "log_debug",
+    "process_spawn", "process_wait", "process_stdout", "process_stderr", "process_kill",
+    "dns_resolve", "dns_reverse", "dns_records", "dns_walk",
+    "secret_get", "secret_set", "secret_persist", "secret_delete", "secret_ls",
+    "hmac_sha256", "aes_gcm_encrypt", "aes_gcm_decrypt",
+    "ed25519_keypair", "ed25519_sign", "ed25519_verify",
+    "http_server_start", "http_server_poll", "http_server_respond", "http_server_stop",
+    "ws_connect", "ws_handshake", "ws_send", "ws_recv", "ws_close",
 ];
 
 #[derive(Debug)]

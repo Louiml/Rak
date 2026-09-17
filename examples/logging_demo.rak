@@ -1,0 +1,7 @@
+// Structured logging (#8): machine-readable JSONL output.
+log_level("debug")
+log_init("")
+log_info("scan_start", { host: "127.0.0.1", ports: [80, 443] })
+log_warn("slow_scan", { host: "10.0.0.1", seconds: 12 })
+log_error("timeout", { host: "10.0.0.2", port: 443 })
+log_debug("detail", { step: 3, ok: true })

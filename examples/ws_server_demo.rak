@@ -1,0 +1,19 @@
+// WebSocket (#5): echo server.
+let listener = net_listen("127.0.0.1:19001")
+dump "server listening"
+loop {
+    let accepted = net_accept(listener)
+    let stream = accepted.0
+    ws_handshake(stream)
+    dump "client connected"
+    loop {
+        let msg = ws_recv(stream)
+        if msg == nil { break }
+        let op = msg.opcode
+        if op == 8 { break }   // close frame
+        if op == 1 {           // text
+            ws_send(stream, msg.payload, false)   // server does not mask
+        }
+    }
+    break
+}

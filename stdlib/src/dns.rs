@@ -196,6 +196,95 @@ pub fn query(name: &str, rtype: &str, server: Option<&str>) -> Result<DnsRespons
     parse_response(&buf[..n])
 }
 
+/// Resolve a hostname, returning all A/AAAA address strings.
+pub fn resolve(name: &str, server: Option<&str>) -> Result<Vec<String>, String> {
+    let mut addrs = Vec::new();
+    for rtype in ["A", "AAAA"] {
+        if let Ok(resp) = query(name, rtype, server) {
+            for r in resp.answers {
+                let v = r.rdata.clone();
+                if !addrs.contains(&v) {
+                    addrs.push(v);
+                }
+            }
+        }
+    }
+    Ok(addrs)
+}
+
+/// Reverse-DNS lookup for an IPv4 or IPv6 address. Returns PTR names.
+pub fn reverse(ip: &str, server: Option<&str>) -> Result<Vec<String>, String> {
+    let ptr_name = ptr_for(ip)?;
+    let resp = query(&ptr_name, "PTR", server)?;
+    Ok(resp.answers.into_iter().map(|r| r.rdata).filter(|s| !s.is_empty()).collect())
+}
+
+fn ptr_for(ip: &str) -> Result<String, String> {
+    if ip.contains(':') {
+        // IPv6: split on '::' if present, expand to 8 groups of 4 hex digits,
+        // then reverse each nibble across the whole address per RFC 3596.
+        let (head, tail) = match ip.find("::") {
+            Some(i) => (&ip[..i], &ip[i + 2..]),
+            None => (ip, ""),
+        };
+        let head_groups: Vec<&str> = if head.is_empty() { Vec::new() } else { head.split(':').collect() };
+        let tail_groups: Vec<&str> = if tail.is_empty() { Vec::new() } else { tail.split(':').collect() };
+        let missing = 8usize.saturating_sub(head_groups.len() + tail_groups.len());
+        let mut groups: Vec<String> = Vec::with_capacity(8);
+        for g in &head_groups {
+            groups.push(format!("{:0>4}", g));
+        }
+        for _ in 0..missing {
+            groups.push("0000".to_string());
+        }
+        for g in &tail_groups {
+            groups.push(format!("{:0>4}", g));
+        }
+        if groups.len() != 8 {
+            return Err(format!("dns_reverse: bad IPv6 '{}'", ip));
+        }
+        let mut nibbles = String::new();
+        for g in &groups {
+            nibbles.push_str(&g.to_lowercase());
+        }
+        let rev: String = nibbles.chars().rev().collect();
+        let dotted = rev.chars().map(|c| c.to_string()).collect::<Vec<_>>().join(".");
+        Ok(format!("{}.ip6.arpa", dotted))
+    } else {
+        let parts: Vec<&str> = ip.split('.').collect();
+        if parts.len() != 4 {
+            return Err(format!("dns_reverse: bad IPv4 '{}'", ip));
+        }
+        let mut rev: Vec<String> = parts.iter().rev().map(|s| s.to_string()).collect();
+        rev.push("in-addr.arpa".to_string());
+        Ok(rev.join("."))
+    }
+}
+
+/// Query all supported record types for a name, returning flattened records.
+pub fn records(name: &str, server: Option<&str>) -> Result<Vec<DnsRecord>, String> {
+    let mut out = Vec::new();
+    for rtype in ["A", "AAAA", "MX", "TXT", "CNAME", "NS", "PTR", "SOA"] {
+        if let Ok(resp) = query(name, rtype, server) {
+            out.extend(resp.answers);
+        }
+    }
+    Ok(out)
+}
+
+/// Walk a domain's common subdomains, returning those that resolve (have any
+/// record). `prefixes` is a comma-separated dictionary.
+pub fn walk(domain: &str, prefixes: &[String], server: Option<&str>) -> Vec<String> {
+    let mut out = Vec::new();
+    for p in prefixes {
+        let sub = format!("{}.{}", p, domain);
+        if query(&sub, "A", server).map(|r| !r.answers.is_empty()).unwrap_or(false) {
+            out.push(sub);
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

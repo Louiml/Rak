@@ -1,0 +1,7 @@
+// WebSocket (#5): client.
+let ws = ws_connect("ws://127.0.0.1:19001/echo")
+dump "connected"
+ws_send(ws, "hello from rakc", true)
+let resp = ws_recv(ws)
+dump string(resp.payload)
+ws_close(ws)

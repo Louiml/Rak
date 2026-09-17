@@ -1,0 +1,19 @@
+// HTTP server framework (#4): pull-based request/response loop.
+let port = http_server_start("127.0.0.1", 8080)
+dump fmt("listening on port {}", port)
+
+let count = 0
+loop {
+    let req = http_server_poll()
+    if req == nil {
+        sleep(10)
+    } else {
+        let id = req.id
+        if req.path == "/users" {
+            let body = fmt("\"users\": {0}", count)
+            http_server_respond(id, 200, { "Content-Type": "application/json" }, "{" + body + "}")
+        } else {
+            http_server_respond(id, 404, {}, "not found")
+        }
+    }
+}

@@ -1,0 +1,9 @@
+// Process API (#6): spawn a command, read its stdout/stderr, wait.
+let pid = process_spawn("cmd", ["/c", "echo", "hello from rakc"])
+let code = process_wait(pid)
+dump fmt("exit code: {}", code)
+dump process_stdout(pid)
+
+let pid2 = process_spawn("powershell", ["-Command", "Write-Output halp"])
+let _ = process_wait(pid2)
+dump process_stdout(pid2)

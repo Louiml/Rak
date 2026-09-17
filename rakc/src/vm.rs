@@ -248,6 +248,40 @@ impl Vm {
             let data = native_bytes(args.first());
             Ok(Value::String(Arc::from(rak_stdlib::sha256(&data).as_str())))
         });
+        self.insert_native("hmac_sha256", |args| {
+            let key = native_bytes(args.first());
+            let data = native_bytes(args.get(1));
+            Ok(Value::String(Arc::from(rak_stdlib::hmac_sha256(&key, &data).as_str())))
+        });
+        self.insert_native("aes_gcm_encrypt", |args| {
+            let key = native_bytes(args.first());
+            let nonce = native_bytes(args.get(1));
+            let pt = native_bytes(args.get(2));
+            rak_stdlib::aes_gcm_encrypt(&key, &nonce, &pt).map(|b| Value::Bytes(Arc::from(b.as_slice()))).map_err(|e| e)
+        });
+        self.insert_native("aes_gcm_decrypt", |args| {
+            let key = native_bytes(args.first());
+            let nonce = native_bytes(args.get(1));
+            let ct = native_bytes(args.get(2));
+            rak_stdlib::aes_gcm_decrypt(&key, &nonce, &ct).map(|b| Value::Bytes(Arc::from(b.as_slice()))).map_err(|e| e)
+        });
+        self.insert_native("ed25519_keypair", |args| {
+            let seed = native_bytes(args.first());
+            rak_stdlib::ed25519_keypair(&seed).map(|(pk, sk)| {
+                Value::Tuple(Arc::from([Value::Bytes(Arc::from(pk.as_slice())), Value::Bytes(Arc::from(sk.as_slice()))]))
+            }).map_err(|e| e)
+        });
+        self.insert_native("ed25519_sign", |args| {
+            let sk = native_bytes(args.first());
+            let msg = native_bytes(args.get(1));
+            rak_stdlib::ed25519_sign(&sk, &msg).map(|s| Value::Bytes(Arc::from(s.as_slice()))).map_err(|e| e)
+        });
+        self.insert_native("ed25519_verify", |args| {
+            let pk = native_bytes(args.first());
+            let sig = native_bytes(args.get(1));
+            let msg = native_bytes(args.get(2));
+            rak_stdlib::ed25519_verify(&pk, &sig, &msg).map(Value::Bool).map_err(|e| e)
+        });
         self.insert_native("hex_encode", |args| {
             let data = native_bytes(args.first());
             Ok(Value::String(Arc::from(rak_stdlib::hex_encode(&data).as_str())))
@@ -686,6 +720,167 @@ impl Vm {
             }
             Ok(Value::String(Arc::from(out.as_str())))
         });
+        // --- Structured logging (#8) ---
+        self.insert_native("log_level", |args| {
+            let lvl = native_str(args.first());
+            rak_stdlib::log::set_level(&lvl);
+            Ok(Value::Nil)
+        });
+        self.insert_native("log_init", |args| {
+            let path = native_str(args.first());
+            rak_stdlib::log::init_file(&path)?;
+            Ok(Value::Nil)
+        });
+        self.insert_native("log_info", |args| vm_log(&rak_stdlib::log::Level::Info, args));
+        self.insert_native("log_warn", |args| vm_log(&rak_stdlib::log::Level::Warn, args));
+        self.insert_native("log_error", |args| vm_log(&rak_stdlib::log::Level::Error, args));
+        self.insert_native("log_debug", |args| vm_log(&rak_stdlib::log::Level::Debug, args));
+        // --- Process API (#6) ---
+        self.insert_native("process_spawn", |args| {
+            let cmd = native_str(args.first());
+            let mut a = Vec::new();
+            if let Some(Value::Array(arr)) = args.get(1) {
+                for v in arr.iter() {
+                    a.push(native_str(Some(v)));
+                }
+            }
+            let pid = rak_stdlib::process::spawn(&cmd, &a)?;
+            Ok(Value::I64(pid as i64))
+        });
+        self.insert_native("process_wait", |args| {
+            let pid = args.first().and_then(|v| v.as_u64()).unwrap_or(0);
+            let code = rak_stdlib::process::wait(pid)?;
+            Ok(Value::I64(code))
+        });
+        self.insert_native("process_stdout", |args| {
+            let pid = args.first().and_then(|v| v.as_u64()).unwrap_or(0);
+            let s = rak_stdlib::process::read_stdout(pid)?;
+            Ok(Value::String(Arc::from(s.as_str())))
+        });
+        self.insert_native("process_stderr", |args| {
+            let pid = args.first().and_then(|v| v.as_u64()).unwrap_or(0);
+            let s = rak_stdlib::process::read_stderr(pid)?;
+            Ok(Value::String(Arc::from(s.as_str())))
+        });
+        self.insert_native("process_kill", |args| {
+            let pid = args.first().and_then(|v| v.as_u64()).unwrap_or(0);
+            rak_stdlib::process::kill(pid)?;
+            Ok(Value::Nil)
+        });
+        // --- DNS toolkit (#3) ---
+        self.insert_native("dns_resolve", |args| {
+            let name = native_str(args.first());
+            let server = args.get(1).map(|v| native_str(Some(v)));
+            let addrs = rak_stdlib::dns::resolve(&name, server.as_deref())?;
+            Ok(Value::Array(Arc::from(addrs.into_iter().map(|s| Value::String(Arc::from(s.as_str()))).collect::<Vec<_>>())))
+        });
+        self.insert_native("dns_reverse", |args| {
+            let ip = native_str(args.first());
+            let server = args.get(1).map(|v| native_str(Some(v)));
+            let names = rak_stdlib::dns::reverse(&ip, server.as_deref())?;
+            Ok(Value::Array(Arc::from(names.into_iter().map(|s| Value::String(Arc::from(s.as_str()))).collect::<Vec<_>>())))
+        });
+        self.insert_native("dns_records", |args| {
+            let name = native_str(args.first());
+            let server = args.get(1).map(|v| native_str(Some(v)));
+            let recs = rak_stdlib::dns::records(&name, server.as_deref())?;
+            let arr: Vec<Value> = recs.into_iter().map(|r| {
+                let mut m = HashMap::new();
+                m.insert("name".to_string(), Value::String(Arc::from(r.name.as_str())));
+                m.insert("type".to_string(), Value::String(Arc::from(r.rtype.as_str())));
+                m.insert("ttl".to_string(), Value::I64(r.ttl as i64));
+                m.insert("rdata".to_string(), Value::String(Arc::from(r.rdata.as_str())));
+                Value::Map(Arc::from(m))
+            }).collect();
+            Ok(Value::Array(Arc::from(arr)))
+        });
+        self.insert_native("dns_walk", |args| {
+            let domain = native_str(args.first());
+            let mut prefixes = Vec::new();
+            if let Some(Value::Array(a)) = args.get(1) {
+                for v in a.iter() {
+                    prefixes.push(native_str(Some(v)));
+                }
+            }
+            let server = args.get(2).map(|v| native_str(Some(v)));
+            let found = rak_stdlib::dns::walk(&domain, &prefixes, server.as_deref());
+            Ok(Value::Array(Arc::from(found.into_iter().map(|s| Value::String(Arc::from(s.as_str()))).collect::<Vec<_>>())))
+        });
+        // --- Secrets API (#9) ---
+        self.insert_native("secret_get", |args| {
+            let name = native_str(args.first());
+            match rak_stdlib::secrets::get(&name) {
+                Some(v) => Ok(Value::String(Arc::from(v.as_str()))),
+                None => Ok(Value::Nil),
+            }
+        });
+        self.insert_native("secret_set", |args| {
+            let name = native_str(args.first());
+            let value = native_str(args.get(1));
+            rak_stdlib::secrets::set(&name, &value);
+            Ok(Value::Nil)
+        });
+        self.insert_native("secret_persist", |args| {
+            let name = native_str(args.first());
+            let value = native_str(args.get(1));
+            rak_stdlib::secrets::persist(&name, &value)?;
+            Ok(Value::Nil)
+        });
+        self.insert_native("secret_delete", |args| {
+            let name = native_str(args.first());
+            rak_stdlib::secrets::delete(&name)?;
+            Ok(Value::Nil)
+        });
+        self.insert_native("secret_ls", |_args| {
+            let names = rak_stdlib::secrets::list();
+            Ok(Value::Array(Arc::from(names.into_iter().map(|s| Value::String(Arc::from(s.as_str()))).collect::<Vec<_>>())))
+        });
+        // --- HTTP server framework (#4) ---
+        self.insert_native("http_server_start", |args| {
+            let addr = native_str(args.first());
+            let port = args.get(1).and_then(|v| v.as_u64()).unwrap_or(8080) as u16;
+            let bound = rak_stdlib::http_server::server_start(&addr, port)?;
+            Ok(Value::I64(bound as i64))
+        });
+        self.insert_native("http_server_poll", |_args| {
+            match rak_stdlib::http_server::poll() {
+                Some(req) => {
+                    let mut m = HashMap::new();
+                    m.insert("id".to_string(), Value::I64(req.id as i64));
+                    m.insert("method".to_string(), Value::String(Arc::from(req.method.as_str())));
+                    m.insert("path".to_string(), Value::String(Arc::from(req.path.as_str())));
+                    m.insert("query".to_string(), vm_map(req.query));
+                    m.insert("headers".to_string(), vm_map(req.headers));
+                    m.insert("body".to_string(), Value::String(Arc::from(req.body.as_str())));
+                    Ok(Value::Map(Arc::from(m)))
+                }
+                None => Ok(Value::Nil),
+            }
+        });
+        self.insert_native("http_server_respond", |args| {
+            let id = args.first().and_then(|v| v.as_u64()).unwrap_or(0);
+            let status = args.get(1).and_then(|v| v.as_u64()).unwrap_or(200) as u16;
+            let headers: Vec<(String, String)> = match args.get(2) {
+                Some(Value::Map(m)) => m.iter().map(|(k, v)| (k.clone(), v.to_string())).collect(),
+                _ => Vec::new(),
+            };
+            let body = native_str(args.get(3));
+            rak_stdlib::http_server::respond(id, status, &headers, &body).map_err(|e| e)?;
+            Ok(Value::Nil)
+        });
+        self.insert_native("http_server_stop", |_args| {
+            rak_stdlib::http_server::server_stop();
+            Ok(Value::Nil)
+        });
+        self.insert_native("sleep", |args| {
+            let ms = args.first().and_then(|v| v.as_u64()).unwrap_or(0);
+            std::thread::sleep(std::time::Duration::from_millis(ms));
+            Ok(Value::Nil)
+        });
+        self.insert_native("now_ms", |_args| {
+            let ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0);
+            Ok(Value::I64(ms))
+        });
     }
 
     fn insert_native(&mut self, name: &str, f: impl Fn(&[Value]) -> Result<Value, String> + Send + Sync + 'static) {
@@ -1046,6 +1241,58 @@ fn native_bytes(v: Option<&Value>) -> Vec<u8> {
         Some(v) => v.to_string().into_bytes(),
         None => Vec::new(),
     }
+}
+
+/// Convert a VM value to structured-log JSON fields. Mirrors the interpreter's
+/// `value_to_json`.
+fn vm_log(level: &rak_stdlib::log::Level, args: &[Value]) -> Result<Value, String> {
+    fn conv(v: &Value) -> rak_stdlib::log::Json {
+        match v {
+            Value::String(s) => rak_stdlib::log::Json::Str(s.to_string()),
+            Value::Bytes(b) => rak_stdlib::log::Json::Str(String::from_utf8_lossy(b).into_owned()),
+            Value::Bool(b) => rak_stdlib::log::Json::Bool(*b),
+            Value::Nil => rak_stdlib::log::Json::Nil,
+            Value::I64(n) => rak_stdlib::log::Json::Num(*n as f64),
+            Value::Hex(h, _) => rak_stdlib::log::Json::Num(*h as f64),
+            Value::F64(f) => rak_stdlib::log::Json::Num(*f),
+            Value::Array(a) => rak_stdlib::log::Json::Arr(a.iter().map(conv).collect()),
+            Value::Map(m) => {
+                let mut obj = std::collections::HashMap::new();
+                for (k, v) in m.iter() {
+                    obj.insert(k.clone(), conv(v));
+                }
+                rak_stdlib::log::Json::Obj(obj)
+            }
+            other => rak_stdlib::log::Json::Str(other.to_string()),
+        }
+    }
+    let key = native_str(args.first());
+    let fields: std::collections::HashMap<String, rak_stdlib::log::Json> = match args.get(1) {
+        Some(Value::Map(m)) => {
+            let mut out = std::collections::HashMap::new();
+            for (k, v) in m.iter() {
+                out.insert(k.clone(), conv(v));
+            }
+            out
+        }
+        Some(other) => {
+            let mut out = std::collections::HashMap::new();
+            out.insert("value".to_string(), conv(other));
+            out
+        }
+        None => std::collections::HashMap::new(),
+    };
+    rak_stdlib::log::log(level.clone(), &key, &fields)?;
+    Ok(Value::Nil)
+}
+
+/// Wrap a String map as a VM `Value::Map`.
+fn vm_map(map: std::collections::HashMap<String, String>) -> Value {
+    let mut m = std::collections::HashMap::new();
+    for (k, v) in map {
+        m.insert(k, Value::String(Arc::from(v.as_str())));
+    }
+    Value::Map(Arc::from(m))
 }
 
 /// Recursively unwrap a `Value::Evidence` wrapper to its inner value.
