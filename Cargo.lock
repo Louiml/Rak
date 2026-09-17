@@ -3492,7 +3492,7 @@ dependencies = [
 
 [[package]]
 name = "rak-setup"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "dialoguer",
@@ -3507,7 +3507,7 @@ dependencies = [
 
 [[package]]
 name = "rak-stdlib"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -3532,7 +3532,7 @@ dependencies = [
 
 [[package]]
 name = "rakc"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "bindgen",
@@ -3553,7 +3553,7 @@ dependencies = [
 
 [[package]]
 name = "rakpkg"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "serde_json",
 ]
