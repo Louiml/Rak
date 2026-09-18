@@ -97,6 +97,7 @@ pub enum Value {
     Module(HashMap<String, Value>),
     TcpListener(Arc<Mutex<std::net::TcpListener>>),
     TcpStream(Arc<Mutex<std::net::TcpStream>>),
+    UdpTransport(Arc<Mutex<rak_stdlib::tunnel::UdpTransport>>),
     JoinHandle(Arc<Mutex<Option<JoinHandle<Value>>>>),
     Sender(Arc<Mutex<mpsc::Sender<Value>>>),
     Receiver(Arc<Mutex<mpsc::Receiver<Value>>>),
@@ -210,6 +211,7 @@ impl fmt::Display for Value {
             Value::Module(_) => write!(f, "<module>"),
             Value::TcpListener(_) => write!(f, "<tcp-listener>"),
             Value::TcpStream(_) => write!(f, "<tcp-stream>"),
+            Value::UdpTransport(_) => write!(f, "<udp-transport>"),
             Value::JoinHandle(_) => write!(f, "<thread>"),
             Value::Sender(_) => write!(f, "<sender>"),
             Value::Receiver(_) => write!(f, "<receiver>"),
@@ -1056,6 +1058,9 @@ impl Interpreter {
                 self.binstructs
                     .insert(name.clone(), fields.clone());
             }
+            Stmt::Tunnel { name, passphrase, body } => {
+                self.exec_tunnel(name, passphrase, body)?;
+            }
         }
         Ok(())
     }
@@ -1193,6 +1198,39 @@ impl Interpreter {
             }
         }
         self.output.push("[SCAN] Complete".to_string());
+        Ok(())
+    }
+
+    /// Execute a `tunnel <name> <passphrase> { ... }` block. Derives a 32-byte
+    /// session key from the passphrase (PBKDF2-HMAC-SHA256) and opens an
+    /// encrypted UDP conduit, binding `<name>` (key), `<name>_udp` (transport)
+    /// and `<name>_addr` (bound ip:port) inside the block.
+    fn exec_tunnel(&mut self, name: &str, passphrase: &str, body: &[Stmt]) -> crate::Result<()> {
+        let salt: Vec<u8> = b"rak:secure-elb:tunnel".to_vec();
+        let key = rak_stdlib::tunnel::psk_derive(passphrase, &salt, 100_000, 32)
+            .map_err(crate::RakError::Runtime)?;
+        let (transport, local) = rak_stdlib::tunnel::udp_bind("127.0.0.1:0")
+            .map_err(crate::RakError::Runtime)?;
+
+        self.env.push_scope();
+        self.env.define(
+            name.to_string().as_str(),
+            Value::Bytes(key.clone().into()),
+        );
+        let udp_value = Value::UdpTransport(std::sync::Arc::new(transport));
+        self.env
+            .define(format!("{}_udp", name).as_str(), udp_value);
+        self.env
+            .define(format!("{}_addr", name).as_str(), Value::String(local.to_string()));
+        // Expose a stable bare `tunnel_key` alias inside the block too.
+        self.env.define("tunnel_key", Value::Bytes(key.into()));
+        for s in body {
+            self.exec_stmt(s)?;
+            if self.returning {
+                break;
+            }
+        }
+        self.env.pop_scope();
         Ok(())
     }
 
@@ -4024,6 +4062,126 @@ impl Interpreter {
                     Ok(b) => Ok(Value::Result(Some(Box::new(Value::Bytes(b))), None)),
                     Err(e) => Ok(Value::Result(None, Some(Box::new(Value::String(e))))),
                 }
+            }
+            // --- VPN / encrypted tunneling ---
+            "x25519_keypair" => {
+                let seed = self.val_to_bytes(args.first())?;
+                match rak_stdlib::tunnel::x25519_keypair(&seed) {
+                    Ok((pk, sk)) => Ok(Value::Tuple(vec![Value::Bytes(pk), Value::Bytes(sk)])),
+                    Err(e) => Err(crate::RakError::Runtime(e)),
+                }
+            }
+            "x25519_shared" => {
+                let secret = self.val_to_bytes(args.first())?;
+                let peer = self.val_to_bytes(args.get(1))?;
+                match rak_stdlib::tunnel::x25519_shared(&secret, &peer) {
+                    Ok(shared) => Ok(Value::Bytes(shared)),
+                    Err(e) => Err(crate::RakError::Runtime(e)),
+                }
+            }
+            "chacha20_encrypt" => {
+                let key = self.val_to_bytes(args.first())?;
+                let nonce = self.val_to_bytes(args.get(1))?;
+                let aad = self.val_to_bytes(args.get(2))?;
+                let plain = self.val_to_bytes(args.get(3))?;
+                match rak_stdlib::tunnel::chacha20_encrypt(&key, &nonce, &aad, &plain) {
+                    Ok(ct) => Ok(Value::Bytes(ct)),
+                    Err(e) => Err(crate::RakError::Runtime(e)),
+                }
+            }
+            "chacha20_decrypt" => {
+                let key = self.val_to_bytes(args.first())?;
+                let nonce = self.val_to_bytes(args.get(1))?;
+                let aad = self.val_to_bytes(args.get(2))?;
+                let ct = self.val_to_bytes(args.get(3))?;
+                match rak_stdlib::tunnel::chacha20_decrypt(&key, &nonce, &aad, &ct) {
+                    Ok(pt) => Ok(Value::Bytes(pt)),
+                    Err(e) => Err(crate::RakError::Runtime(e)),
+                }
+            }
+            "tunnel_preshared_key" => {
+                let pass = self.val_to_string(args.first())?;
+                let salt = self.val_to_bytes(args.get(1))?;
+                let iters = args.get(2).and_then(|v| v.as_u64()).unwrap_or(100_000) as u32;
+                let len = args.get(3).and_then(|v| v.as_u64()).unwrap_or(32) as u32;
+                match rak_stdlib::tunnel::psk_derive(&pass, &salt, iters, len) {
+                    Ok(k) => Ok(Value::Bytes(k)),
+                    Err(e) => Err(crate::RakError::Runtime(e)),
+                }
+            }
+            "kdf_next" => {
+                let prev = self.val_to_bytes(args.first())?;
+                let counter = args.get(1).and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+                let len = args.get(2).and_then(|v| v.as_u64()).unwrap_or(32) as u32;
+                match rak_stdlib::tunnel::kdf_next(&prev, counter, len) {
+                    Ok(k) => Ok(Value::Bytes(k)),
+                    Err(e) => Err(crate::RakError::Runtime(e)),
+                }
+            }
+            "tunnel_frame" => {
+                let seq = args.first().and_then(|v| v.as_u64()).unwrap_or(0);
+                let payload = self.val_to_bytes(args.get(1))?;
+                Ok(Value::Bytes(rak_stdlib::tunnel::tunnel_frame(seq, &payload)))
+            }
+            "tunnel_unframe" => {
+                let frame = self.val_to_bytes(args.first())?;
+                match rak_stdlib::tunnel::tunnel_unframe(&frame) {
+                    Ok((seq, payload)) => Ok(Value::Tuple(vec![
+                        Value::Int(seq as i64),
+                        Value::Bytes(payload),
+                    ])),
+                    Err(e) => Err(crate::RakError::Runtime(e)),
+                }
+            }
+            "tunnel_nonce" => {
+                let seq = args.first().and_then(|v| v.as_u64()).unwrap_or(0);
+                let nonce = rak_stdlib::tunnel::nonce_for(seq);
+                Ok(Value::Bytes(nonce.to_vec()))
+            }
+            "udp_bind" => {
+                let addr = self.val_to_string(args.first()).unwrap_or_else(|_| "127.0.0.1:0".to_string());
+                match rak_stdlib::tunnel::udp_bind(&addr) {
+                    Ok((transport, local)) => Ok(Value::Tuple(vec![
+                        Value::UdpTransport(Arc::new(transport)),
+                        Value::String(local.to_string()),
+                    ])),
+                    Err(e) => Err(crate::RakError::Runtime(e)),
+                }
+            }
+            "udp_send" => {
+                let transport = match args.first() {
+                    Some(Value::UdpTransport(t)) => t.clone(),
+                    _ => return Err(crate::RakError::Runtime("udp_send: expected a UDP transport".to_string())),
+                };
+                let data = self.val_to_bytes(args.get(1))?;
+                let target = self.val_to_string(args.get(2))?;
+                match rak_stdlib::tunnel::udp_send(&transport, &data, &target) {
+                    Ok(n) => Ok(Value::Int(n as i64)),
+                    Err(e) => Err(crate::RakError::Runtime(e)),
+                }
+            }
+            "udp_recv" => {
+                let transport = match args.first() {
+                    Some(Value::UdpTransport(t)) => t.clone(),
+                    _ => return Err(crate::RakError::Runtime("udp_recv: expected a UDP transport".to_string())),
+                };
+                let max = args.get(1).and_then(|v| v.as_u64()).unwrap_or(65535) as usize;
+                let timeout = args.get(2).and_then(|v| v.as_u64()).unwrap_or(0);
+                match rak_stdlib::tunnel::udp_recv(&transport, max, timeout) {
+                    Ok(Some((data, addr))) => Ok(Value::Tuple(vec![
+                        Value::Bytes(data),
+                        Value::String(addr.to_string()),
+                    ])),
+                    Ok(None) => Ok(Value::Nil),
+                    Err(e) => Err(crate::RakError::Runtime(e)),
+                }
+            }
+            "udp_local_addr" => {
+                let transport = match args.first() {
+                    Some(Value::UdpTransport(t)) => t.clone(),
+                    _ => return Err(crate::RakError::Runtime("udp_local_addr: expected a UDP transport".to_string())),
+                };
+                Ok(Value::String(rak_stdlib::tunnel::udp_local_addr(&transport)))
             }
             // --- DNS ---
             "dns_query" => {

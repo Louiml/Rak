@@ -17,6 +17,7 @@ import { Example } from './components/examples';
 import { Icon } from './components/Icon';
 import SettingsModal, { Settings, loadSettings, saveSettings } from './components/Settings';
 import Tutorial, { TourStep } from './components/Tutorial';
+import DocsBrowser from './components/DocsBrowser';
 
 export type { Tab };
 
@@ -75,6 +76,7 @@ export default function IDE() {
   const [sidebarWidth, setSidebarWidth] = useState(256);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [quickOpen, setQuickOpen] = useState(false);
+  const [docsOpen, setDocsOpen] = useState(false);
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [cursorPos, setCursorPos] = useState({ line: 1, col: 1 });
   const consoleRef = useRef<HTMLDivElement>(null);
@@ -82,6 +84,27 @@ export default function IDE() {
   const toastIdRef = useRef(0);
   const resizeRef = useRef<{ type: 'terminal' | 'sidebar'; startY: number; startH: number; startW: number; startX: number } | null>(null);
   const recentOutputs = useRef(new Map<string, number>());
+
+  // --- Recent projects (persisted in localStorage) ---
+  const [recentProjects, setRecentProjects] = useState<string[]>(() => {
+    try {
+      return JSON.parse(localStorage.getItem('rak.ide.recentProjects') || '[]');
+    } catch { return []; }
+  });
+
+  const addRecentProject = useCallback((path: string) => {
+    if (!path) return;
+    setRecentProjects(prev => {
+      const next = [path, ...prev.filter(p => p !== path)].slice(0, 8);
+      try { localStorage.setItem('rak.ide.recentProjects', JSON.stringify(next)); } catch {}
+      return next;
+    });
+  }, []);
+
+  const clearRecentProjects = useCallback(() => {
+    setRecentProjects([]);
+    try { localStorage.removeItem('rak.ide.recentProjects'); } catch {}
+  }, []);
 
   const activeTab = tabs.find((t) => t.id === activeTabId) || null;
 
@@ -130,6 +153,7 @@ useEffect(() => {
     try {
       const selected = await open({ directory: true, multiple: false, title: 'Open Workspace Folder' });
       if (typeof selected === 'string' && selected) {
+        addRecentProject(selected);
         setCurrentPath(selected);
         setWorkspaceOpen(true);
         setTabs([]);
@@ -254,6 +278,14 @@ useEffect(() => {
     navigator.clipboard.writeText(path).then(() => showToast('Path copied', 'success'));
   };
 
+  const handleInsertDoc = (title: string) => {
+    if (!activeTab) { showToast('Open a file to insert docs', 'info'); return; }
+    const name = title.split(' ')[0].replace(/\W/g, '');
+    if (!name) return;
+    updateTabContent(activeTab.id, activeTab.content + (activeTab.content.endsWith('\n') ? '' : '\n') + `${name} `);
+    showToast(`Inserted ${name}`, 'success');
+  };
+
   const handleRevealInExplorer = (path: string) => {
     if (!path) return;
     const dir = path.includes('\\') ? path.split('\\').slice(0, -1).join('\\') : path.split('/').slice(0, -1).join('/');
@@ -278,6 +310,7 @@ useEffect(() => {
       else if (mod && e.shiftKey && e.key === 'T') { e.preventDefault(); setTerminalOpen(o => !o); }
       else if (mod && e.key === 'b' && !e.shiftKey) { e.preventDefault(); setSidebarOpen(o => !o); }
       else if (mod && e.key === 'j' && !e.shiftKey) { e.preventDefault(); setConsoleOpen(o => !o); }
+      else if (mod && e.key === 'k' && !e.shiftKey) { e.preventDefault(); setDocsOpen(o => !o); }
       else if (mod && e.key === 'p' && !e.shiftKey) { e.preventDefault(); setQuickOpen(true); }
       else if (mod && e.shiftKey && e.key === 'P') { e.preventDefault(); setPaletteOpen(true); }
       else if (mod && e.key === 'w' && !e.shiftKey) { e.preventDefault(); if (activeTabId) handleTabClose(activeTabId); }
@@ -323,6 +356,7 @@ useEffect(() => {
     { id: 'terminal', label: 'Toggle Terminal', shortcut: 'Ctrl+Shift+T', icon: 'terminal', action: () => setTerminalOpen(o => !o) },
     { id: 'sidebar', label: 'Toggle Sidebar', shortcut: 'Ctrl+B', icon: 'panel-left', action: () => setSidebarOpen(o => !o) },
     { id: 'console', label: 'Toggle Console', shortcut: 'Ctrl+J', icon: 'monitor', action: () => setConsoleOpen(o => !o) },
+    { id: 'docs', label: 'Toggle Documentation', shortcut: 'Ctrl+K', icon: 'book', action: () => setDocsOpen(o => !o) },
     { id: 'quickopen', label: 'Quick Open File', shortcut: 'Ctrl+P', icon: 'search', action: () => setQuickOpen(true) },
     { id: 'interp', label: 'Mode: Interpreter', icon: 'zap', action: () => { setRunMode('interp'); showToast('Interpreter mode', 'info'); } },
     { id: 'vm', label: 'Mode: VM', icon: 'zap', action: () => { setRunMode('vm'); showToast('VM mode', 'info'); } },
@@ -361,6 +395,27 @@ useEffect(() => {
                 <button onClick={() => { setCurrentPath(''); setWorkspaceOpen(true); handleNewScratchFile(); }} className="px-8 py-2 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 rounded-lg transition-colors text-sm">New Scratch File</button>
               </div>
             </div>
+            {recentProjects.length > 0 && (
+              <div className="w-80 text-left bg-zinc-900/60 border border-zinc-800 rounded-lg p-3">
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-[11px] text-zinc-400 font-semibold tracking-wide uppercase">Recent Projects</span>
+                  <button onClick={clearRecentProjects} className="text-[10px] text-zinc-600 hover:text-red-400" title="Clear recent projects">Clear</button>
+                </div>
+                <div className="space-y-0.5 max-h-40 overflow-y-auto">
+                  {recentProjects.map((p) => (
+                    <button
+                      key={p}
+                      onClick={() => { addRecentProject(p); setCurrentPath(p); setWorkspaceOpen(true); setTabs([]); setActiveTabId(null); }}
+                      className="w-full text-left px-2 py-1.5 rounded text-xs text-zinc-300 hover:bg-zinc-800 hover:text-emerald-300 flex items-center gap-2 group"
+                      title={p}
+                    >
+                      <Icon name="folder" size={12} className="text-zinc-500 group-hover:text-emerald-400 flex-shrink-0" />
+                      <span className="truncate">{p}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
             <div className="text-xs text-zinc-600 max-w-md mx-auto">
               English keywords, first-class hexadecimal, real networking, bytecode VM, SQL server, self-hosting. Built for recon, security research, and general-purpose systems programming.
             </div>
@@ -387,6 +442,7 @@ useEffect(() => {
           <button onClick={handleNewFile} className="px-2 py-1 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 rounded" title="New File (Ctrl+N)">New File</button>
           <button onClick={handleOpenFolder} className="px-2 py-1 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 rounded" title="Open Folder (Ctrl+O)">Open Folder</button>
           <button onClick={handleSave} className="px-3 py-1 text-zinc-300 hover:bg-zinc-800 rounded" title="Save (Ctrl+S)">Save</button>
+          <button onClick={() => setDocsOpen(o => !o)} className="px-2 py-1 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 rounded" title="Docs (Ctrl+K)">Docs</button>
           <span data-tour="examples"><ExamplesMenu onOpen={handleOpenExample} /></span>
         </div>
         <div className="flex items-center gap-1">
@@ -496,6 +552,11 @@ useEffect(() => {
               ))}
             </div>
           </div>
+        )}
+
+        {/* Docs browser */}
+        {docsOpen && (
+          <DocsBrowser onClose={() => setDocsOpen(false)} onInsert={handleInsertDoc} />
         )}
       </div>
 

@@ -8,6 +8,7 @@ out/
 
 ide/src-tauri/gen/schemas/
 ide/src-tauri/target/
+ide/src-tauri/resources/
 
 .DS_Store
 Thumbs.db

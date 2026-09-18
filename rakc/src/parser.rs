@@ -401,6 +401,7 @@ impl<'a> Parser<'a> {
                 }
             }
             Some(Token::BinStruct) => self.parse_binstruct(),
+            Some(Token::Tunnel) => self.parse_tunnel(),
             _ => {
                 let expr = self.parse_expr()?;
                 self.semi()?;
@@ -998,6 +999,24 @@ impl<'a> Parser<'a> {
         }
         self.expect(Token::RBrace)?;
         Ok(Stmt::BinStructDef { name, fields })
+    }
+
+    /// Parse a `tunnel <name> <passphrase> { body }` statement. Derives a
+    /// session key and opens an encrypted UDP conduit, binding `<name>`,
+    /// `<name>_udp` and `<name>_addr` inside the block body.
+    fn parse_tunnel(&mut self) -> Result<Stmt> {
+        self.expect(Token::Tunnel)?;
+        let name = self.expect_ident()?;
+        let passphrase = match self.peek() {
+            Some(Token::String(s)) => {
+                let s = s.clone();
+                self.advance();
+                s
+            }
+            _ => self.expect_ident()?,
+        };
+        let body = self.parse_block()?;
+        Ok(Stmt::Tunnel { name, passphrase, body })
     }
 
     /// Parse a `binstruct` field type: `u16be`, `u4`, `i32le`, `bytes`, `rest`,

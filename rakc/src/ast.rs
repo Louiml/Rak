@@ -270,6 +270,14 @@ pub enum Stmt {
         name: String,
         fields: Vec<BinField>,
     },
+    /// `tunnel <name> <passphrase> { body }` — derive a session key and open an
+    /// encrypted UDP conduit, binding `<name>` (key), `<name>_udp` (transport)
+    /// and `<name>_addr` (bound address) inside the block body.
+    Tunnel {
+        name: String,
+        passphrase: String,
+        body: Vec<Stmt>,
+    },
 }
 
 /// A single field inside a `binstruct` declaration.

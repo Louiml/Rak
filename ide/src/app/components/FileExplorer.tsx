@@ -51,6 +51,37 @@ export default function FileExplorer({ onFileSelect, currentPath, onPathChange, 
     loadDir(currentPath);
   }, [currentPath, loadDir, refreshKey]);
 
+  // Real-time refresh: poll the current directory while mounted so the
+  // explorer picks up changes made outside the IDE (or by other tools),
+  // and refresh immediately when the window regains focus.
+  useEffect(() => {
+    let prev: string | null = null;
+    let cancelled = false;
+
+    const check = async () => {
+      if (cancelled) return;
+      try {
+        const result: FileEntry[] = await invoke('list_dir', { path: currentPath });
+        const sig = result.map((e) => `${e.is_dir ? 'd' : 'f'}:${e.name}`).sort().join('\n');
+        if (prev === null) prev = sig;
+        else if (prev !== sig) {
+          prev = sig;
+          refresh(); // bumps refreshKey -> reloads top level + expanded subdirs
+        }
+      } catch { /* directory may be gone; ignore transient read errors */ }
+    };
+
+    check();
+    const timer = window.setInterval(check, 2500);
+    const onFocus = () => check();
+    window.addEventListener('focus', onFocus);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+      window.removeEventListener('focus', onFocus);
+    };
+  }, [currentPath]);
+
   const toggleExpand = (path: string) => {
     setExpandedDirs((prev) => {
       const next = new Set(prev);

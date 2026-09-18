@@ -622,6 +622,9 @@ impl Compiler {
                     }
                 }
             }
+            Stmt::Tunnel { .. } => {
+                return Err("VM does not support 'tunnel' statement (use `rakc run` with the interpreter)".to_string());
+            }
             other => {
                 return Err(format!("VM does not support statement: {:?}", other));
             }

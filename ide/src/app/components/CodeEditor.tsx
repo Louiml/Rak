@@ -42,6 +42,10 @@ const SNIPPETS: Snippet[] = [
   { trigger: 'netraw', label: 'net_raw SYN', body: 'let pkt = net_raw_tcp_syn("10.0.0.1", "10.0.0.2", 12345, 80)\ndump len(pkt)' },
   { trigger: 'ffi', label: 'ffi_load', body: 'let lib = ffi_load("libc.so.6")\ndump lib.call("abs", [-9])' },
   { trigger: 'dns', label: 'dns_query', body: 'dump dns_query("example.com", "A")' },
+  { trigger: 'tunnel', label: 'tunnel block', body: 'tunnel link "passphrase" {\n    \n}' },
+  { trigger: 'x25519', label: 'x25519 keypair', body: 'let keys = x25519_keypair(seed)\ndump hex_encode(keys.0)' },
+  { trigger: 'chacha', label: 'chacha20 encrypt', body: 'let ct = chacha20_encrypt(key, tunnel_nonce(1), b"aad", b"data")' },
+  { trigger: 'udp', label: 'udp bind', body: 'let t = udp_bind("127.0.0.1:8001")\nlet sock = t.0\nlet addr = t.1' },
 ];
 
 const KEYWORDS = [
@@ -50,6 +54,7 @@ const KEYWORDS = [
   'while', 'break', 'continue', 'true', 'false', 'nil', 'in',
   'try', 'catch', 'raise', 'throw', 'trait', 'async', 'await', 'spawn', 'as', 'type',
   'import', 'from', 'export', 'macro', 'macro_rules', 'const', 'extern',
+  'binstruct', 'evidence', 'tunnel',
 ];
 
 const KEYWORD_SET = new Set(KEYWORDS);
@@ -96,6 +101,12 @@ const BUILTINS = [
   'pcap_open', 'pcap_next',
   // Async I/O
   'http_get_async', 'tcp_probe', 'tcp_connect_async',
+  // VPN / encrypted tunneling
+  'x25519_keypair', 'x25519_shared',
+  'chacha20_encrypt', 'chacha20_decrypt',
+  'tunnel_preshared_key', 'kdf_next',
+  'tunnel_frame', 'tunnel_unframe', 'tunnel_nonce',
+  'udp_bind', 'udp_send', 'udp_recv', 'udp_local_addr',
 ];
 
 interface Suggestion {
@@ -110,6 +121,27 @@ const ALL_SUGGESTIONS: Suggestion[] = [
   ...TYPES.map((t) => ({ label: t, kind: 'type' as const })),
   ...BUILTINS.map((b) => ({ label: b, kind: 'builtin' as const })),
 ];
+
+// Collect identifiers defined in the current buffer so completion can suggest
+// user symbols (let/const/fn names, params) as well as the built-in vocabulary.
+function extractBufferSymbols(source: string): { label: string; kind: 'keyword' | 'type' | 'builtin' | 'snippet' }[] {
+  const seen = new Set<string>();
+  const out: { label: string; kind: 'keyword' | 'type' | 'builtin' | 'snippet' }[] = [];
+  const add = (label: string) => {
+    if (!label || seen.has(label)) return;
+    seen.add(label);
+    out.push({ label, kind: 'keyword' as const });
+  };
+  // `let name =`, `const NAME =`, `mut name =`
+  for (const m of source.matchAll(/\b(?:let|mut|const)\s+([a-zA-Z_][a-zA-Z0-9_]*)\b/g)) add(m[1]);
+  // `fn name(` and `fn name<T>(`
+  for (const m of source.matchAll(/\bfn\s+([a-zA-Z_][a-zA-Z0-9_]*)/g)) add(m[1]);
+  // `tunnel <name>`
+  for (const m of source.matchAll(/\btunnel\s+([a-zA-Z_][a-zA-Z0-9_]*)/g)) add(m[1]);
+  // struct <Name>, enum <Name>
+  for (const m of source.matchAll(/\b(?:struct|enum|binstruct)\s+([a-zA-Z_][a-zA-Z0-9_]*)/g)) add(m[1]);
+  return out;
+}
 
 const KIND_ICON: Record<Suggestion['kind'], IconName> = { keyword: 'key', type: 'box', builtin: 'zap', snippet: 'file-code' };
 
@@ -301,6 +333,7 @@ function renderLine(line: string): React.ReactNode {
 export default function CodeEditor({ value, onChange, onRun, onCursorChange, fontSize = 14, tabSize = 4, autoClose = true }: CodeEditorProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const highlightRef = useRef<HTMLPreElement>(null);
+  const gutterRef = useRef<HTMLDivElement>(null);
   const lines = value.split('\n');
 
   // Find/Replace state
@@ -326,6 +359,9 @@ export default function CodeEditor({ value, onChange, onRun, onCursorChange, fon
     if (textareaRef.current && highlightRef.current) {
       highlightRef.current.scrollTop = textareaRef.current.scrollTop;
       highlightRef.current.scrollLeft = textareaRef.current.scrollLeft;
+    }
+    if (textareaRef.current && gutterRef.current) {
+      gutterRef.current.scrollTop = textareaRef.current.scrollTop;
     }
   };
 
@@ -397,29 +433,68 @@ export default function CodeEditor({ value, onChange, onRun, onCursorChange, fon
   };
 
   // Autocomplete logic
-  const updateSuggestions = useCallback(() => {
+  const updateSuggestions = useCallback((force = false) => {
     if (!textareaRef.current) return;
     const ta = textareaRef.current;
     const pos = ta.selectionStart;
     const before = value.substring(0, pos);
     const wordMatch = before.match(/[a-zA-Z_][a-zA-Z0-9_]*$/);
-    if (wordMatch && wordMatch[0].length >= 1) {
-      const prefix = wordMatch[0].toLowerCase();
-      const matches = ALL_SUGGESTIONS.filter(s => s.label.toLowerCase().startsWith(prefix)).slice(0, 8);
-      if (matches.length > 0 && (matches.length > 1 || matches[0].label !== wordMatch[0])) {
-        setSuggestions(matches);
-        setSuggestionIndex(0);
-        setShowSuggestions(true);
-        // compute caret pixel position (monospace: text-sm 14px, leading-6 24px, p-4)
-        const lines = before.split('\n');
-        const lineIdx = lines.length - 1;
-        const col = lines[lineIdx].length;
-        const scrollTop = ta.scrollTop;
-        const scrollLeft = ta.scrollLeft;
-        setSuggestionTop(16 + (lineIdx + 1) * 24 - scrollTop);
-        setSuggestionLeft(16 + (col + 1) * 8.4 - scrollLeft);
-        return;
+    const prefix = wordMatch ? wordMatch[0].toLowerCase() : '';
+
+    // Predictions: after a known keyword / builtin + space, suggest the tokens
+    // that most often follow it (e.g. `{` after fn/if/while/tunnel, `=` after
+    // let, `(` after a call).
+    const trailing = before.trimEnd();
+    const lastKw = (trailing.match(/([a-zA-Z_][a-zA-Z0-9_]*)$/) || [])[1]?.toLowerCase();
+    let prediction: Suggestion | null = null;
+    if (!wordMatch && lastKw) {
+      if (['if', 'else', 'while', 'for', 'loop', 'match'].includes(lastKw)) {
+        prediction = { label: '{ … }', kind: 'snippet', body: '{\n    \n}' };
+      } else if (lastKw === 'tunnel') {
+        prediction = { label: '<name> "<pass>" { … }', kind: 'snippet', body: 'link "passphrase" {\n    \n}' };
+      } else if (lastKw === 'let' || lastKw === 'mut' || lastKw === 'const') {
+        prediction = { label: '= value', kind: 'snippet', body: 'name = value' };
+      } else if (['scan', 'fetch', 'dump', 'return', 'await', 'print', 'yield'].includes(lastKw)) {
+        prediction = { label: '<expr>', kind: 'snippet', body: ' ' };
       }
+    }
+
+    const symbols = extractBufferSymbols(value);
+    const pool: Suggestion[] = [
+      ...(prediction ? [prediction] : []),
+      ...symbols,
+      ...ALL_SUGGESTIONS,
+    ];
+
+    let matches: Suggestion[];
+    if (force && !prefix && symbols.length === 0) {
+      // Ctrl+Space with empty word: show everything.
+      matches = ALL_SUGGESTIONS.slice(0, 12);
+    } else if (force && !prefix) {
+      matches = pool.slice(0, 12);
+    } else if (prefix) {
+      // Rank prefix matches first, then substring matches, then cjk-friendly.
+      const starts = pool.filter(s => s.label.toLowerCase().startsWith(prefix));
+      const contains = pool.filter(s => !s.label.toLowerCase().startsWith(prefix) && s.label.toLowerCase().includes(prefix));
+      matches = [...starts, ...contains].slice(0, force ? 16 : 8);
+    } else {
+      setShowSuggestions(false);
+      return;
+    }
+
+    if (matches.length > 0 && (matches.length > 1 || !prefix || matches[0].label !== wordMatch![0])) {
+      setSuggestions(matches);
+      setSuggestionIndex(0);
+      setShowSuggestions(true);
+      // compute caret pixel position (monospace: text-sm 14px, leading-6 24px, p-4)
+      const ls = before.split('\n');
+      const lineIdx = ls.length - 1;
+      const col = ls[lineIdx].length;
+      const scrollTop = ta.scrollTop;
+      const scrollLeft = ta.scrollLeft;
+      setSuggestionTop(16 + (lineIdx + 1) * 24 - scrollTop);
+      setSuggestionLeft(16 + (col + 1) * 8.4 - scrollLeft);
+      return;
     }
     setShowSuggestions(false);
   }, [value]);
@@ -431,8 +506,8 @@ export default function CodeEditor({ value, onChange, onRun, onCursorChange, fon
     const before = value.substring(0, pos);
     const after = value.substring(pos);
     const wordMatch = before.match(/[a-zA-Z_][a-zA-Z0-9_]*$/);
-    if (!wordMatch) return;
-    const newBefore = before.substring(0, before.length - wordMatch[0].length);
+    // Predictions / forced inserts replace nothing when there is no word prefix.
+    const newBefore = wordMatch ? before.substring(0, before.length - wordMatch[0].length) : before;
     const inserted = suggestion.body ?? suggestion.label;
     const newValue = newBefore + inserted + after;
     onChange(newValue);
@@ -597,6 +672,12 @@ export default function CodeEditor({ value, onChange, onRun, onCursorChange, fon
       setShowSuggestions(false);
       return;
     }
+    // Ctrl+Space - force completion suggestions / predictions
+    if (mod && e.key === ' ') {
+      e.preventDefault();
+      updateSuggestions(true);
+      return;
+    }
     // Autocomplete navigation
     if (showSuggestions && suggestions.length > 0) {
       if (e.key === 'ArrowDown') {
@@ -666,10 +747,11 @@ export default function CodeEditor({ value, onChange, onRun, onCursorChange, fon
   return (
     <div className="relative flex-1 flex bg-zinc-950 overflow-hidden">
       {/* Line numbers */}
-      <div className="flex flex-col py-4 px-3 text-right bg-zinc-950 border-r border-zinc-800 select-none overflow-hidden">
+      <div ref={gutterRef} className="flex flex-col py-4 px-3 text-right bg-zinc-950 border-r border-zinc-800 select-none overflow-hidden flex-shrink-0" style={{ willChange: 'scroll-position' }}>
         {lines.map((_, i) => (
-          <div key={i} className="text-xs text-zinc-600 leading-6 min-h-[1.5rem]">{i + 1}</div>
+          <div key={i} className="text-xs text-zinc-600 leading-6 min-h-[1.5rem] h-[24px] flex-shrink-0">{i + 1}</div>
         ))}
+        <div className="min-h-[1.5rem] h-[24px] flex-shrink-0" />
       </div>
 
       {/* Editor area */}

@@ -1050,3 +1050,119 @@ binstruct name for a `Ref` field.
   interpreter and the VM.
 - `examples/forensic_structs.rak` runs on both `rakc run` and `rakc vm`,
   decoding real DNS queries, round-tripping, and emitting a cited report.
+
+---
+
+## Part 5 — VPN & Encrypted Tunneling  **[SHIPPED]**
+
+Rak ships an application-layer VPN toolkit: forward-secret key agreement
+(X25519), AEAD encryption (ChaCha20-Poly1305), key derivation (PBKDF2 + HKDF),
+tunnel datagram framing, and an encrypted UDP transport. Everything lives at the
+application layer so no kernel TUN/TAP device or raw-socket privilege is required
+— it works on **Windows** out of the box (raw sockets are Unix-gated in this
+stdlib).
+
+### 5.1 The `tunnel` keyword  **[SHIPPED]**
+
+#### Syntax
+```rak
+tunnel <name> <passphrase> {
+    // <name>       -> 32-byte session key (Bytes)
+    // <name>_udp   -> bound encrypted UDP transport handle
+    // <name>_addr  -> bound "ip:port" string
+    // tunnel_key   -> alias for the session key
+}
+```
+
+#### Architecture
+`tunnel` is a scoped statement. At parse time it is a plain `Stmt::Tunnel {
+name, passphrase, body }`; only the lexer (`Token::Tunnel`), `ast.rs`, and
+`parser.rs::parse_tunnel` change — there is no expression form. At runtime the
+interpreter's `exec_tunnel` derives a 32-byte session key via
+`rak_stdlib::tunnel::psk_derive` (PBKDF2-HMAC-SHA256), binds an ephemeral UDP
+transport with `udp_bind("127.0.0.1:0")`, pushes a scope, defines
+`<name>`/`<name>_udp`/`<name>_addr`/`tunnel_key`, executes the body, then pops
+the scope.
+
+The bytecode VM does **not** implement `tunnel` (it has no UDP transport value);
+`compiler.rs` returns a clear `"VM does not support 'tunnel' statement"` error,
+consistent with the deliberate-subset convention.
+
+#### Error handling & edge cases
+- Reusing a passphrase yields the same key (PBKDF2 is deterministic with a fixed
+  salt); a different salt or iteration count yields a different key.
+- The block scope is popped after the body, so `<name>` and friends are
+  undefined outside — an `Undefined variable` error, by design.
+- Binding an ephemeral UDP port cannot fail on a functioning loopback interface.
+
+### 5.2 Stdlib module `stdlib/src/tunnel.rs`  **[SHIPPED]**
+
+New free functions (mirroring `crypto.rs`/`net.rs` style):
+
+| Function | Purpose |
+|----------|---------|
+| `x25519_keypair(seed) -> (pub, sec)` | Deterministic Curve25519 keypair from a 32-byte seed. |
+| `x25519_shared(secret, peer_pub) -> Vec<u8>` | ECDH shared secret. |
+| `chacha20_encrypt(key, nonce, aad, plain) -> Vec<u8>` | AEAD ciphertext ++ tag. |
+| `chacha20_decrypt(key, nonce, aad, ct) -> Vec<u8>` | AEAD decrypt / verify. |
+| `psk_derive(pass, salt, iters, len) -> Vec<u8>` | PBKDF2-HMAC-SHA256 session key. |
+| `hkdf_derive(secret, salt, info, len) -> Vec<u8>` | HKDF-SHA256 extraction/expansion. |
+| `kdf_next(prev, counter, len) -> Vec<u8>` | Rolling per-packet ratchet key. |
+| `tunnel_frame(seq: u64, payload) -> Vec<u8>` | `[seq(8)] ++ payload` framing. |
+| `tunnel_unframe(frame) -> (u64, payload)` | Parse + validate a frame. |
+| `udp_bind(addr) -> (Mutex<UdpTransport>, SocketAddr)` | Bind a UDP conduit. |
+| `udp_send(transport, data, target) -> usize` | Datagram send. |
+| `udp_recv(transport, max, timeout) -> Option<(data, addr)>` | Timed receive. |
+| `udp_local_addr(transport) -> String` | Bound address. |
+
+### 5.3 Rak builtins  **[SHIPPED]**
+
+Exposed as builtins in **both** the interpreter `eval_builtin` and the VM
+`register_natives` for the pure-crypto set; the UDP transport builtins are
+**interpreter-only** (the VM has no `UdpTransport` value). All are added to
+`lsp.rs::BUILTINS` for autocomplete.
+
+- `x25519_keypair(seed)` → `(pub, sec)` tuple of Bytes
+- `x25519_shared(secret, peer_pub)` → Bytes
+- `chacha20_encrypt(key, nonce, aad, plain)` → Bytes
+- `chacha20_decrypt(key, nonce, aad, ct)` → Bytes (raises on auth failure)
+- `tunnel_preshared_key(pass, salt, iters, len)` → Bytes
+- `kdf_next(prev_key, counter, len)` → Bytes
+- `tunnel_frame(seq, payload)` → Bytes
+- `tunnel_unframe(frame)` → `(seq, payload)` tuple
+- `udp_bind(addr)` → `(transport, "ip:port")` tuple  *(interpreter)*
+- `udp_send(transport, data, target)` → int  *(interpreter)*
+- `udp_recv(transport, max, timeout_ms)` → `(data, addr)` tuple or `nil` on timeout  *(interpreter)*
+- `udp_local_addr(transport)` → string  *(interpreter)*
+
+#### Error handling
+- `chacha20_encrypt/decrypt` require key = 32 bytes and nonce = 12 bytes; errors
+  are descriptive. Decrypt raises on auth-tag mismatch or bad key/nonce.
+- `x25519_keypair/shared` require 32-byte inputs.
+- `udp_recv` with `timeout_ms > 0` returns `nil` on timeout (non-blocking poll
+  otherwise); `WouldBlock` is mapped to `None`.
+- `tunnel_unframe` rejects frames shorter than 8 bytes.
+
+### 5.4 Dependencies added
+
+`stdlib/Cargo.toml`: `chacha20poly1305 = "0.10"`, `x25519-dalek = { version =
+"2", features = ["static_secrets"] }`, `hkdf = "0.12"`. All pure-Rust, no system
+deps, compile on Windows.
+
+### 5.5 Security notes (see `examples/VPN/README.md`)
+
+- Keys must be fresh/random; never reuse a nonce under the same key (roll via
+  `kdf_next`).
+- `tunnel_frame` uses a monotonic `seq` for replay/reorder detection and to
+  avoid nonce reuse.
+- In production pull passphrases from the secrets store (`secret_get`), never
+  hardcode.
+
+### Verification
+- `examples/VPN/keyexchange.rak` runs on both backends and demonstrates matching
+  shared secrets and eavesdropper failure.
+- `examples/VPN/psk_tunnel.rak`, `udp_dtls_like.rak`, `packet_builder.rak`, and
+  `vpn_over_http.rak` exercise the `tunnel` keyword, UDP transport, raw packet
+  forgery, and covert HTTP relay respectively on `rakc run`.
+- The VM returns clear "not supported" errors for the interpreter-only constructs
+  (`tunnel`, `udp_*`, `try/catch`, `net_raw_*`) rather than crashing.

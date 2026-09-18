@@ -6,7 +6,7 @@ const KEYWORDS: &[&str] = &[
     "scan", "fetch", "dump", "trace", "loop", "if", "else", "fn", "let", "mut",
     "return", "use", "mod", "pub", "struct", "enum", "impl", "match", "for",
     "while", "break", "continue", "true", "false", "nil", "in",
-    "try", "catch", "raise", "throw", "trait", "async", "await", "spawn", "as", "type", "extern", "macro", "const", "import", "from", "export",
+    "try", "catch", "raise", "throw", "trait", "async", "await", "spawn", "as", "type", "extern", "macro", "const", "import", "from", "export", "binstruct", "evidence", "tunnel",
 ];
 
 const TYPES: &[&str] = &[
@@ -40,6 +40,9 @@ const BUILTINS: &[&str] = &[
     "ed25519_keypair", "ed25519_sign", "ed25519_verify",
     "http_server_start", "http_server_poll", "http_server_respond", "http_server_stop",
     "ws_connect", "ws_handshake", "ws_send", "ws_recv", "ws_close",
+    "x25519_keypair", "x25519_shared", "chacha20_encrypt", "chacha20_decrypt",
+    "tunnel_preshared_key", "kdf_next", "tunnel_frame", "tunnel_unframe", "tunnel_nonce",
+    "udp_bind", "udp_send", "udp_recv", "udp_local_addr",
 ];
 
 #[derive(Debug)]

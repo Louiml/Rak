@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="theme-color" content="#fdfcfc">
-    <meta name="description" content="Rak language reference: syntax, types, pipelines, regex, binary patterns, traits, FFI, memory-mapped files, async I/O, macros, modules, raw sockets, protocol parsers, and the bytecode VM.">
+    <meta name="description" content="Rak language reference: syntax, types, pipelines, regex, binary patterns, traits, FFI, memory-mapped files, async I/O, macros, modules, raw sockets, protocol parsers, VPN & encrypted tunneling, and the bytecode VM.">
     <title>Rak Documentation: Language Reference</title>
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='4' fill='%23fdfcfc'/%3E%3Cpath d='M9 9l14 0 0 14-14 0z' fill='none' stroke='%23201d1d' stroke-width='2.5'/%3E%3C/svg%3E">
     <link rel="stylesheet" href="style.css">
@@ -16,7 +16,7 @@
         <a class="brand" href="index.html">
             <span class="brand-mark">R</span>
             <span class="brand-name">Rak</span>
-            <span class="brand-ver">v0.4.0</span>
+            <span class="brand-ver">v0.6.0</span>
         </a>
         <nav class="site-nav">
             <a href="#intro">Intro</a>
@@ -70,10 +70,11 @@
             <a href="#stdlib">Standard library</a>
             <a href="#web">Web interop</a>
             <a href="#ide">The IDE</a>
+            <a href="#vpn">VPN &amp; tunneling</a>
             <a href="#examples">Examples</a>
 
             <div class="toc-meta">
-                <b>v0.4.0 &middot;</b> all systems-level features from
+                <b>v0.6.0 &middot;</b> all systems-level features from
                 <code>rak-features-spec.md</code> are shipped and documented here.
             </div>
         </nav>
@@ -931,16 +932,46 @@ dump html_select(html, "a")                // Rak</code></pre>
                     <div class="feature-grid" style="margin-top:1.2rem">
                         <div class="feature"><h4>First-run tutorial</h4><p>A spotlight coachmark tour walks the editor, run modes, console, terminal, and examples. Replays from the palette or Settings.</p></div>
                         <div class="feature"><h4>Settings</h4><p>Editor font size, tab size, auto-close brackets, default run mode &mdash; persisted across sessions.</p></div>
-                        <div class="feature"><h4>File tree</h4><p>A recursive sidebar: click a folder to expand, right-click the background for New File/Folder, drag files into folders to move them.</p></div>
-                        <div class="feature"><h4>Syntax highlight</h4><p>Regex, char, hex, and <code>|&gt;</code> all color correctly, with autocomplete for builtins, types, and snippets.</p></div>
+                        <div class="feature"><h4>File tree</h4><p>A recursive sidebar with real-time refresh &mdash; it polls the directory and reloads on window focus, so external changes appear immediately. Click to expand, drag files into folders to move them.</p></div>
+                        <div class="feature"><h4>Syntax highlight</h4><p>Regex, char, hex, and <code>|&gt;</code> all color correctly. Line numbers scroll in lock-step with your code.</p></div>
+                        <div class="feature"><h4>Smart completion</h4><p>Autocomplete for builtins, types, keywords, snippets, and identifiers defined in the current file. <code>Ctrl+Space</code> forces suggestions and next-token predictions.</p></div>
+                        <div class="feature"><h4>Recent projects</h4><p>The welcome screen lists your recently opened folders from <code>localStorage</code> &mdash; click to reopen, or clear them with one button.</p></div>
+                        <div class="feature"><h4>Built-in docs</h4><p>Press <span class="kbd">Ctrl+K</span> (or Docs in the menu) to open a searchable language &amp; VPN reference right in the editor &mdash; without leaving your file.</p></div>
                         <div class="feature"><h4>Three run modes</h4><p>Interpreter, VM, and Bench from a single dropdown &mdash; output streams to the console.</p></div>
                         <div class="feature"><h4>Built-in terminal</h4><p>Run <code>rakc</code>, <code>rakpkg</code>, or system commands without leaving the editor.</p></div>
                     </div>
 
                     <div class="callout">
                         <div class="callout-title">Shortcuts</div>
-                        <p><span class="kbd">Ctrl+R</span> run &middot; <span class="kbd">Ctrl+S</span> save &middot; <span class="kbd">Ctrl+Shift+P</span> command palette &middot; <span class="kbd">Ctrl+P</span> quick open &middot; <span class="kbd">Ctrl+Shift+T</span> terminal &middot; <span class="kbd">Ctrl+B</span> sidebar.</p>
+                        <p><span class="kbd">Ctrl+R</span> run &middot; <span class="kbd">Ctrl+S</span> save &middot; <span class="kbd">Ctrl+Shift+P</span> command palette &middot; <span class="kbd">Ctrl+P</span> quick open &middot; <span class="kbd">Ctrl+K</span> docs &middot; <span class="kbd">Ctrl+Shift+T</span> terminal &middot; <span class="kbd">Ctrl+B</span> sidebar.</p>
                     </div>
+                </section>
+
+                <section id="vpn" class="doc-section">
+                    <h2>VPN &amp; encrypted tunneling</h2>
+                    <p>Rak ships an application-layer VPN toolkit &mdash; forward-secret key agreement (X25519), AEAD encryption (ChaCha20-Poly1305), key derivation (PBKDF2 + HKDF), tunnel datagram framing, and an encrypted UDP transport. Everything runs at the application layer, so no kernel TUN/TAP device or raw-socket privilege is required; it works on Windows out of the box.</p>
+
+                    <h3>The <code>tunnel</code> keyword</h3>
+                    <figure class="codeblock" data-title="tunnel.rak">
+                        <div class="codeblock-bar" aria-hidden="true"><span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-title">tunnel.rak</span></div>
+                        <pre><code data-lang="rak">tunnel link "shared-secret-passphrase" {
+    // link       -> 32-byte session key (Bytes)
+    // link_udp   -> bound encrypted UDP transport
+    // link_addr  -> bound "ip:port"
+    // tunnel_key -> alias for the session key
+    let ack = chacha20_encrypt(link, tunnel_nonce(1), b"rak:tunnel:data", b"tunnel-ack")
+}</code></pre>
+                    </figure>
+
+                    <div class="feature-grid" style="margin-top:1.2rem">
+                        <div class="feature"><h4>X25519 key exchange</h4><p><code>x25519_keypair(seed)</code> returns <code>(pub, sec)</code>; <code>x25519_shared(sec, peer_pub)</code> derives the shared forward-secret session key.</p></div>
+                        <div class="feature"><h4>ChaCha20-Poly1305</h4><p><code>chacha20_encrypt(key, nonce12, aad, data)</code> returns ciphertext&nbsp;+&nbsp;tag; <code>chacha20_decrypt(...)</code> verifies and raises on tampering.</p></div>
+                        <div class="feature"><h4>Key derivation</h4><p><code>tunnel_preshared_key(pass, salt, iters, len)</code> (PBKDF2) and <code>kdf_next(prev, counter, len)</code> (HKDF ratchet) keep keys fresh and forward-secret.</p></div>
+                        <div class="feature"><h4>Tunnel framing</h4><p><code>tunnel_frame(seq, payload)</code> / <code>tunnel_unframe(frame)</code> add a big-endian sequence header; <code>tunnel_nonce(seq)</code> yields a collision-free AEAD nonce per packet.</p></div>
+                        <div class="feature"><h4>UDP transport</h4><p><code>udp_bind</code> / <code>udp_send</code> / <code>udp_recv</code> / <code>udp_local_addr</code> provide the connectionless outer conduit (interpreter).</p></div>
+                    </div>
+
+                    <p style="margin-top:1rem">The crypto builtins (<code>x25519_*</code>, <code>chacha20_*</code>, <code>kdf_next</code>, <code>tunnel_frame/unframe/nonce</code>, <code>tunnel_preshared_key</code>) run on both the interpreter and the bytecode VM; the <code>tunnel</code> keyword and <code>udp_*</code> transport run on the interpreter. See <code>examples/VPN/</code> and the in-IDE docs (Ctrl+K) for full walkthroughs.</p>
                 </section>
 
                 <section id="examples" class="doc-section">
@@ -1014,6 +1045,23 @@ fetch "https://example.com" { method: "GET" } {
 }</code></pre>
                     </figure>
 
+                    <h3>Forward-secret VPN handshake + tunneled datagram</h3>
+                    <figure class="codeblock" data-title="vpn_handshake.rak">
+                        <div class="codeblock-bar" aria-hidden="true"><span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-title">vpn_handshake.rak</span></div>
+                        <pre><code data-lang="rak">let alice = x25519_keypair(b"0123456789abcdef0123456789abcdef")   // (pub, sec)
+let bob   = x25519_keypair(b"fedcba9876543210fedcba9876543210")
+// exchange public keys, then each derives the same secret:
+let a_shared = x25519_shared(alice.1, bob.0)
+let b_shared = x25519_shared(bob.1, alice.0)
+dump fmt("match: {}", hex_encode(a_shared) == hex_encode(b_shared))
+
+let key = tunnel_preshared_key("session", a_shared, 10000, 32)
+let ct = chacha20_encrypt(key, tunnel_nonce(0), b"aad", b"TUNNELED")
+let frame = tunnel_frame(0, ct)
+let parsed = tunnel_unframe(frame)
+dump string(chacha20_decrypt(key, tunnel_nonce(0), b"aad", parsed.1))</code></pre>
+                    </figure>
+
                     <div class="callout" style="margin-top:2rem">
                         <div class="callout-title">Spec-driven</div>
                         <p>Everything documented here is specified in <a href="https://github.com/Louiml/Rak/blob/main/docs/rak-features-spec.md" target="_blank" rel="noopener">rak-features-spec.md</a>, including exact Rust-level architecture, error handling, edge cases, and VM subset notes.</p>
@@ -1029,7 +1077,7 @@ fetch "https://example.com" { method: "GET" } {
 <footer>
     <div class="container footer-inner">
         <p>Rak &copy; 2026 Louiml &middot; MIT License</p>
-        <p><a href="index.html">Overview</a> &middot; <a href="https://github.com/Louiml/Rak/releases" target="_blank" rel="noopener">v0.4.0</a> &middot; <a href="https://github.com/Louiml/Rak" target="_blank" rel="noopener">GitHub</a></p>
+        <p><a href="index.html">Overview</a> &middot; <a href="https://github.com/Louiml/Rak/releases" target="_blank" rel="noopener">v0.6.0</a> &middot; <a href="https://github.com/Louiml/Rak" target="_blank" rel="noopener">GitHub</a></p>
     </div>
 </footer>
 

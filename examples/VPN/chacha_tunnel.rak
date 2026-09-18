@@ -1,0 +1,55 @@
+// VPN: ChaCha20-Poly1305 authenticated encryption + tunnel framing.
+//
+//   rakc run examples/VPN/chacha_tunnel.rak    (interpreter; the tamper demo
+//                                              uses try/catch, which is
+//                                              interpreter-only)
+//
+// Shows the exact data path of a Rak VPN datagram:
+//   1. Derive a session key from a passphrase via PBKDF2.
+//   2. Encrypt a payload with ChaCha20-Poly1305 (AAD authenticates the header).
+//   3. Frame it with a sequence number for replay/reorder detection.
+//   4. Decrypt on the receiving side, verifying the length + auth tag.
+//   5. Prove a tampered packet is rejected.
+
+// 1. Session key from a shared passphrase (PBKDF2-HMAC-SHA256).
+let key = tunnel_preshared_key("correct horse battery staple", b"rak-vpn-salt", 10000, 32)
+dump fmt("session key = 0x{}", hex_encode(key))
+
+// 2. Encrypt "HELLO_VPN" with a deterministic per-sequence 12-byte nonce. `aad`
+//    is the unencrypted tunnel header (e.g. the sequence/framing prefix) that is
+//    still bound to the ciphertext, so it cannot be swapped by an attacker.
+let seq = 0
+let nonce = tunnel_nonce(seq)
+let aad = b"rak:v1:seq0"
+let plaintext = b"HELLO_VPN"
+let ct = chacha20_encrypt(key, nonce, aad, plaintext)
+dump fmt("ciphertext (ct++tag) = 0x{}", hex_encode(ct))
+
+// 3. Frame it for the wire: 8-byte sequence prefix + ciphertext.
+let frame = tunnel_frame(seq, ct)
+dump fmt("wire frame length = {} bytes", len(frame))
+
+// 4. Receiver parses the frame and decrypts.
+let parsed = tunnel_unframe(frame)
+let recv_seq = parsed.0
+let recv_ct = parsed.1
+dump fmt("received seq = {}, ciphertext = 0x{}", recv_seq, hex_encode(recv_ct))
+let recovered = chacha20_decrypt(key, nonce, aad, recv_ct)
+dump fmt("decrypted message = {}", string(recovered))
+
+// 5. Tamper detection: swap the authenticated header (AAD). Because the AAD is
+//    cryptographically bound to the ciphertext, decrypting with a different AAD
+//    (an attacker rewriting the tunnel header) must fail authentication. Rak
+//    surfaces the failure as an error, which we catch to keep the demo running.
+let evil_aad = b"rak:v1:seq9"          // attacker forges a different sequence
+try {
+    chacha20_decrypt(key, nonce, evil_aad, ct)
+    dump "tampered header ACCEPTED (BAD!)"
+} catch e {
+    dump fmt("tampered header rejected: {}", e)
+}
+
+// 6. Rolling ratchet: never reuse a nonce; derive a fresh key per packet.
+let key_pkt1 = kdf_next(key, 1, 32)
+let key_pkt2 = kdf_next(key, 2, 32)
+dump fmt("packet keys differ: {}", hex_encode(key_pkt1) != hex_encode(key_pkt2))

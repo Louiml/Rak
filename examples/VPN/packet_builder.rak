@@ -1,0 +1,37 @@
+// VPN: encrypt + frame a tunnel datagram and wrap it in a forged UDP/IP packet.
+//
+//   rakc run examples/VPN/packet_builder.rak    (interpreter; net_raw_* and
+//                                               try/catch are interpreter-only)
+//
+// Packet forging here is pure computation: build the IP + UDP headers and the
+// tunneled payload in memory. Only `net_raw_send`/`net_raw_recv` open a real raw
+// socket (Unix: CAP_NET_RAW, Windows: Administrator), and only the *sending* of
+// a forged header is privileged on Windows. Header construction runs anywhere.
+
+// 1. A shared session key (in practice: derived via X25519, see keyexchange.rak).
+let key = tunnel_preshared_key("forge-key", b"rak-forge-salt", 1000, 32)
+
+// 2. Encrypt the tunneled payload and frame it with a sequence number.
+let nonce = b"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x07"
+let ct = chacha20_encrypt(key, nonce, b"rak:forge", b"TUNNELED_DATA")
+let framed = tunnel_frame(7, ct)
+dump fmt("encrypted tunnel frame length = {} bytes", len(framed))
+
+// 3. Wrap the frame in a UDP header (src -> dst ports) as the inner payload.
+//    12345 -> 443 (a "QUIC over VPN" style shape to blend with normal UDP).
+let udp_seg = net_raw_udp("10.0.0.5", "10.0.0.10", 12345, 443, framed)
+dump fmt("UDP segment length = {} bytes", len(udp_seg))
+
+// 4. Wrap the UDP segment in an IPv4 header (proto 17 = UDP).
+let ip_pkt = net_raw_ipv4("10.0.0.5", "10.0.0.10", 17, udp_seg)
+dump fmt("full IP packet length = {} bytes", len(ip_pkt))
+
+// 5. Inspect the forged header fields for sanity.
+dump fmt("IPv4 ver/ihl byte = 0x{:02X}", ip_pkt[0])
+dump fmt("IP protocol byte   = 0x{:02X}", ip_pkt[9])
+dump fmt("checksum           = 0x{:04X}", net_raw_csum(ip_pkt))
+
+// Sending requires privileges; on Windows / unprivileged runs `net_raw_send`
+// returns `Err(...)` instead of crashing, so we just report the Result.
+let sent = net_raw_send(ip_pkt)
+dump fmt("raw socket send result: {}", sent)

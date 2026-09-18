@@ -93,6 +93,8 @@ pub enum Token {
     Export,
     #[token("binstruct")]
     BinStruct,
+    #[token("tunnel")]
+    Tunnel,
     #[token("evidence")]
     Evidence,
 

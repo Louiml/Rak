@@ -1,0 +1,83 @@
+// VPN: DTLS-style encrypted datagram channel over UDP.
+//
+//   rakc run examples/VPN/udp_dtls_like.rak    (interpreter)
+//
+// Simulates a connectionless encrypted channel, like DTLS over a VPN data path:
+//   1. A "client" UDP socket and a "server" UDP socket are bound locally.
+//   2. The client sends a wrapped handshake frame carrying its X25519 public key.
+//   3. The server derives the shared secret and replies with an authenticated ack.
+//   4. The client derives the same secret, decrypts the ack, and proves both
+//      sides now share forward-secret keys to exchange encrypted datagrams.
+//
+// Both sockets live in the same process for the demo; in a real deploy they'd be
+// on separate hosts reachable over the network.
+
+// --- Bind two UDP conduits (the outer transport). ---
+let client = udp_bind("127.0.0.1:0")
+let c_sock = client.0
+let c_addr = client.1
+let server = udp_bind("127.0.0.1:0")
+let s_sock = server.0
+let s_addr = server.1
+
+dump "client conduit = " + c_addr
+dump "server conduit = " + s_addr
+
+// --- Client generates an ephemeral X25519 keypair and sends its public key. ---
+let client_keys = x25519_keypair(b"\xaa\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f\x10\x11\x12\x13\x14\x15\x16\x17\x18\x19\x1a\x1b\x1c\x1d\x1e\x1f")
+let c_pub = client_keys.0
+let c_sec = client_keys.1
+
+// Wrap the ClientHello (DH offer) in a tunnel frame so the server can
+// authenticate the handshake header.
+let hello = tunnel_frame(1, c_pub)
+udp_send(c_sock, hello, string(s_addr))
+
+// --- Server receives the offer, performs its half of the handshake. ---
+let got = udp_recv(s_sock, 65535, 1000)
+if got == nil {
+    dump "server: timed out waiting for client handshake"
+} else {
+    let srv_frame = got.0
+    let srv_from = got.1
+    dump "server: handshake from " + srv_from
+
+    // Parse the framed offer and recover the client's public key.
+    let offer = tunnel_unframe(srv_frame)
+    let client_pubkey = offer.1
+
+    // Server generates its own keypair and computes the shared secret.
+    let server_keys = x25519_keypair(b"\xbb\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f\x10\x11\x12\x13\x14\x15\x16\x17\x18\x19\x1a\x1b\x1c\x1d\x1e\x1f")
+    let s_sec = server_keys.1
+    let srv_shared = x25519_shared(s_sec, client_pubkey)
+    dump "server shared = 0x" + hex_encode(srv_shared)
+
+    // Server encrypts and frames an authenticated ack back to the client.
+    let srv_key = tunnel_preshared_key("dtls-session", srv_shared, 1, 32)
+    let s_nonce = b"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x01"
+    let ack_ct = chacha20_encrypt(srv_key, s_nonce, b"rak:dtls", b"HELLO_DTLS")
+    let ack_wire = tunnel_frame(2, ack_ct)
+    udp_send(s_sock, ack_wire, string(c_addr))
+    dump "server sent encrypted ACK"
+
+    // --- Client receives the ack and derives the same secret. ---
+    let reply = udp_recv(c_sock, 65535, 1000)
+    if reply == nil {
+        dump "client: timed out waiting for server ack"
+    } else {
+        let ack = tunnel_unframe(reply.0)
+        let client_shared = x25519_shared(c_sec, server_keys.0)
+        dump "client shared = 0x" + hex_encode(client_shared)
+        dump "shared secrets match = " + string(hex_encode(client_shared) == hex_encode(srv_shared))
+
+        let c_key = tunnel_preshared_key("dtls-session", client_shared, 1, 32)
+        let msg = chacha20_decrypt(c_key, s_nonce, b"rak:dtls", ack.1)
+        dump "client decrypted server message = " + string(msg)
+
+        // Now both sides hold the same AEAD key and can exchange encrypted
+        // datagrams with forward secrecy.
+        let c_nonce = b"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02"
+        let final = chacha20_encrypt(c_key, c_nonce, b"rak:dtls", b"ALL_OK")
+        dump "client -> server encrypted payload = 0x" + hex_encode(final)
+    }
+}

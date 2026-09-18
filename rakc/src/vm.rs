@@ -282,6 +282,69 @@ impl Vm {
             let msg = native_bytes(args.get(2));
             rak_stdlib::ed25519_verify(&pk, &sig, &msg).map(Value::Bool).map_err(|e| e)
         });
+        self.insert_native("x25519_keypair", |args| {
+            let seed = native_bytes(args.first());
+            rak_stdlib::tunnel::x25519_keypair(&seed).map(|(pk, sk)| {
+                Value::Tuple(Arc::from([Value::Bytes(Arc::from(pk.as_slice())), Value::Bytes(Arc::from(sk.as_slice()))]))
+            }).map_err(|e| e)
+        });
+        self.insert_native("x25519_shared", |args| {
+            let secret = native_bytes(args.first());
+            let peer = native_bytes(args.get(1));
+            rak_stdlib::tunnel::x25519_shared(&secret, &peer)
+                .map(|b| Value::Bytes(Arc::from(b.as_slice())))
+                .map_err(|e| e)
+        });
+        self.insert_native("chacha20_encrypt", |args| {
+            let key = native_bytes(args.first());
+            let nonce = native_bytes(args.get(1));
+            let aad = native_bytes(args.get(2));
+            let pt = native_bytes(args.get(3));
+            rak_stdlib::tunnel::chacha20_encrypt(&key, &nonce, &aad, &pt)
+                .map(|b| Value::Bytes(Arc::from(b.as_slice())))
+                .map_err(|e| e)
+        });
+        self.insert_native("chacha20_decrypt", |args| {
+            let key = native_bytes(args.first());
+            let nonce = native_bytes(args.get(1));
+            let aad = native_bytes(args.get(2));
+            let ct = native_bytes(args.get(3));
+            rak_stdlib::tunnel::chacha20_decrypt(&key, &nonce, &aad, &ct)
+                .map(|b| Value::Bytes(Arc::from(b.as_slice())))
+                .map_err(|e| e)
+        });
+        self.insert_native("tunnel_preshared_key", |args| {
+            let pass = native_str(args.first());
+            let salt = native_bytes(args.get(1));
+            let iters = args.get(2).and_then(|v| v.as_u64()).unwrap_or(100_000) as u32;
+            let len = args.get(3).and_then(|v| v.as_u64()).unwrap_or(32) as u32;
+            rak_stdlib::tunnel::psk_derive(&pass, &salt, iters, len)
+                .map(|b| Value::Bytes(Arc::from(b.as_slice())))
+                .map_err(|e| e)
+        });
+        self.insert_native("kdf_next", |args| {
+            let prev = native_bytes(args.first());
+            let counter = args.get(1).and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+            let len = args.get(2).and_then(|v| v.as_u64()).unwrap_or(32) as u32;
+            rak_stdlib::tunnel::kdf_next(&prev, counter, len)
+                .map(|b| Value::Bytes(Arc::from(b.as_slice())))
+                .map_err(|e| e)
+        });
+        self.insert_native("tunnel_frame", |args| {
+            let seq = args.first().and_then(|v| v.as_u64()).unwrap_or(0);
+            let payload = native_bytes(args.get(1));
+            Ok(Value::Bytes(Arc::from(rak_stdlib::tunnel::tunnel_frame(seq, &payload).as_slice())))
+        });
+        self.insert_native("tunnel_unframe", |args| {
+            let frame = native_bytes(args.first());
+            rak_stdlib::tunnel::tunnel_unframe(&frame).map(|(seq, payload)| {
+                Value::Tuple(Arc::from([Value::I64(seq as i64), Value::Bytes(Arc::from(payload.as_slice()))]))
+            }).map_err(|e| e)
+        });
+        self.insert_native("tunnel_nonce", |args| {
+            let seq = args.first().and_then(|v| v.as_u64()).unwrap_or(0);
+            Ok(Value::Bytes(Arc::from(rak_stdlib::tunnel::nonce_for(seq).as_slice())))
+        });
         self.insert_native("hex_encode", |args| {
             let data = native_bytes(args.first());
             Ok(Value::String(Arc::from(rak_stdlib::hex_encode(&data).as_str())))

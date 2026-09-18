@@ -1,0 +1,68 @@
+// VPN: covert transport - shuttle encrypted tunnel frames through HTTP.
+//
+//   rakc run examples/VPN/vpn_over_http.rak    (interpreter)
+//
+// A "VPN over HTTP" covert transport: a client POSTs a ChaCha20-encrypted,
+// sequence-framed tunnel datagram to a /tunnel endpoint served by Rak's built-in
+// HTTP server, which relays (decrypts + reports) it. The HTTP framing is just
+// the outside wrapper; the payload is end-to-end authenticated and encrypted, so
+// a middlebox or a logging relay cannot read or tamper with it.
+//
+// The client POST runs on a background `spawn` while the main thread runs the
+// relay poll loop, so the two halves of the exchange stay non-blocking.
+
+// Both endpoints share a pre-shared key (in production: X25519 + HKDF, pulled
+// from the secrets store, never hardcoded).
+let key = tunnel_preshared_key("http-covert-psk", b"rak-http-salt", 1000, 32)
+
+// Start the covert HTTP relay.
+let port = http_server_start("127.0.0.1", 8199)
+dump fmt("covert HTTP relay listening on 127.0.0.1:{}", port)
+
+// --- Client half (background task): encrypt + frame + POST a datagram. -------
+fn client_post() {
+    let nonce = b"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x01"
+    let inner = chacha20_encrypt(key, nonce, b"rak:http", b"TOP_SECRET_ROUTED_DATAGRAM")
+    let framed = tunnel_frame(1, inner)
+    let body = hex_encode(framed)
+
+    fetch "http://127.0.0.1:" + port + "/tunnel" { method: "POST", headers: { "Content-Type": "text/plain" }, body: body } {
+        dump fmt("[client] relay status {}", status)
+        dump fmt("[client] relay response {}", string(body))
+    }
+}
+
+let fut = spawn(fn() { client_post() })
+
+// --- Server/relay half (main thread): poll for requests, decrypt, report. ----
+let relayed = false
+let guard = 0
+while !relayed {
+    let req = http_server_poll()
+    if req == nil {
+        sleep(10)
+    } else {
+        let id = req.id
+        if req.path == "/tunnel" {
+            // The POST body is the hex-encoded tunnel frame. Decode + decrypt it.
+            let frame = hex_decode(req.body)
+            if len(frame) < 8 {
+                http_server_respond(id, 400, {}, "bad frame")
+            } else {
+                let parsed = tunnel_unframe(frame)
+                let clear = chacha20_decrypt(key, b"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x01", b"rak:http", parsed.1)
+                dump fmt("[server] decrypted routed datagram: {}", string(clear))
+
+                http_server_respond(id, 200, {}, "delivered")
+                relayed = true
+            }
+        } else {
+            http_server_respond(id, 404, {}, "not found")
+        }
+    }
+    guard = guard + 1
+    if guard > 2000 {
+        dump "relay loop gave up waiting for the client datagram"
+        relayed = true
+    }
+}

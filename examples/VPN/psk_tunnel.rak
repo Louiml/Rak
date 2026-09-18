@@ -1,0 +1,40 @@
+// VPN: the `tunnel` keyword.
+//
+//   rakc run examples/VPN/psk_tunnel.rak    (interpreter only)
+//
+// `tunnel <name> <passphrase> { ... }` derives a 32-byte session key from the
+// passphrase (PBKDF2-HMAC-SHA256) and opens an encrypted UDP conduit. Inside the
+// block the following names are bound:
+//   <name>       -> session key (Bytes)
+//   <name>_udp   -> bound UDP transport handle
+//   <name>_addr  -> the bound "ip:port"
+//   tunnel_key   -> alias for the session key
+//
+// This is the highest-level primitive: declare a secure link, then pass its key
+// to the AEAD builtins to encrypt datagrams for the peer. Both peers must agree
+// on the same passphrase out of band.
+
+tunnel link "shared-very-secret-passphrase" {
+
+    dump fmt("session key        = 0x{}", hex_encode(link))
+    dump fmt("key length         = {} bytes", len(link))
+    dump "local conduit bound  = " + link_addr
+    dump "conduit handle       = " + string(link_udp)
+
+    // Encrypt a datagram for the remote peer under the derived session key.
+    let nonce = b"\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b"
+    let aad = b"rak:tunnel:data"
+    let ack = chacha20_encrypt(link, nonce, aad, b"tunnel-ack")
+    dump fmt("encrypted ack       = 0x{}", hex_encode(ack))
+
+    // The receiving side uses the same passphrase -> same key -> decrypts.
+    let back = chacha20_decrypt(link, nonce, aad, ack)
+    dump "decrypted round-trip = " + string(back)
+
+    // Packet ratification: roll the key forward for the next packet.
+    let next_key = kdf_next(link, 1, 32)
+    dump fmt("next packet key     = 0x{}", hex_encode(next_key))
+}
+
+// After the block the scope is popped: the names are no longer visible.
+// Referencing `link` here would be an "undefined variable" error.

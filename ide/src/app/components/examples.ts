@@ -1829,4 +1829,94 @@ dump sub_add(100, 1)
 dump add(5, 6)
 `,
   },
+  {
+    name: 'vpn_keyexchange',
+    filename: 'VPN/keyexchange.rak',
+    source: `// VPN: Out-of-band X25519 key exchange.
+// Both parties derive the SAME forward-secret shared secret; an eavesdropper
+// without a secret cannot. Run with:  rakc run examples/VPN/keyexchange.rak
+let alice = x25519_keypair(b"\\x00\\x01\\x02\\x03\\x04\\x05\\x06\\x07\\x08\\x09\\x0a\\x0b\\x0c\\x0d\\x0e\\x0f\\x10\\x11\\x12\\x13\\x14\\x15\\x16\\x17\\x18\\x19\\x1a\\x1b\\x1c\\x1d\\x1e\\x1f")
+let bob   = x25519_keypair(b"\\x20\\x21\\x22\\x23\\x24\\x25\\x26\\x27\\x28\\x29\\x2a\\x2b\\x2c\\x2d\\x2e\\x2f\\x30\\x31\\x32\\x33\\x34\\x35\\x36\\x37\\x38\\x39\\x3a\\x3b\\x3c\\x3d\\x3e\\x3f")
+let a_shared = x25519_shared(alice.1, bob.0)
+let b_shared = x25519_shared(bob.1, alice.0)
+dump fmt("shared secrets match: {}", hex_encode(a_shared) == hex_encode(b_shared))
+dump fmt("shared secret: 0x{}", hex_encode(a_shared))
+`,
+  },
+  {
+    name: 'vpn_chacha_tunnel',
+    filename: 'VPN/chacha_tunnel.rak',
+    source: `// VPN: ChaCha20-Poly1305 AEAD + tunnel framing.
+// Derive a session key, encrypt+frame a datagram, decrypt it, and prove that
+// a tampered header is rejected. Run with:  rakc run examples/VPN/chacha_tunnel.rak
+let key = tunnel_preshared_key("correct horse battery staple", b"salt", 10000, 32)
+let nonce = tunnel_nonce(0)
+let aad = b"rak:v1:seq0"
+let ct = chacha20_encrypt(key, nonce, aad, b"HELLO_VPN")
+let frame = tunnel_frame(0, ct)
+let parsed = tunnel_unframe(frame)
+let recovered = chacha20_decrypt(key, nonce, aad, parsed.1)
+dump fmt("decrypted: {}", string(recovered))
+try {
+    chacha20_decrypt(key, nonce, b"rak:v1:seq9", ct)
+    dump "tampered ACCEPTED (BAD!)"
+} catch e {
+    dump fmt("tampered rejected: {}", e)
+}
+`,
+  },
+  {
+    name: 'vpn_psk_tunnel',
+    filename: 'VPN/psk_tunnel.rak',
+    source: `// VPN: the 'tunnel' keyword.
+// Builds an encrypted UDP conduit and exposes its session key to the block.
+// Interpreter only. Run with:  rakc run examples/VPN/psk_tunnel.rak
+tunnel link "shared-very-secret-passphrase" {
+    dump fmt("session key = 0x{}", hex_encode(link))
+    dump "conduit = " + link_addr
+    let ack = chacha20_encrypt(link, tunnel_nonce(1), b"rak:tunnel:data", b"tunnel-ack")
+    dump fmt("encoded ack = 0x{}", hex_encode(ack))
+    let back = chacha20_decrypt(link, tunnel_nonce(1), b"rak:tunnel:data", ack)
+    dump "round-trip = " + string(back)
+}
+`,
+  },
+  {
+    name: 'vpn_over_http',
+    filename: 'VPN/vpn_over_http.rak',
+    source: `// VPN: covert transport - shuttle encrypted tunnel frames through HTTP.
+// A client POSTs an encrypted, framed datagram to /tunnel; the server relay
+// decrypts it. Interpreter only. Run with:  rakc run examples/VPN/vpn_over_http.rak
+let key = tunnel_preshared_key("http-covert-psk", b"rak-http-salt", 1000, 32)
+let port = http_server_start("127.0.0.1", 8199)
+dump fmt("covert relay on 127.0.0.1:{}", port)
+fn client_post() {
+    let inner = chacha20_encrypt(key, tunnel_nonce(1), b"rak:http", b"TOP_SECRET_ROUTED_DATAGRAM")
+    fetch "http://127.0.0.1:" + port + "/tunnel" { method: "POST", body: hex_encode(tunnel_frame(1, inner)) } {
+        dump fmt("[client] relay status {}", status)
+    }
+}
+spawn(fn() { client_post() })
+let relayed = false
+let guard = 0
+while !relayed {
+    let req = http_server_poll()
+    if req == nil {
+        sleep(10)
+    } else {
+        if req.path == "/tunnel" {
+            let parsed = tunnel_unframe(hex_decode(req.body))
+            let clear = chacha20_decrypt(key, tunnel_nonce(1), b"rak:http", parsed.1)
+            dump fmt("[server] decrypted: {}", string(clear))
+            http_server_respond(req.id, 200, {}, "delivered")
+            relayed = true
+        } else {
+            http_server_respond(req.id, 404, {}, "not found")
+        }
+    }
+    guard = guard + 1
+    if guard > 2000 { dump "gave up"; relayed = true }
+}
+`,
+  },
 ];
