@@ -1,0 +1,47 @@
+name: Deploy GitHub Pages
+
+on:
+  # Rebuild the site on pushes to main and when a release tag is created.
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+# Grant the job permission to deploy to the Pages site.
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One deploy at a time; cancel in-progress runs on the same ref.
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload the docs site
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs
+
+  deploy:
+    needs: build
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

@@ -20,7 +20,7 @@ jobs:
         run: |
           TAG="${GITHUB_REF##*/}"
           echo "tag=$TAG" >> $GITHUB_OUTPUT
-          gh release create "$TAG" --title "Rak $TAG" --generate-notes --repo "$GITHUB_REPOSITORY" || true
+          gh release create "$TAG" --title "Rak $TAG" --notes-file .github/release_body.md --repo "$GITHUB_REPOSITORY" || true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
