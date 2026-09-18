@@ -64,13 +64,13 @@ const KEYWORDS = [
   'while', 'break', 'continue', 'true', 'false', 'nil', 'in',
   'try', 'catch', 'raise', 'throw', 'trait', 'async', 'await', 'spawn', 'as', 'type',
   'import', 'from', 'export', 'macro', 'macro_rules', 'const', 'extern',
-  'binstruct', 'evidence', 'tunnel',
+  'binstruct', 'evidence', 'tunnel', 'defer', 'test', 'assert',
 ];
 
 const KEYWORD_SET = new Set(KEYWORDS);
 
 const TYPES = [
-  'hex8', 'hex16', 'hex32', 'hex64', 'int', 'string', 'bytes', 'bool',
+  'hex8', 'hex16', 'hex32', 'hex64', 'int', 'string', 'char', 'bytes', 'bool',
   'i8', 'i16', 'i32', 'i64', 'u8', 'u16', 'u32', 'u64', 'f32', 'f64',
   'Option', 'Result', 'void',
 ];
@@ -225,10 +225,13 @@ function tokenizeLine(line: string): Token[] {
       continue;
     }
     if (line[i] === "'") {
-      // Char literal 'P', '\x41', '\n'
+      // Char literal 'P', '\x41', '\u{03B1}', '\n'
       let j = i + 1;
       let ch = "'";
-      if (line[j] === '\\' && line[j + 1] === 'x' && j + 3 < line.length && /[0-9a-fA-F]{2}/.test(line.slice(j + 2, j + 4))) {
+      const rest = line.slice(j);
+      const uni = rest.match(/^\\u\{[0-9A-Fa-f]{1,6}\}/);
+      if (uni) { ch += uni[0]; j += uni[0].length; }
+      else if (line[j] === '\\' && line[j + 1] === 'x' && j + 3 < line.length && /[0-9a-fA-F]{2}/.test(line.slice(j + 2, j + 4))) {
         ch += line.slice(j, j + 4); j += 4;
       } else if (line[j] === '\\' && j + 1 < line.length) {
         ch += line[j] + line[j + 1]; j += 2;
@@ -238,6 +241,20 @@ function tokenizeLine(line: string): Token[] {
       if (line[j] === "'") { ch += "'"; j++; }
       tokens.push({ type: 'char', value: ch });
       i = j;
+      continue;
+    }
+    if ((line[i] === '0' && line[i + 1] === 'b') || (line[i] === '0' && line[i + 1] === 'B')) {
+      let bin = '0b';
+      i += 2;
+      while (i < line.length && /[01_]/.test(line[i])) { bin += line[i]; i++; }
+      tokens.push({ type: 'number', value: bin });
+      continue;
+    }
+    if ((line[i] === '0' && line[i + 1] === 'o') || (line[i] === '0' && line[i + 1] === 'O')) {
+      let oct = '0o';
+      i += 2;
+      while (i < line.length && /[0-7_]/.test(line[i])) { oct += line[i]; i++; }
+      tokens.push({ type: 'number', value: oct });
       continue;
     }
     if (line[i] === '0' && (line[i + 1] === 'x' || line[i + 1] === 'X')) {

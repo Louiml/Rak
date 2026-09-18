@@ -120,7 +120,7 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
 name = "app"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "log",
  "serde",
@@ -3562,7 +3562,7 @@ dependencies = [
 
 [[package]]
 name = "rak-setup"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "anyhow",
  "dialoguer",
@@ -3577,7 +3577,7 @@ dependencies = [
 
 [[package]]
 name = "rak-stdlib"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -3607,7 +3607,7 @@ dependencies = [
 
 [[package]]
 name = "rakc"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "anyhow",
  "bindgen",
@@ -3629,7 +3629,7 @@ dependencies = [
 
 [[package]]
 name = "rakpkg"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "anyhow",
  "serde",

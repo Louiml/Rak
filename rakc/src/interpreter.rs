@@ -276,6 +276,7 @@ pub enum Value {
     Int(i64),
     Float(f64),
     String(String),
+    Char(char),
     Bytes(Vec<u8>),
     Bool(bool),
     Nil,
@@ -358,6 +359,7 @@ impl PartialEq for Value {
             (Value::Int(a), Value::Int(b)) => a == b,
             (Value::Float(a), Value::Float(b)) => a == b,
             (Value::String(a), Value::String(b)) => a == b,
+            (Value::Char(a), Value::Char(b)) => a == b,
             (Value::Bytes(a), Value::Bytes(b)) => a == b,
             (Value::Bool(a), Value::Bool(b)) => a == b,
             (Value::Nil, Value::Nil) => true,
@@ -365,6 +367,11 @@ impl PartialEq for Value {
             (Value::Array(a), Value::Array(b)) => a == b,
             (Value::Map(a), Value::Map(b)) => a == b,
             (Value::Option(a), Value::Option(b)) => a == b,
+            // Numeric cross-comparison: `0xA == 10 == 10.0` are all "equal"
+            // regardless of literal representation (Hex/Int/Float).
+            (a, b) if is_numeric_val(a) && is_numeric_val(b) => {
+                a.as_f64().unwrap_or(0.0) == b.as_f64().unwrap_or(0.0)
+            }
             (Value::Regex(a), Value::Regex(b)) => a.pattern == b.pattern && a.flags == b.flags,
             (Value::Evidence { inner: a, .. }, Value::Evidence { inner: b, .. }) => a == b,
             (Value::Evidence { inner: a, .. }, other) => (**a).eq(other),
@@ -381,6 +388,7 @@ impl fmt::Display for Value {
             Value::Int(i) => write!(f, "{}", i),
             Value::Float(n) => write!(f, "{}", n),
             Value::String(s) => write!(f, "{}", s),
+            Value::Char(c) => write!(f, "'{}'", c),
             Value::Bytes(b) => {
                 write!(f, "b\"")?;
                 for byte in b {
@@ -447,6 +455,10 @@ impl fmt::Display for Value {
 pub struct Env {
     global: Arc<Mutex<HashMap<String, Value>>>,
     scopes: Vec<HashMap<String, Value>>,
+    /// Names bound as immutable in each scope (parallel to `scopes`).
+    immutable_scopes: Arc<Mutex<Vec<HashSet<String>>>>,
+    /// Names bound as immutable at global scope.
+    global_immutable: Arc<Mutex<HashSet<String>>>,
 }
 
 impl Default for Env {
@@ -460,25 +472,70 @@ impl Env {
         Env {
             global: Arc::new(Mutex::new(HashMap::new())),
             scopes: Vec::new(),
+            immutable_scopes: Arc::new(Mutex::new(Vec::new())),
+            global_immutable: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 
     pub fn push_scope(&mut self) {
         self.scopes.push(HashMap::new());
+        self.immutable_scopes.lock().unwrap().push(HashSet::new());
     }
 
     pub fn pop_scope(&mut self) {
         if !self.scopes.is_empty() {
             self.scopes.pop();
         }
+        let mut ims = self.immutable_scopes.lock().unwrap();
+        if !ims.is_empty() {
+            ims.pop();
+        }
     }
 
     pub fn define(&mut self, name: &str, value: Value) {
+        self.define_mut(name, value, false);
+    }
+
+    /// Define a binding, recording whether the name is immutable.
+    pub fn define_mut(&mut self, name: &str, value: Value, mutable: bool) {
         if let Some(scope) = self.scopes.last_mut() {
             scope.insert(name.to_string(), value);
+            if !mutable {
+                if let Some(ims) = self.immutable_scopes.lock().unwrap().last_mut() {
+                    ims.insert(name.to_string());
+                }
+            }
         } else {
             self.global.lock().unwrap().insert(name.to_string(), value);
+            if !mutable {
+                self.global_immutable.lock().unwrap().insert(name.to_string());
+            }
         }
+    }
+
+    /// True if the given name is bound as immutable (cannot be rebound).
+    pub fn is_immutable(&self, name: &str) -> bool {
+        // `scopes` and `immutable_scopes` are kept in lockstep: immutable_scopes[i]
+        // records which names in scopes[i] were declared immutable. We search from
+        // the innermost scope outward.
+        let ims = self.immutable_scopes.lock().unwrap();
+        let n = self.scopes.len();
+        for i in (0..n).rev() {
+            if !self.scopes[i].contains_key(name) {
+                continue;
+            }
+            if let Some(ims_i) = ims.get(i) {
+                if ims_i.contains(name) {
+                    return true;
+                }
+            }
+            // The variable is bound in this scope but was declared `let mut`,
+            // so it is mutable.
+            return false;
+        }
+        drop(ims);
+        // Fall through to global scope.
+        self.global_immutable.lock().unwrap().contains(name)
     }
 
     pub fn get(&self, name: &str) -> Option<Value> {
@@ -491,6 +548,12 @@ impl Env {
     }
 
     pub fn assign(&mut self, name: &str, value: Value) -> crate::Result<()> {
+        if self.is_immutable(name) {
+            return Err(crate::RakError::Runtime(format!(
+                "cannot assign to immutable variable `{}`",
+                name
+            )));
+        }
         for scope in self.scopes.iter_mut().rev() {
             if scope.contains_key(name) {
                 scope.insert(name.to_string(), value);
@@ -559,6 +622,13 @@ pub struct Interpreter {
     /// Pending loop control raised by `break`/`continue` (with optional label
     /// or numeric depth). Loops consume it via `resolve_loop_signal`.
     loop_signal: Option<LoopSignal>,
+    /// LIFO stack of deferred calls for the current function. `defer expr()`
+    /// pushes a call here; it is drained (in reverse order) when the current
+    /// function returns or the top-level scope exits.
+    defers: Vec<crate::ast::Expr>,
+    /// Test blocks collected during a run (`test "name" { ... }`), for the
+    /// `rakc test` runner.
+    tests: Vec<(String, Vec<crate::ast::Stmt>)>,
 }
 
 /// A `break`/`continue` signal unwinding through nested loops.
@@ -566,6 +636,14 @@ pub struct Interpreter {
 enum LoopSignal {
     Break { label: Option<String>, depth: u32 },
     Continue { label: Option<String>, depth: u32 },
+}
+
+/// The outcome of a single test block for the `rakc test` runner.
+#[derive(Debug, Clone)]
+pub struct TestResult {
+    pub name: String,
+    pub passed: bool,
+    pub message: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -622,6 +700,8 @@ impl Interpreter {
             module_cache: HashMap::new(),
             loading_modules: HashSet::new(),
             loop_signal: None,
+            tests: Vec::new(),
+            defers: Vec::new(),
         }
     }
 
@@ -649,7 +729,9 @@ impl Interpreter {
             binstructs: HashMap::new(),
             module_cache: HashMap::new(),
             loading_modules: HashSet::new(),
+            tests: Vec::new(),
             loop_signal: None,
+            defers: Vec::new(),
         }
     }
 
@@ -660,6 +742,8 @@ impl Interpreter {
         for stmt in &module.items {
             self.exec_stmt(stmt)?;
         }
+        // Run any top-level `defer` calls before returning.
+        self.run_defers()?;
         Ok(self.output.clone())
     }
 
@@ -738,6 +822,37 @@ impl Interpreter {
             }
             None => 0,
         }
+    }
+
+    /// Run tests collected by a prior `run_source`/`run` call and return per-
+    /// test outcomes. Each test runs in a fresh scope; a failing assertion (or
+    /// any raised error) marks the test as failed without aborting the others.
+    pub fn run_collected_tests(&mut self) -> Vec<TestResult> {
+        let tests = std::mem::take(&mut self.tests);
+        tests
+            .into_iter()
+            .map(|(name, body)| {
+                let saved_returning = self.returning;
+                self.returning = false;
+                let saved_env = self.env.clone();
+                self.env.push_scope();
+                let result = (|| -> crate::Result<()> {
+                    for s in &body {
+                        self.exec_stmt(s)?;
+                        if self.returning {
+                            break;
+                        }
+                    }
+                    Ok(())
+                })();
+                self.env = saved_env;
+                self.returning = saved_returning;
+                match result {
+                    Ok(()) => TestResult { name, passed: true, message: None },
+                    Err(e) => TestResult { name, passed: false, message: Some(e.to_string()) },
+                }
+            })
+            .collect()
     }
 
     /// Resolve an import spec's target to a file (and optional package init).
@@ -986,15 +1101,20 @@ impl Interpreter {
             Stmt::Export(inner) => {
                 self.exec_stmt(inner)?;
             }
-            Stmt::Let { name, pattern, mutable: _, value, type_hint: _ } => {
+            Stmt::Let { name, pattern, mutable, value, type_hint } => {
                 let val = self.eval_expr(value)?;
+                // Enforce declared type hints at runtime (type checker catches
+                // these statically; this is a defensive runtime backstop).
+                if let Some(t) = type_hint {
+                    self.check_value_type(&val, t)?;
+                }
                 if name == "main" && pattern.is_none() {
                     self.main_entry = Some(val.clone());
                 }
                 if let Some(p) = pattern {
                     self.bind_pattern(p, &val)?;
                 } else {
-                    self.env.define(name, val);
+                    self.env.define_mut(name, val, *mutable);
                 }
             }
             Stmt::Expr(expr) => {
@@ -1425,6 +1545,24 @@ impl Interpreter {
             Stmt::Tunnel { name, passphrase, body } => {
                 self.exec_tunnel(name, passphrase, body)?;
             }
+            Stmt::Defer(expr) => {
+                self.defers.push(expr.as_ref().clone());
+            }
+            Stmt::Test { name, body } => {
+                // Test declarations are collected (and run by the test runner),
+                // not executed during a normal program run.
+                self.tests.push((name.clone(), body.clone()));
+            }
+            Stmt::Assert(expr) => {
+                let v = self.eval_expr(expr)?;
+                let truthy = is_truthy(&v);
+                if !truthy {
+                    return Err(crate::RakError::Runtime(format!(
+                        "assertion failed: {}",
+                        expr_str(expr)
+                    )));
+                }
+            }
         }
         Ok(())
     }
@@ -1664,9 +1802,12 @@ impl Interpreter {
     fn eval_expr(&mut self, expr: &Expr) -> crate::Result<Value> {
         match expr {
             Expr::Hex(h) => Ok(Value::Hex(*h)),
+Expr::BinLit(b) => Ok(Value::Hex(*b)),
+            Expr::OctLit(o) => Ok(Value::Hex(*o)),
             Expr::Int(i) => Ok(Value::Int(*i)),
             Expr::Float(f) => Ok(Value::Float(*f)),
             Expr::Float32(f) => Ok(Value::Float(*f as f64)),
+            Expr::Char(c) => Ok(Value::Char(*c)),
             Expr::TypedInt(v, k) => Ok(match k {
                 crate::ast::IntKind::I8 | crate::ast::IntKind::I16 | crate::ast::IntKind::I32 | crate::ast::IntKind::I64 => Value::Int(*v),
                 crate::ast::IntKind::U8 | crate::ast::IntKind::U16 | crate::ast::IntKind::U32 | crate::ast::IntKind::U64 => Value::Hex(*v as u64),
@@ -2787,11 +2928,14 @@ impl Interpreter {
         let saved_returning = self.returning;
         self.returning = false;
         let saved_env = self.env.clone();
+        let saved_defers = std::mem::take(&mut self.defers);
         self.env = (**closure).clone();
         self.env.push_scope();
         let bound = self.bind_params(params, &arg_vals, &named_vals)?;
         for (name, v) in bound {
-            self.env.define(&name, v);
+            // Function parameters are mutable by default so functions may
+            // rebind them (matching existing Rak programs).
+            self.env.define_mut(&name, v, true);
         }
         for s in body {
             self.exec_stmt(s)?;
@@ -2804,9 +2948,24 @@ impl Interpreter {
         } else {
             Value::Nil
         };
-        self.env = saved_env;
+        // Run this function's deferred calls in LIFO order (after restoring
+        // the environment so defers can reference function locals).
+        self.env = saved_env.clone();
         self.returning = saved_returning;
+        self.run_defers()?;
+        // Restore the caller's defers (defers registered in a caller must
+        // outlive this function call).
+        self.defers = saved_defers;
         Ok(ret)
+    }
+
+    /// Execute the current function's deferred calls in LIFO order.
+    fn run_defers(&mut self) -> crate::Result<()> {
+        while let Some(expr) = self.defers.pop() {
+            let _ = self.eval_expr(&expr)?;
+        }
+        self.defers = Vec::new();
+        Ok(())
     }
 
     /// Bind function arguments to params, applying positional fill, named
@@ -3355,6 +3514,44 @@ impl Interpreter {
         }
     }
 
+    /// Defensive runtime type check: validate `v` against a declared `Type`.
+    /// Numeric types are mutually compatible; strings, chars, bools, bytes and
+    /// containers are checked structurally. The static type checker normally
+    /// rejects mismatches at compile time; this is a runtime backstop.
+    fn check_value_type(&self, v: &Value, ty: &Type) -> crate::Result<()> {
+        use Type::*;
+        let ok = match ty {
+            Int | I8 | I16 | I32 | I64 | U8 | U16 | U32 | U64 | F32 | F64 | Hex(_) => {
+                matches!(v, Value::Int(_) | Value::Hex(_) | Value::Float(_))
+            }
+            String => matches!(v, Value::String(_)),
+            Char => matches!(v, Value::Char(_)),
+            Bytes => matches!(v, Value::Bytes(_)),
+            Bool => matches!(v, Value::Bool(_)),
+            Nil => matches!(v, Value::Nil),
+            Void => matches!(v, Value::Nil),
+            Option(_) => matches!(v, Value::Option(_)),
+            Result(_, _) => matches!(v, Value::Result(_, _)),
+            Array(_) => matches!(v, Value::Array(_)),
+            Tuple(_) => matches!(v, Value::Tuple(_)),
+            Map(_, _) => matches!(v, Value::Map(_)),
+            Custom(_) => matches!(v, Value::Struct { .. } | Value::Map(_)),
+            Generic(_) => true,
+            Ptr(_) => matches!(v, Value::ForeignPtr(_)),
+            Evidence(_) => matches!(v, Value::Evidence { .. }),
+            Function(_, _) => matches!(v, Value::Function { .. }),
+        };
+        if ok {
+            Ok(())
+        } else {
+            Err(crate::RakError::Runtime(format!(
+                "type mismatch: expected {}, found {}",
+                crate::value::type_of(ty),
+                v.type_name()
+            )))
+        }
+    }
+
     fn eval_binary(&mut self, op: &BinOp, left: &Value, right: &Value) -> crate::Result<Value> {
         match op {
             BinOp::And => return Ok(Value::Bool(is_truthy(left) && is_truthy(right))),
@@ -3467,6 +3664,13 @@ impl Interpreter {
                     self.bind_pattern(inner, v)?;
                 }
             }
+            Pattern::EnumVariant(_, _, subpats) => {
+                if let Value::Enum { data, .. } = value {
+                    for (p, v) in subpats.iter().zip(data.iter()) {
+                        self.bind_pattern(p, v)?;
+                    }
+                }
+            }
             _ => {}
         }
         Ok(())
@@ -3485,6 +3689,15 @@ impl Interpreter {
             (Pattern::Some(inner), Value::Option(Some(v))) => self.pattern_matches(inner, v)?,
             (Pattern::Ok(inner), Value::Result(Some(v), _)) => self.pattern_matches(inner, v)?,
             (Pattern::Err(inner), Value::Result(_, Some(v))) => self.pattern_matches(inner, v)?,
+            (Pattern::EnumVariant(en, vn, subpats), Value::Enum { name, variant, data }) => {
+                &name[..] == en.as_str()
+                    && &variant[..] == vn.as_str()
+                    && subpats.len() == data.len()
+                    && subpats
+                        .iter()
+                        .zip(data.iter())
+                        .all(|(p, v)| self.pattern_matches(p, v).unwrap_or(false))
+            }
             (Pattern::Tuple(pats), Value::Tuple(vals)) => {
                 pats.len() == vals.len() && pats.iter().zip(vals.iter()).all(|(p, v)| self.pattern_matches(p, v).unwrap_or(false))
             }
@@ -3644,6 +3857,67 @@ impl Interpreter {
 
     fn eval_builtin(&mut self, name: &str, args: &[Value]) -> crate::Result<Value> {
         match name {
+            "assert_eq" => {
+                let a = args.get(0).cloned().unwrap_or(Value::Nil);
+                let b = args.get(1).cloned().unwrap_or(Value::Nil);
+                if a != b {
+                    return Err(crate::RakError::Runtime(format!(
+                        "assertion failed: assert_eq({}, {})",
+                        a, b
+                    )));
+                }
+                Ok(Value::Bool(true))
+            }
+            "assert_ne" => {
+                let a = args.get(0).cloned().unwrap_or(Value::Nil);
+                let b = args.get(1).cloned().unwrap_or(Value::Nil);
+                if a == b {
+                    return Err(crate::RakError::Runtime(format!(
+                        "assertion failed: assert_ne({}, {})",
+                        a, b
+                    )));
+                }
+                Ok(Value::Bool(true))
+            }
+            "assert_true" => {
+                let a = args.get(0).cloned().unwrap_or(Value::Nil);
+                if !is_truthy(&a) {
+                    return Err(crate::RakError::Runtime("assertion failed: assert_true()".to_string()));
+                }
+                Ok(Value::Bool(true))
+            }
+            "assert_false" => {
+                let a = args.get(0).cloned().unwrap_or(Value::Nil);
+                if is_truthy(&a) {
+                    return Err(crate::RakError::Runtime("assertion failed: assert_false()".to_string()));
+                }
+                Ok(Value::Bool(true))
+            }
+            "expect_error" => {
+                // `expect_error(fn() { ... })`: invoke the provided callable and
+                // pass only if it raises. A non-callable argument is a failure.
+                let f = args.first().cloned().unwrap_or(Value::Nil);
+                match f {
+                    Value::Function { .. } => {
+                        match self.call_function_with_values(f, vec![]) {
+                            Ok(_) => {
+                                Err(crate::RakError::Runtime(
+                                    "expected error, but no error was raised".to_string(),
+                                ))
+                            }
+                            Err(_) => Ok(Value::Bool(true)),
+                        }
+                    }
+                    other => Err(crate::RakError::Runtime(format!(
+                        "expect_error expects a function argument, got {}",
+                        other.type_name()
+                    ))),
+                }
+            }
+            "panic" => {
+                let msg = args.first().map(|v| v.to_string()).unwrap_or_else(|| "panic".to_string());
+                Err(crate::RakError::Runtime(format!("panic: {}", msg)))
+            }
             "report" => return self.builtin_report(args),
             "cite" => return self.builtin_cite(args),
             "strip_evidence" => {
@@ -5711,6 +5985,7 @@ impl Value {
             Value::Int(_) => "int".to_string(),
             Value::Float(_) => "float".to_string(),
             Value::String(_) => "string".to_string(),
+            Value::Char(_) => "char".to_string(),
             Value::Bytes(_) => "bytes".to_string(),
             Value::Bool(_) => "bool".to_string(),
             Value::Nil => "nil".to_string(),
@@ -5872,6 +6147,52 @@ fn collect_provenance(
     }
 }
 
+/// Render an expression back to (approximate) source text for diagnostics in
+/// assertions and type errors.
+fn expr_str(e: &Expr) -> String {
+    use Expr::*;
+    match e {
+        Int(i) => i.to_string(),
+        Hex(h) => format!("0x{:X}", h),
+        Float(f) => f.to_string(),
+        String(s) => format!("\"{}\"", s),
+        Char(c) => format!("'{}'", c),
+        Bool(b) => b.to_string(),
+        Nil => "nil".to_string(),
+        Ident(n) => n.clone(),
+        Binary(op, l, r) => {
+            let o = match op {
+                crate::ast::BinOp::Add => "+",
+                crate::ast::BinOp::Sub => "-",
+                crate::ast::BinOp::Mul => "*",
+                crate::ast::BinOp::Div => "/",
+                crate::ast::BinOp::Rem => "%",
+                crate::ast::BinOp::Eq => "==",
+                crate::ast::BinOp::NotEq => "!=",
+                crate::ast::BinOp::Lt => "<",
+                crate::ast::BinOp::Gt => ">",
+                crate::ast::BinOp::LtEq => "<=",
+                crate::ast::BinOp::GtEq => ">=",
+                crate::ast::BinOp::And => "&&",
+                crate::ast::BinOp::Or => "||",
+                crate::ast::BinOp::BitAnd => "&",
+                crate::ast::BinOp::BitOr => "|",
+                crate::ast::BinOp::BitXor => "^",
+                crate::ast::BinOp::Shl => "<<",
+                crate::ast::BinOp::Shr => ">>",
+            };
+            format!("{} {} {}", expr_str(l), o, expr_str(r))
+        }
+        other => format!("{:?}", other),
+    }
+}
+
+/// True for the interpreter's numeric value variants (Hex/Int/Float), used to
+/// enable cross-representation numeric equality (`0xA == 10`).
+fn is_numeric_val(v: &Value) -> bool {
+    matches!(v, Value::Hex(_) | Value::Int(_) | Value::Float(_))
+}
+
 fn is_truthy(value: &Value) -> bool {
     match value {
         Value::Bool(b) => *b,
@@ -5880,6 +6201,7 @@ fn is_truthy(value: &Value) -> bool {
         Value::Hex(0) => false,
         Value::Float(0.0) => false,
         Value::String(s) => !s.is_empty(),
+        Value::Char(c) => *c != '\0',
         Value::Bytes(b) => !b.is_empty(),
         Value::Array(a) => !a.is_empty(),
         Value::Map(m) => !m.is_empty(),
@@ -5907,7 +6229,7 @@ mod tests {
     #[test]
     fn test_interpreter_for_loop() {
         let mut interp = Interpreter::new();
-        let output = interp.run_source("let total = 0; for x in [1, 2, 3] { total = total + x; } dump total;").unwrap();
+        let output = interp.run_source("let mut total = 0; for x in [1, 2, 3] { total = total + x; } dump total;").unwrap();
         assert!(output.iter().any(|l| l.contains("[DUMP] 6")));
     }
 
@@ -6019,7 +6341,7 @@ mod tests {
     #[test]
     fn test_interpreter_range() {
         let mut interp = Interpreter::new();
-        let output = interp.run_source("let s = 0; for i in 1..3 { s = s + i } dump s;").unwrap();
+        let output = interp.run_source("let mut s = 0; for i in 1..3 { s = s + i } dump s;").unwrap();
         assert!(output.iter().any(|l| l.contains("[DUMP] 6")));
     }
 
@@ -6144,7 +6466,7 @@ mod tests {
     #[test]
     fn test_interpreter_trait_iterable() {
         let mut interp = Interpreter::new();
-        let src = "struct Range { lo: int, hi: int } impl Iterable for Range { fn iter(self) { let out = []; let i = self.lo; while i <= self.hi { out = push(out, i); i = i + 1 } return out } } let r = Range { lo: 1, hi: 4 }; let s = 0; for n in r { s = s + n } dump s";
+        let src = "struct Range { lo: int, hi: int } impl Iterable for Range { fn iter(self) { let mut out = []; let mut i = self.lo; while i <= self.hi { out = push(out, i); i = i + 1 } return out } } let r = Range { lo: 1, hi: 4 }; let mut s = 0; for n in r { s = s + n } dump s";
         let output = interp.run_source(src).unwrap();
         assert!(output.iter().any(|l| l.contains("[DUMP] 10")), "got: {:?}", output);
     }
@@ -6570,13 +6892,13 @@ dump len(q)
     #[test]
     fn test_do_while() {
         let mut interp = Interpreter::new();
-        let out = interp.run_source("let i = 0\ndo {\n    i = i + 1\n} while i < 3\ndump i").unwrap();
+        let out = interp.run_source("let mut i = 0\ndo {\n    i = i + 1\n} while i < 3\ndump i").unwrap();
         assert!(out.iter().any(|l| l.contains("[DUMP] 3")), "got: {:?}", out);
     }
 
     #[test]
     fn test_do_while_break() {
-        let src = "let i = 0\ndo {\n    i = i + 1\n    if i == 5 { break }\n} while i < 100\ndump i";
+        let src = "let mut i = 0\ndo {\n    i = i + 1\n    if i == 5 { break }\n} while i < 100\ndump i";
         let mut interp = Interpreter::new();
         let out = interp.run_source(src).unwrap();
         assert!(out.iter().any(|l| l.contains("[DUMP] 5")), "got: {:?}", out);
@@ -6584,7 +6906,7 @@ dump len(q)
 
     #[test]
     fn test_break_depth() {
-        let src = "let count = 0\nfor i in 1..3 {\n    for j in 1..3 {\n        if j == 2 { break 2 }\n        count = count + 1\n    }\n}\ndump count";
+        let src = "let mut count = 0\nfor i in 1..3 {\n    for j in 1..3 {\n        if j == 2 { break 2 }\n        count = count + 1\n    }\n}\ndump count";
         let mut interp = Interpreter::new();
         let out = interp.run_source(src).unwrap();
         assert!(out.iter().any(|l| l.contains("[DUMP] 1")), "got: {:?}", out);
@@ -6593,7 +6915,7 @@ dump len(q)
     #[test]
     fn test_indexed_for() {
         let mut interp = Interpreter::new();
-        let src = "let s = 0\nfor i, x in [10, 20, 30] {\n    s = s + i * x\n}\ndump s";
+        let src = "let mut s = 0\nfor i, x in [10, 20, 30] {\n    s = s + i * x\n}\ndump s";
         let out = interp.run_source(src).unwrap();
         assert!(out.iter().any(|l| l.contains("[DUMP] 80")), "got: {:?}", out);
     }
@@ -6663,7 +6985,7 @@ dump s"#).unwrap();
     #[test]
     fn test_bitwise_compound_assign() {
         let mut interp = Interpreter::new();
-        let src = "let x = 0xFF\nx &= 0x0F\ndump x\nlet y = 0x10\ny <<= 2\ndump y";
+        let src = "let mut x = 0xFF\nx &= 0x0F\ndump x\nlet mut y = 0x10\ny <<= 2\ndump y";
         let out = interp.run_source(src).unwrap();
         assert!(out.iter().any(|l| l == "[DUMP] 0xF"), "got: {:?}", out);
         assert!(out.iter().any(|l| l == "[DUMP] 0x40"), "got: {:?}", out);
@@ -6672,10 +6994,174 @@ dump s"#).unwrap();
     #[test]
     fn test_swap_assignment() {
         let mut interp = Interpreter::new();
-        let src = "let a = 1\nlet b = 2\na, b = b, a\ndump a\ndump b";
+        let src = "let mut a = 1\nlet mut b = 2\na, b = b, a\ndump a\ndump b";
         let out = interp.run_source(src).unwrap();
         assert!(out.iter().any(|l| l.contains("[DUMP] 2")), "a=2, got: {:?}", out);
         assert!(out.iter().any(|l| l.contains("[DUMP] 1")), "b=1, got: {:?}", out);
+    }
+
+    #[test]
+    fn test_mutability_rejects_immutable_assign() {
+        let mut interp = Interpreter::new();
+        // Assignment to an immutable `let` binding must be rejected.
+        let err = interp.run_source("let imm = 10\nimm = 20").unwrap_err();
+        assert!(
+            err.to_string().contains("cannot assign to immutable variable `imm`"),
+            "got: {:?}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_mutability_allows_mut_assign() {
+        let mut interp = Interpreter::new();
+        let out = interp
+            .run_source("let mut x = 10\nx = 20\ndump x")
+            .unwrap();
+        assert!(out.iter().any(|l| l.contains("[DUMP] 20")), "got: {:?}", out);
+    }
+
+    #[test]
+    fn test_mutability_compound_assign_immutable() {
+        let mut interp = Interpreter::new();
+        let err = interp.run_source("let n = 5\nn += 3").unwrap_err();
+        assert!(
+            err.to_string().contains("cannot assign to immutable variable `n`"),
+            "got: {:?}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_char_type_and_base_literals() {
+        let mut interp = Interpreter::new();
+        let src = "let c: char = 'A'\ndump c\nlet u = '\\u{03B1}'\ndump u\nlet b = 0b1010\ndump b\nlet o = 0o755\ndump o";
+        let out = interp.run_source(src).unwrap();
+        assert!(out.iter().any(|l| l.contains("[DUMP] 'A'")), "got: {:?}", out);
+        assert!(out.iter().any(|l| l.contains("[DUMP] 'α'")), "got: {:?}", out);
+        assert!(out.iter().any(|l| l.contains("[DUMP] 0xA")), "got: {:?}", out);
+        assert!(out.iter().any(|l| l.contains("[DUMP] 0x1ED")), "got: {:?}", out);
+    }
+
+    #[test]
+    fn test_type_hint_runtime_mismatch() {
+        let mut interp = Interpreter::new();
+        // Defensive runtime type check for an explicit (and wrong) type hint.
+        let err = interp.run_source("let x: char = 42").unwrap_err();
+        assert!(
+            err.to_string().contains("type mismatch"),
+            "got: {:?}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_defer_lifo_order() {
+        let mut interp = Interpreter::new();
+        let src = "fn a() { dump \"aaa\" }\nfn b() { dump \"bbb\" }\nfn f() {\n    defer a()\n    defer b()\n    dump \"body\"\n}\nf()";
+        let out = interp.run_source(src).unwrap();
+        let body = out.iter().position(|l| l == "[DUMP] body").unwrap();
+        let pos_a = out.iter().position(|l| l == "[DUMP] aaa").unwrap();
+        let pos_b = out.iter().position(|l| l == "[DUMP] bbb").unwrap();
+        // LIFO: `b` (registered last) runs first, after the body.
+        assert!(body < pos_b && pos_b < pos_a, "got: {:?}", out);
+    }
+
+    #[test]
+    fn test_defer_runs_on_return_value_preserved() {
+        let mut interp = Interpreter::new();
+        let src = "fn cleanup() { dump \"clean\" }\nfn f(x: int) -> int { defer cleanup(); return x * 2 }\ndump f(21)";
+        let out = interp.run_source(src).unwrap();
+        assert!(out.iter().any(|l| l.contains("[DUMP] clean")), "got: {:?}", out);
+        assert!(out.iter().any(|l| l.contains("[DUMP] 42")), "got: {:?}", out);
+    }
+
+    #[test]
+    fn test_defer_top_level() {
+        let mut interp = Interpreter::new();
+        let src = "fn cleanup() { dump \"toplevel\" }\ndefer cleanup()\ndump \"first\"";
+        let out = interp.run_source(src).unwrap();
+        assert!(out.iter().any(|l| l == "[DUMP] first"), "got: {:?}", out);
+        assert!(out.iter().any(|l| l == "[DUMP] toplevel"), "got: {:?}", out);
+    }
+
+    #[test]
+    fn test_generic_function_identity() {
+        let mut interp = Interpreter::new();
+        let src = "fn identity<T>(value: T) -> T { return value }\nlet a = identity<int>(42)\ndump a\nlet b = identity<string>(\"hello\")\ndump b\nlet c = identity(99)\ndump c";
+        let out = interp.run_source(src).unwrap();
+        assert!(out.iter().any(|l| l == "[DUMP] 42"), "got: {:?}", out);
+        assert!(out.iter().any(|l| l == "[DUMP] hello"), "got: {:?}", out);
+        assert!(out.iter().any(|l| l == "[DUMP] 99"), "got: {:?}", out);
+    }
+
+    #[test]
+    fn test_generic_function_reuses_var() {
+        let mut interp = Interpreter::new();
+        let src = "fn first<T>(a: T, b: T) -> T { return a }\ndump first<int>(1, 2)\ndump first<string>(\"x\", \"y\")";
+        let out = interp.run_source(src).unwrap();
+        assert!(out.iter().any(|l| l == "[DUMP] 1"), "got: {:?}", out);
+        assert!(out.iter().any(|l| l == "[DUMP] x"), "got: {:?}", out);
+    }
+
+    #[test]
+    fn test_test_runner_pass_and_fail() {
+        let mut interp = Interpreter::new();
+        let src = "test \"ok\" { assert 1 == 1 }\ntest \"fail\" { assert 1 == 2 }\ntest \"eq\" { assert_eq(2, 2) }";
+        interp.run_source(src).unwrap();
+        let results = interp.run_collected_tests();
+        assert_eq!(results.len(), 3);
+        assert_eq!(results[0].name, "ok");
+        assert!(results[0].passed);
+        assert!(!results[1].passed, "got: {:?}", results[1]);
+        assert!(results[2].passed);
+    }
+
+    #[test]
+    fn test_assertions_builtins() {
+        let mut interp = Interpreter::new();
+        let src = "assert_eq(1, 1)\nassert_ne(1, 2)\nassert_true(5 > 1)\nassert_false(1 > 5)";
+        assert!(interp.run_source(src).is_ok());
+    }
+
+    #[test]
+    fn test_panic_builtin() {
+        let mut interp = Interpreter::new();
+        let err = interp.run_source("panic(\"unreachable\")").unwrap_err();
+        assert!(err.to_string().contains("panic: unreachable"), "got: {:?}", err);
+    }
+
+    #[test]
+    fn test_assert_failure_reports_expression() {
+        let mut interp = Interpreter::new();
+        let err = interp.run_source("assert 1 == 2").unwrap_err();
+        assert!(err.to_string().contains("assertion failed: 1 == 2"), "got: {:?}", err);
+    }
+
+    #[test]
+    fn test_enum_variant_pattern_matching() {
+        let mut interp = Interpreter::new();
+        let src = "enum Event { Connect(string), Disconnect(i32) }\nlet e = Event::Connect(\"host\")\nmatch e {\n    Event::Connect(host) => { dump host }\n    Event::Disconnect(code) => { dump code }\n}";
+        let out = interp.run_source(src).unwrap();
+        assert!(out.iter().any(|l| l == "[DUMP] host"), "got: {:?}", out);
+    }
+
+    #[test]
+    fn test_enum_unit_variant_matching() {
+        let mut interp = Interpreter::new();
+        let src = "enum State { Ready, Running, Finished }\nlet s = State::Running\nmatch s {\n    State::Ready => { dump \"ready\" }\n    State::Running => { dump \"running\" }\n    State::Finished => { dump \"finished\" }\n}";
+        let out = interp.run_source(src).unwrap();
+        assert!(out.iter().any(|l| l == "[DUMP] running"), "got: {:?}", out);
+    }
+
+    #[test]
+    fn test_enum_variant_pattern_no_match() {
+        let mut interp = Interpreter::new();
+        // A Disconnect arm should not fire for a Connect variant.
+        let src = "enum Event { Connect(string), Disconnect(i32) }\nlet e = Event::Connect(\"host\")\nmatch e {\n    Event::Disconnect(code) => { dump code }\n    Event::Connect(host) => { dump host }\n}";
+        let out = interp.run_source(src).unwrap();
+        assert!(out.iter().any(|l| l == "[DUMP] host"), "got: {:?}", out);
+        assert!(!out.iter().any(|l| l.contains("code")), "got: {:?}", out);
     }
 
     #[test]
@@ -6726,7 +7212,7 @@ dump s"#).unwrap();
     #[test]
     fn test_rest_args() {
         let mut interp = Interpreter::new();
-        let src = "fn sum_all(...nums: array) {\n    let s = 0\n    for n in nums {\n        s = s + n\n    }\n    return s\n}\ndump sum_all(1, 2, 3, 4, 5)";
+        let src = "fn sum_all(...nums: array) {\n    let mut s = 0\n    for n in nums {\n        s = s + n\n    }\n    return s\n}\ndump sum_all(1, 2, 3, 4, 5)";
         let out = interp.run_source(src).unwrap();
         assert!(out.iter().any(|l| l.contains("[DUMP] 15")), "got: {:?}", out);
     }

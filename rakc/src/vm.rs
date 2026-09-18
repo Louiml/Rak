@@ -1098,7 +1098,7 @@ impl Vm {
     }
 
     pub fn run(&mut self, chunk: &Chunk) -> Result<Vec<String>, String> {
-        let mut frame = Frame { code: chunk, ip: 0, stack: Vec::new(), locals: Vec::new() };
+        let mut frame = Frame { code: chunk, ip: 0, stack: Vec::new(), locals: Vec::new(), defers: Vec::new() };
         self.exec_frame(&mut frame)?;
         Ok(std::mem::take(&mut self.output))
     }
@@ -1237,30 +1237,28 @@ impl Vm {
                     let mut args: Vec<Value> = (0..argc).map(|_| frame.pop()).collect();
                     args.reverse();
                     let callee = frame.pop();
-                    match callee {
-                        Value::NativeFn(name, f) => {
-                            let result = f(&args).map_err(|e| format!("{}: {}", name, e))?;
-                            frame.push(result);
-                        }
-                        Value::Closure { code, nparams, name } => {
-                            if self.debug_enabled {
-                                self.debug_callstack.push(name.to_string());
-                            }
-                            let mut sub = Frame { code: &code, ip: 0, stack: Vec::new(), locals: Vec::with_capacity(nparams) };
-                            for i in 0..nparams {
-                                sub.locals.push(args.get(i).cloned().unwrap_or(Value::Nil));
-                            }
-                            self.exec_frame(&mut sub)?;
-                            if self.debug_enabled {
-                                self.debug_callstack.pop();
-                            }
-                            frame.push(sub.stack.pop().unwrap_or(Value::Nil));
-                        }
-                        _ => return Err("cannot call non-function".to_string()),
-                    }
+                    self.call_value(frame, callee, args)?;
                 }
                 Op::Return => {
+                    // Preserve the return value, run this frame's deferred
+                    // calls in LIFO order, then leave the return value as the
+                    // result for the caller.
+                    let ret = frame.pop();
+                    self.run_frame_defers(frame)?;
+                    frame.push(ret);
                     return Ok(());
+                }
+                Op::DeferCall => {
+                    let n = frame.code.code[frame.ip];
+                    frame.ip += 1; // skips the operand byte, handled below
+                    let arity = n as usize;
+                    let mut args = Vec::with_capacity(arity);
+                    for _ in 0..arity {
+                        args.push(frame.pop());
+                    }
+                    args.reverse();
+                    let callee = frame.pop();
+                    frame.defers.push((callee, args));
                 }
                 Op::Print => {
                     let v = frame.pop();
@@ -1413,6 +1411,52 @@ impl Vm {
         }
         Ok(())
     }
+
+    /// Invoke a function value (native fn or closure) with the given args and
+    /// push the result onto `frame.stack`. Shared by `Op::Call` and defer.
+    fn call_value(&mut self, frame: &mut Frame, callee: Value, mut args: Vec<Value>) -> Result<(), String> {
+        match callee {
+            Value::NativeFn(name, f) => {
+                let result = f(&args).map_err(|e| format!("{}: {}", name, e))?;
+                frame.push(result);
+            }
+            Value::Closure { code, nparams, name } => {
+                if self.debug_enabled {
+                    self.debug_callstack.push(name.to_string());
+                }
+                for _ in args.len()..nparams {
+                    args.push(Value::Nil);
+                }
+                let mut sub = Frame {
+                    code: &code,
+                    ip: 0,
+                    stack: Vec::new(),
+                    locals: Vec::with_capacity(nparams),
+                    defers: Vec::new(),
+                };
+                for i in 0..nparams {
+                    sub.locals.push(args.get(i).cloned().unwrap_or(Value::Nil));
+                }
+                self.exec_frame(&mut sub)?;
+                if self.debug_enabled {
+                    self.debug_callstack.pop();
+                }
+                frame.push(sub.stack.pop().unwrap_or(Value::Nil));
+            }
+            _ => return Err("cannot call non-function".to_string()),
+        }
+        Ok(())
+    }
+
+    /// Run a frame's registered deferred calls in LIFO order (innermost
+    /// `defer` runs last), invoking each with its captured args. Results are
+    /// discarded as in the interpreter.
+    fn run_frame_defers(&mut self, frame: &mut Frame) -> Result<(), String> {
+        while let Some((callee, args)) = frame.defers.pop() {
+            self.call_value(frame, callee, args)?;
+        }
+        Ok(())
+    }
 }
 
 struct Frame<'a> {
@@ -1420,6 +1464,9 @@ struct Frame<'a> {
     ip: usize,
     stack: Vec<Value>,
     locals: Vec<Value>,
+    /// Deferred calls (callee value + pre-evaluated args) registered by
+    /// `defer f(...)`, run in LIFO order when this frame returns.
+    defers: Vec<(Value, Vec<Value>)>,
 }
 
 impl<'a> Frame<'a> {
@@ -1639,8 +1686,57 @@ mod tests {
     }
 
     #[test]
+    fn test_vm_mutability_rejects_immutable_assign() {
+        let tokens = crate::lexer::tokenize("let imm = 10\nimm = 20").unwrap();
+        let module = crate::parser::parse(&tokens, "let imm = 10\nimm = 20").unwrap();
+        let err = compile_module(&module).unwrap_err();
+        assert!(
+            err.contains("cannot assign to immutable variable `imm`"),
+            "got: {:?}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_vm_mutability_allows_mut_assign() {
+        let out = run("let mut x = 10\nx = 20\ndump x");
+        assert!(out.iter().any(|l| l.contains("[DUMP] 20")), "got: {:?}", out);
+    }
+
+    #[test]
+    fn test_vm_char_literal() {
+        let out = run("dump 'A'\ndump '\\u{03B1}'");
+        assert!(out.iter().any(|l| l.contains("[DUMP] 'A'")), "got: {:?}", out);
+        assert!(out.iter().any(|l| l.contains("[DUMP] 'α'")), "got: {:?}", out);
+    }
+
+    #[test]
+    fn test_vm_defer_lifo_order() {
+        let out = run("fn a() { dump \"aaa\" }\nfn b() { dump \"bbb\" }\nfn f() { defer a()\ndefer b()\ndump \"body\" } f()");
+        let body = out.iter().position(|l| l == "[DUMP] body").unwrap();
+        let pos_a = out.iter().position(|l| l == "[DUMP] aaa").unwrap();
+        let pos_b = out.iter().position(|l| l == "[DUMP] bbb").unwrap();
+        assert!(body < pos_b && pos_b < pos_a, "got: {:?}", out);
+    }
+
+    #[test]
+    fn test_vm_defer_preserves_return_value() {
+        let out = run("fn cleanup() { dump \"clean\" }\nfn f(x: int) -> int { defer cleanup()\nreturn x * 2 } dump f(21)");
+        assert!(out.iter().any(|l| l.contains("[DUMP] clean")), "got: {:?}", out);
+        assert!(out.iter().any(|l| l.contains("[DUMP] 42")), "got: {:?}", out);
+    }
+
+    #[test]
+    fn test_vm_generic_function_identity() {
+        let out = run("fn identity<T>(value: T) -> T { return value }\ndump identity<int>(42)\ndump identity<string>(\"hello\")\ndump identity(99)");
+        assert!(out.iter().any(|l| l.contains("[DUMP] 42")), "got: {:?}", out);
+        assert!(out.iter().any(|l| l.contains("[DUMP] hello")), "got: {:?}", out);
+        assert!(out.iter().any(|l| l.contains("[DUMP] 99")), "got: {:?}", out);
+    }
+
+    #[test]
     fn test_vm_while_loop() {
-        let out = run("let i = 0; let s = 0; while i < 10 { s = s + i; i = i + 1 } dump s");
+        let out = run("let mut i = 0; let mut s = 0; while i < 10 { s = s + i; i = i + 1 } dump s");
         assert!(out.iter().any(|l| l.contains("[DUMP] 45")));
     }
 
@@ -1652,13 +1748,13 @@ mod tests {
 
     #[test]
     fn test_vm_for_range() {
-        let out = run("let s = 0; for i in 1..100 { s = s + i } dump s");
+        let out = run("let mut s = 0; for i in 1..100 { s = s + i } dump s");
         assert!(out.iter().any(|l| l.contains("[DUMP] 5050")));
     }
 
     #[test]
     fn test_vm_for_array() {
-        let out = run("let s = 0; for x in [10, 20, 30] { s = s + x } dump s");
+        let out = run("let mut s = 0; for x in [10, 20, 30] { s = s + x } dump s");
         assert!(out.iter().any(|l| l.contains("[DUMP] 60")), "got: {:?}", out);
     }
 

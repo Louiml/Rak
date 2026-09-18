@@ -386,12 +386,13 @@
     'let', 'mut', 'fn', 'return', 'if', 'else', 'for', 'while', 'loop', 'break', 'continue',
     'use', 'dump', 'trace', 'scan', 'fetch', 'in', 'struct', 'enum', 'impl', 'trait', 'match',
     'try', 'catch', 'raise', 'throw', 'async', 'await', 'spawn', 'type', 'as', 'mod', 'pub',
-    'macro', 'const', 'extern', 'import', 'from', 'export', 'pipe'
+    'macro', 'const', 'extern', 'import', 'from', 'export', 'pipe',
+    'defer', 'test', 'assert'
   ]);
   // Keywords that produce a value (so a following '/' is division, not a regex).
   var VALUE_WORDS = new Set(['true', 'false', 'nil', 'open', 'port', 'banner']);
   var TYPES = new Set([
-    'int', 'string', 'bytes', 'bool', 'hex', 'hex8', 'hex16', 'hex32', 'hex64',
+    'int', 'string', 'char', 'bytes', 'bool', 'hex', 'hex8', 'hex16', 'hex32', 'hex64',
     'i8', 'i16', 'i32', 'i64', 'u8', 'u16', 'u32', 'u64', 'f32', 'f64',
     'Option', 'Result', 'Display', 'Debug', 'Iterable', 'Index', 'IndexMut',
     'Some', 'None', 'Ok', 'Err'
@@ -443,7 +444,11 @@
   function readChar(line, i) {
     // i points at the opening '
     var j = i + 1;
-    if (line[j] === '\\' && line[j + 1] === 'x' && j + 3 < line.length && /[0-9a-fA-F]{2}/.test(line.slice(j + 2, j + 4))) {
+    var rest = line.slice(j);
+    var uni = rest.match(/^\\u\{[0-9A-Fa-f]{1,6}\}/);
+    if (uni) {
+      j += uni[0].length;
+    } else if (line[j] === '\\' && line[j + 1] === 'x' && j + 3 < line.length && /[0-9a-fA-F]{2}/.test(line.slice(j + 2, j + 4))) {
       j += 4;
     } else if (line[j] === '\\' && j + 1 < line.length) {
       j += 2;
@@ -511,6 +516,16 @@
       if (c === '0' && (line[i + 1] === 'x' || line[i + 1] === 'X')) {
         var j = i + 2; while (j < line.length && /[0-9A-Fa-f]/.test(line[j])) j++;
         var hx = line.slice(i, j); emit('tok-number', hx); i = j; sig('tok-number', hx); continue;
+      }
+
+      // binary and octal base literals: 0b1010, 0o755
+      if (c === '0' && (line[i + 1] === 'b' || line[i + 1] === 'B')) {
+        var j = i + 2; while (j < line.length && /[01_]/.test(line[j])) j++;
+        var bx = line.slice(i, j); emit('tok-number', bx); i = j; sig('tok-number', bx); continue;
+      }
+      if (c === '0' && (line[i + 1] === 'o' || line[i + 1] === 'O')) {
+        var j = i + 2; while (j < line.length && /[0-7_]/.test(line[j])) j++;
+        var ox = line.slice(i, j); emit('tok-number', ox); i = j; sig('tok-number', ox); continue;
       }
 
       // number (with type suffix)

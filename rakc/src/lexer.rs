@@ -97,6 +97,12 @@ pub enum Token {
     Tunnel,
     #[token("evidence")]
     Evidence,
+    #[token("defer")]
+    Defer,
+    #[token("test")]
+    Test,
+    #[token("assert")]
+    Assert,
 
     /// A macro placeholder `$name` inside a macro body.
     #[regex(r"\$[a-zA-Z_][a-zA-Z0-9_]*", |lex| lex.slice()[1..].to_string())]
@@ -113,6 +119,12 @@ pub enum Token {
 
     #[regex(r"0x[0-9A-Fa-f][0-9A-Fa-f_]*", |lex| hex_to_u64(lex.slice()))]
     Hex(u64),
+
+    #[regex(r"0b[01][01_]*", |lex| parse_base_int(lex.slice(), 2))]
+    Binary(u64),
+
+    #[regex(r"0o[0-7][0-7_]*", |lex| parse_base_int(lex.slice(), 8))]
+    Octal(u64),
 
     #[regex(r"[0-9][0-9_]*", |lex| lex.slice().replace('_', "").parse::<i64>().ok())]
     Int(i64),
@@ -135,7 +147,7 @@ pub enum Token {
     #[regex(r#"b"([^"\\]|\\.)*""#, |lex| parse_bytes(lex.slice()))]
     Bytes(Vec<u8>),
 
-    #[regex(r"'([^'\\]|\\x[0-9a-fA-F]{2}|\\.)'", |lex| parse_char(lex.slice()))]
+    #[regex(r"'([^'\\]|\\x[0-9a-fA-F]{2}|\\u\{[0-9a-fA-F]{1,6}\}|\\.)'", |lex| parse_char(lex.slice()))]
     Char(char),
 
     /// A loop label `'name` (used in `'lbl: for ...`, `break 'lbl`).
@@ -281,6 +293,11 @@ fn hex_to_u64(s: &str) -> Option<u64> {
     u64::from_str_radix(&s[2..].replace('_', ""), 16).ok()
 }
 
+/// Parse a `0b...`/`0o...` base-prefixed integer literal.
+fn parse_base_int(s: &str, radix: u32) -> Option<u64> {
+    u64::from_str_radix(&s[2..].replace('_', ""), radix).ok()
+}
+
 fn parse_typed_int(s: &str) -> Option<TypedIntData> {
     let (num, suffix) = if let Some(p) = s.find(|c: char| c == 'i' || c == 'u') {
         (&s[..p], &s[p..])
@@ -396,6 +413,16 @@ fn parse_char(s: &str) -> Option<char> {
                 let hex: String = chars.by_ref().take(2).collect();
                 u8::from_str_radix(&hex, 16).ok().map(|n| n as char)
             }
+            Some('u') => {
+                // `\u{...}` — consume `{`, up to six hex digits, then `}`.
+                if chars.next() == Some('{') {
+                    let hex: String = chars.by_ref().take_while(|c| *c != '}').collect();
+                    let cp = u32::from_str_radix(&hex, 16).ok()?;
+                    char::from_u32(cp)
+                } else {
+                    None
+                }
+            }
             _ => None,
         },
         Some(c) => Some(c),
@@ -475,6 +502,8 @@ fn can_end_expr(t: &Token) -> bool {
             | Token::Interp(_)
             | Token::Bytes(_)
             | Token::Hex(_)
+            | Token::Binary(_)
+            | Token::Octal(_)
             | Token::Char(_)
             | Token::Regex(_)
             | Token::True
@@ -612,6 +641,23 @@ mod tests {
         assert_eq!(toks[0].0, Token::Char('P'));
         assert_eq!(toks[1].0, Token::Char('\n'));
         assert_eq!(toks[2].0, Token::Char('A'));
+    }
+
+    #[test]
+    fn test_base_literals() {
+        let toks = tokenize("0b1010 0o755 0b1_0000 0o1_000").unwrap();
+        assert_eq!(toks[0].0, Token::Binary(0b1010));
+        assert_eq!(toks[1].0, Token::Octal(0o755));
+        assert_eq!(toks[2].0, Token::Binary(0b1_0000));
+        assert_eq!(toks[3].0, Token::Octal(0o1000));
+    }
+
+    #[test]
+    fn test_char_escapes() {
+        let toks = tokenize("'\\'' '\\\"' '\\u{03B1}'").unwrap();
+        assert_eq!(toks[0].0, Token::Char('\''));
+        assert_eq!(toks[1].0, Token::Char('"'));
+        assert_eq!(toks[2].0, Token::Char('α'));
     }
 
     #[test]

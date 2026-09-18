@@ -22,6 +22,13 @@ For Neovim (with `nvim-lspconfig`), configure `rakc lsp` as the command for `.ra
 
 ## Changelog
 
+### 0.7.1
+
+- **Keywords** — `defer`, `test`, `assert`.
+- **Types** — `char` (a first-class Unicode scalar type).
+- **Literals** — `\u{...}` char-escape highlighting, and binary/octal numbers
+  `0b...` / `0o...`.
+
 ### 0.5.1
 
 - **Custom installer** — `rak-setup` TUI wizard (net-install + offline bundle) now highlighted; `binstruct`/`evidence`/`rest` keywords carry over from 0.5.0.

@@ -14,6 +14,7 @@
     { "include": "#builtins" },
     { "include": "#types" },
     { "include": "#hex" },
+    { "include": "#binary_octal" },
     { "include": "#numbers" },
     { "include": "#operators" }
   ],
@@ -61,7 +62,7 @@
       "patterns": [
         {
           "name": "constant.character.rak",
-          "match": "'([^'\\\\]|\\\\x[0-9A-Fa-f]{2}|\\\\.)'"
+          "match": "'([^'\\\\]|\\\\x[0-9A-Fa-f]{2}|\\\\u\\{[0-9A-Fa-f]{1,6}\\}|\\\\.)'"
         }
       ]
     },
@@ -105,7 +106,7 @@
       "patterns": [
         {
           "name": "keyword.control.rak",
-          "match": "\\b(if|else|for|while|loop|break|continue|return|match|try|catch|raise|throw|spawn|await|async|as|type|from|import|evidence)\\b"
+          "match": "\\b(if|else|for|while|loop|break|continue|return|match|try|catch|raise|throw|spawn|await|async|as|type|from|import|evidence|defer|test|assert)\\b"
         },
         {
           "name": "keyword.other.rak",
@@ -129,13 +130,19 @@
       "patterns": [
         {
           "name": "storage.type.rak",
-          "match": "\\b(i8|i16|i32|i64|u8|u16|u32|u64|f32|f64|hex8|hex16|hex32|hex64|int|string|bytes|bool|void|Option|Result)\\b"
+          "match": "\\b(i8|i16|i32|i64|u8|u16|u32|u64|f32|f64|hex8|hex16|hex32|hex64|int|string|char|bytes|bool|void|Option|Result)\\b"
         }
       ]
     },
     "hex": {
       "patterns": [
         { "name": "constant.numeric.hex.rak", "match": "\\b0[xX][0-9A-Fa-f]+\\b" }
+      ]
+    },
+    "binary_octal": {
+      "patterns": [
+        { "name": "constant.numeric.rak", "match": "\\b0[bB][01_]+\\b" },
+        { "name": "constant.numeric.rak", "match": "\\b0[oO][0-7_]+\\b" }
       ]
     },
     "numbers": {

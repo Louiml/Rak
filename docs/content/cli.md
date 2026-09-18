@@ -7,7 +7,8 @@ rakc run <file>     Run a Rak script on the interpreter
 rakc vm <file>      Run on the bytecode VM
 rakc build <file>   Build a standalone executable
 rakc bench <file>   Benchmark interpreter vs VM
-rakc check <file>   Lex and parse, print diagnostics with line/column
+rakc check <file>   Static type check; print diagnostics with line/column
+rakc test [file]    Run test blocks (--filter NAME, --verbose)
 rakc lex <file>     Print tokens
 rakc parse <file>   Print AST
 rakc repl           Start an interactive REPL
@@ -16,6 +17,23 @@ rakc bindgen <h>    Generate Rak bindings from a C header
 rakc debug <file>   Bytecode-VM source debugger (0.7)
 rakc --version
 ```
+
+### rakc check (0.7.1)
+
+`rakc check <file>` runs the static type checker over the AST in addition to
+lexing and parsing. It infers literal types, checks explicit annotations and
+function-call argument types, and flags non-exhaustive or repeated enum-variant
+match patterns. Type mismatches are reported with the expected and found types
+and the offending source line. See [Language reference](language.html#static-type-checking)
+for the diagnostic format.
+
+### rakc test (0.7.1)
+
+`rakc test` discovers and runs `test "name" { ... }` blocks. Pass a file, or
+run it bare to scan `tests/*.rak` (falling back to `test.rak`). Flags:
+`--filter NAME` runs only blocks whose name contains `NAME`, and `--verbose`
+prints failure messages. A failing test exits non-zero. See
+[Tooling](tooling.html#test-runner) for the assertion set and sample output.
 
 ## rakc debug (0.7)
 

@@ -53,11 +53,16 @@ pub enum Op {
     /// Build a `Value::Module` from `n` (name, value) pairs. Operand: `n` (1 byte).
     /// Pops `2*n` values (alternating name string, value), pushes the Module.
     BuildModule,
+    /// Register a deferred call. The callee and its args (already evaluated)
+    /// are pushed onto a per-frame stack and run in LIFO order when the frame
+    /// returns. Operand: argument count `n` (1 byte). Pops `n` args then the
+    /// callee.
+    DeferCall,
 }
 
 impl Op {
     pub fn from_u8(b: u8) -> Option<Op> {
-        if (b as usize) <= Op::BuildModule as usize {
+        if (b as usize) <= Op::DeferCall as usize {
             Some(unsafe { std::mem::transmute(b) })
         } else {
             None

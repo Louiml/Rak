@@ -4,6 +4,31 @@ A programming language for hackers, OSINT investigators, and systems programmers
 
 Hex is a first-class type. The bytecode VM runs about 6x faster than the tree-walker. There's a SQL engine written in Rak itself, and a Rak interpreter written in Rak.
 
+## What's new in 0.7.1
+
+- **Static type checker** — `rakc check <file>` infers literal types, checks
+  `let x: T = value` annotations and function-call arguments, and reports
+  expected vs. found types with the source line (`error[E0308]`). Numeric
+  literals are compatible with each other; `char` and `string` are not.
+- **Mutability is real** — `let x = 10; x = 20` is now an error
+  (`cannot assign to immutable variable 'x'`). Use `let mut x` to rebind.
+  Enforced on both the interpreter and the bytecode VM.
+- **`char` type** — a first-class Unicode scalar, distinct from `u8`/`bytes`,
+  with `\u{...}` and `\xNN` escapes. `let c: char = 'א'` works everywhere.
+- **Base literals** — `0b1010`, `0o755`, and underscores (`1_000_000`). All
+  integer forms compare equal by value, so `0xA == 10`.
+- **Generic functions** — `fn identity<T>(v: T) -> T`, callable as
+  `identity<int>(42)` or inferred `identity(42)`. Type args are validated and
+  then ignored; the runtime stays dynamic.
+- **Enum variant patterns** — `match e { Event::Connect(host) => ... }` with
+  tuple and unit variants, on newline- or comma-separated arms. The checker
+  flags non-exhaustive matches and repeated variant patterns.
+- **`defer`** — `defer cleanup()` runs in LIFO order when the function exits,
+  on a normal return or a raised error. Same behavior on the VM (`Op::DeferCall`).
+- **Test framework** — `rakc test [file] [--filter NAME] [--verbose]` runs
+  `test "name" { ... }` blocks with `assert`, `assert_eq/ne/true/false`,
+  `expect_error(fn() {...})`, and `panic(msg)`. A failing test exits non-zero.
+
 ## What's new in 0.7.0
 
 - **Structured errors** — `catch e` binds a first-class `Error` value with a
@@ -76,7 +101,13 @@ The language started as an OSINT scripting tool. It grew into something bigger.
 
 **Data pipelines.** A `|>` pipeline operator, regex literals (`/\d+/g`) with method syntax, and binary pattern matching over byte slices — built for OSINT log and PCAP triage.
 
-**Type system.** Signed and unsigned ints (i8 through i64, u8 through u64), floats (f32, f64), typed literals like `42i32` and `3.14f64`, tuples, Result/Option, modules, closures with lexical scoping, generics, traits with method dispatch, pattern matching (including binary byte-pattern matching), and string interpolation with `f"hello {name}"`.
+**Type system.** Signed and unsigned ints (i8 through u64), floats (f32, f64),
+typed literals like `42i32` and `3.14f64`, a first-class `char`, base literals
+(`0b1010`/`0o755`/`0xFF`), tuples, Result/Option, modules, closures with lexical
+scoping, generics, traits with method dispatch, pattern matching (including
+binary byte-pattern matching, plus user enum variants), and string interpolation
+with `f"hello {name}"`. A static type checker behind `rakc check` catches bad
+annotations and non-exhaustive matches before you run anything.
 
 **Concurrency.** `spawn` launches a thread, `thread_join` waits for it, `channel()` gives you a sender/receiver pair. TCP networking built in with `net_listen`, `net_accept`, `tcp_read`, `tcp_write`. Async I/O via a Tokio runtime: `async fn`/`await`, `http_get_async`, `tcp_probe`.
 
@@ -488,6 +519,54 @@ for n in Range { lo: 1, hi: 5 } { s = s + n }
 dump s   // 15
 ```
 
+### Characters and base literals
+
+```rak
+let c: char = 'a'
+let hebrew: char = 'א'
+let alpha = '\u{03B1}'   // α
+let bin = 0b1010          // 10
+let oct = 0o755           // 493
+dump 0xA == 10            // true
+```
+
+### Generic functions
+
+```rak
+fn identity<T>(value: T) -> T { return value }
+dump identity<int>(42)        // 42
+dump identity<string>("hi")   // hi
+dump identity(99)             // inferred: 99
+```
+
+### Defer
+
+`defer f()` runs in LIFO order when the current function exits. The last one
+registered runs first. Same on the interpreter and the VM.
+
+```rak
+fn work() {
+    defer dump "cleanup-last"
+    defer dump "cleanup-first"
+}
+work()   // cleanup-first, then cleanup-last
+```
+
+### Tests and type checking
+
+```rak
+test "addition works" {
+    assert add(2, 3) == 5
+    assert_eq(add(2, 3), 5)
+    expect_error(fn() { raise "boom" })
+}
+```
+
+```bash
+rakc test tests/math.rak    # PASS/FAIL, exit non-zero on failure
+rakc check file.rak         # type mismatches, non-exhaustive matches
+```
+
 The full design and implementation plan for these plus FFI, memory-mapped
 files, macros, an async event loop, raw sockets, and DNS/TLS/PCAP parsers is
 in [`docs/rak-features-spec.md`](docs/rak-features-spec.md).
@@ -681,7 +760,8 @@ rakc run <file>     Run a Rak script on the interpreter
 rakc vm <file>      Run on the bytecode VM
 rakc build <file>   Build a standalone executable
 rakc bench <file>   Benchmark interpreter vs VM
-rakc check <file>   Lex and parse, print diagnostics with line/column
+rakc check <file>   Static type check; print diagnostics with line/column
+rakc test [file]    Run test blocks (--filter NAME, --verbose)
 rakc lex <file>     Print tokens
 rakc parse <file>   Print AST
 rakc repl           Start an interactive REPL

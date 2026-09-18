@@ -11,8 +11,32 @@ let pi = 3.14f64
 let n = 42i32
 ```
 
-`let` binds an immutable value; `let mut` allows reassignment. Literals carry
-optional type suffixes (`42i32`, `3.14f64`).
+`let` binds an immutable value; `let mut` allows reassignment. Assigning to an
+immutable binding is an error (`cannot assign to immutable variable 'x'`), on
+the interpreter and the VM alike. Literals carry optional type suffixes
+(`42i32`, `3.14f64`, `42u8`).
+
+```rak
+let mut counter = 0          // ok: mutable
+counter = counter + 1
+// let fixed = 0
+// fixed = 1                 // error: cannot assign to immutable variable 'fixed'
+```
+
+## Numeric literals
+
+Plain decimals, plus base-prefixed literals:
+
+```rak
+let dec = 42
+let bin = 0b101010           // 42
+let oct = 0o755              // 493
+let hex = 0xFF               // 255
+let big = 1_000_000          // underscores are allowed
+```
+
+All integer forms compare equal by value, so `0xA == 10` is `true`. Typed
+suffixes (`i8`...`u64`, `f32`/`f64`, `1e10f64`) select the representation.
 
 ## Functions
 
@@ -26,6 +50,21 @@ dump add(0x10, 0x20)   // 48
 Closures are lexical: free variables resolve at the definition site, not the
 call site. Recursive closures like
 `let f = fn(n) { if n < 2 { return n } return f(n-1) + f(n-2) }` just work.
+
+## Generic functions
+
+Declare type parameters in angle brackets. The runtime is dynamically typed, so
+a generic body works for any argument; the type parameters are validated and
+then ignored:
+
+```rak
+fn identity<T>(value: T) -> T {
+    return value
+}
+dump identity<int>(42)        // 42
+dump identity<string>("hi")   // hi
+dump identity(99)             // inferred: 99
+```
 
 ## Control flow
 
@@ -45,8 +84,23 @@ loop { break }
 
 Signed and unsigned ints (i8 through i64, u8 through u64), floats (f32, f64),
 typed literals like `42i32` and `3.14f64`, tuples, `Result`/`Option`, strings,
-`bytes`, maps, arrays, structs, and enums. Hex is a first-class type
+`char`, `bytes`, maps, arrays, structs, and enums. Hex is a first-class type
 (`hex8`/`hex16`/`hex32`/`hex64`).
+
+## Characters
+
+`char` holds a single Unicode scalar. It is distinct from `u8` and `bytes`.
+Write a character directly, or use an escape:
+
+```rak
+let a: char = 'A'
+let newline = '\n'
+let hebrew = 'א'
+let alpha = '\u{03B1}'   // α
+```
+
+Supported escapes: `\n`, `\r`, `\t`, `\\`, `\'`, `\"`, `\0`, `\xNN`, and
+`\u{HEX}`. A `char` is truthy except for `'\0'`.
 
 ## Hex arithmetic
 
@@ -83,8 +137,26 @@ match 2 {
 }
 ```
 
-Arms are comma-separated. Patterns can destructure arrays and tuples, match
-literals, and use a `_` catch-all.
+Arms may be comma-separated or newline-separated. Patterns can destructure
+arrays and tuples, match literals, use a `_` catch-all, and match user enum
+variants.
+
+```rak
+enum Event {
+    Connect(string),
+    Disconnect(i32)
+}
+
+let e = Event::Connect("host")
+match e {
+    Event::Connect(host) => { dump host }      // "host"
+    Event::Disconnect(code) => { dump code }
+}
+```
+
+Unit variants (`enum State { Ready, Running, Finished }`) match the same way.
+The static checker (`rakc check`) flags a non-exhaustive match that leaves a
+unit variant uncovered, and flags a variant pattern matched twice.
 
 ## Binary pattern matching
 
@@ -175,3 +247,44 @@ dump s   // 15
 
 Trait protocols and method-call dispatch are interpreter-only; on the VM,
 `obj.method(...)` is limited to maps/structs holding callables.
+
+## Defer
+
+`defer expr()` registers a call that runs when the current function exits, in
+LIFO order. The last registered call runs first. Deferred calls run on a normal
+return, an early return, or a raised error.
+
+```rak
+fn cleanup1() { dump "cleanup1" }
+fn cleanup2() { dump "cleanup2" }
+
+fn work() {
+    defer cleanup1()
+    defer cleanup2()
+    dump "body"
+}
+work()   // body, then cleanup2, then cleanup1
+```
+
+`defer` works the same on the interpreter and the VM. The deferred call's
+arguments are evaluated at the point the `defer` is reached.
+
+## Static type checking
+
+`rakc check <file>` runs a static analysis pass over the AST before any
+interpreter or VM work. It infers literal types, checks explicit annotations,
+and checks function-call argument types against declared signatures. A mismatch
+reports the expected and found types with the source line:
+
+```text
+error[E0308]: type mismatch
+  --> main.rak:1:16
+1 | let count: i32 = "hello"
+  |                  ^
+expected: int
+found:    string
+```
+
+`int`, `char`, `string`, `bytes`, `bool`, and the typed sizes are distinct in
+the checker. Numeric literals are mutually compatible, so assigning an `i32` to
+a `u64`-annotated binding is fine, but `let x: char = "hi"` is rejected.

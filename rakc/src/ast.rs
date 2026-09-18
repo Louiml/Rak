@@ -1,11 +1,16 @@
 #[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
     Hex(u64),
+    /// `0b...` base-2 integer literal.
+    BinLit(u64),
+    /// `0o...` base-8 integer literal.
+    OctLit(u64),
     Int(i64),
     Float(f64),
     Float32(f32),
     TypedInt(i64, IntKind),
     String(String),
+    Char(char),
     Interp {
         template: String,
         parts: Vec<Expr>,
@@ -264,6 +269,16 @@ pub enum Stmt {
         name: String,
         value: Box<Expr>,
     },
+    /// `defer expr()` — register a call to run in LIFO order when the current
+    /// function (or the top-level scope) exits.
+    Defer(Box<Expr>),
+    /// `test "name" { ... }` — a test block for the Rak test runner.
+    Test {
+        name: String,
+        body: Vec<Stmt>,
+    },
+    /// `assert <expr>` — assert an expression is truthy, failing the test if not.
+    Assert(Box<Expr>),
     /// `binstruct Name { field: type, ... }` — a declarative wire-format
     /// layout that compiles to both a decoder and an encoder.
     BinStructDef {
@@ -338,6 +353,8 @@ pub enum Pattern {
     Byte(u8),
     Bytes(Vec<BytesPat>),
     Struct(String, Vec<(String, Pattern)>),
+    /// A user-defined enum variant pattern `EnumName::Variant(sub-patterns...)`.
+    EnumVariant(String, String, Vec<Pattern>),
     Range(Box<Pattern>, Box<Pattern>),
     Or(Vec<Pattern>),
     Some(Box<Pattern>),
@@ -367,6 +384,7 @@ pub enum Type {
     F32,
     F64,
     String,
+    Char,
     Bytes,
     Bool,
     Nil,

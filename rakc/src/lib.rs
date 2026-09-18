@@ -1,6 +1,7 @@
 pub mod lexer;
 pub mod parser;
 pub mod ast;
+pub mod typecheck;
 pub mod interpreter;
 pub mod value;
 pub mod bytecode;
@@ -153,10 +154,22 @@ impl RakError {
 pub type Result<T> = std::result::Result<T, RakError>;
 
 /// Compile a Rak source file into an executable or intermediate representation.
+/// Runs the lexer, parser, and static type checker. On a type error, returns
+/// an `Err` containing the rendered diagnostics.
 pub fn compile(source: &str) -> Result<()> {
+    compile_with_file(source, "<input>")?;
+    Ok(())
+}
+
+/// Like [`compile`], but labels diagnostics with `file`.
+pub fn compile_with_file(source: &str, file: &str) -> Result<()> {
     let tokens = lexer::tokenize(source)?;
     let ast = parser::parse(&tokens, source)?;
-    let _ = ast;
+    let mut tc = typecheck::TypeChecker::new(source, file);
+    let diagnostics = tc.check_module(&ast);
+    if let Some(d) = diagnostics.first() {
+        return Err(RakError::Runtime(d.render()));
+    }
     Ok(())
 }
 

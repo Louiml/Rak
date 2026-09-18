@@ -24,6 +24,7 @@ pub enum Value {
     F64(f64),
     Hex(u64, usize),
     String(Arc<str>),
+    Char(char),
     Bytes(Arc<[u8]>),
     Bool(bool),
     Nil,
@@ -96,6 +97,7 @@ impl Value {
             Value::F64(_) => "f64",
             Value::Hex(_, _) => "hex",
             Value::String(_) => "string",
+            Value::Char(_) => "char",
             Value::Bytes(_) => "bytes",
             Value::Bool(_) => "bool",
             Value::Nil => "nil",
@@ -135,6 +137,7 @@ impl Value {
             Value::F32(v) => Some(*v as i64),
             Value::F64(v) => Some(*v as i64),
             Value::Hex(v, _) => Some(*v as i64),
+            Value::Char(c) => Some(*c as i64),
             Value::ForeignPtr(p) => Some(*p as i64),
             Value::Evidence { inner, .. } => inner.as_i64(),
             _ => None,
@@ -163,8 +166,28 @@ impl Value {
             Value::U32(v) => Some(*v as f64),
             Value::U64(v) => Some(*v as f64),
             Value::Hex(v, _) => Some(*v as f64),
+            Value::Char(c) => Some(*c as i64 as f64),
             _ => None,
         }
+    }
+
+    /// True for integer and float value variants, enabling cross-representation
+    /// numeric equality (`0xA == 10 == 10.0`).
+    pub fn is_numeric(&self) -> bool {
+        matches!(
+            self,
+            Value::I8(_)
+                | Value::I16(_)
+                | Value::I32(_)
+                | Value::I64(_)
+                | Value::U8(_)
+                | Value::U16(_)
+                | Value::U32(_)
+                | Value::U64(_)
+                | Value::F32(_)
+                | Value::F64(_)
+                | Value::Hex(_, _)
+        )
     }
 
     pub fn is_truthy(&self) -> bool {
@@ -174,6 +197,7 @@ impl Value {
             Value::I64(0) | Value::I32(0) | Value::U64(0) | Value::U32(0) => false,
             Value::Hex(0, _) => false,
             Value::String(s) => !s.is_empty(),
+            Value::Char(_) => true,
             Value::Bytes(b) => !b.is_empty(),
             Value::Array(a) => !a.is_empty(),
             Value::Map(m) => !m.is_empty(),
@@ -203,6 +227,7 @@ impl PartialEq for Value {
             (Value::F64(a), Value::F64(b)) => a == b,
             (Value::Hex(a, _), Value::Hex(b, _)) => a == b,
             (Value::String(a), Value::String(b)) => a == b,
+            (Value::Char(a), Value::Char(b)) => a == b,
             (Value::Bytes(a), Value::Bytes(b)) => a == b,
             (Value::Bool(a), Value::Bool(b)) => a == b,
             (Value::Nil, Value::Nil) => true,
@@ -210,6 +235,10 @@ impl PartialEq for Value {
             (Value::Array(a), Value::Array(b)) => a == b,
             (Value::Map(a), Value::Map(b)) => a == b,
             (Value::Option(a), Value::Option(b)) => a == b,
+            // Cross-representation numeric equality: `0xA == 10 == 10.0`.
+            (a, b) if a.is_numeric() && b.is_numeric() => {
+                a.as_f64().unwrap_or(0.0) == b.as_f64().unwrap_or(0.0)
+            }
             (Value::Regex(a), Value::Regex(b)) => a.pattern == b.pattern && a.flags == b.flags,
             (Value::ForeignPtr(a), Value::ForeignPtr(b)) => a == b,
             (Value::Closure { code: a, .. }, Value::Closure { code: b, .. }) => Arc::ptr_eq(a, b),
@@ -237,6 +266,7 @@ impl fmt::Display for Value {
             Value::F64(v) => write!(f, "{}", v),
             Value::Hex(h, w) => write!(f, "0x{:0width$X}", h, width = w / 4),
             Value::String(s) => write!(f, "{}", s),
+            Value::Char(c) => write!(f, "'{}'", c),
             Value::Bytes(b) => {
                 write!(f, "b\"")?;
                 for byte in b.iter() {
@@ -353,6 +383,7 @@ pub fn type_of(t: &Type) -> String {
         Type::Hex(_) => "hex".to_string(),
         Type::Int => "int".to_string(),
         Type::String => "string".to_string(),
+        Type::Char => "char".to_string(),
         Type::Bytes => "bytes".to_string(),
         Type::Bool => "bool".to_string(),
         Type::Nil => "nil".to_string(),

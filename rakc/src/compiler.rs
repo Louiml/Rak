@@ -8,7 +8,11 @@ use std::sync::Arc;
 pub struct Compiler {
     chunk: Chunk,
     locals: Vec<(String, usize)>,
+    /// Parallel to `locals`: whether each slot was declared immutable (`let`).
+    immutable_locals: Vec<bool>,
     scope_depth: usize,
+    /// Globals declared immutable (`let x = ...` at top level, non-`pub`).
+    immutable_globals: std::collections::HashSet<String>,
     /// Current top-level statement index (1-based) used as the source-line
     /// marker for `chunk.lines`; enables the VM debugger's line breakpoints.
     statement_line: u32,
@@ -35,6 +39,8 @@ impl Compiler {
         Compiler {
             chunk: Chunk::new(),
             locals: Vec::new(),
+            immutable_locals: Vec::new(),
+            immutable_globals: std::collections::HashSet::new(),
             scope_depth: 0,
             statement_line: 0,
             func_names: std::collections::HashSet::new(),
@@ -496,11 +502,28 @@ impl Compiler {
     fn add_local(&mut self, name: String) -> u8 {
         let slot = self.locals.len() as u8;
         self.locals.push((name, self.scope_depth));
+        self.immutable_locals.push(false);
+        slot
+    }
+
+    fn add_local_mut(&mut self, name: String, mutable: bool) -> u8 {
+        let slot = self.locals.len() as u8;
+        self.locals.push((name, self.scope_depth));
+        self.immutable_locals.push(!mutable);
         slot
     }
 
     fn resolve_local(&self, name: &str) -> Option<u8> {
         self.locals.iter().rposition(|(n, _)| n == name).map(|i| i as u8)
+    }
+
+    /// True if the named local is bound and immutable.
+    fn local_is_immutable(&self, name: &str) -> bool {
+        self.locals
+            .iter()
+            .rposition(|(n, _)| n == name)
+            .map(|i| self.immutable_locals[i])
+            .unwrap_or(false)
     }
 
     fn const_str(&mut self, s: &str) -> u16 {
@@ -509,14 +532,17 @@ impl Compiler {
 
     fn compile_stmt(&mut self, stmt: &Stmt) -> Result<(), String> {
         match stmt {
-            Stmt::Let { name, value, .. } => {
+            Stmt::Let { name, value, mutable, .. } => {
                 self.compile_expr(value)?;
                 if self.scope_depth == 0 {
                     let ci = self.const_str(name);
                     self.emit_op(Op::StoreGlobal);
                     self.emit_u16(ci);
+                    if !mutable {
+                        self.immutable_globals.insert(name.clone());
+                    }
                 } else {
-                    let slot = self.add_local(name.clone());
+                    let slot = self.add_local_mut(name.clone(), *mutable);
                     self.emit_op(Op::StoreLocal);
                     self.emit_byte(slot);
                 }
@@ -634,6 +660,9 @@ impl Compiler {
             Stmt::Tunnel { .. } => {
                 return Err("VM does not support 'tunnel' statement (use `rakc run` with the interpreter)".to_string());
             }
+            Stmt::Defer(expr) => {
+                self.compile_defer_call(expr)?;
+            }
             other => {
                 return Err(format!("VM does not support statement: {:?}", other));
             }
@@ -648,6 +677,30 @@ impl Compiler {
         self.emit_byte((t & 0xFF) as u8);
     }
 
+    /// Compile a `defer callee(args...)` statement. The callee and arguments
+    /// are evaluated at the point the `defer` is reached and registered on the
+    /// VM frame's defer stack, to be run in LIFO order when the frame returns.
+    fn compile_defer_call(&mut self, expr: &Expr) -> Result<(), String> {
+        match expr {
+            Expr::Call { callee, args, named } => {
+                if !named.is_empty() {
+                    return Err("VM does not support named arguments in defer".to_string());
+                }
+                // Evaluate callee (function value) then args, leaving the callee
+                // plus args on the stack for Op::DeferCall.
+                self.compile_expr(callee)?;
+                for a in args {
+                    self.compile_expr(a)?;
+                }
+                self.emit_op(Op::DeferCall);
+                self.emit_byte(args.len() as u8);
+                Ok(())
+            }
+            // Non-call defers aren't supported by the VM codegen.
+            other => Err(format!("VM does not support defer of non-call expression: {:?}", other)),
+        }
+    }
+
     fn begin_scope(&mut self) {
         self.scope_depth += 1;
     }
@@ -659,6 +712,7 @@ impl Compiler {
         while let Some((_, d)) = self.locals.last() {
             if *d > self.scope_depth {
                 self.locals.pop();
+                self.immutable_locals.pop();
                 self.emit_op(Op::Pop);
             } else {
                 break;
@@ -829,6 +883,21 @@ impl Compiler {
                 self.emit_op(Op::LoadConst);
                 self.emit_u16(ci);
             }
+            Expr::BinLit(b) => {
+                let ci = self.emit_const(Value::Hex(*b, 64));
+                self.emit_op(Op::LoadConst);
+                self.emit_u16(ci);
+            }
+            Expr::OctLit(o) => {
+                let ci = self.emit_const(Value::Hex(*o, 64));
+                self.emit_op(Op::LoadConst);
+                self.emit_u16(ci);
+            }
+            Expr::Char(c) => {
+                let ci = self.emit_const(Value::Char(*c));
+                self.emit_op(Op::LoadConst);
+                self.emit_u16(ci);
+            }
             Expr::Float(f) => {
                 let ci = self.emit_const(Value::F64(*f));
                 self.emit_op(Op::LoadConst);
@@ -898,6 +967,11 @@ impl Compiler {
                 });
             }
             Expr::Assign(name, value) => {
+                // Enforce Rak's mutability semantics: an immutable `let x` binding
+                // cannot be reassigned.
+                if self.local_is_immutable(name) || self.immutable_globals.contains(name) {
+                    return Err(format!("cannot assign to immutable variable `{}`", name));
+                }
                 self.compile_expr(value)?;
                 self.emit_op(Op::Dup);
                 if let Some(slot) = self.resolve_local(name) {
@@ -1140,6 +1214,7 @@ impl Compiler {
         while let Some((_, d)) = self.locals.last() {
             if *d > self.scope_depth {
                 self.locals.pop();
+                self.immutable_locals.pop();
             } else {
                 break;
             }

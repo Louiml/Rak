@@ -28,15 +28,37 @@ pub fn parse_expr_str(source: &str) -> Result<Expr> {
     p.parse_expr()
 }
 
+/// Convert an identifier or existing path expression into an `Expr::Path`, so
+/// a generic instantiation `identity<int>` collapses to a callable path.
+fn expr_to_path(e: &Expr) -> Vec<String> {
+    match e {
+        Expr::Ident(name) => vec![name.clone()],
+        Expr::Path(p) => p.clone(),
+        other => {
+            let _ = other;
+            Vec::new()
+        }
+    }
+}
+
 struct Parser<'a> {
     tokens: &'a [(Token, usize)],
     source: &'a str,
     pos: usize,
+    /// Type-parameter names currently in scope (inside `fn f<T>`, `struct S<T>`,
+    /// `enum E<T>`). An identifier matching one of these parses as
+    /// `Type::Generic` instead of `Type::Custom`.
+    generic_type_params: Vec<String>,
 }
 
 impl<'a> Parser<'a> {
     fn new(tokens: &'a [(Token, usize)], source: &'a str) -> Self {
-        Parser { tokens, source, pos: 0 }
+        Parser {
+            tokens,
+            source,
+            pos: 0,
+            generic_type_params: Vec::new(),
+        }
     }
 
     fn peek(&self) -> Option<&Token> {
@@ -402,6 +424,19 @@ impl<'a> Parser<'a> {
             }
             Some(Token::BinStruct) => self.parse_binstruct(),
             Some(Token::Tunnel) => self.parse_tunnel(),
+            Some(Token::Defer) => {
+                self.advance();
+                let e = self.parse_expr()?;
+                self.semi()?;
+                Ok(Stmt::Defer(Box::new(e)))
+            }
+            Some(Token::Test) => self.parse_test(),
+            Some(Token::Assert) => {
+                self.advance();
+                let e = self.parse_expr()?;
+                self.semi()?;
+                Ok(Stmt::Assert(Box::new(e)))
+            }
             _ => {
                 let expr = self.parse_expr()?;
                 self.semi()?;
@@ -718,6 +753,20 @@ impl<'a> Parser<'a> {
         }
     }
 
+    fn parse_test(&mut self) -> Result<Stmt> {
+        self.expect(Token::Test)?;
+        let name = match self.peek() {
+            Some(Token::String(s)) => {
+                let s = s.clone();
+                self.advance();
+                s
+            }
+            _ => "unnamed".to_string(),
+        };
+        let body = self.parse_block()?;
+        Ok(Stmt::Test { name, body })
+    }
+
     fn parse_fn(&mut self) -> Result<Stmt> {
         let is_async = self.match_token(&Token::Async);
         self.expect(Token::Fn)?;
@@ -730,13 +779,19 @@ impl<'a> Parser<'a> {
             _ => return Err(self.perr("Expected function name".to_string())),
         };
         let (params, type_params) = self.parse_params_with_generics()?;
-        let return_type = if self.match_token(&Token::Arrow) {
-            Some(self.parse_type()?)
-        } else {
-            None
+        let return_type = {
+            self.generic_type_params.extend(type_params.iter().cloned());
+            let rt = if self.match_token(&Token::Arrow) {
+                Some(self.parse_type()?)
+            } else {
+                None
+            };
+            for _ in 0..type_params.len() {
+                self.generic_type_params.pop();
+            }
+            rt
         };
         let body = self.parse_block()?;
-        let _ = type_params;
         Ok(Stmt::Let {
             name,
             pattern: None,
@@ -1205,39 +1260,49 @@ impl<'a> Parser<'a> {
                     "f32" => Type::F32,
                     "f64" => Type::F64,
                     "string" => Type::String,
+                    "char" => Type::Char,
                     "bytes" => Type::Bytes,
                     "bool" => Type::Bool,
                     "nil" => Type::Nil,
-                    "Option" => {
-                        if self.match_token(&Token::Lt) {
-                            let inner = self.parse_type()?;
-                            self.expect(Token::Gt)?;
-                            Type::Option(Box::new(inner))
+                    _ => {
+                        // In-scope generic type parameter `T` → Type::Generic.
+                        if self.generic_type_params.iter().any(|p| p == &name) {
+                            Type::Generic(name)
                         } else {
-                            Type::Custom(name)
+                            match name.as_str() {
+                                "Option" => {
+                                    if self.match_token(&Token::Lt) {
+                                        let inner = self.parse_type()?;
+                                        self.expect(Token::Gt)?;
+                                        Type::Option(Box::new(inner))
+                                    } else {
+                                        Type::Custom(name)
+                                    }
+                                }
+                                "Result" => {
+                                    if self.match_token(&Token::Lt) {
+                                        let ok = self.parse_type()?;
+                                        self.expect(Token::Comma)?;
+                                        let err = self.parse_type()?;
+                                        self.expect(Token::Gt)?;
+                                        Type::Result(Box::new(ok), Box::new(err))
+                                    } else {
+                                        Type::Custom(name)
+                                    }
+                                }
+                                "evidence" => {
+                                    if self.match_token(&Token::Lt) {
+                                        let inner = self.parse_type()?;
+                                        self.expect(Token::Gt)?;
+                                        Type::Evidence(Box::new(inner))
+                                    } else {
+                                        Type::Custom(name)
+                                    }
+                                }
+                                _ => Type::Custom(name),
+                            }
                         }
                     }
-                    "Result" => {
-                        if self.match_token(&Token::Lt) {
-                            let ok = self.parse_type()?;
-                            self.expect(Token::Comma)?;
-                            let err = self.parse_type()?;
-                            self.expect(Token::Gt)?;
-                            Type::Result(Box::new(ok), Box::new(err))
-                        } else {
-                            Type::Custom(name)
-                        }
-                    }
-                    "evidence" => {
-                        if self.match_token(&Token::Lt) {
-                            let inner = self.parse_type()?;
-                            self.expect(Token::Gt)?;
-                            Type::Evidence(Box::new(inner))
-                        } else {
-                            Type::Custom(name)
-                        }
-                    }
-                    _ => Type::Custom(name),
                 }
             }
             _ => return Err(self.perr("Expected type".to_string())),
@@ -1265,9 +1330,9 @@ impl<'a> Parser<'a> {
             let body_expr = self.parse_expr()?;
             let body = vec![Stmt::Expr(Box::new(body_expr))];
             arms.push((pattern, guard, body));
-            if !self.match_token(&Token::Comma) {
-                break;
-            }
+            // Arms may be comma-separated OR newline-separated (no comma). Break
+            // only when we reach the closing brace.
+            self.match_token(&Token::Comma);
         }
         self.expect(Token::RBrace)?;
         Ok(Expr::Match {
@@ -1323,6 +1388,23 @@ impl<'a> Parser<'a> {
                 self.advance();
                 if n == "_" {
                     return Ok(Pattern::Wild);
+                }
+                // Enum variant path: `EnumName::Variant` or `EnumName::Variant(...)`.
+                if self.check(&Token::ColonColon) {
+                    self.advance();
+                    let variant = self.expect_ident()?;
+                    let mut inner = vec![];
+                    if self.check(&Token::LParen) {
+                        self.advance();
+                        while !self.check(&Token::RParen) && self.peek().is_some() {
+                            inner.push(self.parse_pattern()?);
+                            if !self.match_token(&Token::Comma) {
+                                break;
+                            }
+                        }
+                        self.expect(Token::RParen)?;
+                    }
+                    return Ok(Pattern::EnumVariant(n, variant, inner));
                 }
                 if self.check(&Token::LParen) {
                     self.advance();
@@ -1831,6 +1913,46 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// True when the tokens starting at offset `rel` from `pos` look like a
+    /// generic instantiation used as a call: `Ident < Type , ... > (` where the
+    /// `>` is eventually followed by `(`, `?.`, `.`, or `?[`. Used to
+    /// disambiguate `identity<int>(...)` from a comparison `a < b`.
+    fn is_generic_call_ahead(&self, _rel: usize) -> bool {
+        let mut depth = 0isize;
+        let mut i = self.pos;
+        let mut saw_gt = false;
+        while i < self.tokens.len() {
+            match &self.tokens[i].0 {
+                Token::Lt | Token::Shl => depth += 1,
+                Token::Gt | Token::Shr => {
+                    depth -= 1;
+                    if depth < 0 {
+                        return false;
+                    }
+                    if depth == 0 {
+                        saw_gt = true;
+                        i += 1;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        if !saw_gt {
+            return false;
+        }
+        // After the matching `>`, a `(`, `?.`, `?[`, or `.` means it's a call
+        // or field access on a generic instance.
+        matches!(
+            self.tokens.get(i).map(|(t, _)| t),
+            Some(Token::LParen)
+                | Some(Token::QuestionDot)
+                | Some(Token::QuestionLBracket)
+                | Some(Token::Dot)
+        )
+    }
+
     fn parse_postfix(&mut self) -> Result<Expr> {
         let mut expr = self.parse_primary()?;
         loop {
@@ -1845,6 +1967,28 @@ impl<'a> Parser<'a> {
                     expr = Expr::MacroInvoke { name, args };
                     continue;
                 }
+            }
+            // Generic instantiation: `Ident<int>(...)` / `Ident<T>()` — only
+            // when the `< ... >` is followed by a call paren (disambiguated
+            // from a comparison by scanning ahead).
+            if self.check(&Token::Lt) && self.is_generic_call_ahead(0) {
+                self.advance(); // consume `<`
+                let mut type_args = Vec::new();
+                while !self.check(&Token::Gt) && self.peek().is_some() {
+                    type_args.push(self.parse_type()?);
+                    if !self.match_token(&Token::Comma) {
+                        break;
+                    }
+                }
+                self.expect(Token::Gt)?;
+                // The language is dynamically typed: explicit type arguments
+                // are validated (parsed) and discarded for the call. Rebuild the
+                // callee expression from its path so the call resolves normally.
+                let path = expr_to_path(&expr);
+                expr = match path.as_slice() {
+                    [single] => Expr::Ident(single.clone()),
+                    _ => Expr::Path(path),
+                };
             }
             if self.match_token(&Token::LParen) {
                 let (args, named) = self.parse_args()?;
@@ -1985,6 +2129,14 @@ impl<'a> Parser<'a> {
                 self.advance();
                 Ok(Expr::Hex(h))
             }
+            Some(Token::Binary(b)) => {
+                self.advance();
+                Ok(Expr::BinLit(b))
+            }
+            Some(Token::Octal(o)) => {
+                self.advance();
+                Ok(Expr::OctLit(o))
+            }
             Some(Token::Int(i)) => {
                 self.advance();
                 Ok(Expr::Int(i))
@@ -2030,7 +2182,7 @@ impl<'a> Parser<'a> {
             }
             Some(Token::Char(c)) => {
                 self.advance();
-                Ok(Expr::Int(c as i64))
+                Ok(Expr::Char(c))
             }
             Some(Token::Regex((pattern, flags))) => {
                 let pattern = pattern.clone();
@@ -2503,7 +2655,7 @@ mod tests {
         let tokens = tokenize(source).unwrap();
         let module = parse(&tokens, source).unwrap();
         match &module.items[0] {
-            Stmt::Let { value, .. } => assert!(matches!(&**value, Expr::Int(65))),
+            Stmt::Let { value, .. } => assert!(matches!(&**value, Expr::Char('A'))),
             _ => panic!(),
         }
     }

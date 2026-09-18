@@ -3,7 +3,7 @@ use std::fs;
 use std::io::{self, Read, Write};
 use std::path::PathBuf;
 
-const VERSION: &str = "0.7.0";
+const VERSION: &str = "0.7.1";
 const PAYLOAD_MAGIC: u64 = 0x52414B5F50434B; // "RAK_PCK" as u64
 
 fn print_usage() {
@@ -25,9 +25,123 @@ fn print_usage() {
     eprintln!("  check <file>   Lex + parse, print diagnostics");
     eprintln!("  lex <file>     Tokenize and print tokens");
     eprintln!("  parse <file>   Parse and print AST");
+    eprintln!("  test [file]    Run Rak tests (--filter NAME, --verbose)");
     eprintln!("  version        Print version");
     eprintln!();
     eprintln!("Use - for file to read from stdin");
+}
+
+/// Run the `rakc test` command. Discovers `.rak` test files (an explicitly
+/// listed file, or `test.rak` / `tests/*.rak`), parses and runs them in the
+/// interpreter, and reports each `test "name" { ... }` block. Supports
+/// `--filter NAME` (substring) and `--verbose`.
+fn cmd_test(args: &[String]) {
+    let mut file: Option<String> = None;
+    let mut filter: Option<String> = None;
+    let mut verbose = false;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--filter" | "-f" => {
+                i += 1;
+                filter = args.get(i).cloned();
+            }
+            "--verbose" | "-v" => verbose = true,
+            a if a.starts_with('-') => {
+                eprintln!("Unknown test flag: {}", a);
+                std::process::exit(1);
+            }
+            other => {
+                if file.is_none() {
+                    file = Some(other.to_string());
+                }
+            }
+        }
+        i += 1;
+    }
+
+    // Discover test files.
+    let mut files: Vec<String> = Vec::new();
+    if let Some(f) = &file {
+        files.push(f.clone());
+    } else {
+        if let Ok(entries) = fs::read_dir("tests") {
+            let mut raks: Vec<String> = entries
+                .filter_map(|e| e.ok())
+                .filter(|e| {
+                    e.path()
+                        .extension()
+                        .map(|x| x == "rak")
+                        .unwrap_or(false)
+                })
+                .map(|e| e.path().to_string_lossy().to_string())
+                .collect();
+            raks.sort();
+            for r in raks {
+                files.push(r);
+            }
+        }
+        if files.is_empty() {
+            files.push("test.rak".to_string());
+        }
+    }
+
+    println!("Running Rak tests...");
+    println!();
+
+    let mut total_passed = 0usize;
+    let mut total_failed = 0usize;
+
+    for f in &files {
+        let source = match fs::read_to_string(f) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("Error reading {}: {}", f, e);
+                total_failed += 1;
+                continue;
+            }
+        };
+        let base_dir = std::path::Path::new(f)
+            .parent()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|| ".".to_string());
+        let mut interp = rakc::interpreter::Interpreter::with_base_dir(base_dir);
+        if let Err(e) = interp.run_source(&source) {
+            eprintln!("error in {}: {}", f, e);
+            total_failed += 1;
+            continue;
+        }
+        let results = interp.run_collected_tests();
+        let file_stem = std::path::Path::new(f)
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| f.clone());
+        for r in results {
+            if let Some(filt) = &filter {
+                if !r.name.contains(filt.as_str()) {
+                    continue;
+                }
+            }
+            if r.passed {
+                total_passed += 1;
+                println!("PASS  {}/{}", file_stem, r.name);
+            } else {
+                total_failed += 1;
+                println!("FAIL  {}/{}", file_stem, r.name);
+                if verbose {
+                    eprintln!("      {}", r.message.as_deref().unwrap_or("(failed)"));
+                }
+            }
+        }
+    }
+
+    println!();
+    println!("{} passed", total_passed);
+    println!("{} failed", total_failed);
+
+    if total_failed > 0 {
+        std::process::exit(1);
+    }
 }
 
 fn read_source(arg: &str) -> String {
@@ -306,6 +420,10 @@ fn main() {
             rakc::repl::run();
             return;
         }
+        "test" => {
+            cmd_test(&args[2..]);
+            return;
+        }
         #[cfg(feature = "lsp")]
         "lsp" => {
             let rt = tokio::runtime::Runtime::new().unwrap();
@@ -372,7 +490,18 @@ fn main() {
         "check" => {
             match rakc::lexer::tokenize(&source) {
                 Ok(tokens) => match rakc::parser::parse(&tokens, &source) {
-                    Ok(_) => println!("{}: no errors", file),
+                    Ok(ast) => {
+                        let mut tc = rakc::typecheck::TypeChecker::new(&source, file);
+                        let diagnostics = tc.check_module(&ast);
+                        if diagnostics.is_empty() {
+                            println!("{}: no errors", file);
+                        } else {
+                            for d in &diagnostics {
+                                eprintln!("{}", d.render());
+                            }
+                            std::process::exit(1);
+                        }
+                    }
                     Err(e) => {
                         eprintln!("{}", e);
                         std::process::exit(1);

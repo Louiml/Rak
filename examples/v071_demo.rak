@@ -1,0 +1,65 @@
+// Rak v0.7.1 — representative new-language-features example.
+// Covers: char, base literals, mutability, generic functions, enums,
+// enum-variant pattern matching, defer, and the test framework.
+
+fn identity<T>(value: T) -> T {
+    return value
+}
+
+enum Event {
+    Connect(string),
+    Disconnect(i32),
+    Data(bytes)
+}
+
+fn describe(event) -> string {
+    match event {
+        Event::Connect(host) => { return "connected to " + host }
+        Event::Disconnect(code) => { return "disconnected (code " + code + ")" }
+        Event::Data(_) => { return "data event" }
+        _ => { return "unknown" }
+    }
+}
+
+fn log_msg(msg: string) {
+    dump msg
+}
+
+fn checkout() {
+    let mut balance = 100
+    defer log_msg("cleaning up checkout")
+    balance = 90
+    dump balance
+}
+
+test "char literals and base numbers" {
+    let c: char = 'א'
+    assert_eq(c, 'א')
+    assert_eq(0b1010, 10)
+    assert_eq(0o755, 493)
+    assert_eq(0xFF, 255)
+}
+
+test "generic identity" {
+    assert_eq(identity<int>(42), 42)
+    assert_eq(identity<string>("hi"), "hi")
+}
+
+test "mutability enforcement" {
+    let mut counted = 0
+    counted = counted + 1
+    assert_eq(counted, 1)
+}
+
+test "enum variant matching" {
+    let e = Event::Connect("host")
+    assert_eq(describe(e), "connected to host")
+}
+
+test "defer runs on return" {
+    fn tagged(value: int) -> int {
+        defer log_msg("deferred in fn")
+        return value * 2
+    }
+    assert_eq(tagged(21), 42)
+}

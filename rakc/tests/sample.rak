@@ -1,0 +1,29 @@
+fn add(a: int, b: int) -> int {
+    return a + b
+}
+
+test "addition works" {
+    assert add(2, 3) == 5
+    assert_eq(add(2, 3), 5)
+    assert_ne(add(2, 3), 6)
+    assert_true(add(1, 1) == 2)
+    assert_false(add(1, 1) == 3)
+}
+
+test "identity generic" {
+    fn identity<T>(v: T) -> T { return v }
+    assert_eq(identity<int>(42), 42)
+    assert_eq(identity<string>("hi"), "hi")
+}
+
+test "mutability works" {
+    let mut x = 10
+    x = 20
+    assert_eq(x, 20)
+}
+
+test "expected failure" {
+    expect_error(fn() {
+        raise "boom"
+    })
+}

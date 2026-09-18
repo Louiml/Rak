@@ -21,6 +21,13 @@ clear message.
 | Binary pattern matching | yes | no (graceful error) |
 | Trait protocols | yes | no (graceful error) |
 | Method-call dispatch | yes | no (no dispatch layer) |
+| User enum patterns (`Event::Variant(..)`) | yes | no (graceful error) |
+| Generic functions (`fn f<T>`) | yes | yes |
+| `defer` (LIFO cleanup) | yes | yes (`Op::DeferCall`) |
+| `char` type | yes | yes |
+| Base literals (`0b`/`0o`) | yes | yes |
+| Cross-numeric equality (`0xA == 10`) | yes | yes |
+| Mutability (`let mut`) | yes | yes (compile-time check) |
 | FFI | yes | yes (natives + `Op::FFICall`/`Op::FFIClose`) |
 | Memory-mapped files | yes (slice/range/pattern) | yes (natives + single-byte index) |
 | Async (`async fn`/`await`/I/O futures) | yes (deferred bodies + I/O) | yes (`Op::Await` + I/O natives; `async fn` runs sync) |
@@ -63,3 +70,6 @@ statement-to-bytecode line mapping: breakpoints (`break <line>`), stepping
   opcodes.
 - `|>` is a parse-time desugar, so the VM evaluates it with no new opcode.
 - `evidence<T> from expr` lowers to a call to the `__evidence_from` native.
+- `defer f(args)` compiles to `Op::DeferCall` with the pre-evaluated callee and
+  args. Each frame holds a defer stack; `Op::Return` runs it LIFO before
+  populating the caller's result, so the return value survives deferred calls.

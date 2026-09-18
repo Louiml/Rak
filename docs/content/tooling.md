@@ -21,6 +21,49 @@ rak> :help
 `:bytecode <expr>` prints the compiled chunk, `:clear` resets state, `:quit`
 exits.
 
+## Test runner
+
+`rakc test` discovers and runs `test "name" { ... }` blocks. Pass a file, or run
+it bare to scan `tests/*.rak` (falling back to `test.rak`).
+
+```bash
+rakc test                    # discover tests/*.rak
+rakc test tests/math.rak     # one file
+rakc test --filter addition  # only names containing "addition"
+rakc test --verbose          # show failure messages
+```
+
+```text
+Running Rak tests...
+
+PASS  sample/addition works
+PASS  sample/generic identity
+FAIL  parser/invalid_literal
+
+3 passed
+1 failed
+```
+
+A failing test exits non-zero. Assertions inside a test block:
+
+```rak
+test "addition works" {
+    assert add(2, 3) == 5
+    assert_eq(add(2, 3), 5)
+    assert_ne(add(2, 3), 6)
+    assert_true(add(1, 1) == 2)
+    assert_false(add(1, 1) == 3)
+}
+
+test "expected failure" {
+    expect_error(fn() { raise "boom" })
+}
+```
+
+`assert <expr>` fails the test when the expression is falsy. `assert_eq`,
+`assert_ne`, `assert_true`, `assert_false`, and `panic("message")` are also
+available as calls outside test blocks.
+
 ## Language server
 
 `rakc lsp` is a stdio language server. It reports parser and lexer diagnostics,
@@ -33,14 +76,14 @@ Build it with `cargo build --release --features lsp`. For Neovim, point
 ## VS Code extension
 
 The `vscode-rak/` directory has a VS Code extension with a TextMate grammar
-(`source.rak`) covering the full v0.7 vocabulary: keywords (`let`, `fn`,
+(`source.rak`) covering the full v0.7 vocabulary (keywords `let`, `fn`,
 `match`, `try`/`catch`, `async`/`await`, `import`/`from`, `macro`, `const`,
-`extern`, `binstruct`, `evidence`, `tunnel`), types (i8..u64, f32/f64,
-hex8..hex64, Option/Result), regex literals, `f"..."` interpolation, `b"..."`
-byte strings, char literals, macro placeholders (`$name`) and invocations
-(`name!`), hex numbers with type suffixes, and the entire builtin set
-(errors, async, streams, CLI, compression, crypto, VPN, forensics). It pairs
-with `rakc lsp` for diagnostics.
+`extern`, `binstruct`, `evidence`, `tunnel`, `defer`, `test`, `assert`; types
+`i8`..`u64`, `f32`/`f64`, `hex8`..`hex64`, `char`, `Option`/`Result`; regex
+literals, `f"..."` interpolation, `b"..."` byte strings, char literals
+including `\u{...}`, macro placeholders (`$name`) and invocations (`name!`),
+hex/binary/octal numbers with type suffixes, and the entire builtin set).
+It pairs with `rakc lsp` for diagnostics.
 
 ## The Rak IDE
 
