@@ -152,37 +152,6 @@ dump hits</code></pre>
                 <p class="section-sub">The interpreter, VM, systems stdlib, standard library, and IDE all run today. The next slice of the spec is macros-rules repetition, live capture, and full libffi.</p>
             </div>
 
-            <div class="grid-2">
-                <div class="card reveal">
-                    <div class="card-head">
-                        <h3><span class="card-dot green" aria-hidden="true"></span> Shipped</h3>
-                    </div>
-                    <ul class="status-list">
-                        <li><span class="icon">[x]</span><span><span class="label">Two backends</span><br>Tree-walker interpreter + bytecode VM</span></li>
-                        <li><span class="icon">[x]</span><span><span class="label">Pipelines, regex, patterns, traits</span><br>The v0.4 language features</span></li>
-                        <li><span class="icon">[x]</span><span><span class="label">FFI &amp; memory-mapped files</span><br>extern "C", ffi_*, mmap_* zero-copy I/O</span></li>
-                        <li><span class="icon">[x]</span><span><span class="label">Raw sockets &amp; async I/O</span><br>Packet forging, futures, await</span></li>
-                        <li><span class="icon">[x]</span><span><span class="label">DNS / TLS / PCAP parsers</span><br>Wire-format inspection built in</span></li>
-                        <li><span class="icon">[x]</span><span><span class="label">Macros, modules, const</span><br>AST expansion, imports &amp; exports</span></li>
-                    </ul>
-                </div>
-
-                <div class="card reveal">
-                    <div class="card-head">
-                        <h3><span class="card-dot amber" aria-hidden="true"></span> Specified, next</h3>
-                    </div>
-                    <ul class="status-list">
-                        <li class="wip"><span class="icon">[*]</span><span><span class="label">Full macro_rules!</span><br>Repeatition, hygiene, true token capture</span></li>
-                        <li class="wip"><span class="icon">[*]</span><span><span class="label">libffi floats</span><br>Float-by-value arguments to C</span></li>
-                        <li class="wip"><span class="icon">[*]</span><span><span class="label">await-for / select</span><br>Concurrent fan-out for scans</span></li>
-                        <li class="wip"><span class="icon">[*]</span><span><span class="label">Live capture</span><br>pcap_listen, live TLS inspect</span></li>
-                        <li class="wip"><span class="icon">[*]</span><span><span class="label">Windows raw sockets</span><br>Npcap / SIO_RCVALL path</span></li>
-                    </ul>
-                    <div class="status-pct">v0.4 features shipped</div>
-                    <div class="progress"><span data-width="100"></span></div>
-                </div>
-            </div>
-
             <div class="card notice reveal">
                 <h3>Start in 30 seconds</h3>
                 <p>Grab a release from GitHub, or build from source. Then open the IDE and the tutorial walks you through everything new.</p>

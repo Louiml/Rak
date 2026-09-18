@@ -43,6 +43,15 @@ const BUILTINS: &[&str] = &[
     "x25519_keypair", "x25519_shared", "chacha20_encrypt", "chacha20_decrypt",
     "tunnel_preshared_key", "kdf_next", "tunnel_frame", "tunnel_unframe", "tunnel_nonce",
     "udp_bind", "udp_send", "udp_recv", "udp_local_addr",
+    "error", "err_message", "err_kind", "err_line", "err_col", "err_file",
+    "err_cause", "err_context", "err_with_context",
+    "await_all", "select", "timeout", "async_sleep", "async_yield",
+    "task_group",
+    "stream_from_array", "stream_map", "filter", "take", "stream_next", "collect",
+    "read_lines", "tcp_stream",
+    "argv", "stdin_read_line", "stdin_read_all", "eprint", "parse_args",
+    "stream_csv", "stream_jsonl", "parse_csv_line",
+    "gzip", "gunzip", "deflate", "inflate", "zip_archive", "zip_list", "zip_extract",
 ];
 
 #[derive(Debug)]

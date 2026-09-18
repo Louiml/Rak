@@ -189,6 +189,21 @@ pub struct FutureHandle {
 pub struct Vm {
     pub globals: HashMap<String, Value>,
     output: Vec<String>,
+    // --- Debugger state ---
+    debug_enabled: bool,
+    debug_breakpoints: std::collections::HashSet<u32>,
+    debug_step: bool,
+    debug_handler: Option<Box<dyn FnMut(u32, Vec<(String, Value)>, std::collections::HashMap<String, Value>, Vec<String>) -> VmDebugAction + Send>>,
+    /// Current call stack of frame names (pushed on function entry, popped on return).
+    debug_callstack: Vec<String>,
+}
+
+/// Decision from the VM debugger handler.
+#[derive(PartialEq, Clone, Copy)]
+pub enum VmDebugAction {
+    Continue,
+    Step,
+    Quit,
 }
 
 impl Vm {
@@ -196,9 +211,45 @@ impl Vm {
         let mut vm = Vm {
             globals: HashMap::new(),
             output: Vec::new(),
+            debug_enabled: false,
+            debug_breakpoints: std::collections::HashSet::new(),
+            debug_step: false,
+            debug_handler: None,
+            debug_callstack: Vec::new(),
         };
         vm.register_natives();
         vm
+    }
+
+    /// Enable the debugger, installing a handler that is invoked at source-line
+    /// boundaries. `breakpoints` are 1-based source lines. The handler receives
+    /// the current line, a snapshot of locals `(name, value)`, a snapshot of
+    /// globals, and the current call stack, and returns a `VmDebugAction`.
+    pub fn debugger<H>(&mut self, breakpoints: std::collections::HashSet<u32>, handler: H)
+    where
+        H: FnMut(u32, Vec<(String, Value)>, std::collections::HashMap<String, Value>, Vec<String>) -> VmDebugAction + Send + 'static,
+    {
+        self.debug_enabled = true;
+        self.debug_breakpoints = breakpoints;
+        self.debug_handler = Some(Box::new(handler));
+    }
+
+    /// Invoked at a source-line boundary while debugging. Snapshots locals and
+    /// globals, calls the installed handler, and returns its action. The
+    /// handler owns breakpoint/stepping policy (it is called on every line).
+    fn debug_pause(&mut self, frame: &Frame, line: u32) -> VmDebugAction {
+        let locals: Vec<(String, Value)> = frame
+            .locals
+            .iter()
+            .enumerate()
+            .map(|(i, v)| (format!("local[{}]", i), v.clone()))
+            .collect();
+        let globals: std::collections::HashMap<String, Value> = self.globals.clone();
+        let callstack = self.debug_callstack.clone();
+        match self.debug_handler.as_mut() {
+            Some(h) => h(line, locals, globals, callstack),
+            None => VmDebugAction::Continue,
+        }
     }
 
     pub fn output(&self) -> &[String] {
@@ -344,6 +395,87 @@ impl Vm {
         self.insert_native("tunnel_nonce", |args| {
             let seq = args.first().and_then(|v| v.as_u64()).unwrap_or(0);
             Ok(Value::Bytes(Arc::from(rak_stdlib::tunnel::nonce_for(seq).as_slice())))
+        });
+        // --- Structured errors ---
+        self.insert_native("error", |args| {
+            let kind = native_str(args.first());
+            let message = native_str(args.get(1));
+            let k = match kind.trim().to_lowercase().as_str() {
+                "io" => crate::ErrorKind::Io,
+                "network" => crate::ErrorKind::Network,
+                "parse" => crate::ErrorKind::Parse,
+                "compile" => crate::ErrorKind::Compile,
+                "type" => crate::ErrorKind::Type,
+                "package" => crate::ErrorKind::Package,
+                "permission" => crate::ErrorKind::Permission,
+                "user" => crate::ErrorKind::User,
+                "timeout" => crate::ErrorKind::Timeout,
+                "cancel" => crate::ErrorKind::Cancel,
+                _ => crate::ErrorKind::Runtime,
+            };
+            Ok(Value::Error(Arc::new(crate::ErrorInfo::new(message.clone()).with_kind(k))))
+        });
+        self.insert_native("err_message", |args| {
+            match args.first() {
+                Some(Value::Error(e)) => Ok(Value::String(Arc::from(e.message.as_str()))),
+                _ => Err("err_message: expected an error".to_string()),
+            }
+        });
+        self.insert_native("err_kind", |args| {
+            match args.first() {
+                Some(Value::Error(e)) => Ok(Value::String(Arc::from(e.kind.as_str()))),
+                _ => Err("err_kind: expected an error".to_string()),
+            }
+        });
+        self.insert_native("err_line", |args| {
+            match args.first() {
+                Some(Value::Error(e)) => Ok(Value::I64(e.line.unwrap_or(0) as i64)),
+                _ => Err("err_line: expected an error".to_string()),
+            }
+        });
+        self.insert_native("err_col", |args| {
+            match args.first() {
+                Some(Value::Error(e)) => Ok(Value::I64(e.col.unwrap_or(0) as i64)),
+                _ => Err("err_col: expected an error".to_string()),
+            }
+        });
+        self.insert_native("err_file", |args| {
+            match args.first() {
+                Some(Value::Error(e)) => Ok(Value::String(Arc::from(e.file.clone().unwrap_or_default().as_str()))),
+                _ => Err("err_file: expected an error".to_string()),
+            }
+        });
+        self.insert_native("err_cause", |args| {
+            match args.first() {
+                Some(Value::Error(e)) => match &e.cause {
+                    Some(c) => Ok(Value::String(Arc::from(c.clone().as_str()))),
+                    None => Ok(Value::Nil),
+                },
+                _ => Err("err_cause: expected an error".to_string()),
+            }
+        });
+        self.insert_native("err_context", |args| {
+            match args.first() {
+                Some(Value::Error(e)) => {
+                    let m: std::collections::HashMap<String, Value> = e.context.iter()
+                        .map(|(k, v)| (k.clone(), Value::String(Arc::from(v.clone().as_str()))))
+                        .collect();
+                    Ok(Value::Map(Arc::new(m)))
+                }
+                _ => Err("err_context: expected an error".to_string()),
+            }
+        });
+        self.insert_native("err_with_context", |args| {
+            match args.first() {
+                Some(Value::Error(e)) => {
+                    let k = native_str(args.get(1));
+                    let v = native_str(args.get(2));
+                    let mut new = e.as_ref().clone();
+                    new.context.push((k, v));
+                    Ok(Value::Error(Arc::new(new)))
+                }
+                _ => Err("err_with_context: expected an error".to_string()),
+            }
         });
         self.insert_native("hex_encode", |args| {
             let data = native_bytes(args.first());
@@ -500,6 +632,21 @@ impl Vm {
             let timeout_ms = args.get(2).and_then(|v| v.as_u64()).unwrap_or(1000) as u64;
             let jh = crate::async_rt::runtime().spawn_blocking(move || {
                 Value::Bool(rak_stdlib::net::tcp_scan(&host, port, timeout_ms))
+            });
+            Ok(Value::Future(Arc::new(FutureHandle { state: Mutex::new(VmFutureState::Pending(jh)) })))
+        });
+        self.insert_native("async_sleep", |args| {
+            let ms = args.first().and_then(|v| v.as_u64()).unwrap_or(0);
+            let jh = crate::async_rt::runtime().spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+                Value::Nil
+            });
+            Ok(Value::Future(Arc::new(FutureHandle { state: Mutex::new(VmFutureState::Pending(jh)) })))
+        });
+        self.insert_native("async_yield", |args| {
+            let jh = crate::async_rt::runtime().spawn(async move {
+                tokio::task::yield_now().await;
+                Value::Nil
             });
             Ok(Value::Future(Arc::new(FutureHandle { state: Mutex::new(VmFutureState::Pending(jh)) })))
         });
@@ -960,6 +1107,15 @@ impl Vm {
         while frame.ip < frame.code.code.len() {
             let op = Op::from_u8(frame.code.code[frame.ip]).ok_or_else(|| format!("bad opcode at {}", frame.ip))?;
             frame.ip += 1;
+            // Debugger: pause at source-line boundaries (breakpoints/step/continue).
+            if self.debug_enabled && !matches!(op, Op::LoopEnd | Op::LoopBegin) {
+                let cur_line = frame.code.lines.get(frame.ip.saturating_sub(1)).copied().unwrap_or(0);
+                let action = self.debug_pause(frame, cur_line);
+                match action {
+                    VmDebugAction::Quit => return Ok(()),
+                    VmDebugAction::Continue | VmDebugAction::Step => {}
+                }
+            }
             match op {
                 Op::Nop => {}
                 Op::LoadConst => {
@@ -1086,12 +1242,18 @@ impl Vm {
                             let result = f(&args).map_err(|e| format!("{}: {}", name, e))?;
                             frame.push(result);
                         }
-                        Value::Closure { code, nparams, .. } => {
+                        Value::Closure { code, nparams, name } => {
+                            if self.debug_enabled {
+                                self.debug_callstack.push(name.to_string());
+                            }
                             let mut sub = Frame { code: &code, ip: 0, stack: Vec::new(), locals: Vec::with_capacity(nparams) };
                             for i in 0..nparams {
                                 sub.locals.push(args.get(i).cloned().unwrap_or(Value::Nil));
                             }
                             self.exec_frame(&mut sub)?;
+                            if self.debug_enabled {
+                                self.debug_callstack.pop();
+                            }
                             frame.push(sub.stack.pop().unwrap_or(Value::Nil));
                         }
                         _ => return Err("cannot call non-function".to_string()),

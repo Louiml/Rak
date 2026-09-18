@@ -60,6 +60,8 @@ pub enum Value {
     Mmap(Arc<rak_stdlib::mmap::MmapHandle>),
     MmapSlice(Arc<rak_stdlib::mmap::MmapHandle>, usize, usize),
     Pcap(Arc<std::sync::Mutex<rak_stdlib::pcap::PcapHandle>>),
+    /// A structured runtime error value (mirrors the interpreter's `Error`).
+    Error(Arc<crate::ErrorInfo>),
     /// A provenance-tagged value (`evidence<T>`).
     Evidence {
         inner: Box<Value>,
@@ -115,6 +117,7 @@ impl Value {
             Value::Mmap(_) => "mmap",
             Value::MmapSlice(_, _, _) => "mmap-slice",
             Value::Pcap(_) => "pcap",
+            Value::Error(_) => "error",
             Value::Evidence { .. } => "evidence",
         }
     }
@@ -283,6 +286,7 @@ impl fmt::Display for Value {
             Value::Mmap(_) => write!(f, "<mmap>"),
             Value::MmapSlice(_, _, n) => write!(f, "<mmap-slice {}B>", n),
             Value::Pcap(_) => write!(f, "<pcap>"),
+            Value::Error(err) => write!(f, "{}", err.message),
             Value::Evidence { inner, .. } => write!(f, "{}", inner),
         }
     }

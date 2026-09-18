@@ -17,6 +17,7 @@ pub mod secrets;
 pub mod http_server;
 pub mod websocket;
 pub mod tunnel;
+pub mod stream_io;
 
 pub use net::*;
 pub use crypto::*;

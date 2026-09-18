@@ -4,6 +4,7 @@
 
 use anyhow::{anyhow, Context, Result};
 use std::fs;
+#[cfg(not(target_os = "windows"))]
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -56,7 +57,11 @@ pub fn run(cfg: &Config, _yes: bool) -> Result<i32> {
 
     manifest.save(cfg.scope)?;
     status(&format!("install complete. {} actions recorded.", manifest.actions.len()));
-    println!("\nNext: open a new shell and run `rakc --version`.");
+    if cfg.components.contains(&Component::Rakc) {
+        println!("\nNext: open a new shell and run `rakc --version`.");
+    } else if cfg.components.contains(&Component::Rakpkg) {
+        println!("\nNext: open a new shell and run `rakpkg --version`.");
+    }
     if cfg.scope == Scope::System {
         println!("(system install: you may need to log out/in for PATH changes to take effect)");
     }
@@ -216,41 +221,26 @@ fn extract_ide_from_bundle(bundle: &Path, dst: &Path) -> Result<()> {
     }
 }
 
-/// Add the bin dir to PATH (user or system) and record it.
+/// Add the bin dir to PATH (user or system) and record it. The edit is
+/// append-only: the user's existing PATH entries are always preserved, and
+/// only the registry hive matching the scope is touched (HKCU for user,
+/// HKLM for system). `setx` is never used (it truncates PATH at 1024 chars
+/// and `setx /M` writes the *system* PATH even for user installs).
 fn add_to_path(cfg: &Config, manifest: &mut Manifest) -> Result<()> {
     let bin = cfg.bin_dir.to_string_lossy().to_string();
     #[cfg(target_os = "windows")]
     {
-        // Minimal Win reg edit via the `reg`/`setx` commands (no extra crate).
-        let (hive, subkey) = match cfg.scope {
-            Scope::User => ("HKCU", "Environment"),
-            Scope::System => ("HKLM", r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment"),
+        let (key, hive) = match cfg.scope {
+            Scope::User => (platform::win::USER_ENV_KEY, "HKCU"),
+            Scope::System => (platform::win::SYSTEM_ENV_KEY, "HKLM"),
         };
-        status(&format!("adding {} to PATH ({})", bin, hive));
-        // Read current PATH
-        let read = std::process::Command::new("reg")
-            .args(["query", &format!("{}\\{}", hive, subkey), "/v", "PATH"])
-            .output();
-        let current = match read {
-            Ok(o) => {
-                let s = String::from_utf8_lossy(&o.stdout).to_string();
-                s.lines()
-                    .find_map(|l| l.split("    PATH    ").nth(1).map(|s| s.trim().to_string()))
-                    .unwrap_or_default()
+        status(&format!("adding {} to PATH ({}, append-only)", bin, hive));
+        if platform::win::path_add(key, &bin)? {
+            match cfg.scope {
+                Scope::User => manifest.record(Action::EnvUser { key: "PATH".to_string(), value: bin }),
+                Scope::System => manifest.record(Action::EnvSystem { key: "PATH".to_string(), value: bin }),
             }
-            Err(_) => String::new(),
-        };
-        if !current.split(';').any(|p| p == bin) {
-            let new = if current.is_empty() { bin.clone() } else { format!("{};{}", current, bin) };
-            let _ = std::process::Command::new("setx")
-                .arg("/M")
-                .arg(&new)
-                .status();
-            // setx /M writes system PATH; for user PATH we use reg add.
-            let _ = std::process::Command::new("reg")
-                .args(["add", &format!("{}\\{}", hive, subkey), "/v", "PATH", "/t", "REG_EXPAND_SZ", "/f", "/d", &new])
-                .status();
-            manifest.record(Action::EnvUser { key: "PATH".to_string(), value: bin.clone() });
+            platform::win::broadcast_env_change();
         }
         Ok(())
     }
@@ -289,12 +279,19 @@ fn set_rak_path(cfg: &Config, manifest: &mut Manifest) -> Result<()> {
     fs::create_dir_all(&cfg.packages_dir)?;
     #[cfg(target_os = "windows")]
     {
-        let (hive, subkey) = ("HKCU", "Environment");
-        status(&format!("setting RAK_PATH={}", pkgs));
-        let _ = std::process::Command::new("reg")
-            .args(["add", &format!("{}\\{}", hive, subkey), "/v", "RAK_PATH", "/t", "REG_SZ", "/f", "/d", &pkgs])
-            .status();
-        manifest.record(Action::EnvUser { key: "RAK_PATH".to_string(), value: pkgs });
+        match cfg.scope {
+            Scope::User => {
+                status(&format!("setting RAK_PATH={}", pkgs));
+                platform::win::set_value(platform::win::USER_ENV_KEY, "RAK_PATH", "REG_SZ", &pkgs)?;
+                manifest.record(Action::EnvUser { key: "RAK_PATH".to_string(), value: pkgs });
+            }
+            Scope::System => {
+                status(&format!("setting RAK_PATH={} (system)", pkgs));
+                platform::win::set_value(platform::win::SYSTEM_ENV_KEY, "RAK_PATH", "REG_SZ", &pkgs)?;
+                manifest.record(Action::EnvSystem { key: "RAK_PATH".to_string(), value: pkgs });
+            }
+        }
+        platform::win::broadcast_env_change();
         Ok(())
     }
     #[cfg(not(target_os = "windows"))]

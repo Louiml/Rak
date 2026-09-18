@@ -3,7 +3,7 @@ use std::fs;
 use std::io::{self, Read, Write};
 use std::path::PathBuf;
 
-const VERSION: &str = "0.6.1";
+const VERSION: &str = "0.7.0";
 const PAYLOAD_MAGIC: u64 = 0x52414B5F50434B; // "RAK_PCK" as u64
 
 fn print_usage() {
@@ -16,6 +16,7 @@ fn print_usage() {
     eprintln!("  vm <file>      Run a Rak script on the bytecode VM");
     eprintln!("  bench <file>   Benchmark interpreter vs VM");
     eprintln!("  build <file>   Build a standalone executable from a Rak script");
+    eprintln!("  debug <file>   Run a line-oriented interactive debugger");
     eprintln!("  repl            Start an interactive REPL");
     #[cfg(feature = "lsp")]
     eprintln!("  lsp             Start the language server (stdio)");
@@ -101,20 +102,187 @@ fn build_exe(source_path: &str) {
     println!("  Source embedded: {} bytes", source_bytes.len());
 }
 
+fn cmd_run_debug(file: &str, source: &str) {
+    use rakc::vm::{Vm, VmDebugAction};
+    let base_dir = std::path::Path::new(file).parent().map(|p| p.to_string_lossy().to_string()).unwrap_or_else(|| ".".to_string());
+
+    let tokens = match rakc::lexer::tokenize(source) {
+        Ok(t) => t,
+        Err(e) => { eprintln!("Lexer error: {}", e); std::process::exit(1); }
+    };
+    let ast = match rakc::parser::parse(&tokens, source) {
+        Ok(a) => a,
+        Err(e) => { eprintln!("Parser error: {}", e); std::process::exit(1); }
+    };
+    let chunk = match rakc::compiler::compile_module_in(&ast, &base_dir) {
+        Ok(c) => c,
+        Err(e) => { eprintln!("Compile error: {}", e); std::process::exit(1); }
+    };
+
+    // Shared breakpoint set / stepping state consulted by the handler.
+    let breakpoints: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<u32>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
+    let stepping: std::sync::Arc<std::sync::Mutex<bool>> = std::sync::Arc::new(std::sync::Mutex::new(true));
+
+    // The disassembler needs the compiled chunk; share it via Arc.
+    let chunk_arc = std::sync::Arc::new(chunk);
+
+    let mut vm = Vm::new();
+    let bps = breakpoints.clone();
+    let stp = stepping.clone();
+    let chunk_d = chunk_arc.clone();
+    vm.debugger(std::collections::HashSet::new(), move |line, locals, _globals, callstack| {
+        // Fast path: don't pause unless stepping or on a breakpoint.
+        if !*stp.lock().unwrap() && !bps.lock().unwrap().contains(&line) {
+            return VmDebugAction::Continue;
+        }
+        *stp.lock().unwrap() = false;
+        println!("\n[stopped] line {}", line);
+        loop {
+            print!("dbg> ");
+            use std::io::Write as _;
+            let _ = std::io::stdout().flush();
+            let mut input = String::new();
+            if std::io::stdin().read_line(&mut input).unwrap_or(0) == 0 {
+                // EOF on stdin: run to completion.
+                return VmDebugAction::Continue;
+            }
+            let trimmed = input.trim().to_string();
+            if trimmed.is_empty() {
+                for (k, v) in &locals {
+                    println!("  {} = {}", k, v);
+                }
+                continue;
+            }
+            let lower = trimmed.to_lowercase();
+            match lower.as_str() {
+                ":help" | "help" | "h" => {
+                    println!("break <line|file:line> | continue/c | step/s | next/n | finish | locals | stack/bt | backtrace | print <name> | disassemble | frame | quit/q");
+                    continue;
+                }
+                "c" | "continue" => return VmDebugAction::Continue,
+                "s" | "step" | "n" | "next" => {
+                    *stp.lock().unwrap() = true;
+                    return VmDebugAction::Step;
+                }
+                "finish" => {
+                    // Run until the next breakpoint or program end.
+                    return VmDebugAction::Continue;
+                }
+                "locals" => {
+                    if locals.is_empty() {
+                        println!("(no locals)");
+                    }
+                    for (k, v) in &locals {
+                        println!("  {} = {}", k, v);
+                    }
+                    continue;
+                }
+                "stack" | "bt" | "backtrace" => {
+                    println!("  #0 <main> (line {})", line);
+                    for (i, name) in callstack.iter().enumerate() {
+                        println!("  #{} {}", i + 1, name);
+                    }
+                    if callstack.is_empty() {
+                        println!("  (no nested calls)");
+                    }
+                    continue;
+                }
+                "frame" => {
+                    println!("current line {}, stack depth {}", line, callstack.len() + 1);
+                    continue;
+                }
+                "quit" | "q" => return VmDebugAction::Quit,
+                _ => {}
+            }
+            if let Some(rest) = lower.strip_prefix("break ") {
+                // Accept both `break 42` and `break file.rak:42`.
+                let num_part = rest.trim().rsplit(':').next().unwrap_or(rest.trim());
+                if let Ok(l) = num_part.trim().parse::<u32>() {
+                    bps.lock().unwrap().insert(l);
+                    println!("breakpoint set at line {}", l);
+                } else {
+                    println!("break <line|file:line> expects a number");
+                }
+                continue;
+            }
+            if let Some(rest) = trimmed.strip_prefix("print ") {
+                let name = rest.trim().to_string();
+                match locals.iter().find(|(k, _)| *k == name) {
+                    Some((_, v)) => println!("{}", v),
+                    None => println!("(no such local '{}'; try 'locals')", name),
+                }
+                continue;
+            }
+            if lower == "disassemble" || lower == "dis" {
+                println!("bytecode: {} bytes, {} constants, {} line markers", chunk_d.code.len(), chunk_d.constants.len(), chunk_d.lines.len());
+                let mut off = 0usize;
+                while off < chunk_d.code.len() {
+                    if let Some(op) = rakc::bytecode::Op::from_u8(chunk_d.code[off]) {
+                        let l = chunk_d.lines.get(off).copied().unwrap_or(0);
+                        let width = match op {
+                            rakc::bytecode::Op::LoadConst
+                            | rakc::bytecode::Op::LoadGlobal
+                            | rakc::bytecode::Op::StoreGlobal
+                            | rakc::bytecode::Op::Jump
+                            | rakc::bytecode::Op::JumpIfFalse
+                            | rakc::bytecode::Op::JumpIfTrue => 2,
+                            rakc::bytecode::Op::LoadLocal
+                            | rakc::bytecode::Op::StoreLocal
+                            | rakc::bytecode::Op::Call
+                            | rakc::bytecode::Op::BuildModule => 1,
+                            _ => 0,
+                        };
+                        let operand = if width == 2 {
+                            format!("{}", chunk_d.read_u16(off + 1))
+                        } else if width == 1 {
+                            format!("{}", chunk_d.code[off + 1])
+                        } else {
+                            String::new()
+                        };
+                        println!("  {:04}  line {:>3}  {:?} {}", off, l, op, operand);
+                        off += 1 + width;
+                    } else {
+                        println!("  {:04}  <bad opcode> {}", off, chunk_d.code[off]);
+                        off += 1;
+                    }
+                }
+                continue;
+            }
+            println!("unknown command '{}' (:help)", input);
+        }
+    });
+
+    let result = vm.run(&chunk_arc);
+    match result {
+        Ok(out) => {
+            for l in &out {
+                println!("{}", l);
+            }
+        }
+        Err(e) => {
+            eprintln!("VM error: {}", e);
+            std::process::exit(1);
+        }
+    }
+    std::process::exit(0);
+}
+
 fn main() {
     if let Some(embedded_source) = check_embedded_payload() {
-        match rakc::eval(&embedded_source) {
-            Ok(output) => {
+        let script_args: Vec<String> = env::args().skip(1).collect();
+        match rakc::eval_cli(&embedded_source, &script_args) {
+            Ok((output, code)) => {
                 for line in &output {
                     println!("{}", line);
                 }
+                std::process::exit(code);
             }
             Err(e) => {
                 eprintln!("Error: {}", e);
                 std::process::exit(1);
             }
         }
-        return;
     }
 
     let args: Vec<String> = env::args().collect();
@@ -178,10 +346,15 @@ fn main() {
     match cmd.as_str() {
         "run" => {
             let base_dir = std::path::Path::new(file).parent().map(|p| p.to_string_lossy().to_string()).unwrap_or_else(|| ".".to_string());
-            match rakc::eval_in(&source, &base_dir) {
-                Ok(output) => {
+            // argv for a `fn main(args)` entry = everything after the file.
+            let script_args: Vec<String> = args.iter().skip(3).cloned().collect();
+            match rakc::eval_in_cli(&source, &base_dir, &script_args) {
+                Ok((output, code)) => {
                     for line in &output {
                         println!("{}", line);
+                    }
+                    if code != 0 {
+                        std::process::exit(code);
                     }
                 }
                 Err(e) => {
@@ -189,6 +362,9 @@ fn main() {
                     std::process::exit(1);
                 }
             }
+        }
+        "debug" => {
+            cmd_run_debug(file, &source);
         }
         "build" => {
             build_exe(file);

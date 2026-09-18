@@ -5,7 +5,7 @@ use anyhow::{anyhow, Result};
 use std::path::PathBuf;
 
 use crate::platform;
-use crate::{confirm, Component, Config, IdeMode, Scope};
+use crate::{confirm, status, Component, Config, IdeMode, Scope};
 
 /// Build a `Config` from CLI flags (non-interactive `--yes` mode).
 pub fn config_from_flags(
@@ -17,10 +17,21 @@ pub fn config_from_flags(
     offline: Option<PathBuf>,
 ) -> Result<Config> {
     let comps: Vec<Component> = match install_components {
-        Some(keys) => keys
-            .iter()
-            .filter_map(|k| Component::parse(k))
-            .collect(),
+        Some(keys) => {
+            let mut out = Vec::new();
+            for k in &keys {
+                match Component::parse(k) {
+                    Some(c) => out.push(c),
+                    None => {
+                        return Err(anyhow!(
+                            "--install: unknown component '{}' (use: rakc,rakpkg,ide,rakpath,shortcuts,man)",
+                            k
+                        ))
+                    }
+                }
+            }
+            out
+        }
         None => Component::all().to_vec(),
     };
     if comps.is_empty() {
@@ -72,6 +83,27 @@ pub fn interactive(offline: Option<PathBuf>) -> Result<Config> {
         }
     }
 
+    // Component selection — a MULTI-select: toggle each entry with <space>,
+    // confirm the whole set with <enter>. Any combination can be chosen.
+    let comp_items: Vec<String> = Component::all().iter().map(|c| c.label().to_string()).collect();
+    let preselected: Vec<bool> = Component::all()
+        .iter()
+        .map(|c| matches!(c, Component::Rakc | Component::Rakpkg))
+        .collect();
+    let selection = MultiSelect::new()
+        .with_prompt("Components to install (↑/↓ move, <space> toggle, <enter> confirm)")
+        .items(&comp_items)
+        .defaults(&preselected)
+        .interact()?;
+    let components: Vec<Component> = selection.into_iter().filter_map(|i| Component::all().get(i).copied()).collect();
+    if components.is_empty() {
+        return Err(anyhow!("no components selected — toggle at least one with <space>, then press <enter>"));
+    }
+    status(&format!(
+        "selected components: {}",
+        components.iter().map(|c| c.key()).collect::<Vec<_>>().join(", ")
+    ));
+
     let scope_items = [Scope::User.label(), Scope::System.label()];
     let scope_idx = Select::new()
         .with_prompt("Install scope")
@@ -83,17 +115,7 @@ pub fn interactive(offline: Option<PathBuf>) -> Result<Config> {
         return Err(anyhow!("cancelled"));
     }
 
-    let comp_items: Vec<String> = Component::all().iter().map(|c| c.label().to_string()).collect();
-    let selection = MultiSelect::new()
-        .with_prompt("Components to install (space to toggle)")
-        .items(&comp_items)
-        .defaults(&(0..comp_items.len()).map(|_| true).collect::<Vec<_>>())
-        .interact()?;
-    let components: Vec<Component> = selection.into_iter().filter_map(|i| Component::all().get(i).copied()).collect();
-    if components.is_empty() {
-        return Err(anyhow!("no components selected"));
-    }
-
+    let needs_bin = components.contains(&Component::Rakc) || components.contains(&Component::Rakpkg);
     let ide_mode = if components.contains(&Component::Ide) {
         let items = ["portable dir", "system location"];
         let idx = Select::new().with_prompt("IDE install mode").items(&items).default(0).interact()?;
@@ -102,12 +124,17 @@ pub fn interactive(offline: Option<PathBuf>) -> Result<Config> {
         IdeMode::Portable
     };
 
-    let default_bin = platform::default_bin_dir(scope)?;
-    let bin_dir: PathBuf = Input::new()
-        .with_prompt("Bin directory (rakc, rakpkg)")
-        .default(default_bin.to_string_lossy().to_string())
-        .interact_text()?
-        .into();
+    // Only prompt for directories that the selected components actually use.
+    let bin_dir: PathBuf = if needs_bin {
+        let default_bin = platform::default_bin_dir(scope)?;
+        Input::new()
+            .with_prompt("Bin directory (rakc, rakpkg)")
+            .default(default_bin.to_string_lossy().to_string())
+            .interact_text()?
+            .into()
+    } else {
+        platform::default_bin_dir(scope)?
+    };
 
     let ide_dir = if components.contains(&Component::Ide) {
         let default_ide = platform::default_ide_dir(scope, ide_mode)?;
@@ -120,24 +147,32 @@ pub fn interactive(offline: Option<PathBuf>) -> Result<Config> {
         platform::default_ide_dir(scope, ide_mode)?
     };
 
-    let default_pkgs = platform::default_packages_dir(scope)?;
-    let packages_dir: PathBuf = Input::new()
-        .with_prompt("Packages directory (RAK_PATH)")
-        .default(default_pkgs.to_string_lossy().to_string())
-        .interact_text()?
-        .into();
+    let packages_dir: PathBuf = if components.contains(&Component::RakPath) {
+        let default_pkgs = platform::default_packages_dir(scope)?;
+        Input::new()
+            .with_prompt("Packages directory (RAK_PATH)")
+            .default(default_pkgs.to_string_lossy().to_string())
+            .interact_text()?
+            .into()
+    } else {
+        platform::default_packages_dir(scope)?
+    };
 
     let net = offline.is_none();
 
     // Summary.
     println!("\n--- Summary ---");
-    println!("scope:      {}", scope.label());
-    println!("components: {}", components.iter().map(|c| c.key()).collect::<Vec<_>>().join(","));
-    println!("bin dir:     {}", bin_dir.display());
+    println!("scope:       {}", scope.label());
+    println!("components:  {}", components.iter().map(|c| c.key()).collect::<Vec<_>>().join(","));
+    if needs_bin {
+        println!("bin dir:     {}", bin_dir.display());
+    }
     if components.contains(&Component::Ide) {
         println!("ide dir:     {} ({})", ide_dir.display(), if ide_mode == IdeMode::System { "system" } else { "portable" });
     }
-    println!("packages:    {}", packages_dir.display());
+    if components.contains(&Component::RakPath) {
+        println!("packages:    {}", packages_dir.display());
+    }
     println!("mode:        {}", if net { "net-install (download latest release)" } else { "offline bundle" });
     println!();
 

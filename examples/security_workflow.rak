@@ -1,0 +1,57 @@
+// Security workflow (v0.7): composable evidence pipeline.
+//
+//   rakc run examples/security_workflow.rak
+//
+// Rak's features are designed to compose: streams + evidence + provenance all
+// work together. This mirrors an analyst pipeline using mechanisms that ship:
+//   feed -> stream_map(parse) -> filter -> stream_map(enrich) -> report
+
+// Parse a line "kind,value" into a structured IOC map.
+fn parse_ioc(line) {
+    let parts = split(line, ",")
+    return { kind: parts[0], value: parts[1] }
+}
+
+// Normalize an IOC (lowercase domain sink).
+fn normalize_ioc(ioc) {
+    if ioc.kind == "domain" {
+        return { kind: ioc.kind, value: lower(ioc.value) }
+    }
+    return ioc
+}
+
+// Enrich with a resolved address list (empty when not resolvable).
+fn resolve_and_enrich(ioc) {
+    let addrs = []
+    if ioc.kind == "domain" {
+        addrs = dns_resolve(ioc.value)
+    }
+    return { ioc: ioc, resolved: addrs }
+}
+
+fn run_feed(path) {
+    let line_stream = read_lines(path)               // lazy stream (backpressured)
+    let iocs       = stream_map(line_stream, parse_ioc)
+    let normalized = stream_map(iocs, normalize_ioc)
+    let enriched   = stream_map(normalized, resolve_and_enrich)
+
+    let seen = {}
+    let count = 0
+    for row in enriched {
+        let ioc = row.ioc
+        if has(seen, ioc.value) {
+            continue
+        }
+        seen[ioc.value] = true
+        count = count + 1
+        dump fmt("indicator[{}]: {} = {} resolved:{}", count, ioc.kind, ioc.value, string(row.resolved))
+    }
+    dump fmt("total unique indicators: {}", count)
+}
+
+// Demo feed: two raw domains (normalized/resolved) and an IP.
+file_write("_feed.txt", "domain,EvilCom.com\nip,1.2.3.4\n")
+run_feed("_feed.txt")
+file_delete("_feed.txt")
+
+dump "DONE"

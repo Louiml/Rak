@@ -4,6 +4,28 @@ A programming language for hackers, OSINT investigators, and systems programmers
 
 Hex is a first-class type. The bytecode VM runs about 6x faster than the tree-walker. There's a SQL engine written in Rak itself, and a Rak interpreter written in Rak.
 
+## What's new in 0.7.0
+
+- **Structured errors** — `catch e` binds a first-class `Error` value with a
+  `kind`, source span, cause, and context (`err_kind`/`err_message`/`err_line` …).
+- **True async concurrency** — `await_all`, `select` (race), `timeout`,
+  `task_group`, `async_sleep`/`async_yield`, and deferred `async fn` bodies run
+  concurrently on a bounded worker pool (thousands of lightweight ops).
+- **Streaming** — pull-based `Value::Stream` with `stream_map`/`filter`/`take`/
+  `collect`, `read_lines`, and `tcp_stream`; lazily consumed by `for`.
+- **CLI** — `fn main(argv) -> int` entry with real exit codes, `argv()`,
+  stdin/stdout builtins, and a structured `parse_args(spec, argv)` flag parser.
+- **Data processing** — lazy `stream_csv`/`stream_jsonl`, plus
+  `gzip`/`gunzip`/`deflate`/`inflate` and `zip_archive`/`zip_list`/`zip_extract`.
+- **rakpkg** — version/rev constraints, `rakpkg.lock` (rev + SHA-256 checksum),
+  and `update`/`tree`/`audit`/`publish`.
+- **Debugger** — `rakc debug program.rak` (break/continue/step/locals/stack/
+  print/**disassemble**) powered by the bytecode VM with statement↔bytecode
+  line mapping.
+- **Fuzzing** — 8 proptest harnesses (stable CI) + a 13-target **libFuzzer /
+  cargo-fuzz** pack (`fuzz/`) for the lexer, parser, DNS/TLS/JSON parsers,
+  packet builders, WebSocket frames, tunnel, compression, and package manifests.
+
 ## Install
 
 The custom installer is an interactive TUI wizard that installs `rakc`, `rakpkg`, and the Rak IDE, edits PATH, sets `RAK_PATH`, creates shortcuts + `.rak` associations, and installs man pages + shell completions. It runs in net-install (downloads the latest release) or offline-bundle mode, and supports `--uninstall` / `--list` / `--yes` for scripting.

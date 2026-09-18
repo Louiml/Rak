@@ -1,0 +1,38 @@
+// Streaming (v0.7): lazy, pull-based async streams.
+//
+//   rakc run examples/streaming.rak
+//
+// Streams are pulled one element at a time (natural backpressure — producers
+// never run ahead of consumers). Combine them with `stream_map`, `filter`,
+// `take`, `collect`, and `for item in stream`.
+
+dump "=== lazy pipeline: map -> filter -> take ==="
+let numbers = stream_from_array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
+let doubled = stream_map(numbers, fn(x) { return x * 2 })
+let big     = filter(doubled, fn(x) { return x > 10 })   // 12, 14, 16, 18, 20
+for v in take(big, 3) {
+    dump v   // 12, 14, 16
+}
+
+dump "=== collect a stream back into an array ==="
+let words = stream_from_array(["red", "green", "blue"])
+dump collect(words)
+
+dump "=== lazy file line streaming (read_lines) ==="
+let lines = read_lines("examples/hello.rak")
+let i = 0
+for line in lines {
+    i = i + 1
+    if i > 3 { break }            // stop early; the file is never fully read
+    dump fmt("line {}: {}", i, line)
+}
+
+dump "=== map/filter a list of hosts by a predicate ==="
+let targets = stream_from_array(["example.com", "localhost", "10.0.0.1", "x"])
+let responses = stream_map(targets, fn(host) {
+    return fmt("[queried:{}]", host)
+})
+let long = filter(responses, fn(h) { return len(h) > 12 })
+dump collect(long)
+
+dump "DONE"

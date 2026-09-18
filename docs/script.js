@@ -3,6 +3,385 @@
 
   var reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
+  // ============================================================
+  // Markdown-driven docs viewer (docs.html)
+  // The content lives in content/*.md; docs.html only renders it.
+  // ============================================================
+
+  var DOC_PAGES = [
+    { group: 'Start', file: 'introduction.md', title: 'Introduction' },
+    { group: 'Start', file: 'installation.md', title: 'Installation' },
+    { group: 'Start', file: 'quick-start.md', title: 'Quick start' },
+
+    { group: 'Language', file: 'language.md', title: 'Language reference' },
+    { group: 'Language', file: 'errors.md', title: 'Error handling' },
+    { group: 'Language', file: 'concurrency.md', title: 'Concurrency & async' },
+    { group: 'Language', file: 'streams.md', title: 'Streams & data' },
+    { group: 'Language', file: 'modules.md', title: 'Modules' },
+    { group: 'Language', file: 'macros.md', title: 'Macros' },
+
+    { group: 'Systems', file: 'ffi.md', title: 'FFI & mmap' },
+    { group: 'Systems', file: 'networking.md', title: 'Networking & protocols' },
+    { group: 'Systems', file: 'vpn.md', title: 'VPN & tunneling' },
+    { group: 'Systems', file: 'forensics.md', title: 'Forensics' },
+
+    { group: 'Reference', file: 'stdlib.md', title: 'Standard library' },
+    { group: 'Reference', file: 'cli.md', title: 'CLI reference' },
+    { group: 'Reference', file: 'tooling.md', title: 'Tooling' },
+    { group: 'Reference', file: 'vm.md', title: 'Bytecode VM' },
+    { group: 'Reference', file: 'examples.md', title: 'Examples' },
+    { group: 'Reference', file: 'project.md', title: 'Project' }
+  ];
+
+  var MD_ROOT = 'content/';
+
+  function slugify(s) {
+    return s.toLowerCase()
+      .replace(/[^a-z0-9\s-]/g, '')
+      .trim()
+      .replace(/\s+/g, '-');
+  }
+
+  // Map a markdown link to the SPA route. `page.html` -> `#page`,
+  // `page.html#anchor` -> `#page/anchor`, `#anchor` -> `#<current>/anchor`.
+  // External and relative-to-repo links pass through.
+  function normalizeDocHref(href, currentPage) {
+    if (/^(https?:|mailto:|data:)/i.test(href)) return href;
+    var m = href.match(/^([A-Za-z0-9-]+)(\.html)?(#.*)?$/);
+    if (m && m[1] !== 'docs' && m[1] !== 'index' && pageByFile(m[1] + '.md')) {
+      return '#' + m[1] + '/' + (m[3] ? m[3].slice(1) : '');
+    }
+    if (href.charAt(0) === '#' && href.length > 1) return '#' + currentPage + '/' + href.slice(1);
+    return href;
+  }
+
+  function pageByFile(file) {
+    for (var i = 0; i < DOC_PAGES.length; i++) if (DOC_PAGES[i].file === file) return DOC_PAGES[i];
+    return null;
+  }
+
+  function pageTitle(file) {
+    var p = pageByFile(file);
+    return p ? p.title : file;
+  }
+
+  // Inline transforms. `htmlEscaped` text in -> html out. Inline code is
+  // lifted into placeholders first so bold/italic/link processing cannot
+  // touch its content.
+  function mdInline(text, currentPage) {
+    var codes = [];
+    text = text.replace(/`([^`]+)`/g, function (_, c) {
+      codes.push('<code class="md-code">' + c + '</code>');
+      return '\u0000' + (codes.length - 1) + '\u0000';
+    });
+    text = text.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, function (_, label, href) {
+      return '<a href="' + escapeHTML(normalizeDocHref(href, currentPage)) + '">' + label + '</a>';
+    });
+    text = text.replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>');
+    text = text.replace(/(^|\W)\*([^*\s][^*]*)\*/g, '$1<i>$2</i>');
+    text = text.replace(/\\([\\`*_{}\[\]()#+\-.!|>~])/g, '$1');
+    text = text.replace(/\u0000(\d+)\u0000/g, function (_, i) { return codes[+i]; });
+    return text;
+  }
+
+  // A tiny CommonMark-ish renderer: fenced code, ATX headings, pipe tables,
+  // lists (2-space nesting), blockquotes, hr, and paragraphs. This is the
+  // only dependency-free renderer used by the docs viewer.
+  function renderMarkdown(src, currentPage) {
+    var lines = src.replace(/\r\n/g, '\n').split('\n');
+    var out = [];
+    var i = 0;
+
+    function openCodeblock(lang) {
+      lang = (lang || 'text').trim();
+      return '<figure class="codeblock" data-title="' + escapeHTML(lang) + '">' +
+        '<div class="codeblock-bar" aria-hidden="true"><span class="bar-dot"></span><span class="bar-dot"></span>' +
+        '<span class="bar-dot"></span><span class="bar-title">' + escapeHTML(lang) + '</span></div>' +
+        '<pre><code data-lang="' + escapeHTML(lang) + '">';
+    }
+
+    while (i < lines.length) {
+      var line = lines[i];
+
+      // fenced code
+      var fence = line.match(/^```\s*([A-Za-z0-9+#.-]*)\s*$/);
+      if (fence) {
+        var buf = [];
+        i++;
+        while (i < lines.length && !/^```/.test(lines[i])) { buf.push(lines[i]); i++; }
+        i++; // closing fence
+        out.push(openCodeblock(fence[1]) + escapeHTML(buf.join('\n')) + '</code></pre></figure>');
+        continue;
+      }
+
+      // heading
+      var h = line.match(/^(#{1,6})\s+(.*)$/);
+      if (h) {
+        var level = h[1].length;
+        var raw = h[2].replace(/\s+#+\s*$/, '');
+        var plain = raw.replace(/`([^`]+)`/g, '$1');
+        var id = slugify(plain);
+        out.push('<h' + level + (level <= 3 ? ' id="' + id + '"' : '') + '>' + mdInline(escapeHTML(raw), currentPage) + '</h' + level + '>');
+        i++;
+        continue;
+      }
+
+      // table
+      if (/^\s*\|/.test(line) && i + 1 < lines.length && /^\s*\|[\s:|-]+\|?\s*$/.test(lines[i + 1])) {
+        var rows = [];
+        while (i < lines.length && /^\s*\|/.test(lines[i])) { rows.push(lines[i]); i++; }
+        var head = splitRow(rows[0]);
+        var bodyRows = rows.slice(2);
+        var html = '<div class="md-tablewrap"><table class="md-table"><thead><tr>';
+        head.forEach(function (c) { html += '<th>' + mdInline(c, currentPage) + '</th>'; });
+        html += '</tr></thead><tbody>';
+        bodyRows.forEach(function (r) {
+          html += '<tr>';
+          splitRow(r).forEach(function (c) { html += '<td>' + mdInline(c, currentPage) + '</td>'; });
+          html += '</tr>';
+        });
+        html += '</tbody></table></div>';
+        out.push(html);
+        continue;
+      }
+
+      // hr
+      if (/^\s*(---+|\*\*\*+)\s*$/.test(line)) { out.push('<hr>'); i++; continue; }
+
+      // blockquote
+      if (/^\s*>/.test(line)) {
+        var q = [];
+        while (i < lines.length && /^\s*>/.test(lines[i])) { q.push(lines[i].replace(/^\s*>\s?/, '')); i++; }
+        out.push('<blockquote>' + renderMarkdown(q.join('\n'), currentPage) + '</blockquote>');
+        continue;
+      }
+
+      // lists (recursive nesting by indent)
+      if (/^(\s*)([-*]|\d+\.)\s+/.test(line)) {
+        var baseIndent = line.match(/^(\s*)/)[0].replace(/\t/g, '  ').length;
+        var items = [];
+        while (i < lines.length) {
+          var lm = lines[i].match(/^(\s*)([-*]|\d+\.)\s+(.*)$/);
+          if (lm) {
+            items.push({
+              indent: lm[1].replace(/\t/g, '  ').length - baseIndent,
+              ordered: /\d+\./.test(lm[2]),
+              text: lm[3]
+            });
+            i++;
+            continue;
+          }
+          // continuation line: indented plain text continues the last item
+          var cont = lines[i].match(/^( +)(\S.*)$/);
+          if (cont && cont[1].length >= 2 && items.length &&
+              !/^```/.test(lines[i]) && !/^#{1,6}\s/.test(lines[i]) &&
+              !/^\s*\|/.test(lines[i]) && !/^\s*>/.test(lines[i])) {
+            items[items.length - 1].text += ' ' + cont[2].trim();
+            i++;
+            continue;
+          }
+          break;
+        }
+        var state = { i: 0 };
+        out.push(buildList(items, state, 0, currentPage));
+        continue;
+      }
+
+      // blank
+      if (/^\s*$/.test(line)) { i++; continue; }
+
+      // paragraph
+      var para = [];
+      while (i < lines.length && !/^\s*$/.test(lines[i]) &&
+             !/^```/.test(lines[i]) && !/^#{1,6}\s/.test(lines[i]) &&
+             !/^\s*\|/.test(lines[i]) && !/^\s*>/.test(lines[i]) &&
+             !/^(\s*)([-*]|\d+\.)\s+/.test(lines[i]) &&
+             !/^\s*(---+|\*\*\*+)\s*$/.test(lines[i])) {
+        para.push(lines[i].trim());
+        i++;
+      }
+      if (para.length) out.push('<p>' + mdInline(escapeHTML(para.join(' ')), currentPage) + '</p>');
+    }
+
+    return out.join('\n');
+  }
+
+  // Build a nested list HTML from flat items. Nested items (larger indent)
+  // are spliced inside the preceding <li>.
+  function buildList(items, state, indent, currentPage) {
+    var tag = items[state.i].ordered ? 'ol' : 'ul';
+    var html = '<' + tag + '>';
+    while (state.i < items.length) {
+      var it = items[state.i];
+      if (it.indent < indent) break;
+      if (it.indent > indent) {
+        var nested = buildList(items, state, it.indent, currentPage);
+        html = html.replace(/<\/li>$/, nested + '</li>');
+        continue;
+      }
+      html += '<li>' + mdInline(escapeHTML(it.text), currentPage) + '</li>';
+      state.i++;
+    }
+    html += '</' + tag + '>';
+    return html;
+  }
+
+  function splitRow(row) {
+    var s = row.trim();
+    if (s.charAt(0) === '|') s = s.slice(1);
+    if (s.charAt(s.length - 1) === '|') s = s.slice(0, -1);
+    s = s.replace(/\\\|/g, '\u0001');
+    var cells = s.split('|').map(function (c) {
+      return c.replace(/\u0001/g, '|').trim();
+    });
+    return cells;
+  }
+
+  // ------------------------------------------------------------
+  // Viewer: sidebar, router, fetch + render
+  // ------------------------------------------------------------
+
+  function initDocsViewer() {
+    var tocEl = document.getElementById('docs-pages');
+    var contentEl = document.getElementById('md-content');
+    if (!tocEl || !contentEl) return;
+
+    var currentFile = null;
+
+    function buildSidebar(filter) {
+      var q = (filter || '').trim().toLowerCase();
+      var groups = [];
+      DOC_PAGES.forEach(function (p) {
+        if (q && p.title.toLowerCase().indexOf(q) === -1) return;
+        if (!groups.length || groups[groups.length - 1].name !== p.group) {
+          groups.push({ name: p.group, pages: [] });
+        }
+        groups[groups.length - 1].pages.push(p);
+      });
+
+      var html = '<div class="toc-filter"><input type="text" id="toc-filter-input" placeholder="Filter pages&hellip;" aria-label="Filter pages"></div>';
+      groups.forEach(function (g) {
+        html += '<span class="toc-group">' + escapeHTML(g.name) + '</span>';
+        g.pages.forEach(function (p) {
+          var slug = p.file.replace(/\.md$/, '');
+          var cls = p.file === currentFile ? ' class="active"' : '';
+          html += '<a href="#' + slug + '"' + cls + ' data-file="' + p.file + '">' + escapeHTML(p.title) + '</a>';
+        });
+      });
+      // html += '<div class="toc-meta"><b>' + DOC_PAGES.length + ' pages &middot;</b> rendered from <code>content/*.md</code></div>';
+      tocEl.innerHTML = html;
+
+      var input = document.getElementById('toc-filter-input');
+      if (input) {
+        input.value = filter || '';
+        input.addEventListener('input', function () { buildSidebar(input.value); });
+        input.focus();
+      }
+    }
+
+    function buildPageToc(md) {
+      var html = '<span class="toc-group">On this page</span>';
+      var found = false;
+      md.replace(/\r\n/g, '\n').split('\n').forEach(function (l) {
+        var m = l.match(/^##\s+(.*)$/);
+        if (!m) return;
+        var raw = m[1].replace(/\s+#+\s*$/, '').replace(/`([^`]+)`/g, '$1');
+        found = true;
+        html += '<a href="#' + currentFile.replace(/\.md$/, '') + '/' + slugify(raw) + '">' + escapeHTML(raw) + '</a>';
+      });
+      var container = document.getElementById('toc-page');
+      if (!container) {
+        container = document.createElement('div');
+        container.id = 'toc-page';
+        container.className = 'toc-page';
+        tocEl.appendChild(container);
+      }
+      container.innerHTML = found ? html : '';
+    }
+
+    function setActiveLink() {
+      var slug = currentFile && currentFile.replace(/\.md$/, '');
+      tocEl.querySelectorAll('a[data-file]').forEach(function (a) {
+        a.classList.toggle('active', a.getAttribute('data-file') === currentFile);
+      });
+    }
+
+    function scrollIntoPage(hash) {
+      var idx = hash.indexOf('/');
+      if (idx === -1) { window.scrollTo(0, 0); return; }
+      var id = hash.slice(idx + 1);
+      var el = document.getElementById(id);
+      if (el) {
+        var y = el.getBoundingClientRect().top + window.scrollY - 84;
+        if (reduceMotion) window.scrollTo(0, y);
+        else window.scrollTo({ top: y, behavior: 'smooth' });
+      }
+    }
+
+    function renderFile(file, hash) {
+      var slug = file.replace(/\.md$/, '');
+      contentEl.innerHTML = '<div class="md-loading">Loading &ldquo;' + escapeHTML(pageTitle(file)) + '&rdquo;&hellip;</div>';
+      fetch(MD_ROOT + file, { cache: 'no-cache' })
+        .then(function (resp) {
+          if (!resp.ok) throw new Error('HTTP ' + resp.status);
+          return resp.text();
+        })
+        .then(function (text) {
+          currentFile = file;
+          var html = renderMarkdown(text, slug);
+          var pi = DOC_PAGES.findIndex(function (p) { return p.file === file; });
+          var pager = '';
+          if (pi > 0) pager += '<a class="md-pager prev" href="#' + DOC_PAGES[pi - 1].file.replace(/\.md$/, '') + '">&larr; ' + escapeHTML(DOC_PAGES[pi - 1].title) + '</a>';
+          if (pi < DOC_PAGES.length - 1) pager += '<a class="md-pager next" href="#' + DOC_PAGES[pi + 1].file.replace(/\.md$/, '') + '">' + escapeHTML(DOC_PAGES[pi + 1].title) + ' &rarr;</a>';
+          contentEl.innerHTML = '<section class="doc-section">' + html + '</section>' +
+            (pager ? '<nav class="md-pager-row">' + pager + '</nav>' : '');
+          document.title = 'Rak Docs: ' + pageTitle(file);
+          buildSidebarKeepFilter();
+          buildPageToc(text);
+          setActiveLink();
+          highlightBlocks();
+          initCopyButtons();
+          scrollIntoPage(hash);
+        })
+        .catch(function () {
+          contentEl.innerHTML =
+            '<div class="md-error">' +
+            '<h2>Could not load <code>content/' + escapeHTML(file) + '</code></h2>' +
+            '<p>The docs viewer fetches its markdown pages at runtime. Browsers block <code>fetch()</code> from <code>file://</code> URLs &mdash; serve the <code>docs/</code> folder over HTTP, e.g.:</p>' +
+            '<figure class="codeblock" data-title="shell"><div class="codeblock-bar" aria-hidden="true"><span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-title">shell</span></div>' +
+            '<pre><code data-lang="text">cd docs &amp;&amp; python -m http.server 8000\n# then open http://localhost:8000/docs.html</code></pre></figure>' +
+            '<p>On GitHub Pages this resolves automatically.</p>' +
+            '</div>';
+        });
+    }
+
+    // Rebuild the sidebar preserving any active filter text.
+    function buildSidebarKeepFilter() {
+      var input = document.getElementById('toc-filter-input');
+      buildSidebar(input ? input.value : '');
+    }
+
+    function route() {
+      var hash = window.location.hash.replace(/^#/, '');
+      var slug = hash.indexOf('/') === -1 ? hash : hash.slice(0, hash.indexOf('/'));
+      var file = slug ? slug + '.md' : DOC_PAGES[0].file;
+      if (!pageByFile(file)) file = DOC_PAGES[0].file;
+      if (file === currentFile) {
+        scrollIntoPage(hash);
+        return;
+      }
+      renderFile(file, hash);
+    }
+
+    window.addEventListener('hashchange', route);
+    buildSidebar('');
+    route();
+  }
+
+  // ============================================================
+  // Rak syntax highlighting (shared by index.html and docs.html)
+  // ============================================================
+
   var KEYWORDS = new Set([
     'let', 'mut', 'fn', 'return', 'if', 'else', 'for', 'while', 'loop', 'break', 'continue',
     'use', 'dump', 'trace', 'scan', 'fetch', 'in', 'struct', 'enum', 'impl', 'trait', 'match',
@@ -335,6 +714,7 @@
   }
 
   document.addEventListener('DOMContentLoaded', function () {
+    initDocsViewer();
     highlightBlocks();
     initCopyButtons();
     initReveals();

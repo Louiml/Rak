@@ -1,0 +1,52 @@
+// CLI (v0.7): a `fn main(args) -> int` entry point.
+//
+//   rakc run examples/cli_greeter.rak
+//   rakc run examples/cli_greeter.rak Alice --count 3
+//   rakc run examples/cli_greeter.rak --help
+//
+// Top-level code runs first; then `main` is called with the command-line args as
+// an array, and its `int` return value becomes the process exit code. Also
+// demonstrated: the built-in `parse_args` flag parser, `argv()`, and `eprint()`.
+
+let VERSION = "0.1.0"
+
+fn main(argv) {
+    // Structured flag parsing via parse_args(spec, argv).
+    let opts = parse_args({ count: "int", verbose: "bool" }, argv)
+    let positionals = opts[""]   // non-flag arguments
+
+    if len(positionals) < 1 || parse_args_get_bool(opts, "help") {
+        eprint("usage: cli_greeter <name> [--count N] [--verbose]")
+        return 2
+    }
+    let name = positionals[0]
+    if name == "--version" {
+        print("cli_greeter " + VERSION)
+        return 0
+    }
+    let count = 1
+    if has(opts, "count") {
+        count = int(opts["count"])
+    }
+    if count < 1 {
+        count = 1
+    }
+    let i = 0
+    while i < count {
+        let prefix = ""
+        if parse_args_get_bool(opts, "verbose") {
+            prefix = "[info] "
+        }
+        print(prefix + "Hello, " + name + "!")
+        i = i + 1
+    }
+    return 0
+}
+
+// Helper: does opts contain a truthy boolean flag (e.g. --help / --verbose)?
+fn parse_args_get_bool(opts, k) {
+    if has(opts, k) {
+        return opts[k] == true
+    }
+    return false
+}

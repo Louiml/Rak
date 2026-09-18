@@ -9,6 +9,9 @@ pub struct Compiler {
     chunk: Chunk,
     locals: Vec<(String, usize)>,
     scope_depth: usize,
+    /// Current top-level statement index (1-based) used as the source-line
+    /// marker for `chunk.lines`; enables the VM debugger's line breakpoints.
+    statement_line: u32,
     func_names: std::collections::HashSet<String>,
     func_closures: HashMap<String, Value>,
     /// `macro name(params) { body }` definitions, for compile-time expansion.
@@ -33,6 +36,7 @@ impl Compiler {
             chunk: Chunk::new(),
             locals: Vec::new(),
             scope_depth: 0,
+            statement_line: 0,
             func_names: std::collections::HashSet::new(),
             func_closures: HashMap::new(),
             macros: HashMap::new(),
@@ -48,7 +52,10 @@ impl Compiler {
         self.current_exports.clear();
         // Pre-pass: collect top-level functions (incl. `pub fn`), macros (incl.
         // `pub macro`), externs, and the exported-name list.
-        for stmt in &module.items {
+        for (idx, stmt) in module.items.iter().enumerate() {
+            // Consistent statement-index line markers: the VM debugger breaks on
+            // the Nth top-level statement.
+            self.statement_line = (idx + 1) as u32;
             match stmt {
                 Stmt::Let { name, value, .. } => {
                     if let Expr::Function { params, body, .. } = value.as_ref() {
@@ -132,7 +139,9 @@ impl Compiler {
             self.compile_import(imp)?;
         }
         // Compile the module's own non-function items.
-        for stmt in &module.items {
+        for (idx, stmt) in module.items.iter().enumerate() {
+            // Consistent statement-index line markers.
+            self.statement_line = (idx + 1) as u32;
             if let Stmt::Let { value, .. } = stmt {
                 if matches!(value.as_ref(), Expr::Function { .. }) {
                     continue;
@@ -445,7 +454,7 @@ impl Compiler {
     }
 
     fn line(&self) -> u32 {
-        0
+        self.statement_line
     }
 
     fn emit_op(&mut self, op: Op) {

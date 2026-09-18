@@ -1,0 +1,67 @@
+// Async runtime (v0.7): green-thread concurrency on a shared Tokio runtime.
+//
+//   rakc run examples/async_orchestration.rak
+//
+// Demonstrates: async fn, await_all, select (race), timeout, async_sleep,
+// async_yield, and task_group (bounded concurrency + error propagation).
+// Concurrent operations are driven on a bounded pool of OS threads, so you can
+// fire thousands of lightweight network probes without spawning a thread each.
+
+async fn fetch_latency(name, delay_ms) {
+    await async_sleep(delay_ms)
+    return fmt("{}={}ms", name, delay_ms)
+}
+
+dump "=== await_all: run many concurrently, gather in order ==="
+let results = await_all([
+    fetch_latency("a", 60),
+    fetch_latency("b", 20),
+    fetch_latency("c", 90),
+    fetch_latency("d", 40),
+])
+dump results
+
+dump "=== wait and see: TCP probes across many ports concurrently ==="
+let ports = [22, 80, 443, 445, 3389, 8000, 8080, 9999]
+let probe_futures = []
+for p in ports {
+    probe_futures = push(probe_futures, tcp_probe("127.0.0.1", p, 300))
+}
+let open_ports = await_all(probe_futures)
+let count = 0
+for p in ports {
+    if open_ports[count] { dump fmt("  port {} OPEN", p) }
+    count = count + 1
+}
+
+dump "=== select: first future to finish wins (race) ==="
+let winner = select([
+    fetch_latency("fast", 30),
+    fetch_latency("slow", 300),
+])
+dump fmt("winner: index {} -> {}", winner.0, winner.1)
+
+dump "=== timeout: bound an operation ==="
+dump timeout(fetch_latency("within", 20), 200)   // Ok("within=20ms")
+dump timeout(fetch_latency("too slow", 9999), 50) // Err(timeout)
+
+dump "=== task_group: bounded concurrency (limit=2), error propagation ==="
+let jobs = [
+    fn() { return await fetch_latency("j1", 40) },
+    fn() { return await fetch_latency("j2", 10) },
+    fn() { return await fetch_latency("j3", 60) },
+]
+dump task_group(jobs, 2)
+
+let jobs_bad = [
+    fn() { return 1 },
+    fn() { raise "a job failed" },
+]
+try {
+    task_group(jobs_bad, 2)
+    dump "no error propagated (BAD)"
+} catch e {
+    dump fmt("propagated: {}", err_message(e))
+}
+
+dump "DONE"

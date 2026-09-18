@@ -46,6 +46,16 @@ const SNIPPETS: Snippet[] = [
   { trigger: 'x25519', label: 'x25519 keypair', body: 'let keys = x25519_keypair(seed)\ndump hex_encode(keys.0)' },
   { trigger: 'chacha', label: 'chacha20 encrypt', body: 'let ct = chacha20_encrypt(key, tunnel_nonce(1), b"aad", b"data")' },
   { trigger: 'udp', label: 'udp bind', body: 'let t = udp_bind("127.0.0.1:8001")\nlet sock = t.0\nlet addr = t.1' },
+  { trigger: 'main', label: 'fn main entry', body: 'fn main(argv) -> int {\n    dump argv\n    return 0\n}' },
+  { trigger: 'awaitall', label: 'await_all futures', body: 'let results = await_all([f1, f2, f3])\ndump results' },
+  { trigger: 'taskgroup', label: 'task_group (bounded)', body: 'let results = task_group([fn1, fn2, fn3], 4)\ndump results' },
+  { trigger: 'timeout', label: 'timeout future', body: 'let r = timeout(future, 500)  // Ok(value) | Err(...)\ndump r' },
+  { trigger: 'stream', label: 'stream pipeline', body: 'let s = stream_from_array([1, 2, 3])\nlet s2 = stream_map(s, fn(x) { return x * 2 })\ndump collect(take(s2, 2))' },
+  { trigger: 'readlines', label: 'read_lines', body: 'for line in read_lines("file.txt") {\n    dump line\n}' },
+  { trigger: 'csv', label: 'stream_csv', body: 'for row in stream_csv("data.csv", {}) {\n    dump row\n}' },
+  { trigger: 'errh', label: 'structured error', body: 'try {\n    raise "boom"\n} catch e {\n    dump err_kind(e)\n    dump err_message(e)\n    dump err_line(e)\n}' },
+  { trigger: 'parseargs', label: 'parse_args', body: 'let args = parse_args({ verbose: "bool", out: "string" }, argv())\ndump args' },
+  { trigger: 'gzip', label: 'gzip / zip', body: 'let z = gzip(b"data")\ndump gunzip(z)\ndump zip_list(zip_archive({ "a.txt": b"hello" }))' },
 ];
 
 const KEYWORDS = [
@@ -107,6 +117,18 @@ const BUILTINS = [
   'tunnel_preshared_key', 'kdf_next',
   'tunnel_frame', 'tunnel_unframe', 'tunnel_nonce',
   'udp_bind', 'udp_send', 'udp_recv', 'udp_local_addr',
+  // Structured errors (v0.7)
+  'error', 'err_message', 'err_kind', 'err_line', 'err_col', 'err_file',
+  'err_cause', 'err_context', 'err_with_context',
+  // Async concurrency (v0.7)
+  'await_all', 'select', 'timeout', 'task_group', 'async_sleep', 'async_yield',
+  // Streaming (v0.7)
+  'stream_from_array', 'stream_map', 'stream_next', 'filter', 'take', 'collect',
+  'read_lines', 'tcp_stream', 'stream_csv', 'stream_jsonl', 'parse_csv_line',
+  // CLI (v0.7)
+  'argv', 'stdin_read_line', 'stdin_read_all', 'eprint', 'parse_args',
+  // Data processing (v0.7)
+  'gzip', 'gunzip', 'deflate', 'inflate', 'zip_archive', 'zip_list', 'zip_extract',
 ];
 
 interface Suggestion {

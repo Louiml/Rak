@@ -1,0 +1,105 @@
+[package]
+name = "rak-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+description = "libFuzzer/cargo-fuzz targets for Rak (lexer, parser, protocol decoders, manifest parser)"
+
+# cargo-fuzz needs these settings.
+[package.metadata]
+cargo-fuzz = true
+
+# Targets must run in their own crate (outside the root Rak workspace) so the
+# root `cargo build` / `cargo test` stay on the stable toolchain. This crate
+# is built only with `cargo +nightly fuzz` (or `cargo +nightly build` here).
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.rakc]
+path = "../rakc"
+
+[dependencies.rak-stdlib]
+path = "../stdlib"
+
+[dependencies.rakpkg]
+path = "../rakpkg"
+
+[[bin]]
+name = "lexer"
+path = "fuzz_targets/lexer.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "parser"
+path = "fuzz_targets/parser.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "eval"
+path = "fuzz_targets/eval.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "manifest"
+path = "fuzz_targets/manifest.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "dns"
+path = "fuzz_targets/dns.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "tls"
+path = "fuzz_targets/tls.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "json"
+path = "fuzz_targets/json.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "websocket"
+path = "fuzz_targets/websocket.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "tunnel"
+path = "fuzz_targets/tunnel.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "netraw"
+path = "fuzz_targets/netraw.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "csv"
+path = "fuzz_targets/csv.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "gzip"
+path = "fuzz_targets/gzip.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "zip"
+path = "fuzz_targets/zip.rs"
+test = false
+doc = false

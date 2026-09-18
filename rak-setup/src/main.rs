@@ -2,7 +2,9 @@
 //!
 //! `rak-setup` is a self-contained TUI wizard that installs `rakc`, `rakpkg`,
 //! and the Rak IDE on Linux and Windows, in either net-install (downloads
-//! from the latest GitHub release) or offline-bundle mode. It edits PATH,
+//! from the latest GitHub release) or offline-bundle mode. The component
+//! picker is a multi-select (any combination of rakc / rakpkg / IDE / ...).
+//! It edits PATH append-only (existing entries are never touched),
 //! sets `RAK_PATH`, creates shortcuts + `.rak` associations, and installs man
 //! pages + shell completions. A `~/.rak/manifest.json` records every action
 //! for clean uninstall/upgrade.
@@ -231,7 +233,7 @@ fn print_help() {
     println!("rak-setup {} — custom installer for the Rak language", SETUP_VERSION);
     println!();
     println!("USAGE:");
-    println!("  rak-setup                      # interactive wizard");
+    println!("  rak-setup                      # interactive wizard (multi-select components)");
     println!("  rak-setup --yes --install rakc,rakpkg,ide --scope user");
     println!("  rak-setup --uninstall --yes");
     println!("  rak-setup --list               # show what's installed");
@@ -242,7 +244,7 @@ fn print_help() {
     println!("  --uninstall            uninstall existing install (reads manifest)");
     println!("  --list                 list installed components from manifest");
     println!("  --install <a,b,..>     components: rakc,rakpkg,ide,rakpath,shortcuts,man");
-    println!("  --scope <s>           user | system");
+    println!("  --scope <s>            user | system");
     println!("  --bin-dir <path>       bin install dir");
     println!("  --ide-dir <path>       IDE install dir");
     println!("  --ide-mode <m>         portable | system");

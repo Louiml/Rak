@@ -31,6 +31,217 @@ pub struct FutureHandle {
     pub state: Mutex<FutureState>,
 }
 
+/// A pull-based async-capable stream. The consumer drives it via `next`, which
+/// gives natural backpressure: the producer never runs ahead of the consumer.
+/// Applied to file lines, TCP streams, arrays, and lazily-mapped pipelines.
+pub trait RakStream: Send {
+    fn next(&mut self, interp: &mut Interpreter) -> crate::Result<Option<Value>>;
+}
+
+/// A shared stream handle (`Value::Stream`).
+pub type StreamHandle = Arc<Mutex<Box<dyn RakStream>>>;
+
+/// Stream of an in-memory array / iterator of values.
+pub struct ArrayStream {
+    items: std::vec::IntoIter<Value>,
+}
+impl ArrayStream {
+    pub fn new(values: Vec<Value>) -> Self {
+        ArrayStream { items: values.into_iter() }
+    }
+}
+impl RakStream for ArrayStream {
+    fn next(&mut self, _interp: &mut Interpreter) -> crate::Result<Option<Value>> {
+        Ok(self.items.next())
+    }
+}
+
+/// Lazily reads lines from a file (never loads the whole file into memory).
+pub struct LinesStream {
+    reader: Option<std::io::Lines<std::io::BufReader<std::fs::File>>>,
+}
+impl LinesStream {
+    pub fn open(path: &str) -> crate::Result<Self> {
+        use std::io::BufRead;
+        let f = std::fs::File::open(path)
+            .map_err(|e| crate::RakError::Runtime(format!("read_lines: {}: {}", path, e)))?;
+        Ok(LinesStream { reader: Some(std::io::BufReader::new(f).lines()) })
+    }
+}
+impl RakStream for LinesStream {
+    fn next(&mut self, _interp: &mut Interpreter) -> crate::Result<Option<Value>> {
+        match self.reader.as_mut() {
+            Some(r) => match r.next() {
+                Some(Ok(line)) => Ok(Some(Value::String(line))),
+                Some(Err(_)) => {
+                    self.reader = None;
+                    Ok(None)
+                }
+                None => Ok(None),
+            },
+            None => Ok(None),
+        }
+    }
+}
+
+/// Streams lines read (blocking) from a TCP connection. Because the reader
+/// blocks per line, use it with async-friendly workloads or iterate directly.
+pub struct TcpLineStream {
+    reader: Option<std::io::BufReader<std::net::TcpStream>>,
+}
+impl TcpLineStream {
+    pub fn open(stream: std::net::TcpStream) -> Self {
+        TcpLineStream { reader: Some(std::io::BufReader::new(stream)) }
+    }
+}
+impl RakStream for TcpLineStream {
+    fn next(&mut self, _interp: &mut Interpreter) -> crate::Result<Option<Value>> {
+        use std::io::BufRead;
+        match self.reader.as_mut() {
+            Some(r) => {
+                let mut line = String::new();
+                match r.read_line(&mut line) {
+                    Ok(0) => { self.reader = None; Ok(None) }
+                    Ok(_) => Ok(Some(Value::String(line.trim_end_matches('\n').to_string()))),
+                    Err(_) => { self.reader = None; Ok(None) }
+                }
+            }
+            None => Ok(None),
+        }
+    }
+}
+
+/// Lazy `map`: applies `f` to each element from `inner`.
+pub struct MapStream {
+    inner: StreamHandle,
+    f: Value,
+}
+impl RakStream for MapStream {
+    fn next(&mut self, interp: &mut Interpreter) -> crate::Result<Option<Value>> {
+        let item = self.inner.lock().unwrap().next(interp)?;
+        match item {
+            Some(v) => {
+                let f = self.f.clone();
+                let r = interp.call_function_with_values(f, vec![v])?;
+                Ok(Some(r))
+            }
+            None => Ok(None),
+        }
+    }
+}
+
+/// Lazy `filter`: keeps elements for which `f(element)` is truthy.
+pub struct FilterStream {
+    inner: StreamHandle,
+    f: Value,
+}
+impl RakStream for FilterStream {
+    fn next(&mut self, interp: &mut Interpreter) -> crate::Result<Option<Value>> {
+        loop {
+            let item = self.inner.lock().unwrap().next(interp)?;
+            match item {
+                Some(v) => {
+                    let f = self.f.clone();
+                    let keep = interp.call_function_with_values(f, vec![v.clone()])?;
+                    if is_truthy(&keep) {
+                        return Ok(Some(v));
+                    }
+                }
+                None => return Ok(None),
+            }
+        }
+    }
+}
+
+/// Lazy `take(n)`: emits at most `n` elements then ends.
+pub struct TakeStream {
+    inner: StreamHandle,
+    remaining: u64,
+}
+impl RakStream for TakeStream {
+    fn next(&mut self, interp: &mut Interpreter) -> crate::Result<Option<Value>> {
+        if self.remaining == 0 { return Ok(None); }
+        let item = self.inner.lock().unwrap().next(interp)?;
+        if item.is_some() { self.remaining -= 1; }
+        Ok(item)
+    }
+}
+
+/// Lazy CSV parser over an inner line stream. `has_header` maps rows to maps;
+/// otherwise each row is an array of fields.
+pub struct CsvStream {
+    inner: StreamHandle,
+    delim: char,
+    has_header: bool,
+    headers: Vec<String>,
+    started: bool,
+}
+impl RakStream for CsvStream {
+    fn next(&mut self, interp: &mut Interpreter) -> crate::Result<Option<Value>> {
+        loop {
+            let line = self.inner.lock().unwrap().next(interp)?;
+            let line = match line { Some(v) => v.to_string(), None => return Ok(None) };
+            if line.trim().is_empty() { continue; }
+            let fields = rak_stdlib::stream_io::parse_csv_line(&line, self.delim);
+            if !self.started {
+                self.started = true;
+                if self.has_header {
+                    self.headers = fields;
+                    continue; // skip the header row, emit data rows only
+                }
+            }
+            if self.has_header {
+                let mut map = std::collections::HashMap::new();
+                for (i, h) in self.headers.iter().enumerate() {
+                    map.insert(h.clone(), Value::String(fields.get(i).cloned().unwrap_or_default()));
+                }
+                return Ok(Some(Value::Map(map)));
+            }
+            return Ok(Some(Value::Array(fields.into_iter().map(Value::String).collect())));
+        }
+    }
+}
+
+/// Lazy JSONL parser over an inner line stream. Each non-empty line is parsed
+/// as JSON; objects become maps, arrays become arrays.
+pub struct JsonlStream {
+    inner: StreamHandle,
+}
+impl RakStream for JsonlStream {
+    fn next(&mut self, interp: &mut Interpreter) -> crate::Result<Option<Value>> {
+        loop {
+            let line = self.inner.lock().unwrap().next(interp)?;
+            let line = match line { Some(v) => v.to_string(), None => return Ok(None) };
+            if line.trim().is_empty() { continue; }
+            let parsed = rak_stdlib::stream_io::parse_jsonl_line(&line)
+                .map_err(|e| crate::RakError::Runtime(format!("stream_jsonl: {}", e)))?;
+            return Ok(Some(json_value_to_rak(&parsed)));
+        }
+    }
+}
+
+/// Convert a `serde_json::Value` into a Rak `Value`.
+pub fn json_value_to_rak(v: &serde_json::Value) -> Value {
+    match v {
+        serde_json::Value::Null => Value::Nil,
+        serde_json::Value::Bool(b) => Value::Bool(*b),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() { Value::Int(i) }
+            else { Value::Float(n.as_f64().unwrap_or(0.0)) }
+        }
+        serde_json::Value::String(s) => Value::String(s.clone()),
+        serde_json::Value::Array(a) => Value::Array(a.iter().map(json_value_to_rak).collect()),
+        serde_json::Value::Object(o) => {
+            Value::Map(o.iter().map(|(k, v)| (k.clone(), json_value_to_rak(v))).collect())
+        }
+    }
+}
+
+/// Helper to build a shared `Value::Stream` from a concrete `RakStream`.
+fn make_stream<S: RakStream + 'static>(s: S) -> Value {
+    Value::Stream(Arc::new(Mutex::new(Box::new(s))))
+}
+
 /// Provenance metadata attached to an `evidence`-typed value: where it came
 /// from (tool + target), when it was collected, and an optional parent link so
 /// provenance merges transitively through pipeline / correlation steps.
@@ -98,6 +309,7 @@ pub enum Value {
     TcpListener(Arc<Mutex<std::net::TcpListener>>),
     TcpStream(Arc<Mutex<std::net::TcpStream>>),
     UdpTransport(Arc<Mutex<rak_stdlib::tunnel::UdpTransport>>),
+    Stream(Arc<Mutex<Box<dyn RakStream>>>),
     JoinHandle(Arc<Mutex<Option<JoinHandle<Value>>>>),
     Sender(Arc<Mutex<mpsc::Sender<Value>>>),
     Receiver(Arc<Mutex<mpsc::Receiver<Value>>>),
@@ -114,6 +326,8 @@ pub enum Value {
     Future(Arc<FutureHandle>),
     /// A PCAP capture handle (`pcap_open`).
     Pcap(Arc<Mutex<rak_stdlib::pcap::PcapHandle>>),
+    /// A structured runtime error value (`catch e`; `error(...)`).
+    Error(Arc<crate::ErrorInfo>),
     /// A provenance-tagged value (`evidence<T>`). Carries the inner value plus a
     /// chain of where/when/how it was collected.
     Evidence {
@@ -212,6 +426,7 @@ impl fmt::Display for Value {
             Value::TcpListener(_) => write!(f, "<tcp-listener>"),
             Value::TcpStream(_) => write!(f, "<tcp-stream>"),
             Value::UdpTransport(_) => write!(f, "<udp-transport>"),
+            Value::Stream(_) => write!(f, "<stream>"),
             Value::JoinHandle(_) => write!(f, "<thread>"),
             Value::Sender(_) => write!(f, "<sender>"),
             Value::Receiver(_) => write!(f, "<receiver>"),
@@ -222,6 +437,7 @@ impl fmt::Display for Value {
             Value::MmapSlice(_, _, n) => write!(f, "<mmap-slice {}B>", n),
             Value::Future(_) => write!(f, "<future>"),
             Value::Pcap(_) => write!(f, "<pcap>"),
+            Value::Error(err) => write!(f, "{}", err.message),
             Value::Evidence { inner, .. } => write!(f, "{}", inner),
         }
     }
@@ -299,6 +515,18 @@ pub struct Interpreter {
     env: Env,
     output: Vec<String>,
     base_dir: String,
+    /// Current source line being executed (best-effort, for error spans).
+    current_line: u32,
+    current_file: Option<String>,
+    /// Command-line args for the running program (`fn main(argv)` / `argv()`).
+    program_argv: Vec<String>,
+    /// Captured `fn main` value (if defined) so a CLI entry survives scope pop.
+    main_entry: Option<Value>,
+    /// Lines at which `run_debug` should pause (1-based).
+    debug_breakpoints: HashSet<u32>,
+    /// When in `run_debug`, the handler is invoked at each statement boundary
+    /// with (file, line, env); returns whether to stop (await user input).
+    debug_active: bool,
     returning: bool,
     return_value: Value,
     #[cfg(feature = "gui")]
@@ -347,6 +575,13 @@ enum LoopCtrl {
     Continue,
 }
 
+/// User decision from the debug handler (returned by `rakc debug`'s REPL).
+pub enum DebugAction {
+    Continue,
+    Step,
+    Quit,
+}
+
 /// A loaded module's exported runtime values and macro definitions.
 #[derive(Clone)]
 struct ModuleEntry {
@@ -367,6 +602,12 @@ impl Interpreter {
             env: Env::new(),
             output: vec![],
             base_dir: ".".to_string(),
+            current_line: 0,
+            current_file: None,
+            program_argv: Vec::new(),
+            main_entry: None,
+            debug_breakpoints: HashSet::new(),
+            debug_active: false,
             returning: false,
             return_value: Value::Nil,
             #[cfg(feature = "gui")]
@@ -389,6 +630,12 @@ impl Interpreter {
             env: Env::new(),
             output: vec![],
             base_dir,
+            current_line: 0,
+            current_file: None,
+            program_argv: Vec::new(),
+            main_entry: None,
+            debug_breakpoints: HashSet::new(),
+            debug_active: false,
             returning: false,
             return_value: Value::Nil,
             #[cfg(feature = "gui")]
@@ -416,10 +663,81 @@ impl Interpreter {
         Ok(self.output.clone())
     }
 
+    /// A lightweight line-oriented debugger over the interpreter. Executes the
+    /// program top-level statement by top-level statement. `handler(file_line, locals_fn)`
+    /// is invoked before each statement and returns whether to stop; when it
+    /// returns true the caller drives an interactive REPL. Works at top-level
+    /// statement granularity. Returns collected output.
+    pub fn run_debug<H>(&mut self, source: &str, mut handler: H) -> crate::Result<Vec<String>>
+    where
+        H: FnMut(u32, usize, &Vec<(String, Value)>, &Vec<String>) -> DebugAction,
+    {
+        let tokens = crate::lexer::tokenize(source)?;
+        let module = crate::parser::parse(&tokens, source)?;
+        for import in &module.imports {
+            self.load_import(import)?;
+        }
+        let stmts = module.items.clone();
+        // Pre-pass to compute rough line numbers for each top-level statement by
+        // counting newlines up to the statement's position is not available;
+        // we expose statement indices (1-based) as the stop marker instead.
+        for (idx, stmt) in stmts.iter().enumerate() {
+            let line = (idx + 1) as u32;
+            self.current_line = line;
+            let locals = self.env_snapshot();
+            let stack = self.stack_names();
+            let action = handler(line, idx, &locals, &stack);
+            if matches!(action, DebugAction::Quit) {
+                break;
+            }
+            // Don't step into break/continue/return control-flow at this level.
+            self.exec_stmt(stmt)?;
+        }
+        Ok(self.output.clone())
+    }
+
+    fn env_snapshot(&self) -> Vec<(String, Value)> {
+        let mut out = Vec::new();
+        for scope in self.env.scopes.iter() {
+            for (k, v) in scope {
+                out.push((k.clone(), v.clone()));
+            }
+        }
+        out
+    }
+
+    fn stack_names(&self) -> Vec<String> {
+        vec!["<main>".to_string()]
+    }
+
     pub fn run_source(&mut self, source: &str) -> crate::Result<Vec<String>> {
         let tokens = crate::lexer::tokenize(source)?;
         let module = crate::parser::parse(&tokens, source)?;
         self.run(&module)
+    }
+
+    /// The collected output lines so far (for debug/REPL UIs).
+    pub fn output(&self) -> Vec<String> {
+        self.output.clone()
+    }
+
+    /// After executing a script, if a `fn main(args)` is defined, call it with
+    /// the given command-line args and return its `int` result as the exit code
+    /// (defaults to 0 when no `main` is present).
+    pub fn run_main(&mut self, argv: &[String]) -> i32 {
+        self.program_argv = argv.to_vec();
+        let main_val = self.main_entry.clone().or_else(|| self.env.get("main"));
+        match main_val {
+            Some(main_val) => {
+                let args = Value::Array(argv.iter().map(|s| Value::String(s.clone())).collect());
+                match self.call_function_with_values(main_val, vec![args]) {
+                    Ok(Value::Int(n)) => n.clamp(i32::MIN as i64, i32::MAX as i64) as i32,
+                    Ok(_) => 0,
+                    Err(_) => 1,
+                }
+            }
+            None => 0,
+        }
     }
 
     /// Resolve an import spec's target to a file (and optional package init).
@@ -670,6 +988,9 @@ impl Interpreter {
             }
             Stmt::Let { name, pattern, mutable: _, value, type_hint: _ } => {
                 let val = self.eval_expr(value)?;
+                if name == "main" && pattern.is_none() {
+                    self.main_entry = Some(val.clone());
+                }
                 if let Some(p) = pattern {
                     self.bind_pattern(p, &val)?;
                 } else {
@@ -817,6 +1138,34 @@ impl Interpreter {
             Stmt::For { label, pattern, iterable, body } => {
                 let iter = self.eval_expr(iterable)?;
                 let tn = iter.type_name();
+                // Lazy stream iteration: pull one element at a time (natural
+                // backpressure). Applies to `Value::Stream` values.
+                if let Value::Stream(s) = &iter {
+                    let handle = s.clone();
+                    loop {
+                        let item = handle.lock().unwrap().next(self)?;
+                        match item {
+                            Some(v) => {
+                                self.env.push_scope();
+                                self.bind_pattern(pattern, &v)?;
+                                for st in body {
+                                    self.exec_stmt(st)?;
+                                    if self.returning { break; }
+                                    if self.loop_signal.is_some() { break; }
+                                }
+                                let mut stop = self.returning;
+                                if self.loop_signal.is_some() {
+                                    let ctrl = self.resolve_loop_signal(label);
+                                    if let LoopCtrl::Break = ctrl { stop = true; }
+                                }
+                                self.env.pop_scope();
+                                if stop { break; }
+                            }
+                            None => break,
+                        }
+                    }
+                    return Ok(());
+                }
                 let items = if let Some(func) = self
                     .trait_impls
                     .get(&("Iterable".to_string(), tn.clone(), "iter".to_string()))
@@ -991,7 +1340,17 @@ impl Interpreter {
                         self.env.pop_scope();
                         self.env.push_scope();
                         if let Some(cn) = catch_name {
-                            self.env.define(cn, raised);
+                            // Preserve an already-structured Error value; otherwise
+                            // wrap the raised value's string form as a User error.
+                            let bound = match raised {
+                                Value::Error(_) => raised,
+                                other => Value::Error(Arc::new(
+                                    crate::ErrorInfo::new(other.to_string())
+                                        .with_kind(crate::ErrorKind::User)
+                                        .with_span(self.current_file.clone().unwrap_or_default(), self.current_line, 0),
+                                )),
+                            };
+                            self.env.define(cn, bound);
                         }
                         for s in catch_body {
                             self.exec_stmt(s)?;
@@ -1002,7 +1361,12 @@ impl Interpreter {
                         self.env.pop_scope();
                         self.env.push_scope();
                         if let Some(cn) = catch_name {
-                            self.env.define(cn, Value::String(e.to_string()));
+                            let info = e.to_info().with_span(
+                                self.current_file.clone().unwrap_or_default(),
+                                self.current_line,
+                                0,
+                            );
+                            self.env.define(cn, Value::Error(Arc::new(info)));
                         }
                         for s in catch_body {
                             self.exec_stmt(s)?;
@@ -2374,6 +2738,27 @@ impl Interpreter {
         self.call_function_values(params, body, closure, is_async, arg_vals, named_vals)
     }
 
+    /// Run a function's body in the current scope (env already set to the
+    /// closure). Used by `task_group`. Returns the function's return value.
+    fn run_function_body(&mut self, params: &[Param], body: &[Stmt], _is_async: bool, arg_vals: &[Value], named_vals: &[(String, Value)]) -> crate::Result<Value> {
+        let bound = self.bind_params(params, arg_vals, named_vals)?;
+        for (name, v) in bound {
+            self.env.define(&name, v);
+        }
+        for s in body {
+            self.exec_stmt(s)?;
+            if self.returning {
+                break;
+            }
+        }
+        let ret = if self.returning {
+            std::mem::replace(&mut self.return_value, Value::Nil)
+        } else {
+            Value::Nil
+        };
+        Ok(ret)
+    }
+
     /// Call a function value with already-evaluated argument values. Used by
     /// trait-method dispatch where the receiver and arguments are computed
     /// before the call.
@@ -2503,6 +2888,86 @@ impl Interpreter {
             }
             FutureState::Polled => Err(crate::RakError::Runtime("await: future already polled".to_string())),
         }
+    }
+
+    /// Resolve a `Value::Future` **concurrently** by driving it on a plain OS
+/// thread (bounded by a counting semaphore so thousands of concurrent ops share
+/// a handful of threads). Deferred `async fn` bodies are run in their own
+/// `Interpreter`; pending I/O futures are joined via `block_on` on that thread
+/// (legal because the thread is not itself a Tokio worker). Returns a
+/// `std::thread::JoinHandle<crate::Result<Value>>`; does not block.
+    fn drive_future_concurrent(&self, fv: Value) -> crate::Result<std::thread::JoinHandle<crate::Result<Value>>> {
+        let handle = match fv {
+            Value::Future(h) => h,
+            other => return Err(crate::RakError::Runtime(format!(
+                "expected a future, got {}", other.type_name()
+            ))),
+        };
+        let state = std::mem::replace(&mut *handle.state.lock().unwrap(), FutureState::Polled);
+        let permit = crate::async_rt::permit_count();
+        match state {
+            FutureState::Ready(v) => {
+                let th = std::thread::spawn(move || {
+                    let _p = permit.acquire();
+                    Ok(v)
+                });
+                Ok(th)
+            }
+            FutureState::Pending(jh) => {
+                let th = std::thread::spawn(move || {
+                    let _p = permit.acquire();
+                    let _ = jh;
+                    match async_runtime().block_on(async { jh.await }) {
+                        Ok(v) => Ok(v),
+                        Err(e) => Err(crate::RakError::Runtime(format!("async task failed: {}", e))),
+                    }
+                });
+                Ok(th)
+            }
+            FutureState::Deferred { params, body, closure, args, named } => {
+                let th = std::thread::spawn(move || {
+                    let _p = permit.acquire();
+                    let mut interp = Interpreter::new();
+                    interp.env = (*closure).clone();
+                    interp.env.push_scope();
+                    for (p, a) in params.iter().zip(args.iter()) {
+                        interp.env.define(&p.name, a.clone());
+                    }
+                    for (n, v) in &named {
+                        interp.env.define(n, v.clone());
+                    }
+                    let r: crate::Result<()> = (|| {
+                        for s in &body {
+                            interp.exec_stmt(s)?;
+                            if interp.returning { break; }
+                        }
+                        Ok(())
+                    })();
+                    if let Err(e) = r { return Err(e); }
+                    let ret = if interp.returning {
+                        std::mem::replace(&mut interp.return_value, Value::Nil)
+                    } else {
+                        Value::Nil
+                    };
+                    Ok(ret)
+                });
+                Ok(th)
+            }
+            FutureState::Polled => Err(crate::RakError::Runtime("future already polled".to_string())),
+        }
+    }
+
+    /// Join an array of concurrently-driven futures, returning an array of
+    /// their values. Fails fast on the first task error.
+    fn join_futures_concurrent(&self, handles: Vec<std::thread::JoinHandle<crate::Result<Value>>>)
+        -> crate::Result<Vec<Value>> {
+        let mut out = Vec::with_capacity(handles.len());
+        for h in handles {
+            let joined = h.join()
+                .map_err(|_| crate::RakError::Runtime("join: concurrent task panicked".to_string()))??;
+            out.push(joined);
+        }
+        Ok(out)
     }
 
     /// `spawn` a value: a `Future` is returned as-is (async I/O is already
@@ -4183,6 +4648,442 @@ impl Interpreter {
                 };
                 Ok(Value::String(rak_stdlib::tunnel::udp_local_addr(&transport)))
             }
+            // --- Structured errors ---
+            "error" => {
+                let kind = self.val_to_string(args.first()).unwrap_or_else(|_| "runtime".to_string());
+                let message = self.val_to_string(args.get(1)).unwrap_or_else(|_| "error".to_string());
+                let k = str_to_kind(&kind);
+                Ok(Value::Error(Arc::new(
+                    crate::ErrorInfo::new(message).with_kind(k),
+                )))
+            }
+            "err_message" => {
+                let e = self.error_value(args.first())?;
+                Ok(Value::String(e.message.to_string()))
+            }
+            "err_kind" => {
+                let e = self.error_value(args.first())?;
+                Ok(Value::String(e.kind.as_str().to_string()))
+            }
+            "err_line" => {
+                let e = self.error_value(args.first())?;
+                Ok(Value::Int(e.line.unwrap_or(0) as i64))
+            }
+            "err_col" => {
+                let e = self.error_value(args.first())?;
+                Ok(Value::Int(e.col.unwrap_or(0) as i64))
+            }
+            "err_file" => {
+                let e = self.error_value(args.first())?;
+                Ok(Value::String(e.file.clone().unwrap_or_default()))
+            }
+            "err_cause" => {
+                let e = self.error_value(args.first())?;
+                match &e.cause {
+                    Some(c) => Ok(Value::String(c.clone())),
+                    None => Ok(Value::Nil),
+                }
+            }
+            "err_context" => {
+                let e = self.error_value(args.first())?;
+                Ok(Value::Map(e.context.iter().map(|(k, v)| (k.clone(), Value::String(v.clone()))).collect()))
+            }
+            "err_with_context" => {
+                let e = self.error_value(args.first())?;
+                let k = self.val_to_string(args.get(1))?;
+                let v = self.val_to_string(args.get(2))?;
+                let mut new = (*e).clone();
+                new.context.push((k, v));
+                Ok(Value::Error(Arc::new(new)))
+            }
+            // --- Async orchestration ---
+            "await_all" => {
+                let arr = match args.first().map(|v| v.clone()).unwrap_or(Value::Nil) {
+                    Value::Array(items) => items.iter().cloned().collect::<Vec<_>>(),
+                    other => return Err(crate::RakError::Runtime(format!("await_all: expected an array of futures, got {}", other.type_name()))),
+                };
+                let mut handles = Vec::with_capacity(arr.len());
+                for f in arr {
+                    handles.push(self.drive_future_concurrent(f)?);
+                }
+                let results = self.join_futures_concurrent(handles)?;
+                Ok(Value::Array(results))
+            }
+            "select" => {
+                let arr = match args.first().map(|v| v.clone()).unwrap_or(Value::Nil) {
+                    Value::Array(items) => items.iter().cloned().collect::<Vec<_>>(),
+                    other => return Err(crate::RakError::Runtime(format!("select: expected an array of futures, got {}", other.type_name()))),
+                };
+                if arr.is_empty() {
+                    return Err(crate::RakError::Runtime("select: empty array".to_string()));
+                }
+                let n = arr.len();
+                let mut handles = Vec::with_capacity(n);
+                for f in arr {
+                    handles.push(self.drive_future_concurrent(f)?);
+                }
+                // Race all tasks to a shared channel; the first producer wins.
+                let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<(usize, Value)>();
+                for (i, h) in handles.into_iter().enumerate() {
+                    let tx = tx.clone();
+                    std::thread::spawn(move || {
+                        let r = h.join();
+                        let v = match r { Ok(Ok(v)) => v, _ => Value::Nil };
+                        let _ = tx.send((i, v));
+                    });
+                }
+                drop(tx);
+                let (idx, val) = async_runtime().block_on(async move { rx.recv().await })
+                    .ok_or_else(|| crate::RakError::Runtime("select: no future resolved".to_string()))?;
+                Ok(Value::Tuple(vec![Value::Int(idx as i64), val]))
+            }
+            "timeout" => {
+                let future = args.first().map(|v| v.clone()).unwrap_or(Value::Nil);
+                let ms = args.get(1).and_then(|v| v.as_u64()).unwrap_or(1000);
+                match self.drive_future_concurrent(future) {
+                    Ok(h) => {
+                        let start = std::time::Instant::now();
+                        let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                        let done2 = done.clone();
+                        let h2 = std::thread::spawn(move || {
+                            let r = h.join();
+                            done2.store(true, std::sync::atomic::Ordering::SeqCst);
+                            match r {
+                                Ok(inner) => inner,
+                                Err(_) => Err(crate::RakError::Runtime("timeout: task panicked".to_string())),
+                            }
+                        });
+                        let mut timed_out = false;
+                        let result: crate::Result<Value> = loop {
+                            if done.load(std::sync::atomic::Ordering::SeqCst) {
+                                match h2.join() {
+                                    Ok(inner) => break inner,
+                                    Err(_) => break Err(crate::RakError::Runtime("timeout: task panicked".to_string())),
+                                }
+                            }
+                            if start.elapsed().as_millis() >= ms as u128 {
+                                timed_out = true;
+                                break Err(crate::RakError::Runtime("operation timed out".to_string()));
+                            }
+                            std::thread::sleep(std::time::Duration::from_micros(200));
+                        };
+                        if timed_out {
+                            Ok(Value::Result(None, Some(Box::new(Value::Error(Arc::new(
+                                crate::ErrorInfo::new("operation timed out").with_kind(crate::ErrorKind::Timeout)
+                            ))))))
+                        } else {
+                            match result {
+                                Ok(v) => Ok(Value::Result(Some(Box::new(v)), None)),
+                                Err(e) => Err(e),
+                            }
+                        }
+                    }
+                    Err(e) => Err(e),
+                }
+            }
+            "async_sleep" => {
+                let ms = args.first().and_then(|v| v.as_u64()).unwrap_or(0);
+                let h = async_runtime().spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+                    Value::Nil
+                });
+                Ok(Value::Future(Arc::new(FutureHandle { state: Mutex::new(FutureState::Pending(h)) })))
+            }
+            "async_yield" => {
+                let h = async_runtime().spawn(async move {
+                    tokio::task::yield_now().await;
+                    Value::Nil
+                });
+                Ok(Value::Future(Arc::new(FutureHandle { state: Mutex::new(FutureState::Pending(h)) })))
+            }
+            "task_group" => {
+                // task_group([fn1, fn2, ...], limit?) -> [results]
+                // Runs an array of (ordinary or async) functions concurrently with
+                // bounded parallelism. Each function is called with no args in its
+                // own Interpreter; results are joined in input order. An error in
+                // any member propagates (fail-fast) after all dispatched tasks settle.
+                let fns = match args.first().map(|v| v.clone()).unwrap_or(Value::Nil) {
+                    Value::Array(items) => items.iter().cloned().collect::<Vec<_>>(),
+                    other => return Err(crate::RakError::Runtime(format!("task_group: expected an array of functions, got {}", other.type_name()))),
+                };
+                let limit = args.get(1).and_then(|v| v.as_u64()).unwrap_or(crate::async_rt::num_workers_hint()) as usize;
+                let limit = limit.max(1);
+                let permit = crate::async_rt::permit_count_raw(limit);
+                let fns_arc = std::sync::Arc::new(fns);
+                let results = std::sync::Arc::new(std::sync::Mutex::new(vec![Value::Nil; fns_arc.len()]));
+                let err_cell = std::sync::Arc::new(std::sync::Mutex::new(None::<crate::RakError>));
+                let next = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+                let mut handles = Vec::new();
+                for _ in 0..limit.min(fns_arc.len()) {
+                    let permit = permit.clone();
+                    let fns = fns_arc.clone();
+                    let results = results.clone();
+                    let err_cell = err_cell.clone();
+                    let next = next.clone();
+                    handles.push(std::thread::spawn(move || {
+                        loop {
+                            let idx = next.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            if idx >= fns.len() { break; }
+                            let _p = permit.acquire();
+                            let f = fns[idx].clone();
+                            let result = run_group_fn(&f);
+                            match result {
+                                Ok(v) => results.lock().unwrap()[idx] = v,
+                                Err(e) => { let mut ec = err_cell.lock().unwrap(); if ec.is_none() { *ec = Some(e); } }
+                            }
+                        }
+                    }));
+                }
+                for h in handles { let _ = h.join(); }
+                if let Some(e) = err_cell.lock().unwrap().take() {
+                    return Err(e);
+                }
+                let out = results.lock().unwrap().iter().cloned().collect::<Vec<_>>();
+                Ok(Value::Array(out))
+            }
+            // --- Streaming (lazy, pull-based) ---
+            "stream_from_array" => {
+                let arr = match args.first().map(|v| v.clone()).unwrap_or(Value::Nil) {
+                    Value::Array(items) => items,
+                    other => return Err(crate::RakError::Runtime(format!("stream_from_array: expected an array, got {}", other.type_name()))),
+                };
+                Ok(make_stream(ArrayStream::new(arr)))
+            }
+            "stream_map" => {
+                let inner = self.stream_handle(args.first())?;
+                let f = args.get(1).map(|v| v.clone()).unwrap_or(Value::Nil);
+                Ok(make_stream(MapStream { inner, f }))
+            }
+            "filter" => {
+                let inner = self.stream_handle(args.first())?;
+                let f = args.get(1).map(|v| v.clone()).unwrap_or(Value::Nil);
+                Ok(make_stream(FilterStream { inner, f }))
+            }
+            "take" => {
+                let inner = self.stream_handle(args.first())?;
+                let n = args.get(1).and_then(|v| v.as_u64()).unwrap_or(0);
+                Ok(make_stream(TakeStream { inner, remaining: n }))
+            }
+            "stream_next" => {
+                let handle = self.stream_handle(args.first())?;
+                let mut guard = handle.lock().unwrap();
+                match guard.next(self)? {
+                    Some(v) => Ok(Value::Option(Some(Box::new(v)))),
+                    None => Ok(Value::Option(None)),
+                }
+            }
+            "collect" => {
+                let handle = self.stream_handle(args.first())?;
+                let mut out = Vec::new();
+                loop {
+                    let item = {
+                        let mut guard = handle.lock().unwrap();
+                        guard.next(self)?
+                    };
+                    match item {
+                        Some(v) => out.push(v),
+                        None => break,
+                    }
+                }
+                Ok(Value::Array(out))
+            }
+            "read_lines" => {
+                let path = self.val_to_string(args.first())?;
+                Ok(make_stream(LinesStream::open(&path)?))
+            }
+            "tcp_stream" => {
+                let addr = self.val_to_string(args.first())?;
+                use std::net::TcpStream;
+                let s = TcpStream::connect(&addr)
+                    .map_err(|e| crate::RakError::Runtime(format!("tcp_stream: {}: {}", addr, e)))?;
+                let _ = s.set_read_timeout(Some(std::time::Duration::from_secs(5)));
+                Ok(make_stream(TcpLineStream::open(s)))
+            }
+            // --- CLI (program args + stdin/stdout) ---
+            "argv" => {
+                Ok(Value::Array(self.program_argv.iter().cloned().map(Value::String).collect()))
+            }
+            "stdin_read_line" => {
+                let mut line = String::new();
+                use std::io::Read;
+                let mut stdin = std::io::stdin();
+                match stdin.read_line(&mut line) {
+                    Ok(0) => Ok(Value::Nil),
+                    Ok(_) => Ok(Value::String(line.trim_end_matches('\n').to_string())),
+                    Err(e) => Err(crate::RakError::Runtime(format!("stdin_read_line: {}", e))),
+                }
+            }
+            "stdin_read_all" => {
+                use std::io::Read;
+                let mut buf = String::new();
+                let _ = std::io::stdin().read_to_string(&mut buf);
+                Ok(Value::String(buf))
+            }
+            "eprint" => {
+                let msg = self.val_to_string(args.first())?;
+                eprintln!("{}", msg);
+                Ok(Value::Nil)
+            }
+            // Structured flag parser: parse_args(spec, argv) -> map
+            // spec is a map of flag -> "bool"|"string"|"int". Handles --flag value,
+            // --flag=value, and bare boolean --flag. Positional args go under "".
+            "parse_args" => {
+                let spec = match args.get(0).map(|v| v.clone()) {
+                    Some(Value::Map(m)) => m.clone(),
+                    _ => return Err(crate::RakError::Runtime("parse_args: expected a spec map".to_string())),
+                };
+                let argv = match args.get(1).map(|v| v.clone()) {
+                    Some(Value::Array(a)) => a.iter().map(|v| v.to_string()).collect::<Vec<_>>(),
+                    _ => self.program_argv.clone(),
+                };
+                let mut out: HashMap<String, Value> = HashMap::new();
+                let mut positionals: Vec<Value> = Vec::new();
+                let mut i = 0usize;
+                while i < argv.len() {
+                    let a = argv[i].clone();
+                    if a == "--help" || a == "-h" {
+                        out.insert("help".to_string(), Value::Bool(true));
+                        i += 1;
+                        continue;
+                    }
+                    if a.starts_with("--") {
+                        let body = a[2..].to_string();
+                        let (key, inline) = match body.find('=') {
+                            Some(pos) => (body[..pos].to_string(), Some(body[pos + 1..].to_string())),
+                            None => (body, None),
+                        };
+                        let kind = spec.get(&key).map(|v| v.to_string()).unwrap_or_else(|| "bool".to_string());
+                        if inline.is_some() || kind == "bool" {
+                            let val = match inline {
+                                Some(v) => Value::String(v),
+                                None => Value::Bool(true),
+                            };
+                            out.insert(key.clone(), val);
+                            i += 1;
+                            continue;
+                        }
+                        // --flag value
+                        if i + 1 < argv.len() {
+                            let raw = argv[i + 1].clone();
+                            let val = match kind.as_str() {
+                                "int" => Value::Int(raw.parse::<i64>().unwrap_or(0)),
+                                _ => Value::String(raw),
+                            };
+                            out.insert(key.clone(), val);
+                            i += 2;
+                            continue;
+                        } else {
+                            out.insert(key.clone(), Value::Bool(true));
+                            i += 1;
+                            continue;
+                        }
+                    }
+                    if a.starts_with('-') && a.len() > 1 {
+                        // Short flag -x ; consume next token as value if not bool-ish
+                        out.insert(a[1..].to_string(), Value::Bool(true));
+                        i += 1;
+                        continue;
+                    }
+                    positionals.push(Value::String(a));
+                    i += 1;
+                }
+                out.insert("".to_string(), Value::Array(positionals));
+                Ok(Value::Map(out))
+            }
+            // --- Data processing (compression + lazy CSV/JSONL streams) ---
+            "gzip" => {
+                let b = self.val_to_bytes(args.first())?;
+                let level = args.get(1).and_then(|v| v.as_u64()).unwrap_or(6) as u32;
+                match rak_stdlib::stream_io::gzip_compress(&b, level) {
+                    Ok(out) => Ok(Value::Bytes(out)),
+                    Err(e) => Err(crate::RakError::Runtime(format!("gzip: {}", e))),
+                }
+            }
+            "gunzip" => {
+                let b = self.val_to_bytes(args.first())?;
+                match rak_stdlib::stream_io::gzip_decompress(&b) {
+                    Ok(out) => Ok(Value::Bytes(out)),
+                    Err(e) => Err(crate::RakError::Runtime(format!("gunzip: {}", e))),
+                }
+            }
+            "deflate" => {
+                let b = self.val_to_bytes(args.first())?;
+                let level = args.get(1).and_then(|v| v.as_u64()).unwrap_or(6) as u32;
+                match rak_stdlib::stream_io::deflate_compress(&b, level) {
+                    Ok(out) => Ok(Value::Bytes(out)),
+                    Err(e) => Err(crate::RakError::Runtime(format!("deflate: {}", e))),
+                }
+            }
+            "inflate" => {
+                let b = self.val_to_bytes(args.first())?;
+                match rak_stdlib::stream_io::deflate_decompress(&b) {
+                    Ok(out) => Ok(Value::Bytes(out)),
+                    Err(e) => Err(crate::RakError::Runtime(format!("inflate: {}", e))),
+                }
+            }
+            "zip_archive" => {
+                // files: map name -> bytes (or array of [name, bytes])
+                let files_val = args.first().map(|v| v.clone()).unwrap_or(Value::Nil);
+                let mut files: Vec<(String, Vec<u8>)> = Vec::new();
+                match files_val {
+                    Value::Map(m) => {
+                        for (k, v) in m {
+                            files.push((k, self.val_to_bytes(Some(&v))?));
+                        }
+                    }
+                    Value::Array(a) => {
+                        for item in a.iter() {
+                            if let Value::Tuple(t) = item {
+                                if let (Some(Value::String(name)), Some(bytes)) = (t.get(0), t.get(1)) {
+                                    files.push((name.to_string(), self.val_to_bytes(Some(bytes))?));
+                                }
+                            }
+                        }
+                    }
+                    other => return Err(crate::RakError::Runtime(format!("zip_archive: expected a map/array, got {}", other.type_name()))),
+                }
+                match rak_stdlib::stream_io::zip_archive(files) {
+                    Ok(out) => Ok(Value::Bytes(out)),
+                    Err(e) => Err(crate::RakError::Runtime(format!("zip_archive: {}", e))),
+                }
+            }
+            "zip_list" => {
+                let b = self.val_to_bytes(args.first())?;
+                match rak_stdlib::stream_io::zip_list(&b) {
+                    Ok(names) => Ok(Value::Array(names.into_iter().map(Value::String).collect())),
+                    Err(e) => Err(crate::RakError::Runtime(format!("zip_list: {}", e))),
+                }
+            }
+            "zip_extract" => {
+                let b = self.val_to_bytes(args.first())?;
+                let name = self.val_to_string(args.get(1))?;
+                match rak_stdlib::stream_io::zip_extract(&b, &name) {
+                    Ok(out) => Ok(Value::Bytes(out)),
+                    Err(e) => Err(crate::RakError::Runtime(format!("zip_extract: {}", e))),
+                }
+            }
+            "parse_csv_line" => {
+                let line = self.val_to_string(args.first())?;
+                let sep = self.val_to_string(args.get(1)).unwrap_or_else(|_| ",".to_string());
+                let delim = sep.chars().next().unwrap_or(',');
+                let fields = rak_stdlib::stream_io::parse_csv_line(&line, delim);
+                Ok(Value::Array(fields.into_iter().map(Value::String).collect()))
+            }
+            "stream_csv" => {
+                let path = self.val_to_string(args.first())?;
+                let opts = self.val_to_string(args.get(1)).unwrap_or_default();
+                let delim = if opts.contains(";") { ';' } else { ',' };
+                let has_header = opts.contains("header");
+                let inner = make_stream(LinesStream::open(&path)?);
+                let wrapper = CsvStream { inner: self.stream_handle(Some(&inner))?, delim, has_header, headers: Vec::new(), started: false };
+                Ok(Value::Stream(Arc::new(Mutex::new(Box::new(wrapper)))))
+            }
+            "stream_jsonl" => {
+                let path = self.val_to_string(args.first())?;
+                let inner = make_stream(LinesStream::open(&path)?);
+                let wrapper = JsonlStream { inner: self.stream_handle(Some(&inner))? };
+                Ok(Value::Stream(Arc::new(Mutex::new(Box::new(wrapper)))))
+            }
             // --- DNS ---
             "dns_query" => {
                 let name = self.val_to_string(args.first())?;
@@ -4564,6 +5465,24 @@ impl Interpreter {
         }
     }
 
+    fn error_value(&self, val: Option<&Value>) -> crate::Result<Arc<crate::ErrorInfo>> {
+        match val {
+            Some(Value::Error(e)) => Ok(e.clone()),
+            Some(v) => Ok(Arc::new(crate::ErrorInfo::new(v.to_string()))),
+            None => Err(crate::RakError::Runtime("expected an error value".to_string())),
+        }
+    }
+
+    fn stream_handle(&self, val: Option<&Value>) -> crate::Result<StreamHandle> {
+        match val {
+            Some(Value::Stream(s)) => Ok(s.clone()),
+            Some(v) => Err(crate::RakError::Runtime(format!(
+                "expected a stream, got {}", v.type_name()
+            ))),
+            None => Err(crate::RakError::Runtime("expected a stream".to_string())),
+        }
+    }
+
     fn value_to_json(&self, val: &Value) -> std::collections::HashMap<String, rak_stdlib::log::Json> {
         fn conv(v: &Value) -> rak_stdlib::log::Json {
             match v {
@@ -4723,6 +5642,49 @@ pub fn substitute_expr(expr: &Expr, bindings: &HashMap<String, Expr>) -> Expr {
 }
 
 /// Parse a `ws://[host][:port][/path]` URL into (host, port, path).
+/// Map an error-kind string (e.g. "io", "network", "parse") to an `ErrorKind`.
+fn str_to_kind(s: &str) -> crate::ErrorKind {
+    match s.trim().to_lowercase().as_str() {
+        "io" => crate::ErrorKind::Io,
+        "network" => crate::ErrorKind::Network,
+        "parse" => crate::ErrorKind::Parse,
+        "compile" => crate::ErrorKind::Compile,
+        "type" => crate::ErrorKind::Type,
+        "package" => crate::ErrorKind::Package,
+        "permission" => crate::ErrorKind::Permission,
+        "user" => crate::ErrorKind::User,
+        "timeout" => crate::ErrorKind::Timeout,
+        "cancel" => crate::ErrorKind::Cancel,
+        _ => crate::ErrorKind::Runtime,
+    }
+}
+
+/// Run a single (ordinary or async) function value in its own interpreter,
+/// used by `task_group`. No args are passed.
+fn run_group_fn(f: &Value) -> crate::Result<Value> {
+    match f {
+        Value::Function { params, body, closure, is_async, .. } => {
+            let params = params.clone();
+            let body = body.clone();
+            let closure = closure.clone();
+            let is_async = *is_async;
+            let mut interp = Interpreter::new();
+            interp.env = (*closure).clone();
+            interp.env.push_scope();
+            let r = interp.run_function_body(&params, &body, is_async, &[], &[]);
+            // Thread the raised value's message through so `catch` in the caller
+            // sees a meaningful error rather than an empty one.
+            match r {
+                Err(crate::RakError::Raise(msg)) => {
+                    Err(crate::RakError::Runtime(format!("group member raised: {}", msg)))
+                }
+                other => other,
+            }
+        }
+        _ => Err(crate::RakError::Runtime(format!("task_group: expected a function, got {}", f.type_name()))),
+    }
+}
+
 fn parse_ws_url(url: &str) -> crate::Result<(String, u16, String)> {
     let rest = url
         .strip_prefix("ws://")
@@ -4766,6 +5728,7 @@ impl Value {
             Value::MmapSlice(_, _, _) => "mmap-slice".to_string(),
             Value::Future(_) => "future".to_string(),
             Value::Pcap(_) => "pcap".to_string(),
+            Value::Error(_) => "error".to_string(),
             Value::Evidence { inner, .. } => format!("evidence<{}>", inner.type_name()),
             _ => "<opaque>".to_string(),
         }

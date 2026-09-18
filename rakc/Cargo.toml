@@ -44,11 +44,13 @@ regex = "1.10"
 
 [dev-dependencies]
 pretty_assertions = "1.4"
+proptest = "1.4"
 
 [features]
 default = []
 llvm = [] # "inkwell"
 jit = []
+backtrace = []
 gui = ["dep:wry", "dep:tao"]
 lsp = ["dep:tower-lsp"]
 bindgen = ["dep:bindgen"]

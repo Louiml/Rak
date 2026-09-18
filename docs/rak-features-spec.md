@@ -1166,3 +1166,113 @@ deps, compile on Windows.
   forgery, and covert HTTP relay respectively on `rakc run`.
 - The VM returns clear "not supported" errors for the interpreter-only constructs
   (`tunnel`, `udp_*`, `try/catch`, `net_raw_*`) rather than crashing.
+
+---
+
+## Part 6 � v0.7: Async, streaming, CLI, errors, data processing, rakpkg  **[SHIPPED]**
+
+All features below are implemented, tested, and verified working (`cargo test`
+green). Nothing here is aspirational.
+
+### 6.1 Structured errors  **[SHIPPED]**
+- `ErrorInfo` (`rakc/src/lib.rs`) carries `message`, `kind`, `file:line:col`
+  span, `cause`, a `context` map, and a backtrace. `ErrorKind` classifies
+  `runtime/io/network/parse/compile/type/package/permission/user/timeout/cancel`.
+- `catch e` binds a first-class `Value::Error` that still stringifies to the
+  message (so existing `dump e` / `fmt("{}", e)` keep working) but exposes
+  `.kind`/`.line`/`.col`/`.cause` via builtins:
+  `error(kind,msg)`, `err_message`, `err_kind`, `err_line`, `err_col`,
+  `err_file`, `err_cause`, `err_context`, `err_with_context`.
+- Registered in both backends + LSP.
+
+### 6.2 Async runtime  **[SHIPPED]**
+- Shared Tokio runtime (`async_rt.rs`) with a non-Tokio counting semaphore
+  (`permit_count`) so concurrent futures run on a bounded pool of OS threads �
+  no thread per op, thousands of concurrent operations supported.
+- Builtins: `await_all([futures]) -> [values]`, `select([futures]) -> (index, value)`
+  (race), `timeout(future, ms) -> Result`, `task_group([fns], limit) -> [results]`
+  (bounded parallelism + error propagation), `async_sleep(ms)`,
+  `async_yield()`. Deferred `async fn` bodies are driven concurrently on the
+  bounded pool. `tcp_probe`/`http_get_async` already produce futures.
+- See `examples/async_orchestration.rak`.
+
+### 6.3 Streaming  **[SHIPPED]**
+- `Value::Stream` is a pull-based `RakStream` (`next()`) giving natural
+  backpressure. `for item in stream` iterates lazily.
+- Builtins: `stream_from_array`, `stream_map(s, f)`, `filter(s, f)`,
+  `take(s, n)`, `stream_next(s)`, `collect(s)`, `read_lines(path)`,
+  `tcp_stream(addr)`.
+- See `examples/streaming.rak`.
+
+### 6.4 CLI  **[SHIPPED]**
+- `fn main(argv) -> int` is an optional entry point; top-level code runs first,
+  then `main` is called with the args array, and its `int` return becomes the
+  process exit code (works for `rakc run` and built `.exe`).
+- Builtins: `argv()`, `stdin_read_line()`, `stdin_read_all()`, `eprint()`,
+  and a structured flag parser `parse_args(spec, argv) -> map` handling
+  `--flag value`, `--flag=value`, boolean `--flag`, and positionals under `""`.
+- See `examples/cli_greeter.rak`.
+
+### 6.5 Data processing  **[SHIPPED]**
+- `stdlib/src/stream_io.rs` provides gzip/deflate, ZIP create/list/extract, and
+  RFC-4180 CSV + JSONL parsers.
+- Interpreter builtins: `gzip/gunzip/deflate/inflate`, `zip_archive/zip_list/`
+  `zip_extract`, `parse_csv_line`, and lazy `stream_csv(path, opts)` and
+  `stream_jsonl(path)` (never fully load files into memory).
+
+### 6.6 rakpkg ugrade  **[SHIPPED]**
+- `rakpkg` (0.7.0) adds version/rev constraints (`user/repo@^1.2`, `#rev`),
+  a `rakpkg.lock` (resolved rev + manifest SHA-256 checksum), and commands:
+  `add/remove/install/update/lock/tree/audit/publish/run/build/list`.
+- `tree` prints the recursive dependency graph (cycle-safe); `audit` verifies
+  installed checksums against the lockfile.
+
+### 6.7 Fuzzing / property tests  **[SHIPPED]**
+- `rakc/tests/proptest_harness.rs` runs 8 proptest suites on the stable
+  CI toolchain asserting no-panic / bounded-termination / no-OOB for the lexer,
+  parser, DNS parser, raw packet builders, WebSocket frame parser, TLS parser,
+  JSON parser, and tunnel framing.
+
+### Verification
+- `cargo test -p rakc` (162 lib tests) + `--test proptest_harness` (8) green.
+- `cargo test -p rak-stdlib` (21) green.
+- `examples/async_orchestration.rak`, `examples/streaming.rak`,
+  `examples/cli_greeter.rak`, `examples/security_workflow.rak` all run.
+- The VM omits features it does not implement (deferred `async fn` bodies,
+  `stream_*`, `argv()`, `parse_args`) with clear errors rather than crashing;
+  the pure async I/O futures (`async_sleep`, `tcp_probe`) run on the VM.
+
+### 6.8 Debugger (`rakc debug`)  **[SHIPPED]**
+- `rakc debug program.rak` launches a **bytecode-VM source debugger**. The
+  compiler now emits a source line-marker per top-level statement into
+  `Chunk.lines`, so breakpoints map to bytecode offsets (source ↔ bytecode
+  mapping). The VM pauses at line boundaries and drives an interactive REPL.
+- Commands: `break <line|file:line>`, `continue`/`c`, `step`/`s`, `next`/`n`,
+  `finish`, `locals`, `stack`/`bt`/`backtrace`, `frame`, `print <name>`,
+  `disassemble`/`dis` (full bytecode listing with line markers + operands),
+  `quit`/`q`, `help`. Program output streams after each pause.
+- Breakpoints are set by **statement index** (1-based, matching the bytecode
+  line markers); `disassemble` shows the line→bytecode mapping so you can place
+  breakpoints precisely. Locals are `local[N]` slots of the current frame and
+  `stack` shows the function call chain with line numbers.
+
+### 6.9 Fuzzing: cargo-fuzz targets  **[SHIPPED]**
+- `fuzz/` is a standalone libFuzzer workspace (13 targets) complementing the
+  proptest harnesses: `lexer`, `parser`, `eval`, `manifest`, `dns`, `tls`,
+  `json`, `websocket`, `tunnel`, `netraw`, `csv`, `gzip`, `zip`.
+- Run with `cargo +nightly fuzz run <target>` (Linux/WSL; the sanitizer passes
+  MSVC doesn't support). See `fuzz/README.md`. The proptest harnesses in 6.7
+  run continuously on stable CI; the fuzz pack performs deeper coverage-guided
+  campaigns on nightly.
+- `rakpkg` is now a lib+bin so `parse_manifest_str` is fuzzable and reusable.
+
+### Verification
+- `cargo test -p rakc` (162 lib tests) + `--test proptest_harness` (8) green.
+- `cargo test -p rak-stdlib` (21) and `cargo test -p rakpkg` (4) green.
+- `fuzz/` type-checks (`cargo check`) with 0 errors; `rakc debug` verified
+  end-to-end for break/step/continue/locals/stack/print/disassemble.
+- `examples/async_orchestration.rak`, `examples/streaming.rak`,
+  `examples/cli_greeter.rak`, `examples/security_workflow.rak` all run.
+- The VM omits features it does not implement (deferred `async fn` bodies,
+  `stream_*`, `argv()`, `parse_args`) with clear errors rather than crashing;
+  the pure async I/O futures (`async_sleep`, `tcp_probe`) run on the VM.

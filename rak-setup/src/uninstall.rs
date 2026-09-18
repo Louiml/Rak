@@ -20,7 +20,9 @@ pub fn list() -> Result<i32> {
                     Action::File { path } => format!("file {}", path.display()),
                     Action::Dir { path } => format!("dir  {}", path.display()),
                     Action::PathLine { rc_file, .. } => format!("PATH line in {}", rc_file.display()),
-                    Action::EnvUser { key, .. } | Action::EnvSystem { key, .. } => format!("env {}", key),
+                    Action::EnvUser { key, value } | Action::EnvSystem { key, value } => {
+                        format!("env {} = {}", key, value)
+                    }
                     Action::DesktopEntry { path } => format!("desktop {}", path.display()),
                     Action::MimeAssoc => "mime assoc".to_string(),
                     Action::RegKey { path } => format!("reg {}", path),
@@ -69,9 +71,21 @@ fn uninstall_manifest(m: &crate::manifest::Manifest, scope: Scope) -> Result<i32
                 status(&format!("removed file {}", path.display()));
             }
             Action::Dir { path } => {
-                // Only remove if empty-ish (best effort); don't nuke user data.
-                let _ = std::fs::remove_dir_all(path);
-                status(&format!("removed dir {}", path.display()));
+                // Only recurse-delete directories that belong to Rak (inside
+                // ~/.rak or the recorded IDE dir); for anything else (e.g.
+                // /usr/local/bin) just try to remove it if empty.
+                let owned = platform::rak_root().map(|r| path.starts_with(&r)).unwrap_or(false)
+                    || m.ide_dir == *path;
+                let removed = if owned {
+                    std::fs::remove_dir_all(path).is_ok()
+                } else {
+                    std::fs::remove_dir(path).is_ok()
+                };
+                if removed {
+                    status(&format!("removed dir {}", path.display()));
+                } else {
+                    status(&format!("left dir {} (not empty or not owned)", path.display()));
+                }
             }
             Action::PathLine { rc_file, line } => {
                 let contents = std::fs::read_to_string(rc_file).unwrap_or_default();
@@ -83,19 +97,33 @@ fn uninstall_manifest(m: &crate::manifest::Manifest, scope: Scope) -> Result<i32
                 let _ = std::fs::write(rc_file, cleaned);
                 status(&format!("removed PATH line from {}", rc_file.display()));
             }
-            Action::EnvUser { key, .. } => {
+            Action::EnvUser { key, value } => {
                 #[cfg(target_os = "windows")]
                 {
-                    let _ = std::process::Command::new("reg")
-                        .args(["delete", "HKCU\\Environment", "/v", key, "/f"])
-                        .status();
+                    if key.eq_ignore_ascii_case("PATH") {
+                        // Remove only the rak bin entry — never the whole
+                        // PATH value.
+                        platform::win::path_remove(platform::win::USER_ENV_KEY, value);
+                        platform::win::broadcast_env_change();
+                    } else {
+                        platform::win::delete_value(platform::win::USER_ENV_KEY, key);
+                    }
                 }
-                let _ = key;
+                let _ = value;
                 status(&format!("removed env {}", key));
             }
-            Action::EnvSystem { key, .. } => {
-                let _ = key;
-                status(&format!("(system env {} left; remove manually if needed)", key));
+            Action::EnvSystem { key, value } => {
+                #[cfg(target_os = "windows")]
+                {
+                    if key.eq_ignore_ascii_case("PATH") {
+                        platform::win::path_remove(platform::win::SYSTEM_ENV_KEY, value);
+                        platform::win::broadcast_env_change();
+                    } else {
+                        platform::win::delete_value(platform::win::SYSTEM_ENV_KEY, key);
+                    }
+                }
+                let _ = value;
+                status(&format!("removed env {} (system)", key));
             }
             Action::DesktopEntry { path } => {
                 let _ = std::fs::remove_file(path);
