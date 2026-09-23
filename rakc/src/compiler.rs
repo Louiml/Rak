@@ -24,6 +24,18 @@ pub struct Compiler {
     /// compile pre-pass so `Name.decode(...)` / `Name.encode(...)` resolve at
     /// compile time to native-fn globals.
     binstructs: HashMap<String, Vec<BinField>>,
+    /// `impl <Trait> for <Type>` / inherent `impl <Type>` methods, baked as
+    /// closures and registered as `__method_<type>_<name>` globals so
+    /// `Op::CallMethod` can dispatch on the receiver's runtime type.
+    method_closures: Vec<(String, Value)>,
+    /// `enum` constructor natives keyed `__enum_new_<Enum>_<Variant>`.
+    enum_ctors: Vec<(String, Value)>,
+    /// Set of baked enum-ctor global names, for `Expr::Path` lookup.
+    enum_ctor_names: std::collections::HashSet<String>,
+    /// Active loops for `break`/`continue` (most recent last). Outer scope
+    /// entries carry the loop's optional label, its `continue` jump target,
+    /// and any floating `break` jumps to patch when the loop ends.
+    loop_stack: Vec<LoopInfo>,
     /// Names exported by the module currently being compiled (`pub`/`export`).
     current_exports: Vec<String>,
     /// Import-once cache: canonical module path → its exported global names.
@@ -32,6 +44,15 @@ pub struct Compiler {
     compiling: std::collections::HashSet<std::path::PathBuf>,
     /// Base directory for resolving name-based imports of the current module.
     base_dir: String,
+}
+
+struct LoopInfo {
+    label: Option<String>,
+    /// Floating `break` jumps, patched to the loop's end.
+    break_jumps: Vec<usize>,
+    /// Floating `continue` jumps, patched to the loop's continue point
+    /// (the increment for `for`, loop-start for `while`/`loop`).
+    continue_jumps: Vec<usize>,
 }
 
 impl Compiler {
@@ -47,6 +68,10 @@ impl Compiler {
             func_closures: HashMap::new(),
             macros: HashMap::new(),
             binstructs: HashMap::new(),
+            method_closures: Vec::new(),
+            enum_ctors: Vec::new(),
+            enum_ctor_names: std::collections::HashSet::new(),
+            loop_stack: Vec::new(),
             current_exports: Vec::new(),
             module_cache: HashMap::new(),
             compiling: std::collections::HashSet::new(),
@@ -93,6 +118,32 @@ impl Compiler {
                 Stmt::BinStructDef { name, fields } => {
                     self.binstructs.insert(name.clone(), fields.clone());
                 }
+                Stmt::Enum { name, variants, .. } => {
+                    // Bake a constructor native per variant as a global
+                    // `__enum_new_<Enum>_<Variant>`; `Event::Connect(x)`
+                    // compiles to `LoadGlobal ctor; args; Call`.
+                    for v in variants {
+                        let ctor = crate::vm::make_enum_ctor(name.clone(), v.name.clone());
+                        let key = format!("__enum_new_{}_{}", name, v.name);
+                        self.enum_ctor_names.insert(key.clone());
+                        self.enum_ctors.push((key, ctor));
+                    }
+                }
+                Stmt::Impl { target, trait_name, methods } => {
+                    // Mirror the interpreter's registration: `impl Display for
+                    // Point` -> type "Point"; inherent `impl Point` -> target
+                    // is the type. Methods are `Stmt::Let` fn values.
+                    let type_name = trait_name.clone().unwrap_or_else(|| target.clone());
+                    for m in methods {
+                        if let Stmt::Let { name: mname, value, .. } = m {
+                            if let Expr::Function { params, body, .. } = value.as_ref() {
+                                let key = format!("__method_{}_{}", type_name, mname);
+                                let closure = self.compile_function(&key, params, body)?;
+                                self.method_closures.push((key, closure));
+                            }
+                        }
+                    }
+                }
                 _ => {}
             }
         }
@@ -110,6 +161,23 @@ impl Compiler {
             self.emit_u16(ci);
             self.load_const(en);
             let ci = self.const_str(&format!("__bin_encode_{}", name));
+            self.emit_op(Op::StoreGlobal);
+            self.emit_u16(ci);
+        }
+        // Register `impl`-block methods as globals so `Op::CallMethod` can
+        // dispatch `obj.method(...)` on the receiver's runtime type name.
+        let methods: Vec<(String, Value)> = std::mem::take(&mut self.method_closures);
+        for (name, closure) in methods {
+            self.load_const(closure);
+            let ci = self.const_str(&name);
+            self.emit_op(Op::StoreGlobal);
+            self.emit_u16(ci);
+        }
+        // Register enum constructor natives.
+        let ctors: Vec<(String, Value)> = std::mem::take(&mut self.enum_ctors);
+        for (name, ctor) in ctors {
+            self.load_const(ctor);
+            let ci = self.const_str(&name);
             self.emit_op(Op::StoreGlobal);
             self.emit_u16(ci);
         }
@@ -170,6 +238,15 @@ impl Compiler {
                 continue;
             }
             if matches!(stmt, Stmt::BinStructDef { .. }) {
+                continue;
+            }
+            // `impl` blocks are handled in the pre-pass (baked `__method_*`
+            // globals); `Stmt::Trait` declarations are documentation-only.
+            // `struct`/`enum`/`type` declarations are compile-time metadata
+            // (struct literals and baked enum ctors need no runtime def).
+            let is_def = |s: &Stmt| matches!(s, Stmt::Struct { .. } | Stmt::Enum { .. } | Stmt::TypeAlias { .. } | Stmt::Impl { .. });
+            let is_def_export = matches!(stmt, Stmt::Export(inner) if is_def(inner.as_ref()));
+            if is_def(stmt) || is_def_export || matches!(stmt, Stmt::Trait { .. }) {
                 continue;
             }
             self.compile_stmt(stmt)?;
@@ -563,6 +640,42 @@ impl Compiler {
                 }
                 self.emit_op(Op::Return);
             }
+            Stmt::Try { body, catch_name, catch_body } => {
+                // Layout:
+                //   Op::Try <handler>   [body]   Jump end
+                //   handler: [StoreLocal e | Pop]  [catch_body]  CatchEnd
+                //   end:
+                self.emit_op(Op::Try);
+                let try_pos = self.chunk.code.len();
+                self.emit_byte(0xFF);
+                self.emit_byte(0xFF);
+                for s in body {
+                    self.compile_stmt(s)?;
+                }
+                let jend = self.emit_jump(Op::Jump);
+                // Handler: patch the Try operand to point here.
+                let handler = self.chunk.code.len() as u16;
+                self.chunk.code[try_pos] = (handler >> 8) as u8;
+                self.chunk.code[try_pos + 1] = (handler & 0xFF) as u8;
+                if let Some(cn) = catch_name {
+                    let slot = self.add_local(cn.clone());
+                    self.emit_op(Op::StoreLocal);
+                    self.emit_byte(slot);
+                } else {
+                    self.emit_op(Op::Pop);
+                }
+                self.begin_scope();
+                for s in catch_body {
+                    self.compile_stmt(s)?;
+                }
+                self.end_scope();
+                self.emit_op(Op::CatchEnd);
+                self.patch_jump(jend);
+            }
+            Stmt::Raise(expr) => {
+                self.compile_expr(expr)?;
+                self.emit_op(Op::Throw);
+            }
             Stmt::If { cond, then_branch, else_branch } => {
                 self.compile_expr(cond)?;
                 let jfalse = self.emit_jump(Op::JumpIfFalse);
@@ -584,8 +697,9 @@ impl Compiler {
                 }
                 self.patch_jump(jend);
             }
-            Stmt::While { cond, body, .. } => {
+            Stmt::While { label, cond, body, .. } => {
                 let loop_start = self.chunk.code.len();
+                self.loop_stack.push(LoopInfo { label: label.clone(), break_jumps: Vec::new(), continue_jumps: Vec::new() });
                 self.compile_expr(cond)?;
                 let jexit = self.emit_jump(Op::JumpIfFalse);
                 self.emit_op(Op::Pop);
@@ -597,17 +711,102 @@ impl Compiler {
                 self.emit_jump_back(loop_start);
                 self.patch_jump(jexit);
                 self.emit_op(Op::Pop);
+                self.end_loop_with_continue(loop_start);
             }
-            Stmt::Loop { body, .. } => {
+            Stmt::IfLet { pattern, value, then_branch, else_branch } => {
+                self.compile_expr(value)?;
+                let v_slot = self.add_local("__iflet_v".to_string());
+                self.emit_op(Op::StoreLocal);
+                self.emit_byte(v_slot);
+                let binds = self.emit_pattern_match(pattern, v_slot)?;
+                let jelse = self.emit_jump(Op::JumpIfFalse);
+                self.begin_scope();
+                for (i, name) in binds.iter().enumerate() {
+                    self.emit_op(Op::Dup);
+                    self.load_const(Value::I64(i as i64));
+                    self.emit_op(Op::IndexGet);
+                    let slot = self.add_local(name.clone());
+                    self.emit_op(Op::StoreLocal);
+                    self.emit_byte(slot);
+                }
+                self.emit_op(Op::Pop); // drop the indicator (array or true)
+                for s in then_branch {
+                    self.compile_stmt(s)?;
+                }
+                self.end_scope();
+                let jend = self.emit_jump(Op::Jump);
+                self.patch_jump(jelse);
+                self.emit_op(Op::Pop); // drop the nil
+                if let Some(els) = else_branch {
+                    self.begin_scope();
+                    for s in els {
+                        self.compile_stmt(s)?;
+                    }
+                    self.end_scope();
+                }
+                self.patch_jump(jend);
+            }
+            Stmt::WhileLet { pattern, value, body } => {
                 let loop_start = self.chunk.code.len();
+                self.loop_stack.push(LoopInfo { label: None, break_jumps: Vec::new(), continue_jumps: Vec::new() });
+                self.compile_expr(value)?;
+                let v_slot = self.add_local("__whilelet_v".to_string());
+                self.emit_op(Op::StoreLocal);
+                self.emit_byte(v_slot);
+                let binds = self.emit_pattern_match(pattern, v_slot)?;
+                let jexit = self.emit_jump(Op::JumpIfFalse);
+                self.begin_scope();
+                for (i, name) in binds.iter().enumerate() {
+                    self.emit_op(Op::Dup);
+                    self.load_const(Value::I64(i as i64));
+                    self.emit_op(Op::IndexGet);
+                    let slot = self.add_local(name.clone());
+                    self.emit_op(Op::StoreLocal);
+                    self.emit_byte(slot);
+                }
+                self.emit_op(Op::Pop); // drop the indicator
+                for s in body {
+                    self.compile_stmt(s)?;
+                }
+                self.end_scope();
+                self.emit_jump_back(loop_start);
+                self.patch_jump(jexit);
+                self.emit_op(Op::Pop); // drop the nil
+                self.end_loop_with_continue(loop_start);
+            }
+            Stmt::DoWhile { cond, body } => {
+                let loop_start = self.chunk.code.len();
+                self.loop_stack.push(LoopInfo { label: None, break_jumps: Vec::new(), continue_jumps: Vec::new() });
+                self.begin_scope();
+                for s in body {
+                    self.compile_stmt(s)?;
+                }
+                self.end_scope();
+                self.compile_expr(cond)?;
+                let jexit = self.emit_jump(Op::JumpIfFalse);
+                self.emit_op(Op::Pop);
+                self.emit_jump_back(loop_start);
+                // `do..while` body runs at least once; the continue point is the
+                // condition check.
+                let cont = self.chunk.code.len();
+                self.end_loop_with_continue(cont);
+                self.patch_jump(jexit);
+                self.emit_op(Op::Pop);
+            }
+            Stmt::Loop { label, body } => {
+                let loop_start = self.chunk.code.len();
+                self.loop_stack.push(LoopInfo { label: label.clone(), break_jumps: Vec::new(), continue_jumps: Vec::new() });
                 self.begin_scope();
                 for s in body {
                     self.compile_stmt(s)?;
                 }
                 self.end_scope();
                 self.emit_jump_back(loop_start);
+                self.end_loop_with_continue(loop_start);
             }
-            Stmt::For { pattern, iterable, body, .. } => self.compile_for(pattern, iterable, body)?,
+            Stmt::For { label, pattern, iterable, body } => self.compile_for(label, pattern, iterable, body)?,
+            Stmt::Break(target) => self.compile_loop_jump(target, false)?,
+            Stmt::Continue(target) => self.compile_loop_jump(target, true)?,
             Stmt::Const { name, value } => {
                 // `const NAME = expr` compiles like a `let` (eagerly evaluated
                 // at the call site and bound; immutable by convention).
@@ -753,7 +952,7 @@ impl Compiler {
         Ok(())
     }
 
-    fn compile_for(&mut self, pattern: &Pattern, iterable: &Expr, body: &[Stmt]) -> Result<(), String> {
+    fn compile_for(&mut self, label: &Option<String>, pattern: &Pattern, iterable: &Expr, body: &[Stmt]) -> Result<(), String> {
         // VM support is limited to a single identifier binding; tuple/indexed
         // `for i, x in …` patterns run on the interpreter only for now.
         let name = match pattern {
@@ -772,6 +971,7 @@ impl Compiler {
                     self.emit_op(Op::StoreLocal);
                     self.emit_byte(hi_slot);
                     let loop_start = self.chunk.code.len();
+                    self.loop_stack.push(LoopInfo { label: label.clone(), break_jumps: Vec::new(), continue_jumps: Vec::new() });
                     self.emit_op(Op::LoadLocal);
                     self.emit_byte(lo_slot);
                     self.emit_op(Op::LoadLocal);
@@ -789,6 +989,9 @@ impl Compiler {
                         self.compile_stmt(s)?;
                     }
                     self.end_scope();
+                    // `continue` in a range `for` skips the increment, not the
+                    // loop-start (otherwise the bound never advances).
+                    let inc_target = self.chunk.code.len();
                     self.emit_op(Op::LoadLocal);
                     self.emit_byte(lo_slot);
                     self.emit_op(Op::Dup);
@@ -801,6 +1004,7 @@ impl Compiler {
                     self.emit_op(Op::Pop);
                     self.emit_op(Op::Pop);
                     self.emit_op(Op::Pop);
+                    self.end_loop_with_continue(inc_target);
                 }
                 Ok(())
             }
@@ -814,6 +1018,7 @@ impl Compiler {
                 self.emit_op(Op::StoreLocal);
                 self.emit_byte(idx_slot);
                 let loop_start = self.chunk.code.len();
+                self.loop_stack.push(LoopInfo { label: label.clone(), break_jumps: Vec::new(), continue_jumps: Vec::new() });
                 self.emit_op(Op::LoadLocal);
                 self.emit_byte(arr_slot);
                 self.emit_op(Op::LoadLocal);
@@ -829,6 +1034,8 @@ impl Compiler {
                     self.compile_stmt(s)?;
                 }
                 self.end_scope();
+                // `continue` in a `for` skips to the next element (the increment).
+                let inc_target = self.chunk.code.len();
                 self.emit_op(Op::LoadLocal);
                 self.emit_byte(idx_slot);
                 self.load_const(Value::I64(1));
@@ -839,6 +1046,7 @@ impl Compiler {
                 self.patch_jump(jexit);
                 // JumpIfFalse left the (falsy) item on the stack; pop it.
                 self.emit_op(Op::Pop);
+                self.end_loop_with_continue(inc_target);
                 Ok(())
             }
         }
@@ -996,6 +1204,23 @@ impl Compiler {
                 if !named.is_empty() {
                     return Err("VM does not support named arguments".to_string());
                 }
+                // `Enum::Variant(args...)` — call the baked ctor native.
+                if let Expr::Path(segs) = callee.as_ref() {
+                    if segs.len() == 2 {
+                        let key = format!("__enum_new_{}_{}", segs[0], segs[1]);
+                        if self.enum_ctor_names.contains(&key) {
+                            let ci = self.const_str(&key);
+                            self.emit_op(Op::LoadGlobal);
+                            self.emit_u16(ci);
+                            for a in args {
+                                self.compile_expr(a)?;
+                            }
+                            self.emit_op(Op::Call);
+                            self.emit_byte(args.len() as u8);
+                            return Ok(());
+                        }
+                    }
+                }
                 if let Expr::Ident(name) = callee.as_ref() {
                     if self.func_names.contains(name) {
                         let ci = self.const_str(name);
@@ -1050,6 +1275,21 @@ impl Compiler {
                             }
                         }
                     }
+                    // General method call `obj.method(args...)` — dispatch at
+                    // runtime via `Op::CallMethod` (regex natives, baked impl
+                    // methods, then a field holding a callable).
+                    if !named.is_empty() {
+                        return Err("VM does not support named arguments".to_string());
+                    }
+                    self.compile_expr(obj)?;
+                    for a in args {
+                        self.compile_expr(a)?;
+                    }
+                    let mi = self.const_str(method);
+                    self.emit_op(Op::CallMethod);
+                    self.emit_u16(mi);
+                    self.emit_byte(args.len() as u8);
+                    return Ok(());
                 }
                 self.compile_expr(callee)?;
                 for a in args {
@@ -1154,6 +1394,41 @@ impl Compiler {
                 self.emit_op(Op::Call);
                 self.emit_byte(1);
             }
+            Expr::TryExpr(inner) => {
+                // `expr?` — unwrap Result/Option or raise (bindable by catch).
+                self.compile_expr(inner)?;
+                self.emit_op(Op::TryUnwrap);
+            }
+            Expr::StructLit { name, fields } => {
+                // Build a `Value::Struct`: push (name-const, value) pairs then
+                // `Op::StructNew <name> <n>`.
+                for (fname, fval) in fields {
+                    let ni = self.const_str(fname);
+                    self.emit_op(Op::LoadConst);
+                    self.emit_u16(ni);
+                    self.compile_expr(fval)?;
+                }
+                let name_ci = self.const_str(name);
+                self.emit_op(Op::StructNew);
+                self.emit_u16(name_ci);
+                self.emit_byte(fields.len() as u8);
+            }
+            Expr::Path(segs) => {
+                // `Enum::Variant` (unit variant, no args) — call the baked
+                // ctor native with zero args.
+                if segs.len() == 2 {
+                    let key = format!("__enum_new_{}_{}", segs[0], segs[1]);
+                    if self.enum_ctor_names.contains(&key) {
+                        let ci = self.const_str(&key);
+                        self.emit_op(Op::LoadGlobal);
+                        self.emit_u16(ci);
+                        self.emit_op(Op::Call);
+                        self.emit_byte(0);
+                        return Ok(());
+                    }
+                }
+                return Err(format!("VM does not support path expression: {}", segs.join("::")));
+            }
             other => {
                 return Err(format!("VM does not support expression: {:?}", other));
             }
@@ -1170,42 +1445,109 @@ impl Compiler {
         for (pattern, guard, body) in arms {
             self.emit_op(Op::LoadLocal);
             self.emit_byte(v_slot);
-            let bind = self.compile_pattern(pattern)?;
-            let jnext = self.emit_jump(Op::JumpIfFalse);
-            self.emit_op(Op::Pop);
-            if let Some(name) = bind {
+            let is_structural = matches!(
+                pattern,
+                Pattern::Tuple(_)
+                    | Pattern::Array(_)
+                    | Pattern::Byte(_)
+                    | Pattern::Bytes(_)
+                    | Pattern::Struct(_, _)
+                    | Pattern::EnumVariant(_, _, _)
+                    | Pattern::Range(_, _)
+                    | Pattern::Or(_)
+                    | Pattern::Some(_)
+                    | Pattern::None
+                    | Pattern::Ok(_)
+                    | Pattern::Err(_)
+            );
+            if is_structural {
+                // Structural patterns: emit the descriptor, run `Op::MatchPat`,
+                // then bind extracted values into fresh per-arm locals. The
+                // bindings array doubles as the truthiness indicator: a match
+                // leaves a non-empty array (or `true`) on the stack, a failed
+                // match leaves `nil`.
+                let (desc, binds) = self.structural_pattern_desc(pattern)?;
+                let di = self.emit_const(desc);
+                let bindnames = Value::Array(Arc::from(
+                    binds.iter().map(|n| Value::String(Arc::from(n.as_str()))).collect::<Vec<_>>(),
+                ));
+                let bi = self.emit_const(bindnames);
+                self.emit_op(Op::LoadConst);
+                self.emit_u16(di);
+                self.emit_op(Op::LoadConst);
+                self.emit_u16(bi);
+                self.emit_op(Op::MatchPat);
+                self.emit_u16(di);
+                self.emit_u16(bi);
+                let jnext = self.emit_jump(Op::JumpIfFalse);
                 self.begin_scope();
-                let slot = self.add_local(name);
-                self.emit_op(Op::LoadLocal);
-                self.emit_byte(v_slot);
-                self.emit_op(Op::StoreLocal);
-                self.emit_byte(slot);
+                for (i, name) in binds.iter().enumerate() {
+                    self.emit_op(Op::Dup);
+                    self.load_const(Value::I64(i as i64));
+                    self.emit_op(Op::IndexGet);
+                    let slot = self.add_local(name.clone());
+                    self.emit_op(Op::StoreLocal);
+                    self.emit_byte(slot);
+                }
+                // For a structural pattern with no binds, MatchPat left a bare
+                // `true` (stack has one value); with binds it left the array.
+                if !binds.is_empty() {
+                    self.emit_op(Op::Pop); // drop the bindings array
+                }
+                self.compile_match_arm(guard, body, &mut end_jumps, jnext)?;
             } else {
+                // Scalar inline path (existing codegen): pop scrutinee, push bool.
+                let bind = self.compile_pattern(pattern)?;
+                let jnext = self.emit_jump(Op::JumpIfFalse);
+                self.emit_op(Op::Pop);
                 self.begin_scope();
-            }
-            if let Some(g) = guard {
-                self.compile_expr(g)?;
-                let jg = self.emit_jump(Op::JumpIfFalse);
-                self.emit_op(Op::Pop);
-                self.compile_block_value(body)?;
-                self.end_scope_for_match();
-                let jend = self.emit_jump(Op::Jump);
-                end_jumps.push(jend);
-                self.patch_jump(jg);
-                self.emit_op(Op::Pop);
-                self.patch_jump(jnext);
-                let _ = jg;
-            } else {
-                self.compile_block_value(body)?;
-                self.end_scope_for_match();
-                let jend = self.emit_jump(Op::Jump);
-                end_jumps.push(jend);
-                self.patch_jump(jnext);
+                if let Some(name) = bind {
+                    let slot = self.add_local(name);
+                    self.emit_op(Op::LoadLocal);
+                    self.emit_byte(v_slot);
+                    self.emit_op(Op::StoreLocal);
+                    self.emit_byte(slot);
+                }
+                self.compile_match_arm(guard, body, &mut end_jumps, jnext)?;
             }
         }
         self.emit_op(Op::Nil);
         for j in end_jumps {
             self.patch_jump(j);
+        }
+        Ok(())
+    }
+
+    /// Compile the (possibly guarded) body of a match arm and the join edges for
+    /// the next arm. `jnext` is the `JumpIfFalse` that forwards an unmatched
+    /// scrutinee; it is patched to skip this arm, and the unmatched indicator
+    /// left on the stack is popped so the next arm starts clean.
+    fn compile_match_arm(
+        &mut self,
+        guard: &Option<Expr>,
+        body: &[Stmt],
+        end_jumps: &mut Vec<usize>,
+        jnext: usize,
+    ) -> Result<(), String> {
+        if let Some(g) = guard {
+            self.compile_expr(g)?;
+            let jg = self.emit_jump(Op::JumpIfFalse);
+            self.emit_op(Op::Pop);
+            self.compile_block_value(body)?;
+            self.end_scope_for_match();
+            let jend = self.emit_jump(Op::Jump);
+            end_jumps.push(jend);
+            self.patch_jump(jg);
+            self.emit_op(Op::Pop);
+            self.patch_jump(jnext);
+            self.emit_op(Op::Pop);
+        } else {
+            self.compile_block_value(body)?;
+            self.end_scope_for_match();
+            let jend = self.emit_jump(Op::Jump);
+            end_jumps.push(jend);
+            self.patch_jump(jnext);
+            self.emit_op(Op::Pop);
         }
         Ok(())
     }
@@ -1219,6 +1561,74 @@ impl Compiler {
                 break;
             }
         }
+    }
+
+    /// Emit the descriptor-based match of a pattern against a scrutinee in
+    /// local slot `v_slot`, leaving a truthy indicator on the stack (a
+    /// bindings array on a match, `nil` otherwise). Returns the bound names.
+    fn emit_pattern_match(&mut self, pattern: &Pattern, v_slot: u8) -> Result<Vec<String>, String> {
+        let desc = self.pattern_descriptor(pattern)?;
+        let binds = self.pattern_binds(pattern);
+        let di = self.emit_const(desc);
+        let bindnames = Value::Array(Arc::from(
+            binds.iter().map(|n| Value::String(Arc::from(n.as_str()))).collect::<Vec<_>>(),
+        ));
+        let bi = self.emit_const(bindnames);
+        self.emit_op(Op::LoadLocal);
+        self.emit_byte(v_slot);
+        self.emit_op(Op::LoadConst);
+        self.emit_u16(di);
+        self.emit_op(Op::LoadConst);
+        self.emit_u16(bi);
+        self.emit_op(Op::MatchPat);
+        self.emit_u16(di);
+        self.emit_u16(bi);
+        Ok(binds)
+    }
+
+    /// Patch every floating `break` and `continue` of the innermost loop (which
+    /// just ended), then pop it. `continue_target` is the loop's continue point
+    /// (its increment for `for`; its start for `while`/`loop`).
+    fn end_loop_with_continue(&mut self, continue_target: usize) {
+        if let Some(mut li) = self.loop_stack.pop() {
+            for j in li.continue_jumps.drain(..) {
+                self.chunk.code[j] = (continue_target >> 8) as u8;
+                self.chunk.code[j + 1] = (continue_target & 0xFF) as u8;
+            }
+            for b in li.break_jumps {
+                self.patch_jump(b);
+            }
+        }
+    }
+
+    /// `break [target]` / `continue [target]` on the VM: resolve the target
+    /// loop from the loop stack and emit a forward placeholder jump patched
+    /// when the loop ends (`continue` to its increment/start, `break` to its
+    /// end). Numeric-depth targets index outward from the innermost loop; a
+    /// label matches by name.
+    fn compile_loop_jump(&mut self, target: &Option<BreakTarget>, is_continue: bool) -> Result<(), String> {
+        let idx = match target {
+            None => 0,
+            Some(BreakTarget::Depth(n)) => (*n - 1) as usize,
+            Some(BreakTarget::Label(l)) => {
+                let mut found = None;
+                for (i, li) in self.loop_stack.iter().enumerate().rev() {
+                    if li.label.as_deref() == Some(l.as_str()) {
+                        found = Some(i);
+                        break;
+                    }
+                }
+                found.ok_or_else(|| format!("VM loop label '{}' not found", l))?
+            }
+        };
+        self.loop_stack.get(idx).ok_or_else(|| "VM break/continue outside a loop".to_string())?;
+        let j = self.emit_jump(Op::Jump);
+        if is_continue {
+            self.loop_stack.get_mut(idx).unwrap().continue_jumps.push(j);
+        } else {
+            self.loop_stack.get_mut(idx).unwrap().break_jumps.push(j);
+        }
+        Ok(())
     }
 
     fn compile_pattern(&mut self, pattern: &Pattern) -> Result<Option<String>, String> {
@@ -1262,6 +1672,102 @@ impl Compiler {
             }
             other => Err(format!("VM match does not support pattern: {:?}", other)),
         }
+    }
+
+    fn val_str(&self, s: &str) -> Value {
+        Value::String(Arc::from(s))
+    }
+
+    /// Collect, depth-first, every name bound by a pattern (for `MatchPat`
+    /// bindings). `Ident` binds; `_`/`Wild` and scalar/byte literals do not.
+    fn pattern_binds(&self, p: &Pattern) -> Vec<String> {
+        match p {
+            Pattern::Ident(n) => vec![n.clone()],
+            Pattern::Tuple(ps) | Pattern::Array(ps) | Pattern::Or(ps) => {
+                ps.iter().flat_map(|x| self.pattern_binds(x)).collect()
+            }
+            Pattern::Struct(_, fields) => fields.iter().flat_map(|(_, sub)| self.pattern_binds(sub)).collect(),
+            Pattern::EnumVariant(_, _, subs) => subs.iter().flat_map(|x| self.pattern_binds(x)).collect(),
+            Pattern::Some(inner) | Pattern::Ok(inner) | Pattern::Err(inner) => self.pattern_binds(inner),
+            Pattern::Range(lo, hi) => {
+                let mut v = self.pattern_binds(lo);
+                v.extend(self.pattern_binds(hi));
+                v
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// Build a `PatternDef` descriptor (a `Value::Array`) for a structural
+    /// pattern plus its bound names. Returns `Err` for unsupported patterns.
+    fn structural_pattern_desc(&mut self, p: &Pattern) -> Result<(Value, Vec<String>), String> {
+        let desc = self.pattern_descriptor(p)?;
+        let binds = self.pattern_binds(p);
+        Ok((desc, binds))
+    }
+
+    /// Build the recursive pattern descriptor. `Ident` becomes a capture node
+    /// `["bind", name, ["wild"]]`; every other node carries a tag string at
+    /// index 0 (mirroring `vm::vm_pattern_match`).
+    pub(crate) fn pattern_descriptor(&mut self, p: &Pattern) -> Result<Value, String> {
+        fn arr(vals: Vec<Value>) -> Value {
+            Value::Array(Arc::from(vals))
+        }
+        fn arr1(v: Value) -> Value {
+            Value::Array(Arc::from(vec![v]))
+        }
+        let tag = |s: &str| Value::String(Arc::from(s));
+        Ok(match p {
+            Pattern::Wild => arr1(tag("wild")),
+            Pattern::Ident(name) => arr(vec![tag("bind"), tag(name), arr1(tag("wild"))]),
+            Pattern::Int(i) => arr(vec![tag("int"), Value::I64(*i)]),
+            Pattern::Hex(h) => arr(vec![tag("hex"), Value::U64(*h)]),
+            Pattern::String(s) => arr(vec![tag("string"), tag(s)]),
+            Pattern::Bool(b) => arr(vec![tag("bool"), Value::Bool(*b)]),
+            Pattern::Nil => arr1(tag("nil")),
+            Pattern::Byte(b) => arr(vec![tag("byte"), Value::I64(*b as i64)]),
+            Pattern::Bytes(pats) => {
+                let mut bytes: Vec<Value> = Vec::new();
+                let mut rest = false;
+                for b in pats {
+                    match b {
+                        BytesPat::Byte(x) => bytes.push(Value::I64(*x as i64)),
+                        BytesPat::Rest => rest = true,
+                    }
+                }
+                arr(vec![tag("bytes"), arr(bytes), Value::Bool(rest)])
+            }
+            Pattern::Tuple(ps) | Pattern::Array(ps) => {
+                let subs = ps.iter().map(|x| self.pattern_descriptor(x)).collect::<Result<Vec<_>, _>>()?;
+                let kind = if matches!(p, Pattern::Tuple(_)) { "tuple" } else { "array" };
+                arr(vec![tag(kind), arr(subs)])
+            }
+            Pattern::Struct(name, fields) => {
+                let mut fs: Vec<Value> = Vec::new();
+                for (fname, sub) in fields {
+                    fs.push(tag(fname));
+                    fs.push(self.pattern_descriptor(sub)?);
+                }
+                arr(vec![tag("struct"), tag(name), arr(fs)])
+            }
+            Pattern::EnumVariant(ename, variant, subs) => {
+                let subs = subs.iter().map(|x| self.pattern_descriptor(x)).collect::<Result<Vec<_>, _>>()?;
+                arr(vec![tag("enum"), tag(ename), tag(variant), arr(subs)])
+            }
+            Pattern::Range(lo, hi) => arr(vec![
+                tag("range"),
+                self.pattern_descriptor(lo)?,
+                self.pattern_descriptor(hi)?,
+            ]),
+            Pattern::Or(ps) => {
+                let subs = ps.iter().map(|x| self.pattern_descriptor(x)).collect::<Result<Vec<_>, _>>()?;
+                arr(vec![tag("or"), arr(subs)])
+            }
+            Pattern::Some(inner) => arr(vec![tag("some"), self.pattern_descriptor(inner)?]),
+            Pattern::None => arr1(tag("none")),
+            Pattern::Ok(inner) => arr(vec![tag("ok"), self.pattern_descriptor(inner)?]),
+            Pattern::Err(inner) => arr(vec![tag("err"), self.pattern_descriptor(inner)?]),
+        })
     }
 }
 

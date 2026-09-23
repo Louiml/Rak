@@ -58,11 +58,39 @@ pub enum Op {
     /// returns. Operand: argument count `n` (1 byte). Pops `n` args then the
     /// callee.
     DeferCall,
+    /// Begin a `try` region. Operand: u16 handler offset (patched by the
+    /// compiler). Pushes a catch frame onto the VM's handler stack for this
+    /// frame; on error the VM unwinds to the handler with the error value.
+    Try,
+    /// Pop the catch frame for the current `try` (the body completed without
+    /// raising).
+    CatchEnd,
+    /// Raise: pop a value; if it's already a `Value::Error` bind it as-is,
+    /// otherwise wrap its string form as a `User` error. Unwinds to the
+    /// nearest enclosing `try` handler (or fails the run).
+    Throw,
+    /// `expr?` — pop a `Result`/`Option`; `Ok(v)`/`Some(v)` push `v`,
+    /// `Err(e)`/`None` raise (bindable by `catch`).
+    TryUnwrap,
+    /// Method call `obj.method(args...)`. Operands: u16 method-name const
+    /// index, u8 argument count. Pops `argc` args then the receiver; dispatch
+    /// order: native regex methods, `__method_<type>_<name>` globals (baked
+    /// from `impl` blocks), then a field holding a callable.
+    CallMethod,
+    /// Build a `Value::Struct`. Operands: u16 name-const index, u8 field
+    /// count `n`. Pops `2*n` values (alternating field-name const, value).
+    StructNew,
+    /// Structural pattern match. Operands: u16 descriptor-const index, u16
+    /// bind-names-const index. Pops the grow-the-bindings-array indicator
+    /// then the descriptor then the scrutinee; pushes a truthy `Value::Array`
+    /// of bound values (ordered as the descriptor's bind names, `Nil` where a
+    /// bind was absent) on a match, or `Value::Nil` on no match.
+    MatchPat,
 }
 
 impl Op {
     pub fn from_u8(b: u8) -> Option<Op> {
-        if (b as usize) <= Op::DeferCall as usize {
+        if (b as usize) <= Op::MatchPat as usize {
             Some(unsafe { std::mem::transmute(b) })
         } else {
             None

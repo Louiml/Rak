@@ -1276,3 +1276,222 @@ green). Nothing here is aspirational.
 - The VM omits features it does not implement (deferred `async fn` bodies,
   `stream_*`, `argv()`, `parse_args`) with clear errors rather than crashing;
   the pure async I/O futures (`async_sleep`, `tcp_probe`) run on the VM.
+
+---
+
+## Part 7 — v0.8: Unify + Extend  **[SPEC → SHIPPED]**
+
+v0.8 closes the interpreter/VM feature gap, adds operator overloading and
+match-pattern upgrades, real (checked) generics, a lazy Iterator protocol, a
+syntax pack, a type-checking/formatter/linter/doc toolchain, and the OSINT
+domain pack. Status markers are updated to **[SHIPPED]** as each feature lands.
+
+### 7A.1 VM `try`/`catch`  **[SPEC]**
+
+#### Syntax
+```rak
+try {
+    raise "boom"
+} catch e {
+    dump err_message(e)
+}
+```
+
+#### Architecture
+- `bytecode.rs`: new opcodes `Op::Try` (operand: u16 catch-target offset) and
+  `Op::Throw` (re-raise / raise a value). `compiler.rs::compile_stmt` compiles
+  `Stmt::Try` as: `Op::Try <catch_off>` — body — `Jump <end_off>` — catch target
+  (binds the error into a local) — handler.
+- `vm.rs`: a per-`Vm` `catch_stack: Vec<CatchFrame>` where `CatchFrame {
+  handler_offset, stack_len, locals_len }`. Runtime errors and `Op::Throw`
+  unwind: pop frames back to `stack_len`/`locals_len`, jump to
+  `handler_offset`, push `Value::Error`. No handler left → the VM run fails
+  with the original message (same as today).
+- `defer` interplay: pending `DeferCall`s registered inside the try body run
+  before the handler executes (LIFO), matching interpreter semantics.
+
+#### Error handling & edge cases
+- The error value bound in `catch e` is the same first-class
+  `Value::Error(ErrorInfo)` as on the interpreter (`err_kind`/`err_line`/…
+  work).
+- A `return` inside a try body still runs defers and exits normally — the
+  handler is skipped.
+- Nested try blocks: the innermost active handler wins.
+
+### 7A.2 VM method dispatch (`Op::CallMethod`)  **[SPEC]**
+
+#### Syntax
+```rak
+struct Point { x: int, y: int }
+impl Display for Point { fn fmt(self) { ... } }
+let p = Point { x: 1, y: 2 }
+p.fmt()                // method call on the VM
+```
+
+#### Architecture
+- `compiler.rs` collects `Stmt::Impl` methods into a
+  `methods: HashMap<(String /*type*/, String /*method*/), Value>` on the
+  `Vm` (baked as `Value::NativeFn`/closures, mirroring the interpreter's
+  registry). `inherent impl` methods register the same way.
+- New opcode `Op::CallMethod` with two operands (u16 method-name const idx,
+  u8 argc). `vm.rs` dispatch order matches the interpreter:
+  1. native methods (`Regex`, `binstruct` decode/encode — already lowered),
+  2. `methods` registry (receiver prepended as arg 0),
+  3. fallback: field holding a callable.
+- `FieldGet` on structs/enums stays as-is; `Op::CallMethod` fires only when
+  the postfix call follows a field access whose receiver is not a
+  map/module-with-function... (compile-time conservative: emit `CallMethod`
+  for any `Expr::FieldAccess` callee; `FieldGet` fallback happens inside the
+  op when no method exists).
+
+### 7A.3 VM binary pattern matching  **[SPEC]**
+
+Fill `compile_pattern` for `Pattern::Bytes` / `Pattern::Byte`: each `Byte(b)`
+arm compiles to `IndexGet` + `Eq` comparisons against the pattern constants
+(the trailing `..`/`Rest` consumes the remainder unconditionally; a no-rest
+pattern adds a `Len`-style check via existing length native). Bounds-checked;
+interpreter-only semantics preserved.
+
+### 7A.4 VM streams  **[SPEC]**
+
+- `value.rs`: `Value::Stream(Arc<Mutex<Box<dyn RakStream>>>)` mirrored from
+  the interpreter.
+- `vm.rs::register_natives`: `stream_from_array`, `stream_map`, `filter`,
+  `take`, `collect`, `stream_next`, `read_lines`, `tcp_stream`.
+- `compiler.rs::compile_for`: a `Stream` arm drives `next()` until `nil`
+  (lazy, backpressure preserved).
+
+### 7A.5 VM `tunnel` / `udp_*`  **[SPEC]**
+
+`compiler.rs` compiles `Stmt::Tunnel` to: `tunnel_preshared_key` native call →
+`udp_bind` native call → define `<name>`/`<name>_udp`/`<name>_addr`/
+`tunnel_key` as locals for the body scope → body → (scope pop is implicit in
+the frame). `value.rs` mirrors `Value::UdpTransport`. `udp_send`/`udp_recv`/
+`udp_local_addr` registered as VM natives.
+
+### 7A.6 VM `import pkg.sub`  **[SPEC]**
+
+`compiler.rs::inline_module` gains dotted-resolution: `import pkg.sub` resolves
+`pkg/init.rak` then `sub.rak` inside `pkg/` and inlines both modules'
+exports; `pkg` binds as a Module value containing `sub` (interpreter parity).
+
+### 7A.7 Operator overloading  **[SPEC]**
+
+#### Syntax
+```rak
+struct Vec3 { x: int, y: int, z: int }
+impl Add for Vec3 {
+    fn add(self, o) { return Vec3 { x: self.x + o.x, y: self.y + o.y, z: self.z + o.z } }
+}
+impl Eq for Vec3 {
+    fn eq(self, o) { return self.x == o.x && self.y == o.y && self.z == o.z }
+}
+dump a + b            // Vec3 { ... }
+dump a == b           // true
+```
+
+Built-in operator traits: `Add(add)`, `Sub(sub)`, `Mul(mul)`, `Div(div)`,
+`Rem(rem)`, `Neg(neg)`, `Eq(eq)` (used by `==`/`!=` and literal match
+patterns), `Compare(cmp)` (returns -1/0/1; drives `<`/`>`/`<=`/`>=`).
+Dispatch order: numeric fast paths first (unchanged), then
+`trait_impls[("Add", type(lhs))]` (interpreter) / the VM trait registry,
+then the existing error. The receiver is the **left** operand; if the left
+operand has no impl but the right does, the right's impl is tried with
+commutative fallback only for `Add`/`Mul`/`Eq`. Both backends.
+
+### 7A.8 Match guards, binding patterns, struct patterns  **[SPEC]**
+
+#### Syntax
+```rak
+match port {
+    p if p < 1024      => { dump "privileged" },
+    x @ [0x89, 'P', ..] => { dump "png-like \(x)" },
+    Point { x, y }      => { dump x + y },
+    _                   => { dump "other" },
+}
+```
+
+- `ast.rs`: `MatchArm { guard: Option<Expr> }`, `Pattern::Bind(String,
+  Box<Pattern>)`, `Pattern::Struct(String, Vec<(String, Option<Pattern>)>)`.
+- Guards: matched-then-evaluated in the arm scope; a false guard falls
+  through to the next arm (interpreter + VM `JumpIfFalse` to next arm).
+- `Bind` binds the whole scrutinee (byte arrays bind to `bytes`).
+- Struct patterns destructure by field name; missing fields are an error.
+- Exhaustiveness checking (`rakc check`) treats guards as non-exhaustive.
+
+### 7A.9 Checked generics  **[SPEC]**
+
+`struct Box<T> { v: T }`, `enum Res<T, E> { Ok(T), Err(E) }` — parser accepts
+generic params on struct/enum; `typecheck.rs` records them, and call-site
+unification (`fn identity<T>(v: T) -> T` with `identity(42)`) substitutes
+concrete types to verify the return type. Runtime stays erased
+(backward-compatible); the checker becomes the source of truth.
+
+### 7A.10 Iterator protocol  **[SPEC]**
+
+Built-in `Iterator` trait with `next(self) -> Option`. `for` prefers
+`Iterator::next` (lazy) over `Iterable::iter` (eager array). New builtins on
+both backends: `zip(a, b)`, `enumerate(xs)`, `fold(xs, init, f)`, `reduce(xs,
+f)`, `any(xs, f)`, `all(xs, f)`, `flat_map(xs, f)`, `take_while(s, f)`,
+`skip(s, n)`. `for (k, v) in map { ... }` iterates key/value pairs (sugar for
+the existing map-iteration order).
+
+### 7A.11 Syntax pack  **[SPEC]**
+
+| Feature | Syntax | Implementation |
+|---------|--------|----------------|
+| Raw strings | `r"\d+\.py"` (no escapes; regex `\/` annoyance gone) | lexer, pre-regex-postprocess |
+| Triple-quoted strings | `"""...multi line..."""` | lexer |
+| Nil-safe access | `cfg?.port` (nil if `cfg` is nil) | parse-time desugar |
+| Nil coalescing | `x ?? default` | parse-time desugar |
+| `if let` / `while let` | `if let Some(v) = opt { ... }` | desugar to `match` |
+| Default params | `fn f(a, b = 10)` | parser stores default exprs |
+| Named args | `f(b: 2)` | postfix sugar, positional fallback |
+| Varargs | `fn f(...args)` | binds remaining args as array |
+| Labeled loops | `outer: loop { break outer }` | parser + both backends |
+| Sets | `set_of([..])`, `set_add/has/union/intersect/diff`, `for s in set` | `Value::Set` both backends |
+
+### 7B — Type system & tooling  **[SPEC]**
+
+- **`rakc check` v2** (`typecheck.rs`): function-signature table, inference
+  through function bodies, `?`-propagation checks (return type must admit
+  `Err`), cross-module signature checking with a per-file cache, generic
+  substitution (7A.9).
+- **`rakc fmt`** (new `fmt.rs`): AST→source printer, 2-space indent, `--write`
+  / `--check`; proptest `parse(fmt(src))` stability.
+- **`rakc lint`** (new `lint.rs`): unused let/import, shadowed names,
+  `== nil`, unreachable code after return, missing `pub fn` return types;
+  advisory by default, `--deny` exits non-zero.
+- **`rakc doc` + `///`**: doc comments attached to items in the parser,
+  Markdown output (`-o dir`), LSP hover shows them (`lsp.rs`).
+- **Bytecode cache**: `rakc vm file.rak --cache` persists a serialized Chunk
+  (`.rakc`) validated by source hash.
+- **TCO**: tail-call loop conversion in the tree-walker; tail-flagged VM
+  `Call` reuses the frame (deep recursion is safe).
+
+### 7C — OSINT domain pack  **[SPEC]**
+
+- **binstruct v2**: bitfield fields (`u4`..`u63`, packed LSB-first with
+  `:bitfield`), conditional fields (`field: type if <expr-on-earlier-fields>`),
+  length-prefixed arrays (`field: [T; count]`), enum-discriminant tables.
+  Extends the compile-time `ResolvedBinField` tree; encode honors conditions.
+- **Evidence auto-propagation (opt-in)**: `#[track_evidence]` on a `fn`
+  wraps the return value in `cite(value, fn_name, call_site)`; propagates
+  through `|>` when enabled. Off by default (§4 errata preserved).
+- **Live capture**: `tls_inspect(host, port, sni?)` — real ClientHello →
+  ServerHello + cert chain (rustls, pure Rust); `pcap_listen(iface, bpf,
+  timeout)` behind the `pcap` feature; `net_raw_icmp_ping` +
+  `net_raw_arp_request`/`arp_scan` (builders cross-platform, I/O
+  unix-gated like §2.2).
+- **Windows raw sockets**: `net_raw_send`/`recv` via Npcap's
+  `PacketSendPackets`/`PacketReceivePacket` when the `npcap` feature is on
+  and Npcap is installed.
+- **macOS**: CI matrix + build fixes (tauri GUI already cross-platform;
+  raw sockets need sudo, matching §2.2).
+
+### Verification (per-feature, as each lands)
+- `cargo test -p rakc` green on both backends (new `test_vm_*` for every
+  unification item).
+- New example files run on `rakc run` **and** `rakc vm`.
+- `lsp.rs::BUILTINS` updated for every new builtin.
+- `cargo test -p rak-stdlib` / `-p rakpkg` stay green.

@@ -170,6 +170,20 @@ pub fn make_foreign_native(decl: crate::ast::ForeignFn, lib_path: Option<String>
     Value::NativeFn(name, Arc::new(native))
 }
 
+/// Build a VM `Value::NativeFn` that constructs an enum value:
+/// `Event::Connect(host)` pushes a `Value::Enum { name, variant, data }`.
+pub fn make_enum_ctor(enum_name: String, variant: String) -> Value {
+    let name = Arc::from(format!("{}::{}", enum_name, variant).as_str());
+    let native = move |args: &[Value]| -> Result<Value, String> {
+        Ok(Value::Enum {
+            name: Arc::from(enum_name.as_str()),
+            variant: Arc::from(variant.as_str()),
+            data: Arc::from(args.to_vec()),
+        })
+    };
+    Value::NativeFn(name, Arc::new(native))
+}
+
 pub struct ChannelHandle {
     pub id: u64,
 }
@@ -189,6 +203,9 @@ pub struct FutureHandle {
 pub struct Vm {
     pub globals: HashMap<String, Value>,
     output: Vec<String>,
+    /// An in-flight error value (from `Op::Throw` / `Op::TryUnwrap`) that is
+    /// being unwound to a `try` handler. Cleared when a handler binds it.
+    pending_error: Option<Value>,
     // --- Debugger state ---
     debug_enabled: bool,
     debug_breakpoints: std::collections::HashSet<u32>,
@@ -196,6 +213,17 @@ pub struct Vm {
     debug_handler: Option<Box<dyn FnMut(u32, Vec<(String, Value)>, std::collections::HashMap<String, Value>, Vec<String>) -> VmDebugAction + Send>>,
     /// Current call stack of frame names (pushed on function entry, popped on return).
     debug_callstack: Vec<String>,
+}
+
+/// A pending `try` region in a frame: where to jump on error, plus the stack /
+/// locals / defer depths to restore before the handler runs.
+struct CatchFrame {
+    handler_offset: usize,
+    stack_len: usize,
+    locals_len: usize,
+    /// Depth of the frame's defer stack when `Op::Try` executed; defers
+    /// registered inside the try body (indices ≥ this) run before the handler.
+    defers_len: usize,
 }
 
 /// Decision from the VM debugger handler.
@@ -211,6 +239,7 @@ impl Vm {
         let mut vm = Vm {
             globals: HashMap::new(),
             output: Vec::new(),
+            pending_error: None,
             debug_enabled: false,
             debug_breakpoints: std::collections::HashSet::new(),
             debug_step: false,
@@ -257,6 +286,18 @@ impl Vm {
     }
 
     fn register_natives(&mut self) {
+        // Result/Option constructors (the interpreter special-cases these in
+        // `eval_call`; the VM registers them as natives so `Ok(42)?` works).
+        self.insert_native("Ok", |args| {
+            Ok(Value::Result(Some(Box::new(args.first().cloned().unwrap_or(Value::Nil))), None))
+        });
+        self.insert_native("Err", |args| {
+            Ok(Value::Result(None, Some(Box::new(args.first().cloned().unwrap_or(Value::Nil)))))
+        });
+        self.insert_native("Some", |args| {
+            Ok(Value::Option(Some(Box::new(args.first().cloned().unwrap_or(Value::Nil)))))
+        });
+        self.globals.insert("None".to_string(), Value::Option(None));
         self.insert_native("len", |args| {
             match args.first() {
                 Some(Value::String(s)) => Ok(Value::I64(s.chars().count() as i64)),
@@ -1098,12 +1139,45 @@ impl Vm {
     }
 
     pub fn run(&mut self, chunk: &Chunk) -> Result<Vec<String>, String> {
-        let mut frame = Frame { code: chunk, ip: 0, stack: Vec::new(), locals: Vec::new(), defers: Vec::new() };
+        let mut frame = Frame { code: chunk, ip: 0, stack: Vec::new(), locals: Vec::new(), defers: Vec::new(), catches: Vec::new() };
         self.exec_frame(&mut frame)?;
         Ok(std::mem::take(&mut self.output))
     }
 
+    /// Execute a frame, catching errors and unwinding to the nearest `try`
+    /// handler in this frame. Frames without a handler propagate the error to
+    /// the caller (which may have its own handler). A frame that fully unwinds
+    /// (no handler) runs its deferred calls in LIFO order first.
     fn exec_frame(&mut self, frame: &mut Frame) -> Result<(), String> {
+        loop {
+            match self.exec_frame_inner(frame) {
+                Ok(()) => return Ok(()),
+                Err(e) => {
+                    if let Some(c) = frame.catches.pop() {
+                        // Run defers registered inside the try body (LIFO),
+                        // then restore the stack/locals depths recorded at
+                        // `Op::Try` and jump to the handler.
+                        while frame.defers.len() > c.defers_len {
+                            let (callee, args) = frame.defers.pop().unwrap();
+                            self.call_value(frame, callee, args)?;
+                        }
+                        frame.stack.truncate(c.stack_len);
+                        frame.locals.truncate(c.locals_len);
+                        let errv = self.pending_error.take().unwrap_or_else(|| {
+                            Value::Error(Arc::new(crate::ErrorInfo::new(e.clone()).with_kind(crate::ErrorKind::Runtime)))
+                        });
+                        frame.ip = c.handler_offset;
+                        frame.push(errv);
+                        continue;
+                    }
+                    self.run_frame_defers(frame)?;
+                    return Err(e);
+                }
+            }
+        }
+    }
+
+    fn exec_frame_inner(&mut self, frame: &mut Frame) -> Result<(), String> {
         while frame.ip < frame.code.code.len() {
             let op = Op::from_u8(frame.code.code[frame.ip]).ok_or_else(|| format!("bad opcode at {}", frame.ip))?;
             frame.ip += 1;
@@ -1407,6 +1481,138 @@ impl Vm {
                     }
                     frame.push(Value::Map(Arc::from(m)));
                 }
+                Op::Try => {
+                    let handler = frame.code.read_u16(frame.ip) as usize;
+                    frame.ip += 2;
+                    frame.catches.push(CatchFrame {
+                        handler_offset: handler,
+                        stack_len: frame.stack.len(),
+                        locals_len: frame.locals.len(),
+                        defers_len: frame.defers.len(),
+                    });
+                }
+                Op::CallMethod => {
+                    let ci = frame.code.read_u16(frame.ip) as usize;
+                    frame.ip += 2;
+                    let argc = frame.code.code[frame.ip] as usize;
+                    frame.ip += 1;
+                    let method = match &frame.code.constants[ci] {
+                        Value::String(s) => s.to_string(),
+                        _ => return Err("bad method name constant".to_string()),
+                    };
+                    let mut args: Vec<Value> = (0..argc).map(|_| frame.pop()).collect();
+                    args.reverse();
+                    let receiver = frame.pop();
+                    self.call_method(frame, receiver, method, args)?;
+                }
+                Op::StructNew => {
+                    let ci = frame.code.read_u16(frame.ip) as usize;
+                    frame.ip += 2;
+                    let n = frame.code.code[frame.ip] as usize;
+                    frame.ip += 1;
+                    let name = match &frame.code.constants[ci] {
+                        Value::String(s) => s.to_string(),
+                        _ => return Err("bad struct name constant".to_string()),
+                    };
+                    let mut fields = HashMap::new();
+                    for _ in 0..n {
+                        let v = frame.pop();
+                        let k = match frame.pop() {
+                            Value::String(s) => s.to_string(),
+                            _ => return Err("StructNew: field name must be a string".to_string()),
+                        };
+                        fields.insert(k, v);
+                    }
+                    frame.push(Value::Struct { name: Arc::from(name.as_str()), fields: Arc::from(fields) });
+                }
+                Op::MatchPat => {
+                    let di = frame.code.read_u16(frame.ip) as usize;
+                    frame.ip += 2;
+                    let bi = frame.code.read_u16(frame.ip) as usize;
+                    frame.ip += 2;
+                    let bindnames = match &frame.code.constants[bi] {
+                        Value::Array(a) => a.clone(),
+                        _ => return Err("MatchPat: bad bind-names constant".to_string()),
+                    };
+                    let desc = match &frame.code.constants[di] {
+                        Value::Array(a) => Value::Array(a.clone()),
+                        _ => return Err("MatchPat: bad descriptor constant".to_string()),
+                    };
+                    // Compiler pushed [scrutinee, descriptor, bind-names] then
+                    // MatchPat di bi; drop the two descriptor values (already
+                    // read via their constant indices) and take the scrutinee.
+                    let _bindnames_val = frame.pop();
+                    let _desc_val = frame.pop();
+                    let scrutinee = frame.pop();
+                    let mut bounds: Vec<(String, Value)> = Vec::new();
+                    match vm_pattern_match(&scrutinee, &desc, &mut bounds) {
+                        Ok(true) => {
+                            // Emit bound values in the descriptor's bind order.
+                            let out: Vec<Value> = bindnames
+                                .iter()
+                                .map(|n| {
+                                    let nm = n.to_string();
+                                    bounds.iter().find(|(k, _)| *k == nm).map(|(_, v)| v.clone()).unwrap_or(Value::Nil)
+                                })
+                                .collect();
+                            // A truthy indicator: a bare `true` when there are no
+                            // binds (an empty array would be falsy in Rak).
+                            if out.is_empty() {
+                                frame.push(Value::Bool(true));
+                            } else {
+                                frame.push(Value::Array(Arc::from(out)));
+                            }
+                        }
+                        Ok(false) => frame.push(Value::Nil),
+                        Err(e) => return Err(e),
+                    }
+                }
+                Op::CatchEnd => {
+                    frame.catches.pop();
+                }
+                Op::Throw => {
+                    // Raise: pop the raised value; an existing structured
+                    // `Value::Error` is preserved, anything else is wrapped as
+                    // a User-kind error (mirrors the interpreter's `raise`).
+                    let v = frame.pop();
+                    let msg = v.to_string();
+                    self.pending_error = Some(match v {
+                        Value::Error(_) => v,
+                        other => Value::Error(Arc::new(
+                            crate::ErrorInfo::new(other.to_string()).with_kind(crate::ErrorKind::User),
+                        )),
+                    });
+                    return Err(msg);
+                }
+                Op::TryUnwrap => {
+                    // `expr?` — unwrap Result/Option or raise.
+                    let v = frame.pop();
+                    let unwrapped: Option<Value> = match &v {
+                        Value::Result(ok, err) => {
+                            if let Some(e) = err {
+                                self.pending_error = Some((**e).clone());
+                                None
+                            } else {
+                                ok.as_deref().cloned().or(Some(Value::Nil))
+                            }
+                        }
+                        Value::Option(opt) => match opt {
+                            Some(v) => Some((**v).clone()),
+                            None => {
+                                self.pending_error = Some(Value::String(Arc::from("None")));
+                                None
+                            }
+                        },
+                        other => Some(other.clone()),
+                    };
+                    match unwrapped {
+                        Some(inner) => frame.push(inner),
+                        None => {
+                            let msg = self.pending_error.as_ref().map(|v| v.to_string()).unwrap_or_else(|| "None".to_string());
+                            return Err(msg);
+                        }
+                    }
+                }
             }
         }
         Ok(())
@@ -1433,6 +1639,7 @@ impl Vm {
                     stack: Vec::new(),
                     locals: Vec::with_capacity(nparams),
                     defers: Vec::new(),
+                    catches: Vec::new(),
                 };
                 for i in 0..nparams {
                     sub.locals.push(args.get(i).cloned().unwrap_or(Value::Nil));
@@ -1445,6 +1652,67 @@ impl Vm {
             }
             _ => return Err("cannot call non-function".to_string()),
         }
+        Ok(())
+    }
+
+    /// Dispatch `receiver.method(args...)` (mirrors the interpreter's
+    /// `eval_call` method branch): regex natives, baked `impl` methods
+    /// (`__method_<type>_<name>` globals), then a field holding a callable.
+    fn call_method(&mut self, frame: &mut Frame, receiver: Value, method: String, args: Vec<Value>) -> Result<(), String> {
+        let recv = unwrap_vm_evidence(&receiver);
+        if let Value::Regex(_) = &recv {
+            return self.call_regex_method_vm(frame, &recv, &method, args);
+        }
+        // Structs/enums dispatch on their type *name* (mirrors the
+        // interpreter, where `Value::Struct.type_name()` returns the name).
+        let tn = match &recv {
+            Value::Struct { name, .. } => name.to_string(),
+            Value::Enum { name, .. } => name.to_string(),
+            other => other.type_name().to_string(),
+        };
+        let key = format!("__method_{}_{}", tn, method);
+        if let Some(f) = self.globals.get(&key).cloned() {
+            let mut all = Vec::with_capacity(args.len() + 1);
+            all.push(receiver);
+            all.extend(args);
+            return self.call_value(frame, f, all);
+        }
+        // Fallback: a field that itself holds a callable (modules, etc.).
+        let field = match &recv {
+            Value::Map(m) => m.get(&method).cloned(),
+            Value::Struct { fields, .. } => fields.get(&method).cloned(),
+            _ => None,
+        };
+        if let Some(f) = field {
+            if matches!(f, Value::Closure { .. } | Value::NativeFn(..)) {
+                return self.call_value(frame, f, args);
+            }
+        }
+        Err(format!("No method '{}' on {}", method, tn))
+    }
+
+    /// Regex method dispatch on the VM (`re.match/hay`, `find`, `find_all`,
+    /// `replace`) — mirrors the interpreter's `call_regex_method`.
+    fn call_regex_method_vm(&mut self, frame: &mut Frame, re_val: &Value, method: &str, args: Vec<Value>) -> Result<(), String> {
+        let re = match re_val {
+            Value::Regex(r) => r.clone(),
+            _ => return Err("not a regex".to_string()),
+        };
+        let hay = native_str(args.first());
+        let result = match method {
+            "match" | "is_match" => Value::Bool(re.re.is_match(&hay)),
+            "find" => re.re.find(&hay).map(|m| Value::String(Arc::from(m.as_str()))).unwrap_or(Value::Nil),
+            "find_all" => Value::Array(Arc::from(
+                re.re.find_iter(&hay).map(|m| Value::String(Arc::from(m.as_str()))).collect::<Vec<_>>(),
+            )),
+            "replace" | "replace_all" => {
+                let rep = native_str(args.get(1));
+                Value::String(Arc::from(re.re.replace_all(&hay, rep.as_str()).into_owned().as_str()))
+            }
+            _ => return Err(format!("regex has no method '{}'", method)),
+        };
+        let _ = frame;
+        frame.push(result);
         Ok(())
     }
 
@@ -1467,6 +1735,8 @@ struct Frame<'a> {
     /// Deferred calls (callee value + pre-evaluated args) registered by
     /// `defer f(...)`, run in LIFO order when this frame returns.
     defers: Vec<(Value, Vec<Value>)>,
+    /// Active `try` regions (most recent last), unwound on error.
+    catches: Vec<CatchFrame>,
 }
 
 impl<'a> Frame<'a> {
@@ -1572,6 +1842,281 @@ fn unwrap_vm_evidence(v: &Value) -> Value {
     match v {
         Value::Evidence { inner, .. } => unwrap_vm_evidence(inner),
         other => other.clone(),
+    }
+}
+
+/// Descriptor tag helpers for [pattern] matching. The descriptor is a
+/// `Value::Array` with a string tag at index 0; `arg(i)` reads `desc[i + 1]`.
+fn pat_tag(d: &[Value]) -> &str {
+    match d.first() {
+        Some(Value::String(s)) => s.as_ref(),
+        _ => "",
+    }
+}
+
+fn pat_arg<'a>(d: &'a [Value], i: usize) -> Option<&'a Value> {
+    d.get(i + 1)
+}
+
+/// Structural pattern match against a descriptor (mirrors the interpreter's
+/// `pattern_matches`). Returns whether the value matched; on success, `bounds`
+/// is filled with `(name, value)` pairs from `["bind", name, sub]` nodes.
+fn vm_pattern_match(v: &Value, d: &Value, bounds: &mut Vec<(String, Value)>) -> Result<bool, String> {
+    let d = match d {
+        Value::Array(a) => a,
+        _ => return Err("MatchPat: descriptor must be an array".to_string()),
+    };
+    match pat_tag(d) {
+        "wild" => Ok(true),
+        "bind" => {
+            let name = match pat_arg(d, 0) {
+                Some(Value::String(s)) => s.to_string(),
+                _ => return Err("MatchPat: bind name must be a string".to_string()),
+            };
+            let sub = pat_arg(d, 1).cloned().unwrap_or_else(|| Value::Array(Arc::from(vec![Value::String(Arc::from("wild"))])));
+            if vm_pattern_match(v, &sub, bounds)? {
+                bounds.push((name, v.clone()));
+                Ok(true)
+            } else {
+                Ok(false)
+            }
+        }
+        "int" => {
+            let want = pat_arg(d, 0).and_then(|x| x.as_i64());
+            Ok(want.is_some() && v.as_i64() == want)
+        }
+        "hex" => {
+            let want = pat_arg(d, 0).and_then(|x| x.as_u64());
+            Ok(want.is_some() && v.as_u64() == want)
+        }
+        "string" => {
+            let want = match pat_arg(d, 0) {
+                Some(Value::String(s)) => s.as_ref(),
+                _ => "",
+            };
+            Ok(matches!(v, Value::String(s) if s.as_ref() == want))
+        }
+        "bool" => {
+            let want = matches!(pat_arg(d, 0), Some(Value::Bool(true)));
+            Ok(matches!(v, Value::Bool(b) if *b == want))
+        }
+        "nil" => Ok(matches!(v, Value::Nil)),
+        "byte" => {
+            // `Pattern::Byte` matches a 1-byte `Bytes` or an equal `Int`.
+            let want = pat_arg(d, 0).and_then(|x| x.as_i64()).unwrap_or(0) as u8;
+            Ok(match v {
+                Value::Bytes(b) => b.len() == 1 && b[0] == want,
+                _ => v.as_i64() == Some(want as i64),
+            })
+        }
+        "bytes" => {
+            let elems = match pat_arg(d, 0) {
+                Some(Value::Array(a)) => a.clone(),
+                _ => return Err("MatchPat: bytes elems not an array".to_string()),
+            };
+            let rest = matches!(pat_arg(d, 1), Some(Value::Bool(true)));
+            let data: Vec<u8> = match v {
+                Value::Bytes(b) => b.to_vec(),
+                Value::MmapSlice(h, off, n) => h.as_slice()[*off..off + n].to_vec(),
+                Value::Mmap(h) => h.as_slice().to_vec(),
+                _ => return Ok(false),
+            };
+            let mut vi = 0usize;
+            let mut pi = 0usize;
+            while pi < elems.len() {
+                let b = elems[pi].as_i64().unwrap_or(0) as u8;
+                if vi >= data.len() || data[vi] != b {
+                    return Ok(false);
+                }
+                vi += 1;
+                pi += 1;
+            }
+            Ok(if rest { true } else { vi == data.len() })
+        }
+        "tuple" => {
+            let subs = match pat_arg(d, 0) {
+                Some(Value::Array(a)) => a.clone(),
+                _ => return Err("MatchPat: tuple subs not an array".to_string()),
+            };
+            match v {
+                Value::Tuple(t) => {
+                    if t.len() != subs.len() {
+                        return Ok(false);
+                    }
+                    for (i, sub) in subs.iter().enumerate() {
+                        if !vm_pattern_match(&t[i], sub, bounds)? {
+                            return Ok(false);
+                        }
+                    }
+                    Ok(true)
+                }
+                _ => Ok(false),
+            }
+        }
+        "array" => {
+            let subs = match pat_arg(d, 0) {
+                Some(Value::Array(a)) => a.clone(),
+                _ => return Err("MatchPat: array subs not an array".to_string()),
+            };
+            match v {
+                Value::Array(a) => {
+                    if a.len() != subs.len() {
+                        return Ok(false);
+                    }
+                    for (i, sub) in subs.iter().enumerate() {
+                        if !vm_pattern_match(&a[i], sub, bounds)? {
+                            return Ok(false);
+                        }
+                    }
+                    Ok(true)
+                }
+                // Exact-length byte-slice matching via an array pattern.
+                Value::Bytes(b) => {
+                    if b.len() != subs.len() {
+                        return Ok(false);
+                    }
+                    for (i, sub) in subs.iter().enumerate() {
+                        let ok = match (sub, b[i]) {
+                            (Value::Array(e), byte) => has_byte_literal(e, byte),
+                            _ => false,
+                        };
+                        if !ok {
+                            return Ok(false);
+                        }
+                    }
+                    Ok(true)
+                }
+                _ => Ok(false),
+            }
+        }
+        "struct" => {
+            let want_name = match pat_arg(d, 0) {
+                Some(Value::String(s)) => s.as_ref(),
+                _ => "",
+            };
+            let fields = match pat_arg(d, 1) {
+                Some(Value::Array(a)) => a.clone(),
+                _ => return Err("MatchPat: struct fields not an array".to_string()),
+            };
+            match v {
+                Value::Struct { name, fields: fmap } => {
+                    if name.as_ref() != want_name {
+                        return Ok(false);
+                    }
+                    let mut i = 0;
+                    while i + 1 < fields.len() {
+                        let fname = match &fields[i] {
+                            Value::String(s) => s.as_ref(),
+                            _ => return Err("MatchPat: struct field name not a string".to_string()),
+                        };
+                        let sub = &fields[i + 1];
+                        match fmap.get(fname) {
+                            Some(fv) => {
+                                if !vm_pattern_match(fv, sub, bounds)? {
+                                    return Ok(false);
+                                }
+                            }
+                            None => return Ok(false),
+                        }
+                        i += 2;
+                    }
+                    Ok(true)
+                }
+                _ => Ok(false),
+            }
+        }
+        "enum" => {
+            let want_enum = match pat_arg(d, 0) {
+                Some(Value::String(s)) => s.as_ref(),
+                _ => "",
+            };
+            let want_var = match pat_arg(d, 1) {
+                Some(Value::String(s)) => s.as_ref(),
+                _ => "",
+            };
+            let subs = match pat_arg(d, 2) {
+                Some(Value::Array(a)) => a.clone(),
+                _ => return Err("MatchPat: enum subs not an array".to_string()),
+            };
+            match v {
+                Value::Enum { name, variant, data } => {
+                    if name.as_ref() != want_enum || variant.as_ref() != want_var || data.len() != subs.len() {
+                        return Ok(false);
+                    }
+                    for (i, sub) in subs.iter().enumerate() {
+                        if !vm_pattern_match(&data[i], sub, bounds)? {
+                            return Ok(false);
+                        }
+                    }
+                    Ok(true)
+                }
+                _ => Ok(false),
+            }
+        }
+        "range" => {
+            let lo = pat_arg(d, 0);
+            let hi = pat_arg(d, 1);
+            let lo_val = bounded_const(lo);
+            let hi_val = bounded_const(hi);
+            match (lo_val, hi_val, v.as_i64()) {
+                (Some(l), Some(h), Some(x)) => Ok(x >= l && x <= h),
+                _ => Ok(false),
+            }
+        }
+        "or" => {
+            let opts = match pat_arg(d, 0) {
+                Some(Value::Array(a)) => a.clone(),
+                _ => return Err("MatchPat: or subs not an array".to_string()),
+            };
+            for o in opts.iter() {
+                if vm_pattern_match(v, o, bounds)? {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        }
+        "some" => match v {
+            Value::Option(Some(inner)) => vm_pattern_match(inner, pat_arg(d, 0).ok_or("MatchPat: some needs sub")?, bounds),
+            _ => Ok(false),
+        },
+        "none" => Ok(matches!(v, Value::Option(None))),
+        "ok" => match v {
+            Value::Result(Some(inner), _) => vm_pattern_match(inner, pat_arg(d, 0).ok_or("MatchPat: ok needs sub")?, bounds),
+            _ => Ok(false),
+        },
+        "err" => match v {
+            Value::Result(_, Some(inner)) => vm_pattern_match(inner, pat_arg(d, 0).ok_or("MatchPat: err needs sub")?, bounds),
+            _ => Ok(false),
+        },
+        _ => Err(format!("MatchPat: unknown pattern tag '{}'", pat_tag(d))),
+    }
+}
+
+/// For `["byte"|"int"|"hex", n]` bound inside a `Range` descriptor.
+fn bounded_const(v: Option<&Value>) -> Option<i64> {
+    match v {
+        Some(Value::I64(i)) => Some(*i),
+        Some(Value::U64(u)) => Some(*u as i64),
+        Some(Value::Array(e)) => match pat_arg(e, 0) {
+            Some(Value::I64(i)) => Some(*i),
+            Some(Value::U64(u)) => Some(*u as i64),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// True if a byte-literal descriptor node matches the given byte (used by the
+/// exact-length `array`-pattern over `bytes`).
+fn has_byte_literal(e: &[Value], byte: u8) -> bool {
+    match e.first() {
+        Some(Value::String(s)) => match s.as_ref() {
+            "hex" => e.get(1).and_then(|x| x.as_u64()) == Some(byte as u64),
+            "int" => e.get(1).and_then(|x| x.as_i64()) == Some(byte as i64),
+            "byte" => e.get(1).and_then(|x| x.as_i64()) == Some(byte as i64),
+            _ => false,
+        },
+        _ => false,
     }
 }
 
@@ -2040,5 +2585,401 @@ dump r"#);
         assert!(out.iter().any(|l| l.contains("[DUMP] 93.184.216.34")), "ip got: {:?}", out);
         assert!(out.iter().any(|l| l.contains("tool=manual")), "report got: {:?}", out);
         assert!(out.iter().any(|l| l.contains("Sources")), "report got: {:?}", out);
+    }
+
+    // --- try/catch + `?` on the VM (Part 7A.1) ---
+
+    #[test]
+    fn test_vm_try_catch_raise() {
+        let out = run(r#"try {
+    raise "boom"
+} catch e {
+    dump e
+}
+dump "after""#);
+        assert!(out.iter().any(|l| l.contains("[DUMP] boom")), "got: {:?}", out);
+        assert!(out.iter().any(|l| l.contains("[DUMP] after")), "got: {:?}", out);
+    }
+
+    #[test]
+    fn test_vm_try_catch_structured() {
+        let out = run(r#"try {
+    raise "boom"
+} catch e {
+    dump err_kind(e)
+    dump err_message(e)
+}"#);
+        assert!(out.iter().any(|l| l.contains("[DUMP] user")), "kind got: {:?}", out);
+        assert!(out.iter().any(|l| l.contains("[DUMP] boom")), "message got: {:?}", out);
+    }
+
+    #[test]
+    fn test_vm_try_catches_runtime_error() {
+        let out = run(r#"try {
+    let x = 1 / 0
+    dump "never"
+} catch e {
+    dump "caught"
+}
+dump "done""#);
+        assert!(out.iter().any(|l| l.contains("[DUMP] caught")), "got: {:?}", out);
+        assert!(out.iter().any(|l| l.contains("[DUMP] done")), "got: {:?}", out);
+    }
+
+    #[test]
+    fn test_vm_try_nested_and_skip() {
+        let out = run(r#"try {
+    dump "no-raise"
+} catch e {
+    dump "should-not-run"
+}
+dump "ok""#);
+        assert!(out.iter().any(|l| l.contains("[DUMP] no-raise")), "got: {:?}", out);
+        assert!(!out.iter().any(|l| l.contains("should-not-run")), "got: {:?}", out);
+        assert!(out.iter().any(|l| l.contains("[DUMP] ok")), "got: {:?}", out);
+    }
+
+    #[test]
+    fn test_vm_try_catches_caller_error() {
+        let out = run(r#"fn inner() {
+    raise "deep"
+}
+try {
+    inner()
+} catch e {
+    dump e
+}"#);
+        assert!(out.iter().any(|l| l.contains("[DUMP] deep")), "got: {:?}", out);
+    }
+
+    #[test]
+    fn test_vm_try_defer_runs_in_body() {
+        let out = run(r#"fn cleanup() { dump "clean" }
+try {
+    defer cleanup()
+    raise "x"
+} catch e {
+    dump "caught"
+}"#);
+        let clean = out.iter().position(|l| l.contains("[DUMP] clean")).unwrap();
+        let caught = out.iter().position(|l| l.contains("[DUMP] caught")).unwrap();
+        assert!(clean < caught, "defers must run before the handler: {:?}", out);
+    }
+
+    #[test]
+    fn test_vm_raise_propagates_without_catch() {
+        let tokens = crate::lexer::tokenize("raise \"no handler\"").unwrap();
+        let module = crate::parser::parse(&tokens, "raise \"no handler\"").unwrap();
+        let chunk = compile_module(&module).unwrap();
+        let mut vm = Vm::new();
+        let err = vm.run(&chunk).unwrap_err();
+        assert!(err.contains("no handler"), "got: {}", err);
+    }
+
+    #[test]
+    fn test_vm_try_catch_return_value() {
+        let out = run(r#"fn risky(n) {
+    try {
+        if n > 0 { raise "too big" }
+        return 1
+    } catch e {
+        return -1
+    }
+}
+dump risky(5)
+dump risky(-1)"#);
+        assert!(out.iter().any(|l| l.contains("[DUMP] -1")), "got: {:?}", out);
+        assert!(out.iter().any(|l| l.contains("[DUMP] 1")), "got: {:?}", out);
+    }
+
+    #[test]
+    fn test_vm_question_operator_result() {
+        let out = run(r#"fn go() {
+    let v = Ok(42)?
+    return v
+}
+dump go()
+try {
+    let v = Err("bad")?
+    dump "never"
+} catch e {
+    dump e
+}"#);
+        assert!(out.iter().any(|l| l.contains("[DUMP] 42")), "got: {:?}", out);
+        assert!(out.iter().any(|l| l.contains("[DUMP] bad")), "got: {:?}", out);
+    }
+
+    #[test]
+    fn test_vm_question_operator_option() {
+        let out = run(r#"try {
+    let v = Some(7)?
+    dump v
+    let n = None?
+    dump "never"
+} catch e {
+    dump "caught-none"
+}"#);
+        assert!(out.iter().any(|l| l.contains("[DUMP] 7")), "got: {:?}", out);
+        assert!(out.iter().any(|l| l.contains("[DUMP] caught-none")), "got: {:?}", out);
+    }
+
+    // --- Method dispatch, struct literals, enum ctors on the VM (7A.2) ---
+
+    #[test]
+    fn test_vm_struct_literal_and_field() {
+        let out = run(r#"struct Point { x: int, y: int }
+let p = Point { x: 3, y: 4 }
+dump p.x
+dump p.y"#);
+        assert!(out.iter().any(|l| l.contains("[DUMP] 3")), "got: {:?}", out);
+        assert!(out.iter().any(|l| l.contains("[DUMP] 4")), "got: {:?}", out);
+    }
+
+    #[test]
+    fn test_vm_inherent_method() {
+        let out = run(r#"struct Point { x: int, y: int }
+impl Point {
+    fn sum(self) { return self.x + self.y }
+}
+let p = Point { x: 3, y: 4 }
+dump p.sum()"#);
+        assert!(out.iter().any(|l| l.contains("[DUMP] 7")), "got: {:?}", out);
+    }
+
+    #[test]
+    fn test_vm_trait_method_fmt() {
+        let out = run(r#"struct Point { x: int, y: int }
+impl Display for Point {
+    fn fmt(self) { return f"({self.x}, {self.y})" }
+}
+let p = Point { x: 3, y: 4 }
+dump p.fmt()"#);
+        assert!(out.iter().any(|l| l.contains("[DUMP] (3, 4)")), "got: {:?}", out);
+    }
+
+    #[test]
+    fn test_vm_regex_method() {
+        let out = run(r#"let re = /\d+/g
+dump re.is_match("abc123")
+dump re.find_all("a1 b22 c333")
+dump (/\s+/g).replace("a  b", "_")"#);
+        assert!(out.iter().any(|l| l.contains("[DUMP] true")), "got: {:?}", out);
+        assert!(out.iter().any(|l| l.contains("[1, 22, 333]")), "got: {:?}", out);
+        assert!(out.iter().any(|l| l.contains("a_b")), "got: {:?}", out);
+    }
+
+    #[test]
+    fn test_vm_enum_ctor_and_value() {
+        let out = run(r#"enum Event { Connect(string), Disconnect }
+let e = Event::Connect("host1")
+dump e
+match e {
+    Event::Connect(h) => { dump h },
+    _ => { dump "other" },
+}"#);
+        assert!(out.iter().any(|l| l.contains("Event")), "ctor got: {:?}", out);
+        assert!(out.iter().any(|l| l.contains("host1")), "match got: {:?}", out);
+    }
+
+    // --- Structural pattern matching on the VM (7A.3) ---
+
+    #[test]
+    fn test_vm_match_struct_pattern() {
+        let out = run(r#"struct Point { x: int, y: int }
+let p = Point { x: 3, y: 4 }
+match p {
+    Point { x, y } => { dump x + y },
+    _ => { dump "no" },
+}"#);
+        assert!(out.iter().any(|l| l.contains("[DUMP] 7")), "got: {:?}", out);
+    }
+
+    #[test]
+    fn test_vm_match_bytes_binary() {
+        let out = run(r#"fn sniff(d) {
+    match d {
+        [0x89, 'P', 'N', 'G', ..] => { return "png" },
+        [0xFF, 0xD8, 0xFF, ..] => { return "jpeg" },
+        _ => { return "unknown" },
+    }
+}
+dump sniff(b"\x89PNG\x0d\x0a")
+dump sniff(b"\xff\xd8\xff\xe0")
+dump sniff(b"nope")"#);
+        assert!(out.iter().any(|l| l.contains("[DUMP] png")), "got: {:?}", out);
+        assert!(out.iter().any(|l| l.contains("[DUMP] jpeg")), "got: {:?}", out);
+        assert!(out.iter().any(|l| l.contains("[DUMP] unknown")), "got: {:?}", out);
+    }
+
+    #[test]
+    fn test_vm_match_tuple_and_or_and_range() {
+        let out = run(r#"let t = (1, 2)
+match t {
+    (1, x) => { dump x },
+    _ => { dump "no" },
+}
+match 5 {
+    | 1 | 2 => { dump "low" },
+    3..10 => { dump "mid" },
+    _ => { dump "other" },
+}
+match 7 {
+    Some(x) => { dump "some" },
+    None => { dump "none" },
+}"#);
+        assert!(out.iter().any(|l| l.contains("[DUMP] 2")), "tuple got: {:?}", out);
+        assert!(out.iter().any(|l| l.contains("[DUMP] mid")), "range got: {:?}", out);
+    }
+
+    #[test]
+    fn test_vm_match_some_ok_err_none() {
+        let out = run(r#"match Ok(42) {
+    Err(e) => { dump "err" },
+    Ok(v) => { dump v },
+}
+match None {
+    Some(x) => { dump "some" },
+    None => { dump "none" },
+}
+try {
+    match Err("bad") {
+        Ok(v) => { dump v },
+        Err(e) => { dump e },
+    }
+}"#);
+        assert!(out.iter().any(|l| l.contains("[DUMP] 42")), "ok got: {:?}", out);
+        assert!(out.iter().any(|l| l.contains("[DUMP] none")), "none got: {:?}", out);
+        assert!(out.iter().any(|l| l.contains("[DUMP] bad")), "err got: {:?}", out);
+    }
+
+    #[test]
+    fn test_vm_match_guard_falls_through() {
+        let out = run(r#"fn classify(n) {
+    match n {
+        x if x < 10 => { return "small" },
+        10 => { return "ten" },
+        _ => { return "big" },
+    }
+}
+dump classify(3)
+dump classify(10)
+dump classify(50)"#);
+        assert!(out.iter().any(|l| l.contains("[DUMP] small")), "got: {:?}", out);
+        assert!(out.iter().any(|l| l.contains("[DUMP] ten")), "got: {:?}", out);
+        assert!(out.iter().any(|l| l.contains("[DUMP] big")), "got: {:?}", out);
+    }
+
+    // --- IfLet / WhileLet / DoWhile on the VM ---
+
+    #[test]
+    fn test_vm_if_let() {
+        let out = run(r#"if let Some(v) = Some(9) { dump v } else { dump "no" }
+if let Some(w) = None { dump "yes" } else { dump "none" }"#);
+        assert!(out.iter().any(|l| l.contains("[DUMP] 9")), "got: {:?}", out);
+        assert!(out.iter().any(|l| l.contains("[DUMP] none")), "got: {:?}", out);
+    }
+
+    #[test]
+    fn test_vm_while_let() {
+        let out = run(r#"let mut n = 0
+while let Some(x) = Some(5) {
+    n = x
+    break
+}
+dump n"#);
+        assert!(out.iter().any(|l| l.contains("[DUMP] 5")), "got: {:?}", out);
+    }
+
+    #[test]
+    fn test_vm_do_while() {
+        let out = run(r#"let mut i = 0
+do { i = i + 1 } while i < 3
+dump i"#);
+        assert!(out.iter().any(|l| l.contains("[DUMP] 3")), "got: {:?}", out);
+    }
+
+    // --- Control flow on the VM (labeled break/continue) ---
+
+    #[test]
+    fn test_vm_labeled_break() {
+        let out = run(r#"let mut s = 0
+'outer: for i in 1..5 {
+    for j in 1..5 {
+        if i * j > 6 { break 'outer }
+        s = s + 1
+    }
+}
+dump s"#);
+        assert!(out.iter().any(|l| l.contains("[DUMP] 8")), "got: {:?}", out);
+    }
+
+    #[test]
+    fn test_vm_labeled_continue() {
+        let out = run(r#"let mut s = 0
+'outer: for i in 1..4 {
+    for j in 1..4 {
+        if j == 2 { continue 'outer }
+        s = s + 1
+    }
+}
+dump s"#);
+        assert!(out.iter().any(|l| l.contains("[DUMP] 4")), "got: {:?}", out);
+    }
+
+    #[test]
+    fn test_vm_loop_break() {
+        let out = run(r#"let mut n = 0
+loop {
+    n = n + 1
+    if n == 5 { break }
+}
+dump n"#);
+        assert!(out.iter().any(|l| l.contains("[DUMP] 5")), "got: {:?}", out);
+    }
+
+    #[test]
+    fn test_vm_while_continue() {
+        let out = run(r#"let mut s = 0
+let mut i = 0
+while i < 10 {
+    i = i + 1
+    if i % 2 == 0 { continue }
+    s = s + i
+}
+dump s"#);
+        assert!(out.iter().any(|l| l.contains("[DUMP] 25")), "got: {:?}", out);
+    }
+
+    #[test]
+    fn test_vm_for_continue() {
+        let out = run(r#"let mut s = 0
+for x in [1, 2, 3, 4] {
+    if x == 2 { continue }
+    s = s + x
+}
+dump s"#);
+        assert!(out.iter().any(|l| l.contains("[DUMP] 8")), "got: {:?}", out);
+    }
+
+    // Direct descriptor/matcher debugging ---
+    #[test]
+    fn debug_vm_pattern_match_direct() {
+        use crate::ast::Pattern;
+        let p = Pattern::Struct("Point".into(), vec![
+            ("x".into(), Pattern::Ident("x".into())),
+            ("y".into(), Pattern::Ident("y".into())),
+        ]);
+        let mut c = crate::compiler::Compiler::new();
+        let src = Value::Struct { name: Arc::from("Point"), fields: Arc::from({
+            let mut m = std::collections::HashMap::new();
+            m.insert("x".to_string(), Value::I64(3));
+            m.insert("y".to_string(), Value::I64(4));
+            m
+        }) };
+        let desc = c.pattern_descriptor(&p).unwrap();
+        let mut bounds = Vec::new();
+        let ok = vm_pattern_match(&src, &desc, &mut bounds).unwrap();
+        assert!(ok, "structure match failed; desc={:?}", desc);
+        assert_eq!(bounds.iter().map(|(n, _)| n.clone()).collect::<Vec<_>>(), vec!["x".to_string(), "y".to_string()]);
     }
 }
