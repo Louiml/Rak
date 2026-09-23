@@ -607,6 +607,32 @@ impl Compiler {
         self.emit_const(Value::String(Arc::from(s)))
     }
 
+    /// Emit a load of the named variable (local if bound, else global).
+    fn compile_ident_load(&mut self, name: &str) -> Result<(), String> {
+        if let Some(slot) = self.resolve_local(name) {
+            self.emit_op(Op::LoadLocal);
+            self.emit_byte(slot);
+        } else {
+            let ci = self.const_str(name);
+            self.emit_op(Op::LoadGlobal);
+            self.emit_u16(ci);
+        }
+        Ok(())
+    }
+
+    /// Emit a store of the top-of-stack value to the named variable.
+    fn store_ident_to(&mut self, name: &str) -> Result<(), String> {
+        if let Some(slot) = self.resolve_local(name) {
+            self.emit_op(Op::StoreLocal);
+            self.emit_byte(slot);
+        } else {
+            let ci = self.const_str(name);
+            self.emit_op(Op::StoreGlobal);
+            self.emit_u16(ci);
+        }
+        Ok(())
+    }
+
     fn compile_stmt(&mut self, stmt: &Stmt) -> Result<(), String> {
         match stmt {
             Stmt::Let { name, value, mutable, .. } => {
@@ -1191,6 +1217,70 @@ impl Compiler {
                     self.emit_u16(ci);
                 }
             }
+            Expr::CompoundAssign(op, name, value) => {
+                // `x op= rhs` — cur = cur op rhs; yields the result.
+                if self.local_is_immutable(name) || self.immutable_globals.contains(name) {
+                    return Err(format!("cannot assign to immutable variable `{}`", name));
+                }
+                self.compile_ident_load(name)?;
+                self.compile_expr(value)?;
+                self.emit_op(match op {
+                    CompoundOp::Add => Op::AddI,
+                    CompoundOp::Sub => Op::SubI,
+                    CompoundOp::Mul => Op::MulI,
+                    CompoundOp::Div => Op::DivI,
+                    CompoundOp::Rem => Op::RemI,
+                    CompoundOp::BitAnd => Op::BitAnd,
+                    CompoundOp::BitOr => Op::BitOr,
+                    CompoundOp::BitXor => Op::BitXor,
+                    CompoundOp::Shl => Op::Shl,
+                    CompoundOp::Shr => Op::Shr,
+                });
+                if let Some(slot) = self.resolve_local(name) {
+                    self.emit_op(Op::StoreLocal);
+                    self.emit_byte(slot);
+                } else {
+                    let ci = self.const_str(name);
+                    self.emit_op(Op::StoreGlobal);
+                    self.emit_u16(ci);
+                }
+            }
+            Expr::IndexAssign { obj, idx, value } => {
+                // `obj[idx] = value` for a named (local/global) container:
+                // container; index; value; IndexSet (leaves mutated container);
+                // store it back to the variable; yield nil.
+                let obj_expr = obj.as_ref();
+                let name = match obj_expr {
+                    Expr::Ident(n) => n,
+                    _ => return Err("VM index-assign: target must be a plain variable".to_string()),
+                };
+                if self.local_is_immutable(name) || self.immutable_globals.contains(name) {
+                    return Err(format!("cannot assign to immutable variable `{}`", name));
+                }
+                self.compile_ident_load(name)?;
+                self.compile_expr(idx)?;
+                self.compile_expr(value)?;
+                self.emit_op(Op::IndexSet);
+                self.store_ident_to(name)?;
+                self.emit_op(Op::Nil);
+            }
+            Expr::FieldAssign { obj, field, value } => {
+                let obj_expr = obj.as_ref();
+                let name = match obj_expr {
+                    Expr::Ident(n) => n,
+                    _ => return Err("VM field-assign: target must be a plain variable".to_string()),
+                };
+                if self.local_is_immutable(name) || self.immutable_globals.contains(name) {
+                    return Err(format!("cannot assign to immutable variable `{}`", name));
+                }
+                self.compile_ident_load(name)?;
+                self.compile_expr(value)?;
+                let fi = self.const_str(field);
+                self.emit_op(Op::FieldSet);
+                self.emit_u16(fi);
+                self.store_ident_to(name)?;
+                self.emit_op(Op::Nil);
+            }
             Expr::Array(items) => {
                 for e in items {
                     self.compile_expr(e)?;
@@ -1398,6 +1488,90 @@ impl Compiler {
                 // `expr?` — unwrap Result/Option or raise (bindable by catch).
                 self.compile_expr(inner)?;
                 self.emit_op(Op::TryUnwrap);
+            }
+            Expr::Ternary { cond, then, els } => {
+                self.compile_expr(cond)?;
+                let jf = self.emit_jump(Op::JumpIfFalse);
+                self.emit_op(Op::Pop);
+                self.compile_expr(then)?;
+                let je = self.emit_jump(Op::Jump);
+                self.patch_jump(jf);
+                self.emit_op(Op::Pop);
+                self.compile_expr(els)?;
+                self.patch_jump(je);
+            }
+            Expr::NilCoalesce(l, r) => {
+                // `a ?? b` — push `l`; if nil/None, jump to `r`. Keeps the
+                // value on the stack on the non-nil path.
+                self.compile_expr(l)?;
+                self.emit_op(Op::Dup);
+                // is it nil/None? nil-coalescing needs a nil test op.
+                let jnil = self.emit_jump(Op::JumpIfNil);
+                self.emit_op(Op::Pop); // pop the duplicated value
+                let je = self.emit_jump(Op::Jump);
+                // nil path: pop the nil, evaluate r
+                self.patch_jump(jnil);
+                self.emit_op(Op::Pop);
+                self.compile_expr(r)?;
+                self.patch_jump(je);
+            }
+            Expr::OptField(obj, field) => {
+                // `obj?.field` — nil if obj is nil/None, else field.
+                self.compile_expr(obj)?;
+                self.emit_op(Op::Dup);
+                let jnil = self.emit_jump(Op::JumpIfNil);
+                self.emit_op(Op::Pop);
+                let ci = self.const_str(field);
+                self.emit_op(Op::LoadConst);
+                self.emit_u16(ci);
+                self.emit_op(Op::FieldGet);
+                let je = self.emit_jump(Op::Jump);
+                self.patch_jump(jnil);
+                self.emit_op(Op::Pop);
+                self.emit_op(Op::Nil);
+                self.patch_jump(je);
+            }
+            Expr::OptIndex(obj, idx) => {
+                self.compile_expr(obj)?;
+                self.emit_op(Op::Dup);
+                let jnil = self.emit_jump(Op::JumpIfNil);
+                self.emit_op(Op::Pop);
+                self.compile_expr(idx)?;
+                self.emit_op(Op::IndexGet);
+                let je = self.emit_jump(Op::Jump);
+                self.patch_jump(jnil);
+                self.emit_op(Op::Pop);
+                self.emit_op(Op::Nil);
+                self.patch_jump(je);
+            }
+            Expr::MultiAssign { targets, values } => {
+                // `a, b = x, y` — evaluate all RHS into temps, then store to
+                // each (Ident) target; yields nil.
+                if targets.len() != values.len() {
+                    return Err("multi-assign: target/value count mismatch".to_string());
+                }
+                let mut slots: Vec<u8> = Vec::new();
+                for v in values {
+                    self.compile_expr(v)?;
+                    let s = self.add_local("__ma".to_string());
+                    slots.push(s);
+                    self.emit_op(Op::StoreLocal);
+                    self.emit_byte(s);
+                }
+                for (i, t) in targets.iter().enumerate() {
+                    match t {
+                        Expr::Ident(name) => {
+                            if self.local_is_immutable(name) || self.immutable_globals.contains(name) {
+                                return Err(format!("cannot assign to immutable variable `{}`", name));
+                            }
+                            self.emit_op(Op::LoadLocal);
+                            self.emit_byte(slots[i]);
+                            self.store_ident_to(name)?;
+                        }
+                        _ => return Err("VM multi-assign: target must be a plain variable".to_string()),
+                    }
+                }
+                self.emit_op(Op::Nil);
             }
             Expr::StructLit { name, fields } => {
                 // Build a `Value::Struct`: push (name-const, value) pairs then

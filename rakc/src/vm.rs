@@ -1305,6 +1305,18 @@ impl Vm {
                         frame.ip = target;
                     }
                 }
+                Op::JumpIfNil => {
+                    let target = frame.code.read_u16(frame.ip) as usize;
+                    frame.ip += 2;
+                    let isnil = match frame.peek() {
+                        Value::Nil => true,
+                        Value::Option(None) => true,
+                        _ => false,
+                    };
+                    if isnil {
+                        frame.ip = target;
+                    }
+                }
                 Op::Call => {
                     let argc = frame.code.code[frame.ip] as usize;
                     frame.ip += 1;
@@ -1566,6 +1578,25 @@ impl Vm {
                         Ok(false) => frame.push(Value::Nil),
                         Err(e) => return Err(e),
                     }
+                }
+                Op::IndexSet => {
+                    let val = frame.pop();
+                    let idx = frame.pop();
+                    let mut obj = frame.pop();
+                    vm_index_set(&mut obj, &idx, val)?;
+                    frame.push(obj);
+                }
+                Op::FieldSet => {
+                    let fi = frame.code.read_u16(frame.ip) as usize;
+                    frame.ip += 2;
+                    let field = match &frame.code.constants[fi] {
+                        Value::String(s) => s.to_string(),
+                        _ => return Err("FieldSet: bad field-name constant".to_string()),
+                    };
+                    let val = frame.pop();
+                    let mut obj = frame.pop();
+                    vm_field_set(&mut obj, &field, val)?;
+                    frame.push(obj);
                 }
                 Op::CatchEnd => {
                     frame.catches.pop();
@@ -2117,6 +2148,57 @@ fn has_byte_literal(e: &[Value], byte: u8) -> bool {
             _ => false,
         },
         _ => false,
+    }
+}
+
+/// `obj[idx] = value` — copy-on-write mutation (fast path when `obj` is the
+/// only reference). Mirrors the interpreter's `Expr::IndexAssign`.
+fn vm_index_set(obj: &mut Value, idx: &Value, val: Value) -> Result<(), String> {
+    match obj {
+        Value::Array(a) => {
+            let i = idx.as_i64().ok_or_else(|| "index-assign: index must be an int".to_string())? as usize;
+            let m = Arc::make_mut(a);
+            if i >= m.len() {
+                return Err(format!("index-assign: index {} out of bounds (len {})", i, m.len()));
+            }
+            m[i] = val;
+            Ok(())
+        }
+        Value::Map(m) => {
+            let k = idx.to_string();
+            Arc::make_mut(m).insert(k, val);
+            Ok(())
+        }
+        Value::Bytes(b) => {
+            let i = idx.as_i64().ok_or_else(|| "index-assign: index must be an int".to_string())? as usize;
+            let m = Arc::make_mut(b);
+            if i >= m.len() {
+                return Err(format!("index-assign: index {} out of bounds (len {})", i, m.len()));
+            }
+            m[i] = val.as_i64().ok_or_else(|| "index-assign: expected a byte".to_string())? as u8;
+            Ok(())
+        }
+        other => Err(format!("cannot index-assign this value ({})", other.type_name())),
+    }
+}
+
+/// `obj.field = value` — copy-on-write mutation for structs and maps.
+fn vm_field_set(obj: &mut Value, field: &str, val: Value) -> Result<(), String> {
+    match obj {
+        Value::Map(m) => {
+            Arc::make_mut(m).insert(field.to_string(), val);
+            Ok(())
+        }
+        Value::Struct { fields, .. } => {
+            let fm = Arc::make_mut(fields);
+            if fm.contains_key(field) {
+                fm.insert(field.to_string(), val);
+                Ok(())
+            } else {
+                Err(format!("field-assign: field '{}' not found", field))
+            }
+        }
+        other => Err(format!("cannot field-assign this value ({})", other.type_name())),
     }
 }
 
@@ -2867,6 +2949,65 @@ dump classify(50)"#);
         assert!(out.iter().any(|l| l.contains("[DUMP] small")), "got: {:?}", out);
         assert!(out.iter().any(|l| l.contains("[DUMP] ten")), "got: {:?}", out);
         assert!(out.iter().any(|l| l.contains("[DUMP] big")), "got: {:?}", out);
+    }
+
+    // --- Assignment + coalescing expressions on the VM ---
+
+    #[test]
+    fn test_vm_index_and_field_assign() {
+        let out = run(r#"let mut a = [1, 2, 3]
+a[0] = 9
+dump a[0]
+let mut m = {}
+m["k"] = "v"
+dump m["k"]
+struct P { x: int }
+let mut p = P { x: 1 }
+p.x = 42
+dump p.x
+let mut n = 5
+n += 3
+n *= 2
+dump n"#);
+        assert!(out.iter().any(|l| l.contains("[DUMP] 9")), "got: {:?}", out);
+        assert!(out.iter().any(|l| l.contains("[DUMP] v")), "got: {:?}", out);
+        assert!(out.iter().any(|l| l.contains("[DUMP] 42")), "got: {:?}", out);
+        assert!(out.iter().any(|l| l.contains("[DUMP] 16")), "got: {:?}", out);
+    }
+
+    #[test]
+    fn test_vm_ternary_and_coalesce() {
+        let out = run(r#"let x = 5
+dump (x > 3 ? "big" : "small")
+dump (nil ?? "fallback")
+dump (Some(1) ?? "fb")
+let m = { port: 80 }
+dump m?.port
+dump (nil?.field ?? "missing")
+let a = [10, 20]
+dump (a?[1] ?? "no")"#);
+        assert!(out.iter().any(|l| l.contains("[DUMP] big")), "got: {:?}", out);
+        assert!(out.iter().any(|l| l.contains("[DUMP] fallback")), "got: {:?}", out);
+        assert!(out.iter().any(|l| l.contains("[DUMP] Some(1)")), "got: {:?}", out);
+        assert!(out.iter().any(|l| l.contains("[DUMP] 80")), "got: {:?}", out);
+        assert!(out.iter().any(|l| l.contains("[DUMP] missing")), "got: {:?}", out);
+        assert!(out.iter().any(|l| l.contains("[DUMP] 20")), "got: {:?}", out);
+    }
+
+    #[test]
+    fn test_vm_multi_assign() {
+        let out = run(r#"let mut a = 0
+let mut b = 0
+a, b = 1, 2
+dump a
+dump b
+let mut x = 0
+let mut y = 0
+x, y = y, x
+dump x"#);
+        assert!(out.iter().any(|l| l.contains("[DUMP] 1")), "got: {:?}", out);
+        assert!(out.iter().any(|l| l.contains("[DUMP] 2")), "got: {:?}", out);
+        assert!(out.iter().any(|l| l.contains("[DUMP] 0")), "got: {:?}", out);
     }
 
     // --- IfLet / WhileLet / DoWhile on the VM ---

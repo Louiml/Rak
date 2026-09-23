@@ -86,11 +86,21 @@ pub enum Op {
     /// of bound values (ordered as the descriptor's bind names, `Nil` where a
     /// bind was absent) on a match, or `Value::Nil` on no match.
     MatchPat,
+    /// `obj[idx] = value`. Pops value, then index, then object; mutates the
+    /// container in place (via copy-on-write) and pushes the container back so
+    /// the caller can store it back to its binding.
+    IndexSet,
+    /// `obj.field = value`. Operand: u16 field-name const index. Pops value,
+    /// then object; mutates and pushes the container back (copy-on-write).
+    FieldSet,
+    /// Jump if the top-of-stack is `nil` or `None` (does not pop). Used by
+    /// `??`, `?.`, `?[`. Operand: u16 target offset.
+    JumpIfNil,
 }
 
 impl Op {
     pub fn from_u8(b: u8) -> Option<Op> {
-        if (b as usize) <= Op::MatchPat as usize {
+        if (b as usize) <= Op::JumpIfNil as usize {
             Some(unsafe { std::mem::transmute(b) })
         } else {
             None

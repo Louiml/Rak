@@ -25,8 +25,8 @@ struct Range { lo: int, hi: int }
 
 impl Iterable for Range {
     fn iter(self) {
-        let out = []
-        let i = self.lo
+        let mut out = []
+        let mut i = self.lo
         while i <= self.hi {
             out = push(out, i)
             i = i + 1
