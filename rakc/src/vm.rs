@@ -305,6 +305,48 @@ fn is_numeric_vm(v: &Value) -> bool {
     )
 }
 
+/// Iterator builtins (Part 7A.10). The pure transforms (zip/enumerate/skip)
+/// are computed here; the function-taking family (fold/reduce/any/all/
+/// flat_map/take_while) is handled with VM access in `Vm::vm_iter_call` —
+/// when reached through this path (a stray native call), it reports an error.
+fn iter_pure_native(name: &str, args: &[Value]) -> Result<Value, String> {
+    fn items_of(args: &[Value], name: &str) -> Result<Vec<Value>, String> {
+        match args.first() {
+            Some(Value::Array(a)) => Ok(a.to_vec()),
+            Some(other) => Err(format!("{}() requires an array, got {}", name, other.type_name())),
+            None => Err(format!("{}() requires an array", name)),
+        }
+    }
+    match name {
+        "zip" => {
+            let a = items_of(args, "zip")?;
+            let b = items_of(&args[1..], "zip")?;
+            let n = a.len().min(b.len());
+            Ok(Value::Array(Arc::from(
+                (0..n).map(|i| Value::Tuple(Arc::from(vec![a[i].clone(), b[i].clone()]))).collect::<Vec<_>>(),
+            )))
+        }
+        "enumerate" => {
+            let a = items_of(args, "enumerate")?;
+            Ok(Value::Array(Arc::from(
+                a.into_iter()
+                    .enumerate()
+                    .map(|(i, v)| Value::Tuple(Arc::from(vec![Value::I64(i as i64), v])))
+                    .collect::<Vec<_>>(),
+            )))
+        }
+        "skip" => {
+            let a = items_of(args, "skip")?;
+            let n = args.get(1).and_then(|v| v.as_i64()).unwrap_or(0).max(0) as usize;
+            Ok(Value::Array(Arc::from(a.into_iter().skip(n).collect::<Vec<_>>())))
+        }
+        _ => Err(format!(
+            "{}() needs VM access to call its function argument (unreachable)",
+            name
+        )),
+    }
+}
+
 impl Vm {
     pub fn new() -> Self {
         let mut vm = Vm {
@@ -369,6 +411,39 @@ impl Vm {
             Ok(Value::Option(Some(Box::new(args.first().cloned().unwrap_or(Value::Nil)))))
         });
         self.globals.insert("None".to_string(), Value::Option(None));
+        // Iterator builtins (Part 7A.10) — pure array transforms. The
+        // function-taking fold family is intercepted in `call_value`.
+        self.insert_native("zip", |args| iter_pure_native("zip", args));
+        self.insert_native("enumerate", |args| iter_pure_native("enumerate", args));
+        self.insert_native("skip", |args| iter_pure_native("skip", args));
+        self.insert_native("keys", |args| match args.first() {
+            Some(Value::Map(m)) => Ok(Value::Array(Arc::from(m.keys().cloned().map(|k| Value::String(Arc::from(k.as_str()))).collect::<Vec<_>>()))),
+            _ => Err("keys() requires a map".to_string()),
+        });
+        self.insert_native("values", |args| match args.first() {
+            Some(Value::Map(m)) => Ok(Value::Array(Arc::from(m.values().cloned().collect::<Vec<_>>()))),
+            _ => Err("values() requires a map".to_string()),
+        });
+        self.insert_native("has", |args| {
+            let k = native_str(args.get(1));
+            match args.first() {
+                Some(Value::Map(m)) => Ok(Value::Bool(m.contains_key(&k))),
+                _ => Ok(Value::Bool(false)),
+            }
+        });
+        self.insert_native("get", |args| {
+            let k = native_str(args.get(1));
+            match args.first() {
+                Some(Value::Map(m)) => Ok(m.get(&k).cloned().unwrap_or_else(|| args.get(2).cloned().unwrap_or(Value::Nil))),
+                _ => Ok(args.get(2).cloned().unwrap_or(Value::Nil)),
+            }
+        });
+        self.insert_native("fold", |args| iter_pure_native("fold", args));
+        self.insert_native("reduce", |args| iter_pure_native("reduce", args));
+        self.insert_native("any", |args| iter_pure_native("any", args));
+        self.insert_native("all", |args| iter_pure_native("all", args));
+        self.insert_native("flat_map", |args| iter_pure_native("flat_map", args));
+        self.insert_native("take_while", |args| iter_pure_native("take_while", args));
         self.insert_native("len", |args| {
             match args.first() {
                 Some(Value::String(s)) => Ok(Value::I64(s.chars().count() as i64)),
@@ -1648,6 +1723,37 @@ impl Vm {
                     vm_field_set(&mut obj, &field, val)?;
                     frame.push(obj);
                 }
+                Op::IterItems => {
+                    // Materialize a container into its iteration items.
+                    let indexed = frame.code.code[frame.ip] == 1;
+                    frame.ip += 1;
+                    let obj = frame.pop();
+                    let obj = unwrap_vm_evidence(&obj);
+                    let items: Vec<Value> = match &obj {
+                        Value::Array(a) => {
+                            if indexed {
+                                a.iter().enumerate().map(|(i, v)| Value::Tuple(Arc::from(vec![Value::I64(i as i64), v.clone()]))).collect()
+                            } else {
+                                a.to_vec()
+                            }
+                        }
+                        Value::Tuple(t) => t.to_vec(),
+                        Value::Map(m) => {
+                            m.iter().map(|(k, v)| Value::Tuple(Arc::from(vec![Value::String(Arc::from(k.as_str())), v.clone()]))).collect()
+                        }
+                        Value::String(s) => {
+                            if indexed {
+                                s.chars().enumerate().map(|(i, c)| Value::Tuple(Arc::from(vec![Value::I64(i as i64), Value::String(Arc::from(c.to_string().as_str()))]))).collect()
+                            } else {
+                                s.chars().map(|c| Value::String(Arc::from(c.to_string().as_str()))).collect()
+                            }
+                        }
+                        Value::Bytes(b) => b.iter().map(|b| Value::I64(*b as i64)).collect(),
+                        Value::MmapSlice(h, off, n) => h.as_slice()[*off..off + n].iter().map(|b| Value::I64(*b as i64)).collect(),
+                        _ => return Err(format!("cannot iterate over this value ({})", obj.type_name())),
+                    };
+                    frame.push(Value::Array(Arc::from(items)));
+                }
                 Op::CatchEnd => {
                     frame.catches.pop();
                 }
@@ -1704,6 +1810,19 @@ impl Vm {
     fn call_value(&mut self, frame: &mut Frame, callee: Value, mut args: Vec<Value>) -> Result<(), String> {
         match callee {
             Value::NativeFn(name, f) => {
+                // Iterator builtins take function arguments and must drive the
+                // VM per element — handle them here where `self` is available.
+                match name.as_ref() {
+                    "zip" | "enumerate" | "skip" => {
+                        let result = iter_pure_native(&name, &args)?;
+                        frame.push(result);
+                        return Ok(());
+                    }
+                    "fold" | "reduce" | "any" | "all" | "flat_map" | "take_while" => {
+                        return self.vm_iter_call(frame, &name, args);
+                    }
+                    _ => {}
+                }
                 let result = f(&args).map_err(|e| format!("{}: {}", name, e))?;
                 frame.push(result);
             }
@@ -1732,6 +1851,92 @@ impl Vm {
                 frame.push(sub.stack.pop().unwrap_or(Value::Nil));
             }
             _ => return Err("cannot call non-function".to_string()),
+        }
+        Ok(())
+    }
+
+    /// Run an iterator builtin whose per-element step calls a Rak function
+    /// (`fold`/`reduce`/`any`/`all`/`flat_map`/`take_while`). The function is
+    /// invoked with `call_value` (which has VM access), so closures work.
+    fn vm_iter_call(&mut self, frame: &mut Frame, name: &str, args: Vec<Value>) -> Result<(), String> {
+        let items: Vec<Value> = match args.first() {
+            Some(Value::Array(a)) => a.to_vec(),
+            Some(other) => return Err(format!("{}() requires an array, got {}", name, other.type_name())),
+            None => return Err(format!("{}() requires an array", name)),
+        };
+        let arity_err = || format!("{}() expects (xs, init, f) / (xs, f)", name);
+        let call2 = |vm: &mut Vm, frame: &mut Frame, f: &Value, a: Value, b: Value| -> Result<Value, String> {
+            vm.call_value(frame, f.clone(), vec![a, b])?;
+            Ok(frame.pop())
+        };
+        let call1 = |vm: &mut Vm, frame: &mut Frame, f: &Value, a: Value| -> Result<Value, String> {
+            vm.call_value(frame, f.clone(), vec![a])?;
+            Ok(frame.pop())
+        };
+        match name {
+            "fold" => {
+                let f = args.get(2).cloned().ok_or_else(arity_err)?;
+                let mut acc = args.get(1).cloned().unwrap_or(Value::Nil);
+                for item in items {
+                    acc = call2(self, frame, &f, acc, item)?;
+                }
+                frame.push(acc);
+            }
+            "reduce" => {
+                let f = args.get(1).cloned().ok_or_else(arity_err)?;
+                if items.is_empty() {
+                    frame.push(Value::Option(None));
+                    return Ok(());
+                }
+                let mut acc = items[0].clone();
+                for item in items.into_iter().skip(1) {
+                    acc = call2(self, frame, &f, acc, item)?;
+                }
+                frame.push(Value::Option(Some(Box::new(acc))));
+            }
+            "any" => {
+                let f = args.get(1).cloned().ok_or_else(arity_err)?;
+                for item in items {
+                    if call1(self, frame, &f, item)?.is_truthy() {
+                        frame.push(Value::Bool(true));
+                        return Ok(());
+                    }
+                }
+                frame.push(Value::Bool(false));
+            }
+            "all" => {
+                let f = args.get(1).cloned().ok_or_else(arity_err)?;
+                for item in items {
+                    if !call1(self, frame, &f, item)?.is_truthy() {
+                        frame.push(Value::Bool(false));
+                        return Ok(());
+                    }
+                }
+                frame.push(Value::Bool(true));
+            }
+            "flat_map" => {
+                let f = args.get(1).cloned().ok_or_else(arity_err)?;
+                let mut out: Vec<Value> = Vec::new();
+                for item in items {
+                    match call1(self, frame, &f, item)? {
+                        Value::Array(a) => out.extend(a.iter().cloned()),
+                        other => out.push(other),
+                    }
+                }
+                frame.push(Value::Array(Arc::from(out)));
+            }
+            "take_while" => {
+                let f = args.get(1).cloned().ok_or_else(arity_err)?;
+                let mut out: Vec<Value> = Vec::new();
+                for item in items {
+                    if !call1(self, frame, &f, item.clone())?.is_truthy() {
+                        break;
+                    }
+                    out.push(item);
+                }
+                frame.push(Value::Array(Arc::from(out)));
+            }
+            _ => return Err(arity_err()),
         }
         Ok(())
     }
@@ -1800,6 +2005,19 @@ impl Vm {
     fn binop_arith(&mut self, frame: &mut Frame, op: BinArith) -> Result<(), String> {
         let r = frame.pop();
         let l = frame.pop();
+        // String concat / array concat on `+` (mirrors the interpreter).
+        if matches!(op, BinArith::Add) {
+            if let Value::String(a) = &l {
+                frame.push(Value::String(Arc::from(format!("{}{}", a, r).as_str())));
+                return Ok(());
+            }
+            if let (Value::Array(a), Value::Array(b)) = (&l, &r) {
+                let mut out = a.to_vec();
+                out.extend(b.to_vec());
+                frame.push(Value::Array(Arc::from(out)));
+                return Ok(());
+            }
+        }
         let lnum = is_numeric_vm(&l);
         let rnum = is_numeric_vm(&r);
         if lnum && rnum {
@@ -3110,6 +3328,51 @@ dump classify(50)"#);
         assert!(out.iter().any(|l| l.contains("[DUMP] small")), "got: {:?}", out);
         assert!(out.iter().any(|l| l.contains("[DUMP] ten")), "got: {:?}", out);
         assert!(out.iter().any(|l| l.contains("[DUMP] big")), "got: {:?}", out);
+    }
+
+    // --- Iterator builtins + map/string for on the VM (7A.10) ---
+
+    #[test]
+    fn test_vm_iter_builtins() {
+        let out = run(r#"dump zip([1, 2, 3], ["a", "b"])
+dump enumerate([10, 20])
+dump fold([1, 2, 3, 4], 0, fn(acc, x) { return acc + x })
+dump reduce([1, 2, 3], fn(a, b) { return a * b })
+dump any([1, 2, 3], fn(x) { return x > 2 })
+dump all([1, 2, 3], fn(x) { return x > 0 })
+dump flat_map([1, 2], fn(x) { return [x, x * 10] })
+dump take_while([1, 2, 3, 0, 5], fn(x) { return x > 0 })
+dump skip([1, 2, 3, 4], 2)
+let m = {a: 1, b: 2}
+dump keys(m)
+dump values(m)"#);
+        assert!(out.iter().any(|l| l.contains("[(1, a), (2, b)]")), "zip got: {:?}", out);
+        assert!(out.iter().any(|l| l.contains("[(0, 10), (1, 20)]")), "enumerate got: {:?}", out);
+        assert!(out.iter().any(|l| l.contains("[DUMP] 10")), "fold got: {:?}", out);
+        assert!(out.iter().any(|l| l.contains("[DUMP] Some(6)")), "reduce got: {:?}", out);
+        assert!(out.iter().any(|l| l.contains("[DUMP] true")), "got: {:?}", out);
+        assert!(out.iter().any(|l| l.contains("[1, 10, 2, 20]")), "flat_map got: {:?}", out);
+        assert!(out.iter().any(|l| l.contains("[1, 2, 3]")), "take_while got: {:?}", out);
+        assert!(out.iter().any(|l| l.contains("[3, 4]")), "skip got: {:?}", out);
+    }
+
+    #[test]
+    fn test_vm_for_map_and_string() {
+        let out = run(r#"let m = {a: 1, b: 2}
+let mut s = 0
+for (k, v) in m {
+    s = s + v
+}
+dump s
+let mut t = ""
+for c in "abc" { t = t + c }
+dump t
+let mut cs = 0
+for (i, c) in "hi" { cs = cs + i }
+dump cs"#);
+        assert!(out.iter().any(|l| l.contains("[DUMP] 3")), "map-for got: {:?}", out);
+        assert!(out.iter().any(|l| l.contains("[DUMP] abc")), "string-for got: {:?}", out);
+        assert!(out.iter().any(|l| l.contains("[DUMP] 1")), "indexed-string got: {:?}", out);
     }
 
     // --- Operator overloading on the VM (7A.7) ---

@@ -96,11 +96,16 @@ pub enum Op {
     /// Jump if the top-of-stack is `nil` or `None` (does not pop). Used by
     /// `??`, `?.`, `?[`. Operand: u16 target offset.
     JumpIfNil,
+    /// Materialize a container into its iteration items (an array): arrays and
+    /// tuples pass through, maps become `(key, value)` tuples, strings become
+    /// chars. Operand: u8 flag — 1 yields `(index, item)` pairs for
+    /// arrays/strings (matching the interpreter's 2-tuple "indexed for").
+    IterItems,
 }
 
 impl Op {
     pub fn from_u8(b: u8) -> Option<Op> {
-        if (b as usize) <= Op::JumpIfNil as usize {
+        if (b as usize) <= Op::IterItems as usize {
             Some(unsafe { std::mem::transmute(b) })
         } else {
             None

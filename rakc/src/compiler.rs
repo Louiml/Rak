@@ -979,12 +979,23 @@ impl Compiler {
     }
 
     fn compile_for(&mut self, label: &Option<String>, pattern: &Pattern, iterable: &Expr, body: &[Stmt]) -> Result<(), String> {
-        // VM support is limited to a single identifier binding; tuple/indexed
-        // `for i, x in …` patterns run on the interpreter only for now.
+        // VM support covers identifier and (k, v) tuple bindings (see
+        // `bind_for_pattern`); deeper patterns run on the interpreter only.
         let name = match pattern {
             Pattern::Ident(n) => n.as_str(),
+            Pattern::Wild => "",
+            Pattern::Tuple(ps) => {
+                // Validate the sub-patterns are plain binds.
+                for sub in ps {
+                    if !matches!(sub, Pattern::Ident(_) | Pattern::Wild) {
+                        return Err(format!("VM does not support for-pattern: {:?}", pattern));
+                    }
+                }
+                ""
+            }
             other => return Err(format!("VM does not support for-pattern: {:?}", other)),
         };
+        let _ = name;
         match iterable {
             Expr::Range(lo, hi) => {
                 if let (Some(lo), Some(hi)) = (lo, hi) {
@@ -1036,6 +1047,12 @@ impl Compiler {
             }
             _ => {
                 self.compile_expr(iterable)?;
+                // Materialize the container into iteration items (maps become
+                // (key, value) tuples; with a 2-tuple pattern, arrays/strings
+                // yield (index, item) — matching the interpreter).
+                let indexed = matches!(pattern, Pattern::Tuple(p) if p.len() == 2);
+                self.emit_op(Op::IterItems);
+                self.emit_byte(if indexed { 1 } else { 0 });
                 let arr_slot = self.add_local("__for_arr".to_string());
                 self.emit_op(Op::StoreLocal);
                 self.emit_byte(arr_slot);
@@ -1052,10 +1069,11 @@ impl Compiler {
                 self.emit_op(Op::IndexGet);
                 let jexit = self.emit_jump(Op::JumpIfFalse);
                 // item is truthy and still on the stack; store it into the loop var.
-                let item_slot = self.add_local(name.to_string());
+                let item_slot = self.add_local("__for_item".to_string());
                 self.emit_op(Op::StoreLocal);
                 self.emit_byte(item_slot);
                 self.begin_scope();
+                self.bind_for_pattern(pattern, item_slot)?;
                 for s in body {
                     self.compile_stmt(s)?;
                 }
@@ -1075,6 +1093,37 @@ impl Compiler {
                 self.end_loop_with_continue(inc_target);
                 Ok(())
             }
+        }
+    }
+
+    /// Bind a `for` pattern from the current iteration item in local slot
+    /// `item_slot`. Identifier patterns bind the whole item; tuple patterns
+    /// destructure each element via `IndexGet`.
+    fn bind_for_pattern(&mut self, pattern: &Pattern, item_slot: u8) -> Result<(), String> {
+        match pattern {
+            Pattern::Wild => Ok(()),
+            Pattern::Ident(n) => {
+                let slot = self.add_local(n.clone());
+                self.emit_op(Op::LoadLocal);
+                self.emit_byte(item_slot);
+                self.emit_op(Op::StoreLocal);
+                self.emit_byte(slot);
+                Ok(())
+            }
+            Pattern::Tuple(ps) => {
+                for (i, sub) in ps.iter().enumerate() {
+                    self.emit_op(Op::LoadLocal);
+                    self.emit_byte(item_slot);
+                    self.load_const(Value::I64(i as i64));
+                    self.emit_op(Op::IndexGet);
+                    let sub_slot = self.add_local("__for_elem".to_string());
+                    self.emit_op(Op::StoreLocal);
+                    self.emit_byte(sub_slot);
+                    self.bind_for_pattern(sub, sub_slot)?;
+                }
+                Ok(())
+            }
+            other => Err(format!("VM does not support for-pattern: {:?}", other)),
         }
     }
 

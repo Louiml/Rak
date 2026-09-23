@@ -4109,6 +4109,115 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                     Err(crate::RakError::Runtime("values() requires a map".to_string()))
                 }
             }
+            // --- Iterator builtins (Part 7A.10) ---
+            "zip" => {
+                let (a, b) = match (args.first(), args.get(1)) {
+                    (Some(Value::Array(a)), Some(Value::Array(b))) => (a.clone(), b.clone()),
+                    _ => return Err(crate::RakError::Runtime("zip() requires two arrays".to_string())),
+                };
+                let n = a.len().min(b.len());
+                Ok(Value::Array((0..n).map(|i| Value::Tuple(vec![a[i].clone(), b[i].clone()])).collect()))
+            }
+            "enumerate" => {
+                let items = match args.first() {
+                    Some(Value::Array(a)) => a.clone(),
+                    other => return Err(crate::RakError::Runtime(format!("enumerate() requires an array, got {}", other.map(|v| v.type_name()).unwrap_or_else(|| "nil".to_string())))),
+                };
+                Ok(Value::Array(
+                    items.into_iter().enumerate().map(|(i, v)| Value::Tuple(vec![Value::Int(i as i64), v])).collect(),
+                ))
+            }
+            "skip" => {
+                let items = match args.first() {
+                    Some(Value::Array(a)) => a.clone(),
+                    _ => return Err(crate::RakError::Runtime("skip() requires an array".to_string())),
+                };
+                let n = args.get(1).and_then(|v| v.as_i64()).unwrap_or(0).max(0) as usize;
+                Ok(Value::Array(items.into_iter().skip(n).collect()))
+            }
+            "fold" => {
+                let items = match args.first() {
+                    Some(Value::Array(a)) => a.clone(),
+                    _ => return Err(crate::RakError::Runtime("fold() requires an array".to_string())),
+                };
+                let f = args.get(2).cloned().ok_or_else(|| crate::RakError::Runtime("fold() requires (xs, init, f)".to_string()))?;
+                let mut acc = args.get(1).cloned().unwrap_or(Value::Nil);
+                for item in items {
+                    acc = self.call_function_with_values(f.clone(), vec![acc, item])?;
+                }
+                Ok(acc)
+            }
+            "reduce" => {
+                let items = match args.first() {
+                    Some(Value::Array(a)) => a.clone(),
+                    _ => return Err(crate::RakError::Runtime("reduce() requires an array".to_string())),
+                };
+                let f = args.get(1).cloned().ok_or_else(|| crate::RakError::Runtime("reduce() requires (xs, f)".to_string()))?;
+                if items.is_empty() {
+                    return Ok(Value::Option(None));
+                }
+                let mut acc = items[0].clone();
+                for item in items.into_iter().skip(1) {
+                    acc = self.call_function_with_values(f.clone(), vec![acc, item])?;
+                }
+                Ok(Value::Option(Some(Box::new(acc))))
+            }
+            "any" => {
+                let items = match args.first() {
+                    Some(Value::Array(a)) => a.clone(),
+                    _ => return Err(crate::RakError::Runtime("any() requires an array".to_string())),
+                };
+                let f = args.get(1).cloned().ok_or_else(|| crate::RakError::Runtime("any() requires (xs, f)".to_string()))?;
+                for item in items {
+                    if is_truthy(&self.call_function_with_values(f.clone(), vec![item])?) {
+                        return Ok(Value::Bool(true));
+                    }
+                }
+                Ok(Value::Bool(false))
+            }
+            "all" => {
+                let items = match args.first() {
+                    Some(Value::Array(a)) => a.clone(),
+                    _ => return Err(crate::RakError::Runtime("all() requires an array".to_string())),
+                };
+                let f = args.get(1).cloned().ok_or_else(|| crate::RakError::Runtime("all() requires (xs, f)".to_string()))?;
+                for item in items {
+                    if !is_truthy(&self.call_function_with_values(f.clone(), vec![item])?) {
+                        return Ok(Value::Bool(false));
+                    }
+                }
+                Ok(Value::Bool(true))
+            }
+            "flat_map" => {
+                let items = match args.first() {
+                    Some(Value::Array(a)) => a.clone(),
+                    _ => return Err(crate::RakError::Runtime("flat_map() requires an array".to_string())),
+                };
+                let f = args.get(1).cloned().ok_or_else(|| crate::RakError::Runtime("flat_map() requires (xs, f)".to_string()))?;
+                let mut out: Vec<Value> = Vec::new();
+                for item in items {
+                    match self.call_function_with_values(f.clone(), vec![item])? {
+                        Value::Array(a) => out.extend(a.iter().cloned()),
+                        other => out.push(other),
+                    }
+                }
+                Ok(Value::Array(out))
+            }
+            "take_while" => {
+                let items = match args.first() {
+                    Some(Value::Array(a)) => a.clone(),
+                    _ => return Err(crate::RakError::Runtime("take_while() requires an array".to_string())),
+                };
+                let f = args.get(1).cloned().ok_or_else(|| crate::RakError::Runtime("take_while() requires (xs, f)".to_string()))?;
+                let mut out: Vec<Value> = Vec::new();
+                for item in items {
+                    if !is_truthy(&self.call_function_with_values(f.clone(), vec![item.clone()])?) {
+                        break;
+                    }
+                    out.push(item);
+                }
+                Ok(Value::Array(out))
+            }
             "read" => match std::fs::read_to_string(self.val_to_string(args.first())?) {
                 Ok(c) => Ok(Value::String(c)),
                 Err(e) => Err(crate::RakError::Runtime(format!("Read error: {}", e))),
