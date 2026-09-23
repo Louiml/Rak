@@ -3553,6 +3553,36 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
     }
 
     fn eval_binary(&mut self, op: &BinOp, left: &Value, right: &Value) -> crate::Result<Value> {
+        // Operator overloading (Part 7A.7): a user impl on a user-defined type
+        // takes precedence over the built-in arithmetic/comparison behaviour.
+        let overload = match op {
+            BinOp::Add => Some(("Add", "add")),
+            BinOp::Sub => Some(("Sub", "sub")),
+            BinOp::Mul => Some(("Mul", "mul")),
+            BinOp::Div => Some(("Div", "div")),
+            BinOp::Rem => Some(("Rem", "rem")),
+            BinOp::Eq => Some(("Eq", "eq")),
+            BinOp::NotEq => Some(("Eq", "eq")),
+            BinOp::Lt => Some(("Compare", "lt")),
+            BinOp::Gt => Some(("Compare", "gt")),
+            BinOp::LtEq => Some(("Compare", "lte")),
+            BinOp::GtEq => Some(("Compare", "gte")),
+            _ => None,
+        };
+        if let Some((tr, method)) = overload {
+            let tn = match left {
+                Value::Struct { name, .. } => name.to_string(),
+                Value::Enum { name, .. } => name.to_string(),
+                _ => left.type_name().to_string(),
+            };
+            if let Some(f) = self.trait_impls.get(&(tr.to_string(), tn, method.to_string())).cloned() {
+                let v = self.call_method_with_values(f, left.clone(), vec![right.clone()])?;
+                return match op {
+                    BinOp::NotEq => Ok(Value::Bool(!is_truthy(&v))),
+                    _ => Ok(v),
+                };
+            }
+        }
         match op {
             BinOp::And => return Ok(Value::Bool(is_truthy(left) && is_truthy(right))),
             BinOp::Or => return Ok(Value::Bool(is_truthy(left) || is_truthy(right))),

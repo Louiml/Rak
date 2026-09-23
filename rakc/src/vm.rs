@@ -234,6 +234,77 @@ pub enum VmDebugAction {
     Quit,
 }
 
+/// Arithmetic operator for overload dispatch (`impl Add for T { fn add(self, o) }`).
+#[derive(Clone, Copy)]
+enum BinArith {
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Rem,
+}
+impl BinArith {
+    fn suffix(self) -> &'static str {
+        match self {
+            BinArith::Add => "add",
+            BinArith::Sub => "sub",
+            BinArith::Mul => "mul",
+            BinArith::Div => "div",
+            BinArith::Rem => "rem",
+        }
+    }
+}
+
+/// Comparison operator for overload dispatch (`fn eq`/`lt`/`gt`/`lte`/`gte`/`ne`).
+#[derive(Clone, Copy)]
+enum CompareOp {
+    Eq,
+    NotEq,
+    Lt,
+    Gt,
+    LtEq,
+    GtEq,
+}
+impl CompareOp {
+    fn suffix(self) -> &'static str {
+        match self {
+            CompareOp::Eq => "eq",
+            CompareOp::NotEq => "ne",
+            CompareOp::Lt => "lt",
+            CompareOp::Gt => "gt",
+            CompareOp::LtEq => "lte",
+            CompareOp::GtEq => "gte",
+        }
+    }
+}
+
+/// Dispatch type of a value: struct/enum by name, everything else by runtime
+/// type name (mirrors `Op::CallMethod`).
+fn dispatch_type(v: &Value) -> String {
+    match v {
+        Value::Struct { name, .. } => name.to_string(),
+        Value::Enum { name, .. } => name.to_string(),
+        other => other.type_name().to_string(),
+    }
+}
+
+fn is_numeric_vm(v: &Value) -> bool {
+    matches!(
+        v,
+        Value::I64(_)
+            | Value::I32(_)
+            | Value::I16(_)
+            | Value::I8(_)
+            | Value::U64(_)
+            | Value::U32(_)
+            | Value::U16(_)
+            | Value::U8(_)
+            | Value::Hex(_, _)
+            | Value::F32(_)
+            | Value::F64(_)
+    )
+}
+
 impl Vm {
     pub fn new() -> Self {
         let mut vm = Vm {
@@ -1239,33 +1310,12 @@ impl Vm {
                 }
                 Op::Pop => { frame.pop(); }
                 Op::Dup => { let v = frame.peek().clone(); frame.push(v); }
-                Op::AddI => bin_int(frame, |a, b| a.wrapping_add(b), |a, b| a + b),
-                Op::SubI => bin_int(frame, |a, b| a.wrapping_sub(b), |a, b| a - b),
-                Op::MulI => bin_int(frame, |a, b| a.wrapping_mul(b), |a, b| a * b),
-                Op::DivI => {
-                    let r = frame.pop(); let l = frame.pop();
-                    match (l, r) {
-                        (Value::I64(a), Value::I64(b)) => if b == 0 { return Err("div by zero".to_string()); } else { frame.push(Value::I64(a / b)); },
-                        (Value::F64(a), Value::F64(b)) => if b == 0.0 { return Err("div by zero".to_string()); } else { frame.push(Value::F64(a / b)); },
-                        (a, b) => { let av = a.as_f64().unwrap_or(0.0); let bv = b.as_f64().unwrap_or(0.0); if bv == 0.0 { return Err("div by zero".to_string()); } frame.push(Value::F64(av / bv)); },
-                    }
-                }
-                Op::RemI => {
-                    let r = frame.pop(); let l = frame.pop();
-                    match (l, r) {
-                        (Value::I64(a), Value::I64(b)) => if b == 0 { return Err("rem by zero".to_string()); } else { frame.push(Value::I64(a % b)); },
-                        (Value::F64(a), Value::F64(b)) => frame.push(Value::F64(a % b)),
-                        (a, b) => { let av = a.as_f64().unwrap_or(0.0); let bv = b.as_f64().unwrap_or(0.0); frame.push(Value::F64(av % bv)); },
-                    }
-                }
-                Op::NegI => {
-                    let v = frame.pop();
-                    match v {
-                        Value::I64(i) => frame.push(Value::I64(-i)),
-                        Value::F64(f) => frame.push(Value::F64(-f)),
-                        other => frame.push(Value::F64(-(other.as_f64().unwrap_or(0.0)))),
-                    }
-                }
+                Op::AddI => self.binop_arith(frame, BinArith::Add)?,
+                Op::SubI => self.binop_arith(frame, BinArith::Sub)?,
+                Op::MulI => self.binop_arith(frame, BinArith::Mul)?,
+                Op::DivI => self.binop_arith(frame, BinArith::Div)?,
+                Op::RemI => self.binop_arith(frame, BinArith::Rem)?,
+                Op::NegI => self.binop_neg(frame)?,
                 Op::AddF => bin_float(frame, |a, b| a + b),
                 Op::SubF => bin_float(frame, |a, b| a - b),
                 Op::MulF => bin_float(frame, |a, b| a * b),
@@ -1277,12 +1327,12 @@ impl Vm {
                 Op::BitNot => { let v = frame.pop(); frame.push(Value::I64(!(v.as_i64().unwrap_or(0)))); }
                 Op::Shl => bin_int(frame, |a, b| a << b, |_, _| 0.0),
                 Op::Shr => bin_int(frame, |a, b| a >> b, |_, _| 0.0),
-                Op::Eq => { let r = frame.pop(); let l = frame.pop(); frame.push(Value::Bool(l == r)); }
-                Op::NotEq => { let r = frame.pop(); let l = frame.pop(); frame.push(Value::Bool(l != r)); }
-                Op::Lt => { let r = frame.pop(); let l = frame.pop(); frame.push(Value::Bool(l.as_i64().unwrap_or(0) < r.as_i64().unwrap_or(0))); }
-                Op::Gt => { let r = frame.pop(); let l = frame.pop(); frame.push(Value::Bool(l.as_i64().unwrap_or(0) > r.as_i64().unwrap_or(0))); }
-                Op::LtEq => { let r = frame.pop(); let l = frame.pop(); frame.push(Value::Bool(l.as_i64().unwrap_or(0) <= r.as_i64().unwrap_or(0))); }
-                Op::GtEq => { let r = frame.pop(); let l = frame.pop(); frame.push(Value::Bool(l.as_i64().unwrap_or(0) >= r.as_i64().unwrap_or(0))); }
+                Op::Eq => self.binop_compare(frame, CompareOp::Eq)?,
+                Op::NotEq => self.binop_compare(frame, CompareOp::NotEq)?,
+                Op::Lt => self.binop_compare(frame, CompareOp::Lt)?,
+                Op::Gt => self.binop_compare(frame, CompareOp::Gt)?,
+                Op::LtEq => self.binop_compare(frame, CompareOp::LtEq)?,
+                Op::GtEq => self.binop_compare(frame, CompareOp::GtEq)?,
                 Op::Not => { let v = frame.pop(); frame.push(Value::Bool(!v.is_truthy())); }
                 Op::True => frame.push(Value::Bool(true)),
                 Op::False => frame.push(Value::Bool(false)),
@@ -1747,7 +1797,118 @@ impl Vm {
         Ok(())
     }
 
-    /// Run a frame's registered deferred calls in LIFO order (innermost
+    fn binop_arith(&mut self, frame: &mut Frame, op: BinArith) -> Result<(), String> {
+        let r = frame.pop();
+        let l = frame.pop();
+        let lnum = is_numeric_vm(&l);
+        let rnum = is_numeric_vm(&r);
+        if lnum && rnum {
+            use Value::*;
+            let push = |frame: &mut Frame, v: Value| frame.push(v);
+            match (l, r) {
+                (I64(a), I64(b)) => match op {
+                    BinArith::Div => {
+                        if b == 0 {
+                            return Err("div by zero".to_string());
+                        }
+                        push(frame, I64(a / b))
+                    }
+                    BinArith::Rem => {
+                        if b == 0 {
+                            return Err("rem by zero".to_string());
+                        }
+                        push(frame, I64(a % b))
+                    }
+                    BinArith::Add => push(frame, I64(a.wrapping_add(b))),
+                    BinArith::Sub => push(frame, I64(a.wrapping_sub(b))),
+                    BinArith::Mul => push(frame, I64(a.wrapping_mul(b))),
+                },
+                (F64(a), F64(b)) => push(frame, F64(match op {
+                    BinArith::Add => a + b,
+                    BinArith::Sub => a - b,
+                    BinArith::Mul => a * b,
+                    BinArith::Div => a / b,
+                    BinArith::Rem => a % b,
+                })),
+                (a, b) => self.numeric_fallback(frame, &a, &b, op)?,
+            }
+            Ok(())
+        } else {
+            let key = format!("__method_{}_{}", dispatch_type(&l), op.suffix());
+            if let Some(f) = self.globals.get(&key).cloned() {
+                self.call_value(frame, f, vec![l, r])
+            } else {
+                self.numeric_fallback(frame, &l, &r, op)
+            }
+        }
+    }
+
+    /// Lenient numeric coercion for mixed/unknown operands (matches the original
+    /// `bin_int` `(a, b)` arm).
+    #[allow(clippy::float_cmp)]
+    fn numeric_fallback(&mut self, frame: &mut Frame, l: &Value, r: &Value, op: BinArith) -> Result<(), String> {
+        let av = l.as_f64().unwrap_or(0.0);
+        let bv = r.as_f64().unwrap_or(0.0);
+        frame.push(Value::F64(match op {
+            BinArith::Add => av + bv,
+            BinArith::Sub => av - bv,
+            BinArith::Mul => av * bv,
+            BinArith::Div => av / bv,
+            BinArith::Rem => av % bv,
+        }));
+        Ok(())
+    }
+
+    fn binop_neg(&mut self, frame: &mut Frame) -> Result<(), String> {
+        let v = frame.pop();
+        match v {
+            Value::I64(i) => {
+                frame.push(Value::I64(-i));
+                Ok(())
+            }
+            Value::F64(f) => {
+                frame.push(Value::F64(-f));
+                Ok(())
+            }
+            other => {
+                let key = format!("__method_{}_neg", dispatch_type(&other));
+                if let Some(f) = self.globals.get(&key).cloned() {
+                    self.call_value(frame, f, vec![other])
+                } else {
+                    frame.push(Value::F64(-(other.as_f64().unwrap_or(0.0))));
+                    Ok(())
+                }
+            }
+        }
+    }
+
+    fn binop_compare(&mut self, frame: &mut Frame, op: CompareOp) -> Result<(), String> {
+        let r = frame.pop();
+        let l = frame.pop();
+        let lnum = is_numeric_vm(&l);
+        let rnum = is_numeric_vm(&r);
+        let base = if lnum { "" } else { &dispatch_type(&l) };
+        if !lnum && !rnum {
+            // Try a user-defined comparison trait first.
+            let key = format!("__method_{}_{}", base, op.suffix());
+            if let Some(f) = self.globals.get(&key).cloned() {
+                return self.call_value(frame, f, vec![l, r]);
+            }
+        }
+        // Fall back to the default behaviour.
+        let b = match op {
+            CompareOp::Eq => l == r,
+            CompareOp::NotEq => l != r,
+            CompareOp::Lt => l.as_i64().unwrap_or(0) < r.as_i64().unwrap_or(0),
+            CompareOp::Gt => l.as_i64().unwrap_or(0) > r.as_i64().unwrap_or(0),
+            CompareOp::LtEq => l.as_i64().unwrap_or(0) <= r.as_i64().unwrap_or(0),
+            CompareOp::GtEq => l.as_i64().unwrap_or(0) >= r.as_i64().unwrap_or(0),
+        };
+        frame.push(Value::Bool(b));
+        Ok(())
+    }
+
+/// Run a frame's registered deferred calls in LIFO order (innermost
     /// `defer` runs last), invoking each with its captured args. Results are
     /// discarded as in the interpreter.
     fn run_frame_defers(&mut self, frame: &mut Frame) -> Result<(), String> {
@@ -2949,6 +3110,60 @@ dump classify(50)"#);
         assert!(out.iter().any(|l| l.contains("[DUMP] small")), "got: {:?}", out);
         assert!(out.iter().any(|l| l.contains("[DUMP] ten")), "got: {:?}", out);
         assert!(out.iter().any(|l| l.contains("[DUMP] big")), "got: {:?}", out);
+    }
+
+    // --- Operator overloading on the VM (7A.7) ---
+
+    #[test]
+    fn test_vm_operator_overload_add_eq() {
+        let out = run(r#"struct Vec3 { x: int, y: int }
+impl Add for Vec3 {
+    fn add(self, o) { return Vec3 { x: self.x + o.x, y: self.y + o.y } }
+}
+impl Eq for Vec3 {
+    fn eq(self, o) { return self.x == o.x && self.y == o.y }
+}
+let a = Vec3 { x: 1, y: 2 }
+let b = Vec3 { x: 10, y: 20 }
+let c = a + b
+dump c.x
+dump c.y
+dump a == b
+dump a == Vec3 { x: 1, y: 2 }"#);
+        assert!(out.iter().any(|l| l.contains("[DUMP] 11")), "got: {:?}", out);
+        assert!(out.iter().any(|l| l.contains("[DUMP] 22")), "got: {:?}", out);
+        assert!(out.iter().any(|l| l.contains("[DUMP] false")), "got: {:?}", out);
+        assert!(out.iter().any(|l| l.contains("[DUMP] true")), "got: {:?}", out);
+    }
+
+    #[test]
+    fn test_vm_operator_overload_compare() {
+        let out = run(r#"struct Box { w: int }
+impl Compare for Box {
+    fn lt(self, o) { return self.w < o.w }
+}
+let a = Box { w: 3 }
+let b = Box { w: 9 }
+dump a < b
+dump b < a"#);
+        assert!(out.iter().any(|l| l.contains("[DUMP] true")), "got: {:?}", out);
+        assert!(out.iter().any(|l| l.contains("[DUMP] false")), "got: {:?}", out);
+    }
+
+    #[test]
+    fn test_vm_operator_overload_neg_and_mixed() {
+        let out = run(r#"struct Temp { c: int }
+impl Neg for Temp {
+    fn neg(self) { return Temp { c: -self.c } }
+}
+let t = Temp { c: 5 }
+let z = -t
+dump z.c
+// Non-numeric + non-numeric without an impl falls back to the old coercion.
+let m = {}
+let n = 1
+dump (m + n)"#);
+        assert!(out.iter().any(|l| l.contains("[DUMP] -5")), "got: {:?}", out);
     }
 
     // --- Assignment + coalescing expressions on the VM ---
