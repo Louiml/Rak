@@ -17,6 +17,7 @@ pub mod gui;
 pub mod lsp;
 #[cfg(feature = "bindgen")]
 pub mod bindgen;
+pub mod fmt;
 
 use thiserror::Error;
 

@@ -534,6 +534,37 @@ fn main() {
                 Err(e) => eprintln!("Lexer error: {}", e),
             }
         }
+        "fmt" => {
+            // `rakc fmt file [--write|--check]`
+            let flags: Vec<&String> = args.iter().skip(3).collect();
+            let write = flags.iter().any(|f| f.as_str() == "--write" || f.as_str() == "-w");
+            let check = flags.iter().any(|f| f.as_str() == "--check" || f.as_str() == "-c");
+            match rakc::fmt::format_source(&source) {
+                Ok(formatted) => {
+                    if check {
+                        if formatted == source {
+                            println!("{}: formatted", file);
+                        } else {
+                            eprintln!("{}: not formatted (run `rakc fmt {} --write`)", file, file);
+                            std::process::exit(1);
+                        }
+                    } else if write {
+                        if formatted != source {
+                            std::fs::write(file, &formatted).map_err(|e| format!("fmt: cannot write '{}': {}", file, e)).unwrap();
+                            println!("{}: formatted", file);
+                        } else {
+                            println!("{}: already formatted", file);
+                        }
+                    } else {
+                        print!("{}", formatted);
+                    }
+                }
+                Err(e) => {
+                    eprintln!("fmt: {}", e);
+                    std::process::exit(1);
+                }
+            }
+        }
         "vm" => {
             let base_dir = std::path::Path::new(file).parent().map(|p| p.to_string_lossy().to_string()).unwrap_or_else(|| ".".to_string());
             match rakc::lexer::tokenize(&source) {
