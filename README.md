@@ -4,6 +4,34 @@ A programming language for hackers, OSINT investigators, and systems programmers
 
 Hex is a first-class type. The bytecode VM runs about 6x faster than the tree-walker. There's a SQL engine written in Rak itself, and a Rak interpreter written in Rak.
 
+## What's new in 0.8 (in progress)
+
+- **The VM caught up.** `rakc vm` now runs what the interpreter runs:
+  `try`/`catch` and `expr?` (structured errors, LIFO defers before the
+  handler), method dispatch on structs/enums (`obj.method(...)` via `impl`
+  blocks), struct literals and enum constructors, and the full pattern
+  language in `match` — struct patterns (`Point { x, y }`), enum variants,
+  binary bytes patterns, or-patterns, ranges, `Some`/`None`/`Ok`/`Err`, and
+  guards.
+- **Operator overloading** — `impl Add/Sub/Mul/Div/Rem/Eq/Compare/Neg for T`
+  with `fn add(self, o)`-style methods, dispatched on both backends before
+  the built-in arithmetic (`a + b`, `a == b`, `a < b`, `-a` on your types).
+- **Assignment on the VM** — `arr[i] = v`, `map[k] = v`, `s.field = v`,
+  `x += 1`, and multi-assign `a, b = x, y` (copy-on-write, mutability rules
+  enforced).
+- **Iterator builtins** — `zip`, `enumerate`, `skip`, `fold`, `reduce`,
+  `any`, `all`, `flat_map`, `take_while`, plus `keys`/`values`/`has`/`get`,
+  on both backends.
+- **`for (k, v) in map`** and indexed `for (i, x) in arr` work on the VM
+  (`Op::IterItems` materializes any iterable; maps always yield pairs).
+- **`if let` / `while let` / `do { } while` / labeled `break`/`continue`**
+  (`'outer: for ... { break 'outer }`) run on the VM.
+- **binstruct bitfields** — `u4`-style non-byte-aligned fields, packed
+  LSB-first and round-tripped through `decode`/`encode` on both backends.
+- **`rakc fmt`** — AST-based formatter (`--write`, `--check` for CI).
+- **`rakc lint`** — advisory checks (unused vars, shadowing, unreachable
+  code, missing `pub fn` return types, duplicate imports; `--deny` for CI).
+
 ## What's new in 0.7.1
 
 - **Static type checker** — `rakc check <file>` infers literal types, checks

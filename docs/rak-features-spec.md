@@ -1286,7 +1286,7 @@ match-pattern upgrades, real (checked) generics, a lazy Iterator protocol, a
 syntax pack, a type-checking/formatter/linter/doc toolchain, and the OSINT
 domain pack. Status markers are updated to **[SHIPPED]** as each feature lands.
 
-### 7A.1 VM `try`/`catch`  **[SPEC]**
+### 7A.1 VM `try`/`catch`  **[SHIPPED]**
 
 #### Syntax
 ```rak
@@ -1318,7 +1318,7 @@ try {
   handler is skipped.
 - Nested try blocks: the innermost active handler wins.
 
-### 7A.2 VM method dispatch (`Op::CallMethod`)  **[SPEC]**
+### 7A.2 VM method dispatch (`Op::CallMethod`)  **[SHIPPED]**
 
 #### Syntax
 ```rak
@@ -1344,7 +1344,7 @@ p.fmt()                // method call on the VM
   for any `Expr::FieldAccess` callee; `FieldGet` fallback happens inside the
   op when no method exists).
 
-### 7A.3 VM binary pattern matching  **[SPEC]**
+### 7A.3 VM structural pattern matching (`Op::MatchPat`)  **[SHIPPED]**
 
 Fill `compile_pattern` for `Pattern::Bytes` / `Pattern::Byte`: each `Byte(b)`
 arm compiles to `IndexGet` + `Eq` comparisons against the pattern constants
@@ -1375,7 +1375,7 @@ the frame). `value.rs` mirrors `Value::UdpTransport`. `udp_send`/`udp_recv`/
 `pkg/init.rak` then `sub.rak` inside `pkg/` and inlines both modules'
 exports; `pkg` binds as a Module value containing `sub` (interpreter parity).
 
-### 7A.7 Operator overloading  **[SPEC]**
+### 7A.7 Operator overloading  **[SHIPPED]**
 
 #### Syntax
 ```rak
@@ -1399,7 +1399,7 @@ then the existing error. The receiver is the **left** operand; if the left
 operand has no impl but the right does, the right's impl is tried with
 commutative fallback only for `Add`/`Mul`/`Eq`. Both backends.
 
-### 7A.8 Match guards, binding patterns, struct patterns  **[SPEC]**
+### 7A.8 Match guards, binding patterns, struct patterns  **[SHIPPED]** (guards were pre-existing; bind/struct/enum patterns via MatchPat)
 
 #### Syntax
 ```rak
@@ -1427,7 +1427,7 @@ unification (`fn identity<T>(v: T) -> T` with `identity(42)`) substitutes
 concrete types to verify the return type. Runtime stays erased
 (backward-compatible); the checker becomes the source of truth.
 
-### 7A.10 Iterator protocol  **[SPEC]**
+### 7A.10 Iterator protocol  **[SHIPPED]** (builtins + map/string for; lazy Iterator trait pending)
 
 Built-in `Iterator` trait with `next(self) -> Option`. `for` prefers
 `Iterator::next` (lazy) over `Iterable::iter` (eager array). New builtins on
@@ -1451,30 +1451,32 @@ the existing map-iteration order).
 | Labeled loops | `outer: loop { break outer }` | parser + both backends |
 | Sets | `set_of([..])`, `set_add/has/union/intersect/diff`, `for s in set` | `Value::Set` both backends |
 
-### 7B — Type system & tooling  **[SPEC]**
+### 7B — Type system & tooling  **[SPEC → SHIPPED for fmt/lint]**
 
 - **`rakc check` v2** (`typecheck.rs`): function-signature table, inference
   through function bodies, `?`-propagation checks (return type must admit
   `Err`), cross-module signature checking with a per-file cache, generic
-  substitution (7A.9).
-- **`rakc fmt`** (new `fmt.rs`): AST→source printer, 2-space indent, `--write`
-  / `--check`; proptest `parse(fmt(src))` stability.
-- **`rakc lint`** (new `lint.rs`): unused let/import, shadowed names,
-  `== nil`, unreachable code after return, missing `pub fn` return types;
-  advisory by default, `--deny` exits non-zero.
+  substitution (7A.9). **[SPEC]**
+- **`rakc fmt`** (new `fmt.rs`) **[SHIPPED]**: AST→source printer, 2-space
+  indent, `--write` / `--check`; idempotence unit tests.
+- **`rakc lint`** (new `lint.rs`) **[SHIPPED]**: unused let/const, shadowed
+  names, unreachable code after return, missing `pub fn` return types,
+  duplicate imports; advisory by default, `--deny` exits non-zero.
 - **`rakc doc` + `///`**: doc comments attached to items in the parser,
-  Markdown output (`-o dir`), LSP hover shows them (`lsp.rs`).
+  Markdown output (`-o dir`), LSP hover shows them (`lsp.rs`). **[SPEC]**
 - **Bytecode cache**: `rakc vm file.rak --cache` persists a serialized Chunk
-  (`.rakc`) validated by source hash.
+  (`.rakc`) validated by source hash. **[SPEC]**
 - **TCO**: tail-call loop conversion in the tree-walker; tail-flagged VM
-  `Call` reuses the frame (deep recursion is safe).
+  `Call` reuses the frame (deep recursion is safe). **[SPEC]**
 
-### 7C — OSINT domain pack  **[SPEC]**
+### 7C — OSINT domain pack  **[SPEC → bitfields SHIPPED]**
 
-- **binstruct v2**: bitfield fields (`u4`..`u63`, packed LSB-first with
-  `:bitfield`), conditional fields (`field: type if <expr-on-earlier-fields>`),
-  length-prefixed arrays (`field: [T; count]`), enum-discriminant tables.
-  Extends the compile-time `ResolvedBinField` tree; encode honors conditions.
+- **binstruct v2**: bitfield fields (`u4`..`u63`, packed LSB-first) are
+  **[SHIPPED]** — any non-multiple-of-8 width parses as a bitfield, packing
+  LSB-first into shared bytes until a byte-aligned field flushes the cursor
+  (identical decode/encode on both backends, round-trip verified). Remaining
+  v2 items — conditional fields (`field: type if <expr>`), length-prefixed
+  arrays (`field: [T; count]`), enum-discriminant tables — **[SPEC]**.
 - **Evidence auto-propagation (opt-in)**: `#[track_evidence]` on a `fn`
   wraps the return value in `cite(value, fn_name, call_site)`; propagates
   through `|>` when enabled. Off by default (§4 errata preserved).
