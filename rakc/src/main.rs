@@ -565,6 +565,30 @@ fn main() {
                 }
             }
         }
+        "lint" => {
+            // `rakc lint file [--deny]`
+            let flags: Vec<&String> = args.iter().skip(3).collect();
+            let deny = flags.iter().any(|f| f.as_str() == "--deny" || f.as_str() == "-d");
+            match rakc::lint::lint_source(&source) {
+                Ok(findings) => {
+                    if findings.is_empty() {
+                        println!("{}: no warnings", file);
+                    } else {
+                        for f in &findings {
+                            println!("warning[{}]: {}", f.rule, f.message);
+                        }
+                        if deny {
+                            eprintln!("{}: {} warnings (denied)", file, findings.len());
+                            std::process::exit(1);
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("lint: {}", e);
+                    std::process::exit(1);
+                }
+            }
+        }
         "vm" => {
             let base_dir = std::path::Path::new(file).parent().map(|p| p.to_string_lossy().to_string()).unwrap_or_else(|| ".".to_string());
             match rakc::lexer::tokenize(&source) {
