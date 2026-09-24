@@ -892,6 +892,7 @@ fn bin_kind_str(k: &BinKind) -> String {
     match k {
         BinKind::Uint { bits, endian } => format!("u{}{}", bits, endian_suffix(endian)),
         BinKind::Int { bits, endian } => format!("i{}{}", bits, endian_suffix(endian)),
+        BinKind::Bits { bits } => format!("u{}", bits),
         BinKind::Bytes(n) => format!("bytes({})", n),
         BinKind::Rest => "rest".to_string(),
         BinKind::Ref(n) => n.clone(),

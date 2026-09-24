@@ -3378,6 +3378,32 @@ dump cs"#);
     // --- Operator overloading on the VM (7A.7) ---
 
     #[test]
+    fn test_vm_binstruct_bitfields() {
+        let out = run(r#"binstruct TcpFlags {
+    ver_ihl: u4
+    tos: u4
+    len: u16be
+}
+let raw = b"\x45\x00\x01\x02"
+let h = TcpFlags.decode(raw)
+dump h.ver_ihl
+dump h.tos
+dump h.len
+let back = TcpFlags.encode(h)
+dump back[0]
+dump len(back)
+let h2 = TcpFlags.decode(back)
+dump h2.ver_ihl
+dump h2.tos"#);
+        assert!(out.iter().any(|l| l.contains("[DUMP] 0x5")), "ver_ihl got: {:?}", out);
+        assert!(out.iter().any(|l| l.contains("[DUMP] 0x4")), "tos got: {:?}", out);
+        assert!(out.iter().any(|l| l.contains("0x0001")), "len got: {:?}", out);
+        assert!(out.iter().any(|l| l.contains("[DUMP] 69")), "roundtrip byte got: {:?}", out);
+        assert!(out.iter().any(|l| l.contains("[DUMP] 3")), "roundtrip len got: {:?}", out);
+        assert_eq!(out.last().unwrap(), "[DUMP] 0x4", "re-decode tos got: {:?}", out);
+    }
+
+    #[test]
     fn test_vm_operator_overload_add_eq() {
         let out = run(r#"struct Vec3 { x: int, y: int }
 impl Add for Vec3 {

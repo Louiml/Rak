@@ -2454,11 +2454,13 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
             None => return Err(crate::RakError::Runtime("decode expects bytes".to_string())),
         };
         let mut off = 0usize;
+        let mut bit = 0usize;
         let mut out: HashMap<String, Value> = HashMap::new();
         for f in &fields {
-            let (val, new_off) = self.decode_field(name, f, &bytes, off)?;
+            let (val, new_off, new_bit) = self.decode_field(name, f, &bytes, off, bit)?;
             out.insert(f.name.clone(), val);
             off = new_off;
+            bit = new_bit;
         }
         let prov = Arc::new(Provenance {
             tool: format!("binstruct:{}", name),
@@ -2474,59 +2476,64 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
         })
     }
 
-    /// Decode a single `binstruct` field starting at byte `off`.
+    /// Decode a single `binstruct` field starting at byte `off` + bit `bit_off`.
+    /// Bitfields share bytes LSB-first; byte-aligned fields flush the cursor.
     fn decode_field(
         &mut self,
         parent: &str,
         f: &crate::ast::BinField,
         bytes: &[u8],
         off: usize,
-    ) -> crate::Result<(Value, usize)> {
+        bit_off: usize,
+    ) -> crate::Result<(Value, usize, usize)> {
         use crate::ast::{BinKind, Endian};
         match &f.kind {
             BinKind::Rest => {
-                let v = if off >= bytes.len() {
+                let start = off + bit_off / 8;
+                let v = if start >= bytes.len() {
                     Vec::new()
                 } else {
-                    bytes[off..].to_vec()
+                    bytes[start..].to_vec()
                 };
-                Ok((Value::Bytes(v), bytes.len()))
+                Ok((Value::Bytes(v), bytes.len(), 0))
             }
             BinKind::Bytes(n) => {
-                if off + n > bytes.len() {
+                let start = off + bit_off.div_ceil(8);
+                if start + n > bytes.len() {
                     return Err(crate::RakError::Runtime(format!(
                         "binstruct {}: field '{}' outruns buffer ({}+{} > {})",
-                        parent, f.name, off, n, bytes.len()
+                        parent, f.name, start, n, bytes.len()
                     )));
                 }
-                let v = bytes[off..off + n].to_vec();
-                Ok((Value::Bytes(v), off + n))
+                let v = bytes[start..start + n].to_vec();
+                Ok((Value::Bytes(v), start + n, 0))
             }
             BinKind::Uint { bits, endian } | BinKind::Int { bits, endian } => {
                 let signed = matches!(f.kind, BinKind::Int { .. });
                 let nbytes = (*bits as usize) / 8;
-                if off + nbytes > bytes.len() {
+                let start = off + bit_off.div_ceil(8);
+                if start + nbytes > bytes.len() {
                     return Err(crate::RakError::Runtime(format!(
                         "binstruct {}: field '{}' outruns buffer ({}+{} > {})",
-                        parent, f.name, off, nbytes, bytes.len()
+                        parent, f.name, start, nbytes, bytes.len()
                     )));
                 }
                 let mut acc: u64 = 0;
                 match endian {
                     Endian::Big => {
                         for i in 0..nbytes {
-                            acc = (acc << 8) | bytes[off + i] as u64;
+                            acc = (acc << 8) | bytes[start + i] as u64;
                         }
                     }
                     Endian::Little => {
                         for i in 0..nbytes {
-                            acc |= (bytes[off + i] as u64) << (8 * i);
+                            acc |= (bytes[start + i] as u64) << (8 * i);
                         }
                     }
                 }
                 let val = if signed {
                     match *bits {
-                        8 => Value::Int(bytes[off] as i8 as i64),
+                        8 => Value::Int(bytes[start] as i8 as i64),
                         16 => Value::Int(match endian {
                             Endian::Big => (acc as u16 as i16) as i64,
                             Endian::Little => (acc as u16 as i16) as i64,
@@ -2541,7 +2548,27 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                 } else {
                     Value::Hex(acc)
                 };
-                Ok((val, off + nbytes))
+                Ok((val, start + nbytes, 0))
+            }
+            BinKind::Bits { bits } => {
+                let width = *bits as usize;
+                if off + bit_off / 8 >= bytes.len() {
+                    return Err(crate::RakError::Runtime(format!(
+                        "binstruct {}: field '{}' outruns buffer",
+                        parent, f.name
+                    )));
+                }
+                // Read `width` bits LSB-first from absolute bit position
+                // `off*8 + bit_off`.
+                let mut acc: u64 = 0;
+                for j in 0..width {
+                    let pos = bit_off + j;
+                    let byte = bytes.get(off + pos / 8).copied().unwrap_or(0);
+                    let bit = (byte >> (pos % 8)) & 1;
+                    acc |= (bit as u64) << j;
+                }
+                let new_bit = bit_off + width;
+                Ok((Value::Hex(acc), off + new_bit / 8, new_bit % 8))
             }
             BinKind::Ref(inner_name) => {
                 let inner_fields = self
@@ -2555,11 +2582,13 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                         ))
                     })?;
                 let mut inner_out: HashMap<String, Value> = HashMap::new();
-                let mut inner_off = off;
+                let mut inner_off = off + bit_off.div_ceil(8);
+                let mut inner_bit = 0usize;
                 for nf in &inner_fields {
-                    let (v, no) = self.decode_field(inner_name, nf, bytes, inner_off)?;
+                    let (v, no, nb) = self.decode_field(inner_name, nf, bytes, inner_off, inner_bit)?;
                     inner_out.insert(nf.name.clone(), v);
                     inner_off = no;
+                    inner_bit = nb;
                 }
                 Ok((
                     Value::Struct {
@@ -2567,6 +2596,7 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                         fields: inner_out,
                     },
                     inner_off,
+                    inner_bit,
                 ))
             }
         }
@@ -2602,20 +2632,26 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
             }
         };
         let mut out: Vec<u8> = Vec::new();
+        let mut bit = 0usize;
         for f in &fields {
-            self.encode_field(name, f, &map, &mut out)?;
+            bit = self.encode_field(name, f, &map, &mut out, bit)?;
+        }
+        if bit % 8 != 0 {
+            out.push(0); // flush a trailing partial byte (zero-padded)
         }
         Ok(Value::Bytes(out))
     }
 
-    /// Encode a single field, appending its bytes to `out`.
+    /// Encode a single field, appending its bytes to `out`. Returns the new
+    /// bit-cursor position (bitfields pack LSB-first into shared bytes).
     fn encode_field(
         &mut self,
         parent: &str,
         f: &crate::ast::BinField,
         map: &HashMap<String, Value>,
         out: &mut Vec<u8>,
-    ) -> crate::Result<()> {
+        bit_off: usize,
+    ) -> crate::Result<usize> {
         use crate::ast::{BinKind, Endian};
         let val = match map.get(&f.name) {
             Some(v) => v.clone(),
@@ -2629,11 +2665,14 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
         };
         let val = unwrap(val);
         match &f.kind {
-            BinKind::Rest => match val {
-                Value::Bytes(b) => out.extend(b),
-                Value::String(s) => out.extend(s.into_bytes()),
-                _ => {}
-            },
+            BinKind::Rest => {
+                match val {
+                    Value::Bytes(b) => out.extend(b),
+                    Value::String(s) => out.extend(s.into_bytes()),
+                    _ => {}
+                }
+                Ok(0)
+            }
             BinKind::Bytes(n) => {
                 let b = match val {
                     Value::Bytes(b) => b,
@@ -2645,6 +2684,26 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                     padded.resize(*n, 0);
                 }
                 out.extend(padded.into_iter().take(*n));
+                Ok(0)
+            }
+            BinKind::Bits { bits } => {
+                let width = *bits as usize;
+                let v = val.as_u64().unwrap_or(0);
+                let mut i = 0usize;
+                while i < width {
+                    let bit = ((v >> i) & 1) as u8;
+                    let pos = bit_off + i;
+                    let byte_idx = pos / 8;
+                    let bit_idx = pos % 8;
+                    while out.len() <= byte_idx {
+                        out.push(0);
+                    }
+                    if bit == 1 {
+                        out[byte_idx] |= 1 << bit_idx;
+                    }
+                    i += 1;
+                }
+                Ok(bit_off + width)
             }
             BinKind::Uint { bits, endian } | BinKind::Int { bits, endian } => {
                 let signed = matches!(f.kind, BinKind::Int { .. });
@@ -2670,6 +2729,7 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                         .collect(),
                 };
                 out.extend(buf);
+                Ok(0)
             }
             BinKind::Ref(inner_name) => {
                 let inner_fields = self
@@ -2692,12 +2752,13 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                         )))
                     }
                 };
+                let mut bit = bit_off;
                 for nf in &inner_fields {
-                    self.encode_field(inner_name, nf, &inner_map, out)?;
+                    bit = self.encode_field(inner_name, nf, &inner_map, out, bit)?;
                 }
+                Ok(bit)
             }
         }
-        Ok(())
     }
 
     fn store_back(&mut self, target: &Expr, value: Value) -> crate::Result<()> {
@@ -6918,6 +6979,38 @@ dump h2.id
         assert!(output.iter().filter(|l| **l == "[DUMP] 0x1234").count() >= 1, "roundtrip id got: {:?}", output);
         // The last dump should be the re-decoded id 0x1234.
         assert_eq!(output.last().unwrap(), "[DUMP] 0x1234", "roundtrip got: {:?}", output);
+    }
+
+    #[test]
+    fn test_interpreter_binstruct_bitfields() {
+        let mut interp = Interpreter::new();
+        let src = r#"
+binstruct TcpFlags {
+    ver_ihl: u4
+    tos: u4
+    len: u16be
+}
+let raw = b"\x45\x00\x01\x02"
+let h = TcpFlags.decode(raw)
+dump h.ver_ihl
+dump h.tos
+dump h.len
+let back = TcpFlags.encode(h)
+dump back[0]
+dump len(back)
+let h2 = TcpFlags.decode(back)
+dump h2.ver_ihl
+dump h2.tos
+"#;
+        let output = interp.run_source(src).unwrap();
+        // LSB-first: ver_ihl = low nibble (5), tos = bits 4..7 (4).
+        assert!(output.iter().any(|l| l == "[DUMP] 0x5"), "ver_ihl got: {:?}", output);
+        assert!(output.iter().any(|l| l == "[DUMP] 0x4"), "tos got: {:?}", output);
+        assert!(output.iter().any(|l| l == "[DUMP] 0x1"), "len got: {:?}", output);
+        // Round-trip: byte 0 re-packs to 0x45.
+        assert!(output.iter().any(|l| l == "[DUMP] 69"), "roundtrip byte got: {:?}", output);
+        assert!(output.iter().any(|l| l == "[DUMP] 3"), "roundtrip len got: {:?}", output);
+        assert_eq!(output.last().unwrap(), "[DUMP] 0x4", "re-decode tos got: {:?}", output);
     }
 
     #[test]

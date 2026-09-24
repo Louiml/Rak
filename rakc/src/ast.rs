@@ -312,6 +312,10 @@ pub enum BinKind {
     Uint { bits: u8, endian: Endian },
     /// A signed integer with the given bit width.
     Int { bits: u8, endian: Endian },
+    /// A non-byte-aligned unsigned bitfield (1..=63 bits), packed LSB-first
+    /// into shared bytes; consecutive bitfields share bytes until a
+    /// byte-aligned field (or the struct end) flushes them.
+    Bits { bits: u8 },
     /// A fixed-length run of raw bytes.
     Bytes(usize),
     /// Everything remaining in the buffer.

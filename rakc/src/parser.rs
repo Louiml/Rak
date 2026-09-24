@@ -1107,6 +1107,11 @@ impl<'a> Parser<'a> {
                         return Ok(BinKind::Uint { bits, endian });
                     }
                 }
+                // Non-byte-aligned width (1..=63): an unsigned LSB-first
+                // bitfield (`u4`, `u12`, `i3` reads as a 3-bit bitfield too).
+                if bits > 0 && bits <= 63 {
+                    return Ok(BinKind::Bits { bits });
+                }
             }
         }
         // Nested binstruct reference.

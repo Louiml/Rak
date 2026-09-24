@@ -2077,6 +2077,8 @@ struct ResolvedBinField {
 enum ResolvedBinKind {
     Uint { bits: u8, endian: Endian },
     Int { bits: u8, endian: Endian },
+    /// A non-byte-aligned unsigned bitfield, LSB-first.
+    Bits { bits: u8 },
     Bytes(usize),
     Rest,
     Ref(Vec<ResolvedBinField>),
@@ -2102,6 +2104,7 @@ fn resolve_binstruct(name: &str, all: &HashMap<String, Vec<BinField>>) -> Result
             let kind = match &f.kind {
                 BinKind::Uint { bits, endian } => ResolvedBinKind::Uint { bits: *bits, endian: *endian },
                 BinKind::Int { bits, endian } => ResolvedBinKind::Int { bits: *bits, endian: *endian },
+                BinKind::Bits { bits } => ResolvedBinKind::Bits { bits: *bits },
                 BinKind::Bytes(n) => ResolvedBinKind::Bytes(*n),
                 BinKind::Rest => ResolvedBinKind::Rest,
                 BinKind::Ref(r) => ResolvedBinKind::Ref(resolve_one(r, all, seen)?),
@@ -2144,11 +2147,13 @@ fn make_bin_decode_native(name: String, fields: Vec<ResolvedBinField>) -> Value 
                 None => return Err("decode expects bytes".to_string()),
             };
             let mut off = 0usize;
+            let mut bit = 0usize;
             let mut map: HashMap<String, Value> = HashMap::new();
             for f in &fields {
-                let (v, no) = decode_resolved(f, &bytes, off)?;
+                let (v, no, nb) = decode_resolved(f, &bytes, off, bit)?;
                 map.insert(f.name.clone(), v);
                 off = no;
+                bit = nb;
             }
             let prov = Arc::new(Provenance {
                 tool: format!("binstruct:{}", nm),
@@ -2169,62 +2174,88 @@ fn make_bin_decode_native(name: String, fields: Vec<ResolvedBinField>) -> Value 
     )
 }
 
-/// Decode a single resolved field. Returns `(value, new_offset)`.
+/// Decode a single resolved field. Returns `(value, new_byte_offset,
+/// new_bit_offset)`. Bitfields share bytes LSB-first until a byte-aligned
+/// field (or the struct end) flushes the bit cursor to the next byte.
 fn decode_resolved(
     f: &ResolvedBinField,
     bytes: &[u8],
     off: usize,
-) -> Result<(Value, usize), String> {
+    bit_off: usize,
+) -> Result<(Value, usize, usize), String> {
     use crate::ast::Endian::*;
     match &f.kind {
         ResolvedBinKind::Rest => {
-            let v = if off >= bytes.len() { Vec::new() } else { bytes[off..].to_vec() };
-            Ok((Value::Bytes(Arc::from(v.as_slice())), bytes.len()))
+            let start = off + bit_off / 8;
+            let v = if start >= bytes.len() { Vec::new() } else { bytes[start..].to_vec() };
+            Ok((Value::Bytes(Arc::from(v.as_slice())), bytes.len(), 0))
         }
         ResolvedBinKind::Bytes(n) => {
-            if off + n > bytes.len() {
+            let start = off + bit_off.div_ceil(8);
+            if start + n > bytes.len() {
                 return Err(format!("binstruct: field '{}' outruns buffer", f.name));
             }
-            Ok((Value::Bytes(Arc::from(&bytes[off..off + n])), off + n))
+            Ok((Value::Bytes(Arc::from(&bytes[start..start + n])), start + n, 0))
         }
         ResolvedBinKind::Uint { bits, endian } => {
             let n = (*bits as usize) / 8;
-            if off + n > bytes.len() {
+            let start = off + bit_off.div_ceil(8);
+            if start + n > bytes.len() {
                 return Err(format!("binstruct: field '{}' outruns buffer", f.name));
             }
             let mut acc: u64 = 0;
             match endian {
-                Big => for i in 0..n { acc = (acc << 8) | bytes[off + i] as u64; },
-                Little => for i in 0..n { acc |= (bytes[off + i] as u64) << (8 * i); },
+                Big => for i in 0..n { acc = (acc << 8) | bytes[start + i] as u64; },
+                Little => for i in 0..n { acc |= (bytes[start + i] as u64) << (8 * i); },
             }
-            Ok((Value::Hex(acc, *bits as usize), off + n))
+            Ok((Value::Hex(acc, *bits as usize), start + n, 0))
         }
         ResolvedBinKind::Int { bits, endian } => {
             let n = (*bits as usize) / 8;
-            if off + n > bytes.len() {
+            let start = off + bit_off.div_ceil(8);
+            if start + n > bytes.len() {
                 return Err(format!("binstruct: field '{}' outruns buffer", f.name));
             }
             let mut acc: u64 = 0;
             match endian {
-                Big => for i in 0..n { acc = (acc << 8) | bytes[off + i] as u64; },
-                Little => for i in 0..n { acc |= (bytes[off + i] as u64) << (8 * i); },
+                Big => for i in 0..n { acc = (acc << 8) | bytes[start + i] as u64; },
+                Little => for i in 0..n { acc |= (bytes[start + i] as u64) << (8 * i); },
             }
             let v = match *bits {
-                8 => bytes[off] as i8 as i64,
+                8 => bytes[start] as i8 as i64,
                 16 => acc as u16 as i16 as i64,
                 32 => acc as u32 as i32 as i64,
                 64 => acc as i64,
                 _ => acc as i64,
             };
-            Ok((Value::I64(v), off + n))
+            Ok((Value::I64(v), start + n, 0))
+        }
+        ResolvedBinKind::Bits { bits } => {
+            let width = *bits as usize;
+            if off + bit_off / 8 >= bytes.len() {
+                return Err(format!("binstruct: field '{}' outruns buffer", f.name));
+            }
+            // Read `width` bits LSB-first starting at absolute bit position
+            // `off*8 + bit_off`.
+            let mut acc: u64 = 0;
+            for j in 0..width {
+                let pos = bit_off + j;
+                let byte = bytes.get(off + pos / 8).copied().unwrap_or(0);
+                let bit = (byte >> (pos % 8)) & 1;
+                acc |= (bit as u64) << j;
+            }
+            let new_bit = bit_off + width;
+            Ok((Value::Hex(acc, width), off + new_bit / 8, new_bit % 8))
         }
         ResolvedBinKind::Ref(inner) => {
             let mut map: HashMap<String, Value> = HashMap::new();
-            let mut io = off;
+            let mut io = off + bit_off.div_ceil(8);
+            let mut ibit = 0usize;
             for nf in inner {
-                let (v, no) = decode_resolved(nf, bytes, io)?;
+                let (v, no, nb) = decode_resolved(nf, bytes, io, ibit)?;
                 map.insert(nf.name.clone(), v);
                 io = no;
+                ibit = nb;
             }
             Ok((
                 Value::Struct {
@@ -2232,6 +2263,7 @@ fn decode_resolved(
                     fields: Arc::from(map),
                 },
                 io,
+                ibit,
             ))
         }
     }
@@ -2255,8 +2287,13 @@ fn make_bin_encode_native(name: String, fields: Vec<ResolvedBinField>) -> Value 
                 other => return Err(format!("encode expects struct/map, got {}", other.type_name())),
             };
             let mut out: Vec<u8> = Vec::new();
+            let mut bit = 0usize;
             for f in &fields {
-                encode_resolved(f, &map, &mut out)?;
+                bit = encode_resolved(f, &map, &mut out, bit)?;
+            }
+            if bit % 8 != 0 {
+                // Flush trailing partial byte (zero-padded).
+                out.push(0);
             }
             Ok(Value::Bytes(Arc::from(out.as_slice())))
         }),
@@ -2267,7 +2304,8 @@ fn encode_resolved(
     f: &ResolvedBinField,
     map: &HashMap<String, Value>,
     out: &mut Vec<u8>,
-) -> Result<(), String> {
+    bit_off: usize,
+) -> Result<usize, String> {
     use crate::ast::Endian::*;
     let val = match map.get(&f.name) {
         Some(v) => match v {
@@ -2277,11 +2315,14 @@ fn encode_resolved(
         None => Value::Nil,
     };
     match &f.kind {
-        ResolvedBinKind::Rest => match val {
-            Value::Bytes(b) => out.extend(b.iter()),
-            Value::String(s) => out.extend(s.to_string().into_bytes()),
-            _ => {}
-        },
+        ResolvedBinKind::Rest => {
+            match val {
+                Value::Bytes(b) => out.extend(b.iter()),
+                Value::String(s) => out.extend(s.to_string().into_bytes()),
+                _ => {}
+            }
+            Ok(0)
+        }
         ResolvedBinKind::Bytes(n) => {
             let b = match val {
                 Value::Bytes(b) => b.to_vec(),
@@ -2291,6 +2332,7 @@ fn encode_resolved(
             let mut padded = b;
             if padded.len() < *n { padded.resize(*n, 0); }
             out.extend(padded.into_iter().take(*n));
+            Ok(0)
         }
         ResolvedBinKind::Uint { bits, endian } => {
             let v = val.as_u64().unwrap_or(0);
@@ -2299,6 +2341,7 @@ fn encode_resolved(
                 Big => for i in (0..n).rev() { out.push(((v >> (8 * i)) & 0xFF) as u8); },
                 Little => for i in 0..n { out.push(((v >> (8 * i)) & 0xFF) as u8); },
             }
+            Ok(0)
         }
         ResolvedBinKind::Int { bits, endian } => {
             let v = val.as_i64().unwrap_or(0) as u64;
@@ -2307,6 +2350,27 @@ fn encode_resolved(
                 Big => for i in (0..n).rev() { out.push(((v >> (8 * i)) & 0xFF) as u8); },
                 Little => for i in 0..n { out.push(((v >> (8 * i)) & 0xFF) as u8); },
             }
+            Ok(0)
+        }
+        ResolvedBinKind::Bits { bits } => {
+            let width = *bits as usize;
+            let v = val.as_u64().unwrap_or(0);
+            // Pack `width` bits LSB-first into the current partial byte.
+            let mut i = 0usize;
+            while i < width {
+                let bit = ((v >> i) & 1) as u8;
+                let pos = bit_off + i;
+                let byte_idx = pos / 8;
+                let bit_idx = pos % 8;
+                while out.len() <= byte_idx {
+                    out.push(0);
+                }
+                if bit == 1 {
+                    out[byte_idx] |= 1 << bit_idx;
+                }
+                i += 1;
+            }
+            Ok(bit_off + width)
         }
         ResolvedBinKind::Ref(inner) => {
             let inner_map = match val {
@@ -2314,10 +2378,11 @@ fn encode_resolved(
                 Value::Map(m) => (*m).clone(),
                 other => return Err(format!("encode: nested field '{}' expects struct, got {}", f.name, other.type_name())),
             };
+            let mut bit = bit_off;
             for nf in inner {
-                encode_resolved(nf, &inner_map, out)?;
+                bit = encode_resolved(nf, &inner_map, out, bit)?;
             }
+            Ok(bit)
         }
     }
-    Ok(())
 }
