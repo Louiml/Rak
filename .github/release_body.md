@@ -1,39 +1,45 @@
-# Rak v0.7.0
+# Rak v0.7.2
 
-Upgraded compiler, new key features, IDE + installer fixes.
+## What's new in 0.7.2
 
-## What's new in 0.7.0
+### Debugger (DAP server)
+- New **`rakc dap`** — a Debug Adapter Protocol server so any DAP-capable editor/IDE can debug `.rak` scripts: set/remove breakpoints, step, step-over, finish, continue, inspect stack frames, scopes, and variables, and evaluate expressions live.
+- The **VS Code extension** ships a debug configuration (adapter type `rak`, launching `rakc dap`) — open a script, set a breakpoint, and press F5. Includes a matching `examples/dap_demo.rak`.
+- Fixed the DAP line-number mapping so client-side (1-based) breakpoints hit the correct VM (0-based) line.
 
-### Compiler & language upgrades
-- **Structured errors** — `catch e` binds a first-class `Error` value with a `kind`, source span (`file:line:col`), `cause`, context map, and backtrace. New builtins: `error`, `err_message`, `err_kind`, `err_line`, `err_col`, `err_file`, `err_cause`, `err_context`, `err_with_context` (interpreter + VM).
-- **True async concurrency** — `await_all`, `select` (race), `timeout`, `task_group`, `async_sleep`, `async_yield`, and deferred `async fn` bodies running on a bounded worker pool (thousands of lightweight ops). Added the shared Tokio runtime (`async_rt.rs`) with a non-Tokio counting semaphore.
-- **Streaming** — pull-based `Value::Stream` with `stream_from_array`, `stream_map`, `filter`, `take`, `stream_next`, `collect`, `read_lines`, and `tcp_stream`; lazily consumed by `for`.
-- **CLI** — optional `fn main(argv) -> int` entry with real process exit codes, plus `argv()`, `stdin_read_line`, `stdin_read_all`, `eprint`, and the `parse_args(spec, argv)` flag parser.
-- **Data processing** — lazy `stream_csv` (RFC-4180) / `stream_jsonl` parsers and `parse_csv_line`, plus `gzip`/`gunzip`/`deflate`/`inflate` and `zip_archive`/`zip_list`/`zip_extract` (new `stdlib/src/stream_io.rs`).
-- **VM line mapping** — the compiler emits a source line-marker per top-level statement into `Chunk.lines` for source-to-bytecode mapping.
+### stdlib batteries
+- New built-in modules covering common tasks:
+  - **Time** — `time_now`, `time_parse`, `time_format`, `time_utc`, `time_elapsed`, sleep helpers.
+  - **Random** — `rand_int`, `rand_float`, `rand_uuid`, `rand_seed`, `rand_bytes`.
+  - **Data formats** — `csv_*` read/write (RFC-4180), `yaml_parse`, JSON round-tripping helpers (new `stdlib/src/datafmt.rs`).
+  - **Archives** — `gzip`/`gunzip`, `zip_archive`/`zip_list`/`zip_extract` (new `stdlib/src/archive.rs`).
+- New gallery examples: `batteries_demo.rak`.
 
-### `rakc debug`
-- New bytecode-VM source debugger: `break`, `continue`/`c`, `step`/`s`, `next`/`n`, `finish`, `locals`, `stack`/`backtrace`, `frame`, `print <name>`, and full `disassemble` with line markers + operands.
+### OSINT pack
+- Practical open-source-intelligence toolkit (new `rakc/src/ext_osint.rs`, `stdlib/src/{whois,ctlogs,yara,report}.rs`):
+  - **WHOIS** — `whois_lookup` + `whois_parse` for domain records.
+  - **CT logs** — `ct_subdomains` certificate-transparency subdomain enumeration.
+  - **YARA-lite** — `yara_scan` over raw bytes (hex/string patterns, `at`/`and`/`all of them`/`none of them`).
+  - **Reports** — `report_markdown` structured Markdown evidence output.
+- New gallery examples: `osint_demo.rak`, `osint_pack_demo.rak`, plus docs page `osint.md`.
 
-### rakpkg
-- Now a lib + bin so `parse_manifest_str` is reusable/fuzzable.
-- Version/rev constraints (`user/repo@^1.2`, `#rev`), `rakpkg.lock` (resolved rev + manifest SHA-256 checksum), and new commands: `update`, `lock`, `tree` (cycle-safe dependency graph), `audit`, `publish`.
+### Language core
+- **`in` operator** — `x in collection` membership tests for arrays, maps, strings, and streams.
+- **Destructuring `let`** — bind multiple variables from an array/map in one statement.
+- **Slice & negative indexing** — `a[1..3]`, `a[-1]`, array/byte/string slicing with safe bounds.
+- New docs page `batteries.md`; README "What's new in 0.7.2".
 
-### Fuzzing
-- 8 proptest harnesses (stable CI) for the lexer, parser, DNS, packet builders, WebSocket, TLS, JSON, and tunnel framing (`rakc/tests/proptest_harness.rs`).
-- A standalone libFuzzer / cargo-fuzz pack (`fuzz/`, 13 targets: lexer, parser, eval, manifest, dns, tls, json, websocket, tunnel, netraw, csv, gzip, zip).
+### IDE upgrades
+- Autocomplete + syntax highlighting for every new batteries & OSINT builtin.
+- Three new example scripts in the gallery (`batteries`, `osint`, `core_v072`), each verified to run byte-identically on both the interpreter and the bytecode VM.
+- IDE + VS Code extension bumped to 0.7.2.
 
-### IDE + VS Code
-- Fixed bugs in the IDE.
-- Added the full v0.7.0 syntax vocabulary to the IDE editor (CodeEditor) and the VS Code extension (vscode-rak grammar, version 0.5.1 → 0.7.0): structured errors, async orchestration, streaming, CLI, and compression builtins, plus 9 new editor snippets (`fn main`, `await_all`, `task_group`, `timeout`, `stream`, `read_lines`, `stream_csv`, `parse_args`, structured errors).
-
-### Documentation
-- Restructured the docs: content is now split into markdown page files under `docs/content/*.md` (based on `README.md` and `rak-features-spec.md`), and `docs.html` is now a lightweight markdown-driven viewer (dependency-free renderer + hash router) served by GitHub Pages.
+### Installers & bundles
+- Linux: portable `rak-ide` tar.gz, offline `rak-bundle` tar.gz, `.deb`, and `.AppImage`.
+- Windows: portable `rak-ide` zip, offline `rak-bundle` zip, NSIS `-setup.exe`, and WiX `.msi`.
+- Standalone `rakc`, `rakpkg`, and `rak-setup` binaries for both platforms.
 
 ## Bug fixes
-
-### Rak installer (rak-setup)
-- **Fix PATH clobbering on Windows** — the installer no longer overwrites a user's entire PATH. Previously a broken `reg query` parse could capture the registry type token and `setx /M` could write the *system* PATH even for user installs, breaking unrelated CLIs (e.g. rustc/cargo). Now PATH edits are **append-only** on the correct registry hive (HKCU for user, HKLM for system), `setx` is removed, and a `WM_SETTINGCHANGE` broadcast refreshes running programs.
-- **Uninstall** now removes only the rak PATH entry (instead of deleting the whole PATH value) and only recurses into rak-owned directories.
-- Component selection is now an explicit **multi-select** on the first screen (space to toggle, enter to confirm), with `rakc` + `rakpkg` preselected.
-- `--install` validates component names and rejects unknown ones.
+- DAP: 1-based ↔ 0-based line translation on `setBreakpoints` / `stackTrace`.
+- `examples/osint_pack_demo.rak`: fixture keys now match the normalized WHOIS map; YARA demo uses a verified rule set; live network lookups commented so the demo stays hermetic.
+- Removed the redundant `core_v08.rak` example (duplicate of `core_demo.rak`).
