@@ -59,53 +59,6 @@ Hex is a first-class type. The bytecode VM runs about 6x faster than the tree-wa
 - **`rakc lint`** — advisory checks (unused vars, shadowing, unreachable
   code, missing `pub fn` return types, duplicate imports; `--deny` for CI).
 
-## What's new in 0.7.1
-
-- **Static type checker** — `rakc check <file>` infers literal types, checks
-  `let x: T = value` annotations and function-call arguments, and reports
-  expected vs. found types with the source line (`error[E0308]`). Numeric
-  literals are compatible with each other; `char` and `string` are not.
-- **Mutability is real** — `let x = 10; x = 20` is now an error
-  (`cannot assign to immutable variable 'x'`). Use `let mut x` to rebind.
-  Enforced on both the interpreter and the bytecode VM.
-- **`char` type** — a first-class Unicode scalar, distinct from `u8`/`bytes`,
-  with `\u{...}` and `\xNN` escapes. `let c: char = 'א'` works everywhere.
-- **Base literals** — `0b1010`, `0o755`, and underscores (`1_000_000`). All
-  integer forms compare equal by value, so `0xA == 10`.
-- **Generic functions** — `fn identity<T>(v: T) -> T`, callable as
-  `identity<int>(42)` or inferred `identity(42)`. Type args are validated and
-  then ignored; the runtime stays dynamic.
-- **Enum variant patterns** — `match e { Event::Connect(host) => ... }` with
-  tuple and unit variants, on newline- or comma-separated arms. The checker
-  flags non-exhaustive matches and repeated variant patterns.
-- **`defer`** — `defer cleanup()` runs in LIFO order when the function exits,
-  on a normal return or a raised error. Same behavior on the VM (`Op::DeferCall`).
-- **Test framework** — `rakc test [file] [--filter NAME] [--verbose]` runs
-  `test "name" { ... }` blocks with `assert`, `assert_eq/ne/true/false`,
-  `expect_error(fn() {...})`, and `panic(msg)`. A failing test exits non-zero.
-
-## What's new in 0.7.0
-
-- **Structured errors** — `catch e` binds a first-class `Error` value with a
-  `kind`, source span, cause, and context (`err_kind`/`err_message`/`err_line` …).
-- **True async concurrency** — `await_all`, `select` (race), `timeout`,
-  `task_group`, `async_sleep`/`async_yield`, and deferred `async fn` bodies run
-  concurrently on a bounded worker pool (thousands of lightweight ops).
-- **Streaming** — pull-based `Value::Stream` with `stream_map`/`filter`/`take`/
-  `collect`, `read_lines`, and `tcp_stream`; lazily consumed by `for`.
-- **CLI** — `fn main(argv) -> int` entry with real exit codes, `argv()`,
-  stdin/stdout builtins, and a structured `parse_args(spec, argv)` flag parser.
-- **Data processing** — lazy `stream_csv`/`stream_jsonl`, plus
-  `gzip`/`gunzip`/`deflate`/`inflate` and `zip_archive`/`zip_list`/`zip_extract`.
-- **rakpkg** — version/rev constraints, `rakpkg.lock` (rev + SHA-256 checksum),
-  and `update`/`tree`/`audit`/`publish`.
-- **Debugger** — `rakc debug program.rak` (break/continue/step/locals/stack/
-  print/**disassemble**) powered by the bytecode VM with statement↔bytecode
-  line mapping.
-- **Fuzzing** — 8 proptest harnesses (stable CI) + a 13-target **libFuzzer /
-  cargo-fuzz** pack (`fuzz/`) for the lexer, parser, DNS/TLS/JSON parsers,
-  packet builders, WebSocket frames, tunnel, compression, and package manifests.
-
 ## Install
 
 The custom installer is an interactive TUI wizard that installs `rakc`, `rakpkg`, and the Rak IDE, edits PATH, sets `RAK_PATH`, creates shortcuts + `.rak` associations, and installs man pages + shell completions. It runs in net-install (downloads the latest release) or offline-bundle mode, and supports `--uninstall` / `--list` / `--yes` for scripting.
