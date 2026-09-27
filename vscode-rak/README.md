@@ -20,9 +20,31 @@ Syntax highlighting and language features for the [Rak](https://github.com/Louim
 
 For Neovim (with `nvim-lspconfig`), configure `rakc lsp` as the command for `.rak` files.
 
+## Debugging
+
+`rakc dap <file>` is a Debug Adapter Protocol server over stdio. This
+extension registers a `rak` debugger contribution: create a `launch.json`
+with the bundled **"Rak: Debug current file"** configuration (or press F5 on
+an open `.rak` file) to launch `rakc dap <file>`. You get breakpoints,
+stepping (`next`/`stepIn`/`stepOut`), the call stack, variable inspection, and
+exception reporting.
+
+Requires `rakc` on your PATH — the same binary that provides the language
+server. Neovim users can point `nvim-dap`'s `rak` adapter at `rakc dap`.
+
 ## Changelog
 
-### 0.7.1
+### 0.7.2
+
+- **DAP debugging** — the extension ships a `rak` debug adapter contribution
+  that launches `rakc dap <file>` (breakpoints, stepping, stack, variables).
+- **New builtins highlighted** — the stdlib batteries (`time_now`, `time_fmt`,
+  `time_parts`, `time_add`, `time_diff`, `date_today`, `rand_seed`, `rand_int`,
+  `rand_float`, `rand_bytes`, `rand_hex`, `rand_choice`, `rand_shuffle`,
+  `csv_parse`, `csv_stringify`, `yaml_parse`, `gzip_compress`,
+  `gzip_decompress`, `zip_read`, `zip_write`) and the OSINT pack
+  (`whois_lookup`, `whois_parse`, `ct_subdomains`, `yara_scan`,
+  `report_markdown`).
 
 - **Keywords** — `defer`, `test`, `assert`.
 - **Types** — `char` (a first-class Unicode scalar type).

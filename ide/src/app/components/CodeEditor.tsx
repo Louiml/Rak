@@ -129,6 +129,15 @@ const BUILTINS = [
   'argv', 'stdin_read_line', 'stdin_read_all', 'eprint', 'parse_args',
   // Data processing (v0.7)
   'gzip', 'gunzip', 'deflate', 'inflate', 'zip_archive', 'zip_list', 'zip_extract',
+  // Stdlib batteries (v0.7.2)
+  'time_now', 'time_now_millis', 'time_fmt', 'time_parse', 'time_parts',
+  'time_add', 'time_diff', 'date_today',
+  'rand_seed', 'rand_int', 'rand_float', 'rand_bytes', 'rand_hex',
+  'rand_choice', 'rand_shuffle',
+  'csv_parse', 'csv_stringify', 'yaml_parse',
+  'gzip_compress', 'gzip_decompress', 'zip_read', 'zip_write',
+  // OSINT pack (v0.7.2)
+  'whois_lookup', 'whois_parse', 'ct_subdomains', 'yara_scan', 'report_markdown',
 ];
 
 interface Suggestion {

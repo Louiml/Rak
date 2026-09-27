@@ -61,6 +61,31 @@ statement-to-bytecode line mapping: breakpoints (`break <line>`), stepping
 `frame`), and `disassemble` for the full line-annotated bytecode listing. See
 [CLI reference](cli.html#rakc-debug-07).
 
+## Debug Adapter Protocol (0.7.2)
+
+`rakc dap program.rak` speaks DAP over stdio (VS Code / any LSP-based editor):
+
+```
+rakc dap program.rak
+```
+
+The server implements the standard session flow — `initialize`,
+`setBreakpoints` (verified per-line), `configurationDone`, then drives the VM
+on a worker thread. While the program is paused you can:
+
+- **continue** / **next** — breakpoint-triggered pauses resume with either
+  run-to-completion or single-step-over semantics (line-granular; repeated
+  opcodes of the same source line don't re-trigger).
+- **stackTrace / scopes / variables** — the current source line plus `Locals`
+  and `Globals` snapshots rendered at each stop.
+- **evaluate** — look up a local/global by name while paused.
+- **pause / disconnect** — interrupt a running program or terminate cleanly.
+
+Program output (`dump` etc.) streams as `output` events; the session ends with
+`terminated`. Because the hook runs at statement boundaries in the VM, only
+the bytecode backend is supported (`rakc dap`), the same one `rakc debug`
+uses.
+
 ## Implementation notes
 
 - Regex values are compiled at **compile time** on the VM (a `Value::Regex`

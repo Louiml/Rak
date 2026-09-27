@@ -4,8 +4,35 @@ A programming language for hackers, OSINT investigators, and systems programmers
 
 Hex is a first-class type. The bytecode VM runs about 6x faster than the tree-walker. There's a SQL engine written in Rak itself, and a Rak interpreter written in Rak.
 
-## What's new in 0.8 (in progress)
+## What's new in 0.7.2
 
+- **DAP debugger server** — `rakc dap <file>` speaks the Debug Adapter
+  Protocol over stdio (Content-Length framing). The VM runs the target on a
+  worker thread while a reader handles requests: `setBreakpoints`/`remove`,
+  `continue`, `next`, `stepIn`, `stepOut`, `stackTrace`, `scopes`/`variables`,
+  `setVariable`, and full `exceptionInfo` — line-granular breakpoint gating via
+  a `last-hit-line` guard. Wire it up from VS Code (the bundled `rak`
+  extension), Neovim (nvim-dap), or any DAP client.
+- **Stdlib batteries** — everyday data modules on both backends: time &
+  datetime (`time_now`, `time_fmt`, `time_parse`, `time_parts`, `time_add`,
+  `time_diff`, `date_today`), randomness (`rand_seed`, `rand_int`,
+  `rand_float`, `rand_bytes`, `rand_hex`, `rand_choice`, `rand_shuffle`), CSV
+  (`csv_parse`, `csv_stringify`), YAML (`yaml_parse`), and archives
+  (`gzip_compress`, `gzip_decompress`, `zip_list`, `zip_read`, `zip_write`).
+- **OSINT pack** — WHOIS lookups and parsing (`whois_lookup`/`whois_parse`),
+  certificate-transparency subdomain enumeration (`ct_subdomains`), a
+  hand-rolled **YARA-lite** scanning engine (`yara_scan`: hex wildcards,
+  `nocase`, `at`/`in`, `all-of`/`any-of`/`none-of`, boolean conditions), and
+  Markdown evidence reports (`report_markdown`). Docs: `docs/content/osint.md`,
+  demo: `examples/osint_demo.rak`.
+- **Language core: `in` operator** — membership checks work on strings
+  (substring/char), arrays, tuples, maps (key lookup), and byte sequences.
+- **Destructuring `let`** — `let (a, b) = pair`, `let [x, y, z] = list`,
+  `let Point { x, y } = obj`, nested and `let mut` forms; arity mismatches
+  raise a catchable error.
+- **Slice and negative indexing** — `a[1..3]`, `a[..2]`, `a[3..]`, `a[-2..]`
+  slices, `a[-1]` reads and `a[-1] = v` writes from the end, with
+  out-of-bounds raises on both backends.
 - **The VM caught up.** `rakc vm` now runs what the interpreter runs:
   `try`/`catch` and `expr?` (structured errors, LIFO defers before the
   handler), method dispatch on structs/enums (`obj.method(...)` via `impl`

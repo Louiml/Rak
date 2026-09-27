@@ -539,7 +539,14 @@ impl<'a> Parser<'a> {
         self.expect(Token::Let)?;
         let mutable = self.match_token(&Token::Mut);
 
-        if self.check(&Token::LParen) || self.check(&Token::LBracket) || self.check(&Token::LBrace) {
+        // Destructuring `let`: `let (a, b) = ...`, `let [x, y] = ...`,
+        // `let Point { x, y } = ...` (ident followed by `{`).
+        if self.check(&Token::LParen)
+            || self.check(&Token::LBracket)
+            || self.check(&Token::LBrace)
+            || (matches!(self.peek(), Some(Token::Ident(_)))
+                && matches!(self.peek_n(1), Some(Token::LBrace)))
+        {
             let pattern = self.parse_pattern()?;
             let type_hint = if self.match_token(&Token::Colon) {
                 Some(self.parse_type()?)
@@ -1798,6 +1805,13 @@ impl<'a> Parser<'a> {
             } else if self.match_token(&Token::GtEq) {
                 let right = self.parse_range()?;
                 left = Expr::Binary(BinOp::GtEq, Box::new(left), Box::new(right));
+            } else if self.check(&Token::In) {
+                // `x in collection` — membership test. In `for` headers the
+                // `in` is consumed directly by parse_for/comprehensions, so
+                // arriving here always means the binary operator.
+                self.advance();
+                let right = self.parse_range()?;
+                left = Expr::Binary(BinOp::In, Box::new(left), Box::new(right));
             } else {
                 break;
             }
@@ -1806,6 +1820,23 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_range(&mut self) -> Result<Expr> {
+        // Open-start ranges: `..end` and `..` (primarily for slicing:
+        // `xs[..3]`, `xs[..]`). A leading `..` used to be a syntax error, so
+        // this only adds new programs, never changes existing ones.
+        if self.check(&Token::DotDot) {
+            self.advance();
+            if self.check(&Token::RBracket)
+                || self.check(&Token::RParen)
+                || self.check(&Token::Comma)
+                || self.check(&Token::RBrace)
+                || self.check(&Token::Semi)
+                || self.peek().is_none()
+            {
+                return Ok(Expr::Range(None, None));
+            }
+            let right = self.parse_bitwise()?;
+            return Ok(Expr::Range(None, Some(Box::new(right))));
+        }
         let left = self.parse_bitwise()?;
         if self.match_token(&Token::DotDot) {
             if self.check(&Token::RBracket)

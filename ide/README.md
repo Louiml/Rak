@@ -10,9 +10,9 @@ The editor tokenizer (`src/app/components/CodeEditor.tsx`) highlights:
 - **Literals** — regex literals `/…/flags`, byte strings `b"…"`, interpolation strings `f"…{expr}…"`, char literals `'…'`, hex `0x…`, typed ints `42i32`.
 - **Macros** — `$placeholder` variables and `name!(…)` macro invocations.
 - **Operators** — `|>` (pipeline), `..`, `::`, `->`, `=>`, `!`, `$`, and the usual arithmetic/logic ops.
-- **Builtins** — `ffi_*`, `mmap_*`, `net_raw_*`, `dns_*`, `tls_*`, `pcap_*`, `http_get_async`, `tcp_probe`, the crypto/file/html/json/net/regex builtins, and `Some`/`None`/`Ok`/`Err`.
+- **Builtins** — `ffi_*`, `mmap_*`, `net_raw_*`, `dns_*`, `tls_*`, `pcap_*`, `http_get_async`, `tcp_probe`, the crypto/file/html/json/net/regex builtins, `Some`/`None`/`Ok`/`Err`, and the v0.7.2 additions (batteries: `time_now`, `time_fmt`, `rand_int`, `csv_parse`, `yaml_parse`, `gzip_*`, `zip_*`; OSINT: `whois_lookup`, `whois_parse`, `ct_subdomains`, `yara_scan`, `report_markdown`).
 
-Autocomplete offers keywords, types, builtins, and snippets (incl. `import`, `from`, `export`, `macro`, `extern`, `const`, `async`, `mmap`, `netraw`, `ffi`, `dns`). The built-in **Examples** gallery includes `ffi`, `mmap`, `async`, `net_raw`, `parsers`, `macros`, and `import_demo`.
+Autocomplete offers keywords, types, builtins, and snippets (incl. `import`, `from`, `export`, `macro`, `extern`, `const`, `async`, `mmap`, `netraw`, `ffi`, `dns`). The built-in **Examples** gallery includes `ffi`, `mmap`, `async`, `net_raw`, `parsers`, `macros`, `import_demo`, and the v0.7.2 `batteries`, `osint`, and `core_v072` demos.
 
 ## Getting Started
 

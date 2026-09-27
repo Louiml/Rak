@@ -426,7 +426,7 @@ impl<'a> TypeChecker<'a> {
                 let _rt = self.infer(r);
                 use ast::BinOp::*;
                 match op {
-                    Eq | NotEq | Lt | Gt | LtEq | GtEq | And | Or => Type::Bool,
+                    Eq | NotEq | Lt | Gt | LtEq | GtEq | And | Or | In => Type::Bool,
                     Add => {
                         // string + anything is string
                         if lt == Type::String {

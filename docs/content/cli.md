@@ -62,6 +62,13 @@ quit / q, help
 `disassemble` shows the line→bytecode mapping so you can place breakpoints
 precisely.
 
+## rakc dap (0.7.2)
+
+`rakc dap program.rak` serves the [Debug Adapter Protocol](vm.html#debug-adapter-protocol-08)
+over stdio (VS Code and similar editors): line breakpoints, continue/step,
+stack/locals/globals inspection, and `evaluate`. Program output streams as DAP
+`output` events. See the VM docs for the session walkthrough.
+
 ## rakpkg
 
 ```text

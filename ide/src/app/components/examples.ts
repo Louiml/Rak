@@ -1919,4 +1919,80 @@ while !relayed {
 }
 `,
   },
+{
+    name: 'batteries',
+    filename: 'batteries.rak',
+    source: `dump time_now()                       // seconds since the Unix epoch
+dump date_today()                     // 2026-09-27
+dump time_fmt(time_now(), "%Y/%m/%d") // strftime-style formatting
+
+rand_seed(42)
+dump rand_int(1, 100)
+dump rand_hex(16)
+let picked = rand_choice([80, 443, 8080])?
+dump picked in [80, 443, 8080]        // true
+
+let rows = csv_parse("name,port\\nhttp,80\\nhttps,443\\n")
+dump rows[1].name                      // https
+dump csv_stringify([{ a: 1, b: 2 }, { a: 3, b: 4 }])
+
+let cfg = yaml_parse("host: 127.0.0.1\\nports: [80, 443]\\n")?
+dump cfg.host
+
+let blob = gzip_compress(b"compress me")
+dump gzip_decompress(blob)             // b"compress me"
+`,
+  },
+  {
+    name: 'osint',
+    filename: 'osint.rak',
+    source: `// OSINT pack (v0.7.2): WHOIS, certificate-transparency, YARA, reports.
+// whois_lookup("example.com") and ct_subdomains("example.com") hit the
+// network -- uncomment when you have connectivity.
+
+let w = whois_parse("Domain Name: EXAMPLE.COM\\nRegistrar: RESERVED-Internet Assigned Numbers Authority\\nName Server: A.IANA-SERVERS.NET\\n")
+dump w["registrar"]                   // RESERVED-Internet Assigned Numbers Authority
+
+let rule = "rule pe_mz { strings: $mz = { 4D 5A ?? 00 03 } condition: $mz at 0 }"
+let data = b"MZ\\x90\\x00\\x03\\x00\\x00\\x00\\x04\\x00"
+dump yara_scan(rule, data)[0].rule    // pe_mz
+
+let markdown = report_markdown({
+  title: "Recon: example.com",
+  meta: { target: "example.com", tool: "rakc osint pack", confidence: "high" },
+  sections: {
+    "Headline": ["registrar: RESERVED-Internet Assigned Numbers Authority"],
+    "YARA": ["pe_mz matched ($mz at 0)"],
+  },
+})
+dump markdown                          // Markdown evidence report
+`,
+  },
+  {
+    name: 'core_v072',
+    filename: 'core_v072.rak',
+    source: `// Language core (v0.7.2): \`in\`, destructuring let, slices.
+dump "ell" in "hello"                  // true  (substring)
+dump 443 in [80, 443, 8080]            // true  (array membership)
+dump "port" in { port: 443 }           // true  (map key)
+dump 0x4D in b"MZ"                     // true  (byte membership)
+
+let (host, port) = ("example.com", 443)
+dump host + ":" + port                 // example.com:443
+
+let [first, second, rest] = [10, 20, 30]
+dump first + rest                      // 40
+
+struct Point { x: int, y: int }
+let Point { x, y } = Point { x: 3, y: 4 }
+dump x * y                             // 12
+
+let d = [10, 20, 30, 40, 50]
+dump d[1..3]                           // [20, 30]
+dump d[..2]                            // [10, 20]
+dump d[-2..]                           // [40, 50]
+dump d[-1]                             // 50
+dump "hello"[1..3]                     // el
+`,
+  },
 ];

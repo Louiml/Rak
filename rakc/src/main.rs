@@ -3,7 +3,7 @@ use std::fs;
 use std::io::{self, Read, Write};
 use std::path::PathBuf;
 
-const VERSION: &str = "0.7.1";
+const VERSION: &str = "0.7.2";
 const PAYLOAD_MAGIC: u64 = 0x52414B5F50434B; // "RAK_PCK" as u64
 
 fn print_usage() {
@@ -17,6 +17,7 @@ fn print_usage() {
     eprintln!("  bench <file>   Benchmark interpreter vs VM");
     eprintln!("  build <file>   Build a standalone executable from a Rak script");
     eprintln!("  debug <file>   Run a line-oriented interactive debugger");
+    eprintln!("  dap <file>     Speak the Debug Adapter Protocol on stdio (editors/IDEs)");
     eprintln!("  repl            Start an interactive REPL");
     #[cfg(feature = "lsp")]
     eprintln!("  lsp             Start the language server (stdio)");
@@ -29,6 +30,8 @@ fn print_usage() {
     eprintln!("  version        Print version");
     eprintln!();
     eprintln!("Use - for file to read from stdin");
+    eprintln!();
+    eprintln!("Sandbox (run/vm/debug/test): --sandbox [--allow net,fs_write,process,ffi,raw,gui,secrets|all]");
 }
 
 /// Run the `rakc test` command. Discovers `.rak` test files (an explicitly
@@ -39,6 +42,8 @@ fn cmd_test(args: &[String]) {
     let mut file: Option<String> = None;
     let mut filter: Option<String> = None;
     let mut verbose = false;
+    let mut sandbox = false;
+    let mut sandbox_allow = String::new();
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -47,6 +52,11 @@ fn cmd_test(args: &[String]) {
                 filter = args.get(i).cloned();
             }
             "--verbose" | "-v" => verbose = true,
+            "--sandbox" => sandbox = true,
+            "--allow" => {
+                i += 1;
+                sandbox_allow = args.get(i).cloned().unwrap_or_default();
+            }
             a if a.starts_with('-') => {
                 eprintln!("Unknown test flag: {}", a);
                 std::process::exit(1);
@@ -58,6 +68,11 @@ fn cmd_test(args: &[String]) {
             }
         }
         i += 1;
+    }
+
+    if sandbox {
+        rakc::caps::enable(&sandbox_allow);
+        println!("sandbox: active (allow: {})", if sandbox_allow.is_empty() { "none".to_string() } else { sandbox_allow.clone() });
     }
 
     // Discover test files.
@@ -461,11 +476,18 @@ fn main() {
     let file = &args[2];
     let source = read_source(file);
 
+    // Sandbox flags: --sandbox [--allow csv]. Stripped from script argv.
+    let (sandbox_on, sandbox_allow, clean_args) = rakc::caps::parse_cli(&args[3..]);
+    if sandbox_on {
+        rakc::caps::enable(&sandbox_allow);
+        eprintln!("sandbox: active (allow: {})", if sandbox_allow.is_empty() { "none".to_string() } else { sandbox_allow.clone() });
+    }
+
     match cmd.as_str() {
         "run" => {
             let base_dir = std::path::Path::new(file).parent().map(|p| p.to_string_lossy().to_string()).unwrap_or_else(|| ".".to_string());
             // argv for a `fn main(args)` entry = everything after the file.
-            let script_args: Vec<String> = args.iter().skip(3).cloned().collect();
+            let script_args: Vec<String> = clean_args;
             match rakc::eval_in_cli(&source, &base_dir, &script_args) {
                 Ok((output, code)) => {
                     for line in &output {
@@ -483,6 +505,9 @@ fn main() {
         }
         "debug" => {
             cmd_run_debug(file, &source);
+        }
+        "dap" => {
+            rakc::dap::run(file, &source);
         }
         "build" => {
             build_exe(file);

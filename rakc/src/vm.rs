@@ -347,6 +347,100 @@ fn iter_pure_native(name: &str, args: &[Value]) -> Result<Value, String> {
     }
 }
 
+/// Membership test behind the `contains(collection, item)` native — the VM
+/// runtime for the `in` operator. Mirrors the interpreter's `contains_member`.
+fn contains_vm(coll: &Value, item: &Value) -> Result<bool, String> {
+    match (coll, item) {
+        (Value::String(s), Value::String(n)) => Ok(s.contains(n.as_ref())),
+        (Value::String(s), Value::Char(c)) => Ok(s.contains(*c)),
+        (Value::Array(a), v) => Ok(a.iter().any(|x| x == v)),
+        (Value::Tuple(t), v) => Ok(t.iter().any(|x| x == v)),
+        (Value::Map(m), Value::String(k)) => Ok(m.contains_key(k.as_ref())),
+        (Value::Map(m), other) => Ok(m.contains_key(&other.to_string())),
+        (Value::Bytes(b), Value::Bytes(n)) => {
+            Ok(n.is_empty() || b.windows(n.len()).any(|w| w == &n[..]))
+        }
+        (Value::Bytes(b), v) => match v.as_i64() {
+            Some(i) if (0..=255).contains(&i) => Ok(b.contains(&(i as u8))),
+            Some(_) => Ok(false),
+            None => Ok(false),
+        },
+        (other, _) => Err(format!(
+            "in: unsupported right-hand side of type '{}'",
+            other.type_name()
+        )),
+    }
+}
+
+/// `[start, end)` bounds for the `slice` native / `xs[a..b]`: nil or absent
+/// bounds are open, negatives count from the end, bounds clamp; errors when
+/// start > end after clamping. Mirrors the interpreter's `slice_bounds`.
+fn slice_bounds_vm(len: usize, start: Option<&Value>, end: Option<&Value>) -> Result<(usize, usize), String> {
+    let len_i = len as i64;
+    let mut s = match start {
+        Some(Value::Nil) | None => 0,
+        Some(v) => v.as_i64().ok_or_else(|| "slice: start must be an int or nil".to_string())?,
+    };
+    let mut e = match end {
+        Some(Value::Nil) | None => len_i,
+        Some(v) => v.as_i64().ok_or_else(|| "slice: end must be an int or nil".to_string())?,
+    };
+    if s < 0 {
+        s += len_i;
+    }
+    if e < 0 {
+        e += len_i;
+    }
+    let s = s.clamp(0, len_i) as usize;
+    let e = e.clamp(0, len_i) as usize;
+    if s > e {
+        return Err(format!("slice: start {} > end {} (len {})", s, e, len));
+    }
+    Ok((s, e))
+}
+
+/// Translate a possibly-negative single index into a `usize` offset.
+/// Negative indices count from the end; returns `None` when out of bounds.
+/// Mirrors the interpreter's `normalize_index`.
+fn normalize_index_vm(len: usize, i: i64) -> Option<usize> {
+    let len_i = len as i64;
+    let idx = if i < 0 { i + len_i } else { i };
+    if idx < 0 || idx >= len_i {
+        None
+    } else {
+        Some(idx as usize)
+    }
+}
+
+/// `slice(xs, start?, end?)` for strings (char-based), arrays, tuples, bytes.
+fn slice_vm(args: &[Value]) -> Result<Value, String> {
+    let target = args.first().cloned().unwrap_or(Value::Nil);
+    match target {
+        Value::String(s) => {
+            let chars: Vec<char> = s.chars().collect();
+            let (st, e) = slice_bounds_vm(chars.len(), args.get(1), args.get(2))?;
+            let out: String = chars[st..e].iter().collect();
+            Ok(Value::String(Arc::from(out.as_str())))
+        }
+        Value::Array(a) => {
+            let (st, e) = slice_bounds_vm(a.len(), args.get(1), args.get(2))?;
+            Ok(Value::Array(Arc::from(a[st..e].to_vec())))
+        }
+        Value::Tuple(t) => {
+            let (st, e) = slice_bounds_vm(t.len(), args.get(1), args.get(2))?;
+            Ok(Value::Tuple(Arc::from(t[st..e].to_vec())))
+        }
+        Value::Bytes(b) => {
+            let (st, e) = slice_bounds_vm(b.len(), args.get(1), args.get(2))?;
+            Ok(Value::Bytes(Arc::from(&b[st..e])))
+        }
+        other => Err(format!(
+            "slice() requires a string/array/tuple/bytes, got {}",
+            other.type_name()
+        )),
+    }
+}
+
 impl Vm {
     pub fn new() -> Self {
         let mut vm = Vm {
@@ -411,6 +505,23 @@ impl Vm {
             Ok(Value::Option(Some(Box::new(args.first().cloned().unwrap_or(Value::Nil)))))
         });
         self.globals.insert("None".to_string(), Value::Option(None));
+        // Membership + slicing (`in` desugars to `contains`, `xs[a..b]` to
+        // `slice`); identical semantics to the interpreter.
+        self.insert_native("contains", |args| {
+            contains_vm(
+                args.first().unwrap_or(&Value::Nil),
+                args.get(1).unwrap_or(&Value::Nil),
+            )
+            .map(Value::Bool)
+        });
+        self.insert_native("slice", slice_vm);
+        // 0.8 feature packs: extended batteries + OSINT natives.
+        for (n, f) in crate::ext_batteries::vm_natives() {
+            self.insert_native(n, f);
+        }
+        for (n, f) in crate::ext_osint::vm_natives() {
+            self.insert_native(n, f);
+        }
         // Iterator builtins (Part 7A.10) — pure array transforms. The
         // function-taking fold family is intercepted in `call_value`.
         self.insert_native("zip", |args| iter_pure_native("zip", args));
@@ -1509,28 +1620,33 @@ impl Vm {
                     let obj = unwrap_vm_evidence(&obj);
                     match (&obj, &idx) {
                         (Value::Array(a), Value::I64(i)) => {
-                            frame.push(a.get(*i as usize).cloned().unwrap_or(Value::Nil));
+                            let i = normalize_index_vm(a.len(), *i).unwrap_or(usize::MAX);
+                            frame.push(a.get(i).cloned().unwrap_or(Value::Nil));
                         }
                         (Value::Tuple(t), Value::I64(i)) => {
-                            frame.push(t.get(*i as usize).cloned().unwrap_or(Value::Nil));
+                            let i = normalize_index_vm(t.len(), *i).unwrap_or(usize::MAX);
+                            frame.push(t.get(i).cloned().unwrap_or(Value::Nil));
                         }
                         (Value::String(s), Value::I64(i)) => {
-                            frame.push(s.chars().nth(*i as usize).map(|c| Value::String(Arc::from(c.to_string().as_str()))).unwrap_or(Value::Nil));
+                            let k = normalize_index_vm(s.chars().count(), *i);
+                            frame.push(k.and_then(|k| s.chars().nth(k)).map(|c| Value::String(Arc::from(c.to_string().as_str()))).unwrap_or(Value::Nil));
                         }
                         (Value::Map(m), Value::String(k)) => {
                             frame.push(m.get(k.as_ref()).cloned().unwrap_or(Value::Nil));
                         }
                         (Value::Mmap(h), Value::I64(i)) => {
                             let data = h.as_slice();
-                            frame.push(Value::I64(data.get(*i as usize).copied().unwrap_or(0) as i64));
+                            let k = normalize_index_vm(data.len(), *i);
+                            frame.push(k.map(|k| Value::I64(data[k] as i64)).unwrap_or(Value::I64(0)));
                         }
                         (Value::MmapSlice(h, off, n), Value::I64(i)) => {
-                            let i = *i as usize;
-                            let b = if i < *n { h.as_slice()[off + i] as i64 } else { 0 };
+                            let k = normalize_index_vm(*n, *i);
+                            let b = k.map(|k| h.as_slice()[off + k] as i64).unwrap_or(0);
                             frame.push(Value::I64(b));
                         }
                         (Value::Bytes(b), Value::I64(i)) => {
-                            frame.push(Value::I64(b.get(*i as usize).copied().unwrap_or(0) as i64));
+                            let k = normalize_index_vm(b.len(), *i);
+                            frame.push(k.map(|k| Value::I64(b[k] as i64)).unwrap_or(Value::I64(0)));
                         }
                         _ => { frame.push(Value::Nil); }
                     }
@@ -1810,6 +1926,8 @@ impl Vm {
     fn call_value(&mut self, frame: &mut Frame, callee: Value, mut args: Vec<Value>) -> Result<(), String> {
         match callee {
             Value::NativeFn(name, f) => {
+                // Sandbox gate (`rakc vm --sandbox`).
+                crate::caps::check_str(name.as_ref())?;
                 // Iterator builtins take function arguments and must drive the
                 // VM per element — handle them here where `self` is available.
                 match name.as_ref() {
@@ -2117,6 +2235,19 @@ impl Vm {
         let b = match op {
             CompareOp::Eq => l == r,
             CompareOp::NotEq => l != r,
+            // If either side is a float, compare as f64 so `x >= 0.0` works.
+            CompareOp::Lt | CompareOp::Gt | CompareOp::LtEq | CompareOp::GtEq
+                if matches!(l, Value::F32(_)) || matches!(r, Value::F32(_)) =>
+            {
+                let (a, bf) = (l.as_f64().unwrap_or(0.0), r.as_f64().unwrap_or(0.0));
+                match op {
+                    CompareOp::Lt => a < bf,
+                    CompareOp::Gt => a > bf,
+                    CompareOp::LtEq => a <= bf,
+                    CompareOp::GtEq => a >= bf,
+                    _ => unreachable!(),
+                }
+            }
             CompareOp::Lt => l.as_i64().unwrap_or(0) < r.as_i64().unwrap_or(0),
             CompareOp::Gt => l.as_i64().unwrap_or(0) > r.as_i64().unwrap_or(0),
             CompareOp::LtEq => l.as_i64().unwrap_or(0) <= r.as_i64().unwrap_or(0),
@@ -2535,11 +2666,10 @@ fn has_byte_literal(e: &[Value], byte: u8) -> bool {
 fn vm_index_set(obj: &mut Value, idx: &Value, val: Value) -> Result<(), String> {
     match obj {
         Value::Array(a) => {
-            let i = idx.as_i64().ok_or_else(|| "index-assign: index must be an int".to_string())? as usize;
+            let raw = idx.as_i64().ok_or_else(|| "index-assign: index must be an int".to_string())?;
+            let i = normalize_index_vm(a.len(), raw)
+                .ok_or_else(|| format!("index-assign: index {} out of bounds (len {})", raw, a.len()))?;
             let m = Arc::make_mut(a);
-            if i >= m.len() {
-                return Err(format!("index-assign: index {} out of bounds (len {})", i, m.len()));
-            }
             m[i] = val;
             Ok(())
         }
@@ -2549,11 +2679,10 @@ fn vm_index_set(obj: &mut Value, idx: &Value, val: Value) -> Result<(), String> 
             Ok(())
         }
         Value::Bytes(b) => {
-            let i = idx.as_i64().ok_or_else(|| "index-assign: index must be an int".to_string())? as usize;
+            let raw = idx.as_i64().ok_or_else(|| "index-assign: index must be an int".to_string())?;
+            let i = normalize_index_vm(b.len(), raw)
+                .ok_or_else(|| format!("index-assign: index {} out of bounds (len {})", raw, b.len()))?;
             let m = Arc::make_mut(b);
-            if i >= m.len() {
-                return Err(format!("index-assign: index {} out of bounds (len {})", i, m.len()));
-            }
             m[i] = val.as_i64().ok_or_else(|| "index-assign: expected a byte".to_string())? as u8;
             Ok(())
         }
@@ -2744,6 +2873,16 @@ mod tests {
     fn test_vm_while_loop() {
         let out = run("let mut i = 0; let mut s = 0; while i < 10 { s = s + i; i = i + 1 } dump s");
         assert!(out.iter().any(|l| l.contains("[DUMP] 45")));
+    }
+
+    #[test]
+    fn test_vm_neg_index_assign_raises() {
+        let tokens = crate::lexer::tokenize("let mut arr = [1]\narr[5] = 9").unwrap();
+        let module = crate::parser::parse(&tokens, "let mut arr = [1]\narr[5] = 9").unwrap();
+        let chunk = compile_module(&module).unwrap();
+        let mut vm = Vm::new();
+        let err = vm.run(&chunk).unwrap_err();
+        assert!(err.contains("index-assign"), "got: {}", err);
     }
 
     #[test]
@@ -3627,4 +3766,69 @@ dump s"#);
         assert!(ok, "structure match failed; desc={:?}", desc);
         assert_eq!(bounds.iter().map(|(n, _)| n.clone()).collect::<Vec<_>>(), vec!["x".to_string(), "y".to_string()]);
     }
+
+    // ---- 0.8 core pack: `in`, destructuring let, slices (VM) ----
+
+    #[test]
+    fn test_vm_in_operator() {
+        let out = run(
+            "dump \"ell\" in \"hello\";\
+             dump 3 in [1, 2, 3];\
+             dump 4 in [1, 2, 3];\
+             dump \"k\" in { k: 1 };\
+             dump 0x4D in b\"MZ\";",
+        );
+        assert_eq!(
+            out,
+            vec!["[DUMP] true", "[DUMP] true", "[DUMP] false", "[DUMP] true", "[DUMP] true"]
+        );
+    }
+
+    #[test]
+    fn test_vm_destructuring_let() {
+        let out = run(
+            "let (h, p) = (\"example.com\", 443);\
+             dump f\"{h}:{p}\";\
+             let [a, b] = [10, 20];\
+             dump a + b;",
+        );
+        assert_eq!(out, vec!["[DUMP] example.com:443", "[DUMP] 30"]);
+    }
+
+    #[test]
+    fn test_vm_destructuring_let_mismatch_throws() {
+        let tokens = crate::lexer::tokenize("let (a, b) = (1, 2, 3);").unwrap();
+        let module = crate::parser::parse(&tokens, "let (a, b) = (1, 2, 3);").unwrap();
+        let chunk = compile_module(&module).unwrap();
+        let mut vm = Vm::new();
+        let err = vm.run(&chunk).unwrap_err();
+        assert!(err.contains("destructuring failed"), "got: {}", err);
+    }
+
+    #[test]
+    fn test_vm_slice_index() {
+        let out = run(
+            "let d = [10, 20, 30, 40, 50];\
+             dump d[1..3];\
+             dump d[..2];\
+             dump d[-2..];\
+             dump \"hello\"[1..3];\
+             dump d[-1];",
+        );
+        assert_eq!(
+            out,
+            vec!["[DUMP] [20, 30]", "[DUMP] [10, 20]", "[DUMP] [40, 50]", "[DUMP] el", "[DUMP] 50"]
+        );
+    }
+
+    #[test]
+    fn test_vm_slice_and_contains_natives() {
+        let out = run(
+            "dump slice(\"hello\", 1, 4);\
+             dump slice([1, 2, 3, 4], 2);\
+             dump contains([5, 6], 6);",
+        );
+        assert_eq!(out, vec!["[DUMP] ell", "[DUMP] [3, 4]", "[DUMP] true"]);
+    }
+
 }

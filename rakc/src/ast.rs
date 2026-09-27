@@ -431,6 +431,8 @@ pub enum UnOp {
 pub enum BinOp {
     Add,
     Sub,
+    /// `x in collection` — membership test (evaluates to bool).
+    In,
     Mul,
     Div,
     Rem,

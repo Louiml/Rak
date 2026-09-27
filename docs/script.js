@@ -26,6 +26,8 @@
     { group: 'Systems', file: 'forensics.md', title: 'Forensics' },
 
     { group: 'Reference', file: 'stdlib.md', title: 'Standard library' },
+    { group: 'Reference', file: 'batteries.md', title: 'Stdlib batteries' },
+    { group: 'Reference', file: 'osint.md', title: 'OSINT pack' },
     { group: 'Reference', file: 'cli.md', title: 'CLI reference' },
     { group: 'Reference', file: 'tooling.md', title: 'Tooling' },
     { group: 'Reference', file: 'vm.md', title: 'Bytecode VM' },

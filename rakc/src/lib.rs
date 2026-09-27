@@ -19,6 +19,10 @@ pub mod lsp;
 pub mod bindgen;
 pub mod fmt;
 pub mod lint;
+pub mod caps;
+pub mod ext_batteries;
+pub mod ext_osint;
+pub mod dap;
 
 use thiserror::Error;
 
@@ -130,6 +134,20 @@ pub enum RakError {
     Runtime(String),
     #[error("Raised: {0}")]
     Raise(String),
+}
+
+/// Allow stdlib functions returning `Result<_, String>` to use `?` directly
+/// inside interpreter glue (e.g. `datafmt::parse_csv(&text)?`).
+impl From<String> for RakError {
+    fn from(s: String) -> Self {
+        RakError::Runtime(s)
+    }
+}
+
+impl From<&str> for RakError {
+    fn from(s: &str) -> Self {
+        RakError::Runtime(s.to_string())
+    }
 }
 
 impl RakError {

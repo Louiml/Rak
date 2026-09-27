@@ -1,0 +1,50 @@
+// Rak 0.8 OSINT pack: WHOIS, certificate transparency, YARA-lite, reports.
+// The pure builtins below are offline; the two network builtins
+// (whois_lookup / ct_subdomains) are shown commented to keep this demo
+// hermetic — both run identically on `rakc run` and `rakc vm`.
+
+let rules = "
+rule pe_header {
+    strings:
+        $mz = { 4D 5A }
+        $pe = { 50 45 00 00 }
+    condition:
+        $mz at 0 and $pe
+}
+rule api_hint {
+    strings:
+        $k = \"/api/v1\" nocase
+    condition:
+        $k
+}
+"
+
+// --- YARA-lite scan: rule -> matched string ids + byte offsets ---
+let blob = b"MZ\x90\x00\x03\x00\x00\x00\x04\x00\x00\x00PE\x00\x00GET /api/V1/config"
+let hits = yara_scan(rules, blob)
+dump len(hits)                        // 2 rules matched
+dump hits[0].rule                     // pe_header
+dump (hits[0].strings[0].id) + "@" + string(hits[0].strings[0].offset)  // mz@0
+dump hits[1].strings[0].offset        // the /api/v1 hit offset
+
+// --- WHOIS response parsing (structured fields) ---
+let w = whois_parse("Domain Name: EXAMPLE.COM\nCreation Date: 1995-08-14T04:00:00Z\nDomain Status: clientTransferProhibited https://icann.org/epp#clientTransferProhibited\nRegistrar: RESERVED-Internet Assigned Numbers Authority\nName Server: A.IANA-SERVERS.NET\nName Server: B.IANA-SERVERS.NET\n")
+dump w["creation date"]
+dump w["registrar"]
+dump w["name server"]                 // both servers accumulated
+
+// --- Markdown evidence report ---
+let rep = report_markdown({
+  title: "Recon: example.com",
+  meta: { target: "example.com", tool: "rakc osint pack", confidence: "high" },
+  sections: {
+    "Headline": ["registrar: RESERVED-Internet Assigned Numbers Authority"],
+    "YARA": ["pe_header matched ($mz at 0)"],
+  },
+})
+dump rep
+
+// Network variants (live, same API on both backends):
+//   let raw  = whois_lookup("example.com")?
+//   let subs = ct_subdomains("example.com")?
+//   whois_parse(raw)["creation date"]

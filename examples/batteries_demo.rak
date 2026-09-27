@@ -1,0 +1,39 @@
+// Rak 0.8 stdlib batteries: time, randomness, CSV/YAML, gzip/zip.
+// Runs on both the interpreter and the VM.
+
+// --- time ---
+let ts = time_parse("2023-11-14 22:13:20")
+dump time_fmt(ts?, "%Y-%m-%d %H:%M:%S")                        // 2023-11-14 22:13:20
+dump time_fmt(0, "%Y-%m-%d (%T)")                              // 1970-01-01 (00:00:00)
+let parts = time_parts(1700000000)
+dump parts.year                                                 // 2023
+dump parts.weekday                                              // 2 (Tuesday)
+dump date_today()                                               // today
+dump time_diff(time_add(100, 50), 100)                          // 50
+
+// --- randomness ---
+rand_seed(7)                    // deterministic for the demo
+dump rand_int(0, 10) < 10         // true
+dump rand_float() >= 0.0          // true
+dump len(rand_bytes(8))           // 8
+dump len(rand_hex(12))            // 12
+let shuffled = rand_shuffle([1, 2, 3, 4, 5])
+dump len(shuffled)                // 5
+dump (rand_choice(["a", "b", "c"])?) in ["a", "b", "c"]  // true
+
+// --- CSV ---
+let csv = csv_parse("host,port\nexample.com,443\n10.0.0.5,0x1F\n")
+dump csv[0].host                  // example.com
+dump csv[1].port                   // 0x1F
+dump csv_stringify(csv)[..9]       // host,port
+
+// --- YAML subset ---
+let cfg = yaml_parse("target: 10.0.0.1\nports:\n  - 80\n  - 443\nstealth: true\n")?
+dump cfg.target                    // 10.0.0.1
+dump cfg.ports[1]                   // 443
+dump cfg.stealth                    // true
+
+// --- gzip ---
+let packed = gzip_compress("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+dump len(packed) < 32                                // true (compresses)
+dump (gzip_decompress(packed)?) == b"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"  // true

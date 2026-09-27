@@ -178,6 +178,62 @@ dump sniff(b"\x89PNG\x0d\x0a\x1a\x0a")  // png
 Without `..`, the pattern matches an exact length. Byte patterns are
 interpreter-only (the VM errors clearly). Always terminate match arms with `,`.
 
+## Membership: `x in collection`
+
+`in` tests membership and returns a bool — substring for strings, element for
+arrays/tuples, key for maps, byte for `bytes`:
+
+```rak
+dump "ell" in "hello"            // true
+dump "x" in "hello"              // false
+dump 2 in [1, 2, 3]              // true
+dump "a" in { a: 1 }             // true
+dump 0x4D in b"MZ"               // true
+```
+
+Works on both backends; `in` is also the keyword used in `for` headers and
+`for ... in` iteration.
+
+## Destructuring `let`
+
+Bind names directly from arrays, tuples, and structs:
+
+```rak
+let (host, port) = ("10.0.0.5", 443)
+let [a, b, rest] = [1, 2, 3]     // rest = 3
+let [_, second] = [10, 20]       // _ skips
+let [p, [q, r]] = [1, [2, 3]]    // nested
+let Point { x, y } = origin      // struct fields
+
+let mut (lo, hi) = (1, 2)
+lo = hi + 1
+```
+
+A mismatch (`let (a, b) = (1, 2, 3)`) raises a clear
+`destructuring failed` error on the interpreter and the VM. The same patterns
+work in `match`, `if let`, and `for` headers.
+
+## Slice indexing and negative indices
+
+`xs[a..b]`, `xs[..b]`, and `xs[a..]` slice strings (char-based), arrays,
+tuples, and bytes. Bounds clamp; a negative bound counts from the end. Single
+negative indices also work, as do negative index-assigns:
+
+```rak
+let d = [10, 20, 30, 40, 50]
+dump d[1..3]      // [20, 30]
+dump d[..2]       // [10, 20]
+dump d[-2..]      // [40, 50]
+dump d[-1]        // 50
+dump "hello"[1..3] // el
+let mut xs = [1, 2, 3]
+xs[-1] = 99       // [1, 2, 99]
+```
+
+Writing out of bounds (`xs[5] = 0`) raises on both backends — the interpreter
+used to silently ignore it; it now matches the VM's `index-assign: index 5 out
+of bounds` error.
+
 ## Pipeline operator
 
 `x |> f` desugars to `f(x)`, and `x |> f(a, b)` to `f(x, a, b)`. Chaining is

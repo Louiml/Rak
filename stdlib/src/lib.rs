@@ -18,6 +18,15 @@ pub mod http_server;
 pub mod websocket;
 pub mod tunnel;
 pub mod stream_io;
+// 0.8 feature packs
+pub mod timekit;
+pub mod randkit;
+pub mod datafmt;
+pub mod archive;
+pub mod whois;
+pub mod ctlogs;
+pub mod yara;
+pub mod report;
 
 pub use net::*;
 pub use crypto::*;

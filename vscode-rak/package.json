@@ -1,8 +1,8 @@
 {
   "name": "rak",
   "displayName": "Rak",
-  "description": "Rak language support: syntax highlighting and diagnostics",
-  "version": "0.7.1",
+  "description": "Rak language support: syntax highlighting, diagnostics, and DAP debugging",
+  "version": "0.7.2",
   "engines": {
     "vscode": "^1.75.0"
   },
@@ -23,6 +23,34 @@
         "language": "rak",
         "scopeName": "source.rak",
         "path": "./syntaxes/rak.tmLanguage.json"
+      }
+    ],
+    "debuggers": [
+      {
+        "type": "rak",
+        "label": "Rak (rakc dap)",
+        "runtime": "executable",
+        "program": "rakc",
+        "args": ["dap", "${file}"],
+        "configurationAttributes": {
+          "launch": {
+            "required": ["program"],
+            "properties": {
+              "program": {
+                "type": "string",
+                "description": "Path to the .rak file to debug"
+              }
+            }
+          }
+        },
+        "initialConfigurations": [
+          {
+            "type": "rak",
+            "request": "launch",
+            "name": "Rak: Debug current file",
+            "program": "${file}"
+          }
+        ]
       }
     ]
   }

@@ -1,0 +1,45 @@
+// Rak 0.7.2 OSINT pack: YARA-lite scanning, WHOIS parsing, CT subdomains,
+// Markdown reports. Runs on both backends; the live network lookups on lines
+// 40-51 are commented out so this demo stays hermetic (run them with
+// connectivity: `rakc --allow net run examples/osint_pack_demo.rak`).
+
+// --- YARA-lite over raw bytes (pure, offline) ---
+let rules = "rule pe_header {\n  strings:\n    $mz = { 4D 5A }\n    $pe = { 50 45 00 00 }\n  condition:\n    $mz at 0 and $pe\n}\nrule api_hint {\n  strings:\n    $k = \"/api/v1\" nocase\n  condition:\n    $k\n}\n"
+let sample = b"MZ\x90\x00\x03\x00\x00\x00\x04\x00\x00\x00PE\x00\x00GET /api/V1/config"
+let hits = yara_scan(rules, sample)?
+dump len(hits)                // 2 (both rules matched)
+dump hits[0].rule             // pe_header
+dump hits[0].strings[0].id    // $mz
+dump hits[0].strings[0].offset // 0
+dump hits[1].strings[0].offset // the /api/v1 hit offset
+
+// --- WHOIS field parsing over fixture text (pure, offline) ---
+let fixture = "Domain Name: EXAMPLE.COM\nRegistrar: RESERVED-REGISTRAR\nCreation Date: 1995-08-14T04:00:00Z\nRegistrant Email: abuse@example.com"
+let fields = whois_parse(fixture)
+dump fields.registrar        // RESERVED-REGISTRAR
+dump fields["domain name"]   // example.com
+
+// --- live lookups (need network; commented to keep the demo hermetic) ---
+// try {
+//     let w = whois_lookup("example.com")?
+//     dump w.registrar
+// } catch e {
+//     dump f"whois offline/failed: {e}"
+// }
+// try {
+//     let subs = ct_subdomains("example.com")?
+//     dump f"ct logs returned {len(subs)} unique names"
+// } catch e {
+//     dump f"crt.sh offline/failed: {e}"
+// }
+
+// --- Markdown evidence report ---
+let md = report_markdown({
+    title: "Probe 2026-09-27",
+    meta: { operator: "rak-demo", target: "10.0.0.5" },
+    sections: {
+        "Open ports": ["443/tcp https", "22/tcp ssh"],
+        "YARA": ["mzbanner matched sample.bin at offset 0"],
+    }
+})
+dump md[..30]            // "# Probe 2026-09-27" + newline...

@@ -837,6 +837,7 @@ fn binop_str(op: &BinOp) -> &'static str {
         BinOp::Gt => ">",
         BinOp::LtEq => "<=",
         BinOp::GtEq => ">=",
+        BinOp::In => "in",
     }
 }
 

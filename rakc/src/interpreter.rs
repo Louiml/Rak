@@ -262,6 +262,72 @@ fn now_secs() -> u64 {
         .unwrap_or(0)
 }
 
+/// Membership test behind `x in collection` and the `contains(coll, x)`
+/// builtin: substring/char checks for strings, equality for arrays/tuples,
+/// key presence for maps, byte / subsequence search for bytes.
+fn contains_member(coll: &Value, item: &Value) -> crate::Result<bool> {
+    match (coll, item) {
+        (Value::String(s), Value::String(n)) => Ok(s.contains(n.as_str())),
+        (Value::String(s), Value::Char(c)) => Ok(s.contains(*c)),
+        (Value::Array(a), v) => Ok(a.iter().any(|x| x == v)),
+        (Value::Tuple(t), v) => Ok(t.iter().any(|x| x == v)),
+        (Value::Map(m), Value::String(k)) => Ok(m.contains_key(k)),
+        (Value::Map(m), other) => Ok(m.contains_key(&other.to_string())),
+        (Value::Bytes(b), Value::Int(i)) => Ok(*i >= 0 && *i <= 255 && b.contains(&(*i as u8))),
+        (Value::Bytes(b), Value::Hex(h)) => Ok(*h <= 255 && b.contains(&(*h as u8))),
+        (Value::Bytes(b), Value::Char(c)) => Ok((*c as u32) <= 255 && b.contains(&(*c as u8))),
+        (Value::Bytes(b), Value::Bytes(n)) => {
+            Ok(n.is_empty() || b.windows(n.len()).any(|w| w == n.as_slice()))
+        }
+        (other, _) => Err(crate::RakError::Runtime(format!(
+            "in: unsupported right-hand side of type '{}'",
+            other.type_name()
+        ))),
+    }
+}
+
+/// Compute `[start, end)` slice bounds with Python-style negative indices and
+/// clamping. `nil` (or absent) bounds are open. Errors when start > end
+/// after clamping.
+fn slice_bounds(len: usize, start: Option<&Value>, end: Option<&Value>) -> crate::Result<(usize, usize)> {
+    let len_i = len as i64;
+    let mut s = match start {
+        Some(Value::Nil) | None => 0,
+        Some(v) => v.as_i64().ok_or_else(|| crate::RakError::Runtime("slice: start must be an int or nil".to_string()))?,
+    };
+    let mut e = match end {
+        Some(Value::Nil) | None => len_i,
+        Some(v) => v.as_i64().ok_or_else(|| crate::RakError::Runtime("slice: end must be an int or nil".to_string()))?,
+    };
+    if s < 0 {
+        s += len_i;
+    }
+    if e < 0 {
+        e += len_i;
+    }
+    let s = s.clamp(0, len_i) as usize;
+    let e = e.clamp(0, len_i) as usize;
+    if s > e {
+        return Err(crate::RakError::Runtime(format!(
+            "slice: start {} > end {} (len {})",
+            s, e, len
+        )));
+    }
+    Ok((s, e))
+}
+
+/// Translate a possibly-negative single index into a `usize` offset.
+/// Negative indices count from the end; returns `None` when out of bounds.
+fn normalize_index(len: usize, i: i64) -> Option<usize> {
+    let len_i = len as i64;
+    let idx = if i < 0 { i + len_i } else { i };
+    if idx < 0 || idx >= len_i {
+        None
+    } else {
+        Some(idx as usize)
+    }
+}
+
 /// A compiled regular expression value. Stored behind an `Arc` so it can be
 /// cloned cheaply inside `Value`.
 pub struct RegexValue {
@@ -1112,7 +1178,15 @@ impl Interpreter {
                     self.main_entry = Some(val.clone());
                 }
                 if let Some(p) = pattern {
-                    self.bind_pattern(p, &val)?;
+                    // Destructuring let must actually match: a shape/type
+                    // mismatch is a runtime error, never a silent no-op.
+                    if !self.pattern_matches(p, &val)? {
+                        return Err(crate::RakError::Runtime(format!(
+                            "destructuring failed: pattern does not match value of type '{}'",
+                            val.type_name()
+                        )));
+                    }
+                    self.bind_pattern_mut(p, &val, *mutable)?;
                 } else {
                     self.env.define_mut(name, val, *mutable);
                 }
@@ -1799,6 +1873,118 @@ impl Interpreter {
         Ok(())
     }
 
+
+    /// Index evaluation, extracted so its locals stay off the hot
+    /// eval_expr stack frame. Handles mmap zero-copy slicing, range slicing
+    /// (`xs[a..b]`, negatives, clamping), and generic indexing.
+    #[inline(never)]
+    fn eval_index(&mut self, obj: &Box<Expr>, idx: &Box<Expr>) -> crate::Result<Value> {
+                let obj_val = self.eval_expr(obj)?;
+                // Zero-copy indexing/slicing for memory maps.
+                if let Value::Mmap(h) = &obj_val {
+                    if let Expr::Range(lo, hi) = idx.as_ref() {
+                        // mmap slice; bounds support negatives and clamp.
+                        let lo_v = lo.as_ref().map(|e| self.eval_expr(e)).transpose()?;
+                        let hi_v = hi.as_ref().map(|e| self.eval_expr(e)).transpose()?;
+                        let (s, e) = slice_bounds(h.len(), lo_v.as_ref(), hi_v.as_ref())?;
+                        return Ok(Value::MmapSlice(h.clone(), s, e - s));
+                    }
+                    let idx_val = self.eval_expr(idx)?;
+                    let i = idx_val.as_i64().unwrap_or(0) as usize;
+                    let data = h.as_slice();
+                    if i >= data.len() { return Err(crate::RakError::Runtime("Index out of bounds".to_string())); }
+                    return Ok(Value::Int(data[i] as i64));
+                }
+                if let Value::MmapSlice(h, base, n) = &obj_val {
+                    if let Expr::Range(lo, hi) = idx.as_ref() {
+                        let lo_v = lo.as_ref().map(|e| self.eval_expr(e)).transpose()?;
+                        let hi_v = hi.as_ref().map(|e| self.eval_expr(e)).transpose()?;
+                        let (s, e) = slice_bounds(*n, lo_v.as_ref(), hi_v.as_ref())?;
+                        return Ok(Value::MmapSlice(h.clone(), base + s, e - s));
+                    }
+                    let idx_val = self.eval_expr(idx)?;
+                    let i = idx_val.as_i64().unwrap_or(0) as usize;
+                    if i >= *n { return Err(crate::RakError::Runtime("Index out of bounds".to_string())); }
+                    return Ok(Value::Int(h.as_slice()[base + i] as i64));
+                }
+                if let Value::Bytes(b) = &obj_val {
+                    if let Expr::Range(lo, hi) = idx.as_ref() {
+                        // bytes slice; bounds support negatives and clamp.
+                        let lo_v = lo.as_ref().map(|e| self.eval_expr(e)).transpose()?;
+                        let hi_v = hi.as_ref().map(|e| self.eval_expr(e)).transpose()?;
+                        let (s, e) = slice_bounds(b.len(), lo_v.as_ref(), hi_v.as_ref())?;
+                        return Ok(Value::Bytes(b[s..e].to_vec()));
+                    }
+                    let idx_val = self.eval_expr(idx)?;
+                    if let Value::Int(i) = idx_val {
+                        // Negative index counts from the end (like Rust slices).
+                        let i = normalize_index(b.len(), i);
+                        return i.map(|k| Value::Int(b[k] as i64)).ok_or_else(|| crate::RakError::Runtime("Index out of bounds".to_string()));
+                    }
+                }
+                // Slice indexing: `xs[1..4]`, `xs[..3]`, `xs[2..]` for
+                // arrays, tuples and strings. Negative indices count from the
+                // end; bounds clamp to the container; char-based for strings.
+                if let Expr::Range(lo, hi) = idx.as_ref() {
+                    let lo_v = match lo {
+                        Some(e) => Some(self.eval_expr(e)?),
+                        None => None,
+                    };
+                    let hi_v = match hi {
+                        Some(e) => Some(self.eval_expr(e)?),
+                        None => None,
+                    };
+                    match &obj_val {
+                        Value::Array(vals) => {
+                            let (s, e) = slice_bounds(vals.len(), lo_v.as_ref(), hi_v.as_ref())?;
+                            return Ok(Value::Array(vals[s..e].to_vec()));
+                        }
+                        Value::Tuple(vals) => {
+                            let (s, e) = slice_bounds(vals.len(), lo_v.as_ref(), hi_v.as_ref())?;
+                            return Ok(Value::Tuple(vals[s..e].to_vec()));
+                        }
+                        Value::String(st) => {
+                            let chars: Vec<char> = st.chars().collect();
+                            let (s, e) = slice_bounds(chars.len(), lo_v.as_ref(), hi_v.as_ref())?;
+                            return Ok(Value::String(chars[s..e].iter().collect()));
+                        }
+                        _ => {
+                            return Err(crate::RakError::Runtime(format!(
+                                "cannot slice a value of type '{}'",
+                                obj_val.type_name()
+                            )))
+                        }
+                    }
+                }
+                let idx_val = self.eval_expr(idx)?;
+                let tn = obj_val.type_name();
+                if let Some(func) = self
+                    .trait_impls
+                    .get(&("Index".to_string(), tn.clone(), "index".to_string()))
+                    .cloned()
+                {
+                    return self.call_method_with_values(func, obj_val, vec![idx_val]);
+                }
+                match (&obj_val, &idx_val) {
+                    (Value::Array(arr), Value::Int(i)) => {
+                        let i = normalize_index(arr.len(), *i);
+                        i.map(|k| arr[k].clone()).ok_or_else(|| crate::RakError::Runtime("Index out of bounds".to_string()))
+                    }
+                    (Value::Tuple(t), Value::Int(i)) => {
+                        let i = normalize_index(t.len(), *i);
+                        i.map(|k| t[k].clone()).ok_or_else(|| crate::RakError::Runtime("Index out of bounds".to_string()))
+                    }
+                    (Value::String(s), Value::Int(i)) => {
+                        let k = normalize_index(s.chars().count(), *i);
+                        k.map(|k| Value::String(s.chars().nth(k).unwrap().to_string())).ok_or_else(|| crate::RakError::Runtime("Index out of bounds".to_string()))
+                    }
+                    (Value::Map(map), Value::String(key)) => {
+                        map.get(key).cloned().ok_or_else(|| crate::RakError::Runtime(format!("Key '{}' not found", key)))
+                    }
+                    _ => Err(crate::RakError::Runtime("Invalid index operation".to_string())),
+                }
+    }
+
     fn eval_expr(&mut self, expr: &Expr) -> crate::Result<Value> {
         match expr {
             Expr::Hex(h) => Ok(Value::Hex(*h)),
@@ -1940,10 +2126,9 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                 match &mut container {
                     Value::Array(a) => {
                         if let Value::Int(i) = idx_val {
-                            let i = i as usize;
-                            if i < a.len() {
-                                a[i] = v.clone();
-                            }
+                            let i = normalize_index(a.len(), i)
+                                .ok_or_else(|| crate::RakError::Runtime(format!("index-assign: index {} out of bounds (len {})", i, a.len())))?;
+                            a[i] = v.clone();
                         }
                     }
                     Value::Map(m) => {
@@ -2011,73 +2196,7 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                     _ => Err(crate::RakError::Runtime("Cannot access field on this value".to_string())),
                 }
             }
-            Expr::Index(obj, idx) => {
-                let obj_val = self.eval_expr(obj)?;
-                // Zero-copy indexing/slicing for memory maps.
-                if let Value::Mmap(h) = &obj_val {
-                    if let Expr::Range(lo, hi) = idx.as_ref() {
-                        let len = h.len();
-                        let s = lo.as_ref().map(|e| self.eval_expr(e)).transpose()?.and_then(|v| v.as_i64()).unwrap_or(0).max(0) as usize;
-                        let e = hi.as_ref().map(|e| self.eval_expr(e)).transpose()?.and_then(|v| v.as_i64()).unwrap_or(len as i64).min(len as i64).max(0) as usize;
-                        if s > e { return Err(crate::RakError::Runtime("mmap slice: start > end".to_string())); }
-                        return Ok(Value::MmapSlice(h.clone(), s, e - s));
-                    }
-                    let idx_val = self.eval_expr(idx)?;
-                    let i = idx_val.as_i64().unwrap_or(0) as usize;
-                    let data = h.as_slice();
-                    if i >= data.len() { return Err(crate::RakError::Runtime("Index out of bounds".to_string())); }
-                    return Ok(Value::Int(data[i] as i64));
-                }
-                if let Value::MmapSlice(h, base, n) = &obj_val {
-                    if let Expr::Range(lo, hi) = idx.as_ref() {
-                        let s = lo.as_ref().map(|e| self.eval_expr(e)).transpose()?.and_then(|v| v.as_i64()).unwrap_or(0).max(0) as usize;
-                        let e = hi.as_ref().map(|e| self.eval_expr(e)).transpose()?.and_then(|v| v.as_i64()).unwrap_or(*n as i64).min(*n as i64).max(0) as usize;
-                        if s > e { return Err(crate::RakError::Runtime("mmap slice: start > end".to_string())); }
-                        return Ok(Value::MmapSlice(h.clone(), base + s, e - s));
-                    }
-                    let idx_val = self.eval_expr(idx)?;
-                    let i = idx_val.as_i64().unwrap_or(0) as usize;
-                    if i >= *n { return Err(crate::RakError::Runtime("Index out of bounds".to_string())); }
-                    return Ok(Value::Int(h.as_slice()[base + i] as i64));
-                }
-                if let Value::Bytes(b) = &obj_val {
-                    if let Expr::Range(lo, hi) = idx.as_ref() {
-                        let len = b.len();
-                        let s = lo.as_ref().map(|e| self.eval_expr(e)).transpose()?.and_then(|v| v.as_i64()).unwrap_or(0).max(0) as usize;
-                        let e = hi.as_ref().map(|e| self.eval_expr(e)).transpose()?.and_then(|v| v.as_i64()).unwrap_or(len as i64).min(len as i64).max(0) as usize;
-                        if s > e { return Err(crate::RakError::Runtime("bytes slice: start > end".to_string())); }
-                        return Ok(Value::Bytes(b[s..e].to_vec()));
-                    }
-                    let idx_val = self.eval_expr(idx)?;
-                    if let Value::Int(i) = idx_val {
-                        return b.get(i as usize).map(|v| Value::Int(*v as i64)).ok_or_else(|| crate::RakError::Runtime("Index out of bounds".to_string()));
-                    }
-                }
-                let idx_val = self.eval_expr(idx)?;
-                let tn = obj_val.type_name();
-                if let Some(func) = self
-                    .trait_impls
-                    .get(&("Index".to_string(), tn.clone(), "index".to_string()))
-                    .cloned()
-                {
-                    return self.call_method_with_values(func, obj_val, vec![idx_val]);
-                }
-                match (&obj_val, &idx_val) {
-                    (Value::Array(arr), Value::Int(i)) => {
-                        arr.get(*i as usize).cloned().ok_or_else(|| crate::RakError::Runtime("Index out of bounds".to_string()))
-                    }
-                    (Value::Tuple(t), Value::Int(i)) => {
-                        t.get(*i as usize).cloned().ok_or_else(|| crate::RakError::Runtime("Index out of bounds".to_string()))
-                    }
-                    (Value::String(s), Value::Int(i)) => {
-                        s.chars().nth(*i as usize).map(|c| Value::String(c.to_string())).ok_or_else(|| crate::RakError::Runtime("Index out of bounds".to_string()))
-                    }
-                    (Value::Map(map), Value::String(key)) => {
-                        map.get(key).cloned().ok_or_else(|| crate::RakError::Runtime(format!("Key '{}' not found", key)))
-                    }
-                    _ => Err(crate::RakError::Runtime("Invalid index operation".to_string())),
-                }
-            }
+            Expr::Index(obj, idx) => self.eval_index(obj, idx),
             Expr::Range(lo, hi) => {
                 let start = match lo {
                     Some(e) => self.eval_expr(e)?.as_i64().unwrap_or(0),
@@ -2265,18 +2384,21 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                 let idx_val = self.eval_expr(idx)?;
                 match (&obj_val, &idx_val) {
                     (Value::Array(a), Value::Int(i)) => {
-                        a.get(*i as usize).cloned().ok_or_else(|| crate::RakError::Runtime("Index out of bounds".to_string()))
+                        let i = normalize_index(a.len(), *i);
+                        Ok(i.map(|k| a[k].clone()).unwrap_or(Value::Nil))
                     }
                     (Value::Tuple(t), Value::Int(i)) => {
-                        t.get(*i as usize).cloned().ok_or_else(|| crate::RakError::Runtime("Index out of bounds".to_string()))
+                        let i = normalize_index(t.len(), *i);
+                        Ok(i.map(|k| t[k].clone()).unwrap_or(Value::Nil))
                     }
                     (Value::String(s), Value::Int(i)) => {
-                        s.chars().nth(*i as usize).map(|c| Value::String(c.to_string())).ok_or_else(|| crate::RakError::Runtime("Index out of bounds".to_string()))
+                        let k = normalize_index(s.chars().count(), *i);
+                        Ok(k.map(|k| Value::String(s.chars().nth(k).unwrap().to_string())).unwrap_or(Value::Nil))
                     }
                     (Value::Map(m), Value::String(k)) => {
-                        m.get(k).cloned().ok_or_else(|| crate::RakError::Runtime(format!("Key '{}' not found", k)))
+                        Ok(m.get(k).cloned().unwrap_or(Value::Nil))
                     }
-                    _ => Err(crate::RakError::Runtime("Invalid index operation".to_string())),
+                    _ => Ok(Value::Nil),
                 }
             }
             Expr::MultiAssign { targets, values } => {
@@ -2786,10 +2908,9 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                 match &mut container {
                     Value::Array(a) => {
                         if let Value::Int(i) = idx_val {
-                            let i = i as usize;
-                            if i < a.len() {
-                                a[i] = value;
-                            }
+                            let i = normalize_index(a.len(), i)
+                                .ok_or_else(|| crate::RakError::Runtime(format!("index-assign: index {} out of bounds (len {})", i, a.len())))?;
+                            a[i] = value;
                         }
                     }
                     Value::Map(m) => {
@@ -2872,6 +2993,8 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                     return Err(crate::RakError::Runtime(format!("named arguments not supported for extern '{}'", name)));
                 }
                 let arg_vals: Vec<Value> = args.iter().map(|a| self.eval_expr(a)).collect::<crate::Result<_>>()?;
+                // Sandbox: calling an `extern "C"` function requires ffi.
+                crate::caps::check_builtin("ffi:extern")?;
                 return self.call_foreign(decl, &arg_vals);
             }
             if !named.is_empty() {
@@ -3649,6 +3772,9 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
             BinOp::Or => return Ok(Value::Bool(is_truthy(left) || is_truthy(right))),
             BinOp::Eq => return Ok(Value::Bool(left == right)),
             BinOp::NotEq => return Ok(Value::Bool(left != right)),
+            // `x in collection` — membership test (also the runtime behind the
+            // `contains(collection, item)` builtin).
+            BinOp::In => return contains_member(right, left).map(Value::Bool),
             _ => {}
         }
         match (op, left, right) {
@@ -3672,6 +3798,19 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                 };
                 Ok(Value::Float(res))
             }
+            // Ordering comparisons on floats (e.g. `x >= 0.0`).
+            _ if matches!(op, BinOp::Lt | BinOp::LtEq | BinOp::Gt | BinOp::GtEq)
+                && (matches!(left, Value::Float(_)) || matches!(right, Value::Float(_))) =>
+            {
+                let (l, r) = (left.as_f64().unwrap_or(0.0), right.as_f64().unwrap_or(0.0));
+                Ok(Value::Bool(match op {
+                    BinOp::Lt => l < r,
+                    BinOp::LtEq => l <= r,
+                    BinOp::Gt => l > r,
+                    BinOp::GtEq => l >= r,
+                    _ => unreachable!(),
+                }))
+            }
             _ => {
                 let (l, r, is_hex) = match (left, right) {
                     (Value::Hex(l), Value::Hex(r)) => (*l as i64, *r as i64, true),
@@ -3691,6 +3830,8 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                     BinOp::BitXor => l ^ r,
                     BinOp::Shl => l << r,
                     BinOp::Shr => l >> r,
+                    // Handled before the numeric fast path; unreachable here.
+                    BinOp::In => return contains_member(right, left).map(Value::Bool),
                     BinOp::Eq => return Ok(Value::Bool(l == r)),
                     BinOp::NotEq => return Ok(Value::Bool(l != r)),
                     BinOp::Lt => return Ok(Value::Bool(l < r)),
@@ -3710,24 +3851,29 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
     }
 
     fn bind_pattern(&mut self, pattern: &Pattern, value: &Value) -> crate::Result<()> {
+        self.bind_pattern_mut(pattern, value, false)
+    }
+
+    /// Like `bind_pattern`, but `mutable` is propagated to `let mut` (...).
+    fn bind_pattern_mut(&mut self, pattern: &Pattern, value: &Value, mutable: bool) -> crate::Result<()> {
         match pattern {
             Pattern::Wild => {}
             Pattern::Ident(n) => {
                 if n != "_" {
-                    self.env.define(n, value.clone());
+                    self.env.define_mut(n, value.clone(), mutable);
                 }
             }
             Pattern::Tuple(pats) => {
                 if let Value::Tuple(vals) = value {
                     for (p, v) in pats.iter().zip(vals.iter()) {
-                        self.bind_pattern(p, v)?;
+                        self.bind_pattern_mut(p, v, mutable)?;
                     }
                 }
             }
             Pattern::Array(pats) => {
                 if let Value::Array(vals) = value {
                     for (p, v) in pats.iter().zip(vals.iter()) {
-                        self.bind_pattern(p, v)?;
+                        self.bind_pattern_mut(p, v, mutable)?;
                     }
                 }
             }
@@ -3735,30 +3881,30 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                 if let Value::Struct { fields: fmap, .. } = value {
                     for (fname, fp) in fields {
                         if let Some(v) = fmap.get(fname) {
-                            self.bind_pattern(fp, v)?;
+                            self.bind_pattern_mut(fp, v, mutable)?;
                         }
                     }
                 }
             }
             Pattern::Some(inner) => {
                 if let Value::Option(Some(v)) = value {
-                    self.bind_pattern(inner, v)?;
+                    self.bind_pattern_mut(inner, v, mutable)?;
                 }
             }
             Pattern::Ok(inner) => {
                 if let Value::Result(Some(v), _) = value {
-                    self.bind_pattern(inner, v)?;
+                    self.bind_pattern_mut(inner, v, mutable)?;
                 }
             }
             Pattern::Err(inner) => {
                 if let Value::Result(_, Some(v)) = value {
-                    self.bind_pattern(inner, v)?;
+                    self.bind_pattern_mut(inner, v, mutable)?;
                 }
             }
             Pattern::EnumVariant(_, _, subpats) => {
                 if let Value::Enum { data, .. } = value {
                     for (p, v) in subpats.iter().zip(data.iter()) {
-                        self.bind_pattern(p, v)?;
+                        self.bind_pattern_mut(p, v, mutable)?;
                     }
                 }
             }
@@ -3947,6 +4093,16 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
     }
 
     fn eval_builtin(&mut self, name: &str, args: &[Value]) -> crate::Result<Value> {
+        // Sandbox gate (`rakc run --sandbox`): deny gated builtin families
+        // unless re-granted with --allow.
+        crate::caps::check_builtin(name)?;
+        // 0.8 feature packs: extended stdlib batteries + OSINT builtins.
+        if let Some(r) = crate::ext_batteries::try_interp(name, args) {
+            return r;
+        }
+        if let Some(r) = crate::ext_osint::try_interp(name, args) {
+            return r;
+        }
         match name {
             "assert_eq" => {
                 let a = args.get(0).cloned().unwrap_or(Value::Nil);
@@ -4106,9 +4262,13 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                 }
             }
             "contains" => {
-                let haystack = self.val_to_string(args.first())?;
-                let needle = self.val_to_string(args.get(1))?;
-                Ok(Value::Bool(haystack.contains(&needle)))
+                // Member test: contains(collection, item). For strings this is
+                // the classic substring check; arrays/tuples use equality,
+                // maps use key presence, bytes use byte/subsequence search —
+                // identical semantics to `item in collection`.
+                let coll = args.first().cloned().unwrap_or(Value::Nil);
+                let item = args.get(1).cloned().unwrap_or(Value::Nil);
+                contains_member(&coll, &item).map(Value::Bool)
             }
             "to_hex" => Ok(Value::String(format!("0x{:X}", args.first().and_then(|v| v.as_u64()).unwrap_or(0)))),
             "from_hex" => {
@@ -4648,13 +4808,35 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                 Ok(Value::Bool(s.ends_with(&p)))
             }
             "slice" => {
-                let s = self.val_to_string(args.first())?;
-                let start = args.get(1).and_then(|v| v.as_i64()).unwrap_or(0).max(0) as usize;
-                let end = args.get(2).and_then(|v| v.as_i64()).unwrap_or(s.len() as i64).max(0) as usize;
-                let chars: Vec<char> = s.chars().collect();
-                let e = end.min(chars.len());
-                let st = start.min(chars.len());
-                Ok(Value::String(chars[st..e].iter().collect()))
+                // Generalized slicing: strings (char-based), arrays and bytes.
+                // `slice(xs, start?, end?)` — nil/absent bounds are open,
+                // negatives count from the end, bounds clamp to the length.
+                let target = args.first().cloned().unwrap_or(Value::Nil);
+                let start = args.get(1);
+                let end = args.get(2);
+                match target {
+                    Value::String(s) => {
+                        let chars: Vec<char> = s.chars().collect();
+                        let (st, e) = slice_bounds(chars.len(), start, end)?;
+                        Ok(Value::String(chars[st..e].iter().collect()))
+                    }
+                    Value::Array(a) => {
+                        let (st, e) = slice_bounds(a.len(), start, end)?;
+                        Ok(Value::Array(a[st..e].to_vec()))
+                    }
+                    Value::Tuple(t) => {
+                        let (st, e) = slice_bounds(t.len(), start, end)?;
+                        Ok(Value::Tuple(t[st..e].to_vec()))
+                    }
+                    Value::Bytes(b) => {
+                        let (st, e) = slice_bounds(b.len(), start, end)?;
+                        Ok(Value::Bytes(b[st..e].to_vec()))
+                    }
+                    other => Err(crate::RakError::Runtime(format!(
+                        "slice() requires a string/array/tuple/bytes, got {}",
+                        other.type_name()
+                    ))),
+                }
             }
             "repeat" => {
                 let s = self.val_to_string(args.first())?;
@@ -6380,6 +6562,7 @@ fn expr_str(e: &Expr) -> String {
                 crate::ast::BinOp::BitXor => "^",
                 crate::ast::BinOp::Shl => "<<",
                 crate::ast::BinOp::Shr => ">>",
+                crate::ast::BinOp::In => "in",
             };
             format!("{} {} {}", expr_str(l), o, expr_str(r))
         }
@@ -6431,6 +6614,68 @@ mod tests {
         let mut interp = Interpreter::new();
         let output = interp.run_source("let mut total = 0; for x in [1, 2, 3] { total = total + x; } dump total;").unwrap();
         assert!(output.iter().any(|l| l.contains("[DUMP] 6")));
+    }
+
+    #[test]
+    fn test_lang_in_operator() {
+        let cases = [
+            ("dump \"ell\" in \"hello\"", "[DUMP] true"),
+            ("dump \"x\" in \"hello\"", "[DUMP] false"),
+            ("dump 2 in [1, 2, 3]", "[DUMP] true"),
+            ("dump 9 in [1, 2, 3]", "[DUMP] false"),
+            ("dump \"a\" in {a: 1}", "[DUMP] true"),
+            ("dump \"z\" in {a: 1}", "[DUMP] false"),
+        ];
+        for (src, want) in cases {
+            let mut interp = Interpreter::new();
+            let out = interp.run_source(src).unwrap();
+            assert!(out.iter().any(|l| l.contains(want)), "src {src:?} got {out:?}");
+        }
+    }
+
+    #[test]
+    fn test_lang_destructuring_let() {
+        let src = "let [a, b, c] = [1, 2, 3]\ndump a + b + c\nlet (x, y) = (4, 5)\ndump x * y\nlet [p, [q, r]] = [1, [2, 3]]\ndump p + q + r\nlet [_, rest] = [10, 20]\ndump rest";
+        let mut interp = Interpreter::new();
+        let out = interp.run_source(src).unwrap();
+        assert!(out.iter().any(|l| l.contains("[DUMP] 6")), "got: {:?}", out);
+        assert!(out.iter().any(|l| l.contains("[DUMP] 20")), "got: {:?}", out);
+        assert!(out.iter().any(|l| l.contains("[DUMP] 6")), "got: {:?}", out);
+        assert!(out.iter().any(|l| l.contains("[DUMP] 20")), "got: {:?}", out);
+    }
+
+    #[test]
+    fn test_lang_slice_indexing() {
+        let src = "let s = \"abcdef\"\nlet arr = [10, 20, 30, 40]\ndump s[1..4]\ndump s[..3]\ndump s[3..]\ndump s[-1]\ndump arr[1..3]\ndump arr[..2]\ndump arr[-1]\nlet mut m = arr\nm[-1] = 99\ndump m[-1]";
+        let mut interp = Interpreter::new();
+        let out = interp.run_source(src).unwrap();
+        assert!(out.iter().any(|l| l.contains("[DUMP] bcd")), "got: {:?}", out);
+        assert!(out.iter().any(|l| l.contains("[DUMP] abc")), "got: {:?}", out);
+        assert!(out.iter().any(|l| l.contains("[DUMP] def")), "got: {:?}", out);
+        assert!(out.iter().any(|l| l.contains("[DUMP] f")), "got: {:?}", out);
+        assert!(out.iter().any(|l| l.contains("[DUMP] [20, 30]")), "got: {:?}", out);
+        assert!(out.iter().any(|l| l.contains("[DUMP] [10, 20]")), "got: {:?}", out);
+        assert!(out.iter().any(|l| l.contains("[DUMP] 40")), "got: {:?}", out);
+        assert!(out.iter().any(|l| l.contains("[DUMP] 99")), "got: {:?}", out);
+    }
+
+    #[test]
+    fn test_lang_slice_oob_write_raises() {
+        let mut interp = Interpreter::new();
+        let err = interp.run_source("let mut arr = [1]\narr[5] = 9").unwrap_err();
+        assert!(err.to_string().contains("index-assign"), "got: {:?}", err);
+    }
+
+    #[test]
+    fn test_interpreter_defer_lifo() {
+        let mut interp = Interpreter::new();
+        let out = interp
+            .run_source("fn a() { dump \"aaa\" }\nfn b() { dump \"bbb\" }\nfn f() { defer a()\ndefer b()\ndump \"body\" } f()")
+            .unwrap();
+        let body = out.iter().position(|l| l == "[DUMP] body").unwrap();
+        let pos_b = out.iter().position(|l| l == "[DUMP] bbb").unwrap();
+        let pos_a = out.iter().position(|l| l == "[DUMP] aaa").unwrap();
+        assert!(body < pos_b && pos_b < pos_a, "got: {:?}", out);
     }
 
     #[test]
@@ -7543,4 +7788,107 @@ dump s"#).unwrap();
         let out = interp.run_source("dump len(dns_build(\"8.8.8.8\", \"PTR\"))").unwrap();
         assert!(out.iter().any(|l| l.contains("[DUMP]")), "got: {:?}", out);
     }
+
+    // ---- 0.8 core pack: `in`, destructuring let, slices (interpreter) ----
+
+    #[test]
+    fn test_in_operator_basics() {
+        let mut interp = Interpreter::new();
+        let out = interp
+            .run_source(
+                "dump \"ell\" in \"hello\";\
+                 dump 'e' in \"hello\";\
+                 dump 3 in [1, 2, 3];\
+                 dump 4 in [1, 2, 3];\
+                 dump \"k\" in { k: 1 };\
+                 dump 0x4D in b\"MZ\";\
+                 dump b\"MZ\" in b\"xxMZyy\";",
+            )
+            .unwrap();
+        assert_eq!(
+            out,
+            vec!["[DUMP] true", "[DUMP] true", "[DUMP] true", "[DUMP] false", "[DUMP] true", "[DUMP] true", "[DUMP] true"]
+        );
+    }
+
+    #[test]
+    fn test_in_operator_unsupported_rhs_errors() {
+        let mut interp = Interpreter::new();
+        let err = interp.run_source("dump 1 in 5;").unwrap_err();
+        assert!(format!("{}", err).contains("unsupported right-hand side"), "got: {}", err);
+    }
+
+    #[test]
+    fn test_contains_builtin_generalized() {
+        let mut interp = Interpreter::new();
+        let out = interp
+            .run_source("dump contains(\"hello\", \"ell\"); dump contains([1, 2], 2); dump contains({ a: 1 }, \"a\");")
+            .unwrap();
+        assert_eq!(out, vec!["[DUMP] true", "[DUMP] true", "[DUMP] true"]);
+    }
+
+    #[test]
+    fn test_destructuring_let_tuple_array_struct() {
+        let mut interp = Interpreter::new();
+        let out = interp
+            .run_source(
+                "let (h, p) = (\"example.com\", 443);\
+                 dump f\"{h}:{p}\";\
+                 let [a, b] = [10, 20];\
+                 dump a + b;\
+                 struct Pt { x: int, y: int }\
+                 let Pt { x, y } = Pt { x: 3, y: 4 };\
+                 dump x * y;",
+            )
+            .unwrap();
+        assert_eq!(out, vec!["[DUMP] example.com:443", "[DUMP] 30", "[DUMP] 12"]);
+    }
+
+    #[test]
+    fn test_destructuring_let_mut_and_mismatch() {
+        let mut interp = Interpreter::new();
+        let out = interp.run_source("let mut (a, b) = (1, 2); a = a + 9; dump f\"{a},{b}\";").unwrap();
+        assert_eq!(out, vec!["[DUMP] 10,2"]);
+
+        let mut interp2 = Interpreter::new();
+        let err = interp2.run_source("let (a, b) = (1, 2, 3);").unwrap_err();
+        assert!(format!("{}", err).contains("destructuring failed"), "got: {}", err);
+    }
+
+    #[test]
+    fn test_slice_index_syntax() {
+        let mut interp = Interpreter::new();
+        let out = interp
+            .run_source(
+                "let d = [10, 20, 30, 40, 50];\
+                 dump d[1..3];\
+                 dump d[..2];\
+                 dump d[3..];\
+                 dump d[-2..];\
+                 dump \"hello, world\"[..5];\
+                 dump b\"MZx90\"[0..2];",
+            )
+            .unwrap();
+        assert_eq!(
+            out,
+            vec![
+                "[DUMP] [20, 30]",
+                "[DUMP] [10, 20]",
+                "[DUMP] [40, 50]",
+                "[DUMP] [40, 50]",
+                "[DUMP] hello",
+                "[DUMP] b\"\\x4D\\x5A\"",
+            ]
+        );
+    }
+
+    #[test]
+    fn test_slice_builtin_arrays_and_bytes() {
+        let mut interp = Interpreter::new();
+        let out = interp
+            .run_source("dump slice([1, 2, 3, 4], 1, 3); dump slice(\"hello\", 1, 4); dump slice(b\"abcd\", 2);")
+            .unwrap();
+        assert_eq!(out, vec!["[DUMP] [2, 3]", "[DUMP] ell", "[DUMP] b\"\\x63\\x64\""]);
+    }
+
 }

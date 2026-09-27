@@ -1,0 +1,30 @@
+// dap_demo.rak -- a ready-made target for the Rak debugger.
+// Launch:  rakc dap examples/dap_demo.rak   (Debug Adapter Protocol on stdio)
+// Or plainly:  rakc run examples/dap_demo.rak / rakc vm examples/dap_demo.rak
+//
+// Tip: set a breakpoint on line 9 (classify) or line 21 (fib total loop) and
+// step through -- variables, scopes, and the call stack are all exposed.
+
+fn fib(n) {
+    if n < 2 { return n }
+    return fib(n - 1) + fib(n - 2)
+}
+
+fn classify(port) {
+    if port == 80 { return "http" }
+    if port == 443 { return "https" }
+    return "other"
+}
+
+let ports = [80, 443, 8080, 53, 22]
+for port in ports {
+    dump fmt("port {:>5} is {}", port, classify(port))
+}
+
+let mut total = 0
+let mut i = 0
+while i < 5 {
+    total = total + fib(i)
+    i = i + 1
+}
+dump fmt("fib(0..4) sum = {}", total)

@@ -635,6 +635,35 @@ impl Compiler {
 
     fn compile_stmt(&mut self, stmt: &Stmt) -> Result<(), String> {
         match stmt {
+            Stmt::Let { name, pattern: Some(pattern), value, mutable, .. } => {
+                // Destructuring let: evaluate into a temp local, pattern-match
+                // with MatchPat, and raise a clear runtime error on mismatch.
+                // Bound names live as locals (same behavior as if-let binds).
+                self.compile_expr(value)?;
+                let v_slot = self.add_local_mut("__letpat_v".to_string(), false);
+                self.emit_op(Op::StoreLocal);
+                self.emit_byte(v_slot);
+                let binds = self.emit_pattern_match(pattern, v_slot)?;
+                // On no-match MatchPat pushes nil -> jump to the error path.
+                let jerr = self.emit_jump(Op::JumpIfNil); // peeks, does not pop
+                for (i, bname) in binds.iter().enumerate() {
+                    self.emit_op(Op::Dup);
+                    self.load_const(Value::I64(i as i64));
+                    self.emit_op(Op::IndexGet);
+                    let slot = self.add_local_mut(bname.clone(), *mutable);
+                    self.emit_op(Op::StoreLocal);
+                    self.emit_byte(slot);
+                }
+                self.emit_op(Op::Pop); // drop the bindings indicator
+                let jend = self.emit_jump(Op::Jump);
+                self.patch_jump(jerr);
+                self.emit_op(Op::Pop); // drop the nil indicator
+                let ci = self.const_str("destructuring failed: pattern does not match value");
+                self.emit_op(Op::LoadConst);
+                self.emit_u16(ci);
+                self.emit_op(Op::Throw);
+                self.patch_jump(jend);
+            }
             Stmt::Let { name, value, mutable, .. } => {
                 self.compile_expr(value)?;
                 if self.scope_depth == 0 {
@@ -1226,6 +1255,18 @@ impl Compiler {
                 }
             }
             Expr::Binary(op, l, r) => {
+                if matches!(op, BinOp::In) {
+                    // `a in b` desugars to the `contains(b, a)` native on the
+                    // VM (identical semantics to the interpreter's BinOp::In).
+                    let ci = self.const_str("contains");
+                    self.emit_op(Op::LoadGlobal);
+                    self.emit_u16(ci);
+                    self.compile_expr(r)?;
+                    self.compile_expr(l)?;
+                    self.emit_op(Op::Call);
+                    self.emit_byte(2);
+                    return Ok(());
+                }
                 self.compile_expr(l)?;
                 self.compile_expr(r)?;
                 self.emit_op(match op {
@@ -1247,6 +1288,8 @@ impl Compiler {
                     BinOp::GtEq => Op::GtEq,
                     BinOp::And => Op::Nop,
                     BinOp::Or => Op::Nop,
+                    // `in` is compiled to a `contains` native call above.
+                    BinOp::In => Op::Nop,
                 });
             }
             Expr::Assign(name, value) => {
@@ -1471,6 +1514,25 @@ impl Compiler {
                 self.emit_op(Op::NewMap);
             }
             Expr::Index(obj, idx) => {
+                // `xs[a..b]` slices via the `slice(xs, a, b)` native
+                // (nil bound = open). Arrays, tuples, strings and bytes.
+                if let Expr::Range(lo, hi) = idx.as_ref() {
+                    let ci = self.const_str("slice");
+                    self.emit_op(Op::LoadGlobal);
+                    self.emit_u16(ci);
+                    self.compile_expr(obj)?;
+                    match lo {
+                        Some(e) => self.compile_expr(e)?,
+                        None => self.emit_op(Op::Nil),
+                    }
+                    match hi {
+                        Some(e) => self.compile_expr(e)?,
+                        None => self.emit_op(Op::Nil),
+                    }
+                    self.emit_op(Op::Call);
+                    self.emit_byte(3);
+                    return Ok(());
+                }
                 self.compile_expr(obj)?;
                 self.compile_expr(idx)?;
                 self.emit_op(Op::IndexGet);
