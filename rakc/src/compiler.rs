@@ -16,6 +16,9 @@ pub struct Compiler {
     /// Current top-level statement index (1-based) used as the source-line
     /// marker for `chunk.lines`; enables the VM debugger's line breakpoints.
     statement_line: u32,
+    /// Monotonic counter for compiler-generated global names, so two imports
+    /// that stage the same module name do not collide.
+    temp_counter: u32,
     func_names: std::collections::HashSet<String>,
     func_closures: HashMap<String, Value>,
     /// `macro name(params) { body }` definitions, for compile-time expansion.
@@ -64,6 +67,7 @@ impl Compiler {
             immutable_globals: std::collections::HashSet::new(),
             scope_depth: 0,
             statement_line: 0,
+    temp_counter: 0,
             func_names: std::collections::HashSet::new(),
             func_closures: HashMap::new(),
             macros: HashMap::new(),
@@ -461,10 +465,51 @@ impl Compiler {
                 if import.is_file || import.path.len() == 1 {
                     self.emit_build_module(&exports, &bind_name);
                 } else {
-                    // `import pkg.sub` directory-package nesting on the VM
-                    // requires per-module global scopes; use `from pkg.sub
-                    // import x` instead (documented VM subset).
-                    return Err("import pkg.sub: VM nesting not supported in this build (use from pkg.sub import x)".to_string());
+                    // `import pkg.sub` binds `pkg` as a module containing `sub`.
+                    //
+                    // The old reason this errored was that a module value and
+                    // its key both have to exist, and the VM's globals are one
+                    // flat namespace. That is still true, but it is not
+                    // blocking: a module *is* a `Value::Map` on the VM, so
+                    // `pkg.sub.x` reduces to two `Op::FieldGet`s, which
+                    // `FieldGet` already handles for maps.
+                    //
+                    // The nesting has to *merge* into `pkg` rather than build a
+                    // fresh map, because `import pkg` and `import pkg.sub` in
+                    // the same file are both legal and the second must not
+                    // discard the first's exports. Hence `Op::MergeModule`
+                    // instead of a second `Op::BuildModule`.
+                    let sub_name = import.path.last().unwrap().clone();
+                    // Build `sub` into a private staging global first, because
+                    // `BuildModule` needs all of its (name, value) pairs on the
+                    // stack at once and the pairs for `sub` have to be nested
+                    // inside the `sub` key rather than sit beside it.
+                    let leaf_global = format!("__rak_mod_{}_{}", bind_name, self.next_temp_id());
+                    self.emit_build_module(&exports, &leaf_global);
+
+                    // `MergeModule` pops name, then entry, then module, so the
+                    // pushes are in reverse: module first, then the entry, then
+                    // the key on top.
+                    //
+                    // `LoadGlobalOrMap` rather than `LoadGlobal` because `pkg`
+                    // may not be bound at all: a file that only does
+                    // `import pkg.sub` is legal, and the interpreter creates the
+                    // package module on demand.
+                    let gi = self.const_str(&bind_name);
+                    self.emit_op(Op::LoadGlobalOrMap);
+                    self.emit_u16(gi);
+
+                    let li = self.const_str(&leaf_global);
+                    self.emit_op(Op::LoadGlobal);
+                    self.emit_u16(li);
+
+                    let ki = self.const_str(&sub_name);
+                    self.emit_op(Op::LoadConst);
+                    self.emit_u16(ki);
+
+                    self.emit_op(Op::MergeModule);
+                    self.emit_op(Op::StoreGlobal);
+                    self.emit_u16(gi);
                 }
                 Ok(())
             }
@@ -605,6 +650,17 @@ impl Compiler {
 
     fn const_str(&mut self, s: &str) -> u16 {
         self.emit_const(Value::String(Arc::from(s)))
+    }
+
+    /// A unique suffix for compiler-generated globals.
+    ///
+    /// Needed because `import a.b` and `import c.b` both want a staging global
+    /// holding `b`'s module, and a fixed name would make the second import
+    /// overwrite the first. Monotonic rather than derived from the path, so two
+    /// imports of the same module in one file still get distinct names.
+    fn next_temp_id(&mut self) -> u32 {
+        self.temp_counter += 1;
+        self.temp_counter
     }
 
     /// Emit a load of the named variable (local if bound, else global).

@@ -53,6 +53,21 @@ pub enum Op {
     /// Build a `Value::Module` from `n` (name, value) pairs. Operand: `n` (1 byte).
     /// Pops `2*n` values (alternating name string, value), pushes the Module.
     BuildModule,
+    /// Insert one entry into an existing module: pops (value, name, module) and
+    /// pushes the module with `name` set to `value`.
+    ///
+    /// Separate from `BuildModule` because that always starts from an empty map,
+    /// which loses the existing entries. Needed by `import pkg.sub` when `pkg` is
+    /// also imported on its own — the package's own exports have to survive.
+    MergeModule,
+    /// Load the named global as a module, or push an empty map if it is not
+    /// bound or is bound to something that is not a map. Operand: const index
+    /// of the name (u16).
+    ///
+    /// A plain `LoadGlobal` would fail with `Undefined` for a file that does
+    /// `import pkg.sub` without ever importing `pkg`, and the interpreter
+    /// accepts that — it creates the package module on demand.
+    LoadGlobalOrMap,
     /// Register a deferred call. The callee and its args (already evaluated)
     /// are pushed onto a per-frame stack and run in LIFO order when the frame
     /// returns. Operand: argument count `n` (1 byte). Pops `n` args then the

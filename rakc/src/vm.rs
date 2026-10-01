@@ -1882,6 +1882,59 @@ impl Vm {
                     }
                     frame.push(Value::Map(Arc::from(m)));
                 }
+                Op::LoadGlobalOrMap => {
+                    let idx = frame.code.read_u16(frame.ip) as usize;
+                    frame.ip += 2;
+                    let name = frame.code.constants[idx].clone();
+                    let Value::String(name) = name else {
+                        return Err("LoadGlobalOrMap: name must be a string".to_string());
+                    };
+                    match self.globals.get(name.as_ref()) {
+                        Some(Value::Map(m)) => frame.push(Value::Map(m.clone())),
+                        // Either the global is unbound — a file that does
+                        // `import pkg.sub` without importing `pkg` — or it holds
+                        // something that is not a module. Both start empty,
+                        // matching the interpreter.
+                        _ => frame.push(Value::Map(Arc::from(HashMap::new()))),
+                    }
+                }
+                Op::MergeModule => {
+                    // Insert one entry into the module value on the stack.
+                    //
+                    // This exists for `import pkg.sub` alongside a separate
+                    // `import pkg`: the package is already bound as a module
+                    // global, and the nested import has to add `sub` to it
+                    // rather than replace it. `BuildModule` cannot do that,
+                    // because it always starts from an empty map, and building
+                    // a fresh `{sub: ...}` would throw away `pkg`'s own
+                    // exports — which is exactly what `pkg.pkgver` then failed
+                    // to find.
+                    // Stack order is (module, name, entry) bottom-up, matching
+                    // how `BuildModule` reads its (name, value) pairs.
+                    let name = frame.pop();
+                    let key = match name {
+                        Value::String(s) => s.to_string(),
+                        other => {
+                            return Err(format!(
+                                "MergeModule: name must be a string, got {}",
+                                other.type_name()
+                            ))
+                        }
+                    };
+                    let entry = frame.pop();
+                    let module = frame.pop();
+                    let mut m = match module {
+                        Value::Map(existing) => (*existing).clone(),
+                        other => {
+                            return Err(format!(
+                                "MergeModule: expected a module, got {}",
+                                other.type_name()
+                            ))
+                        }
+                    };
+                    m.insert(key, entry);
+                    frame.push(Value::Map(Arc::from(m)));
+                }
                 Op::Try => {
                     let handler = frame.code.read_u16(frame.ip) as usize;
                     frame.ip += 2;

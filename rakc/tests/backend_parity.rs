@@ -610,6 +610,71 @@ dump collect(take(filter(base, fn(x) { return x % 2 == 0 }), 2))
     );
 }
 
+/// `import pkg.sub` directory-package nesting (spec 7A.6).
+///
+/// The fixtures are written to a temp directory by the test, because an import
+/// resolves against the importing file's directory. `eval_in` takes a base
+/// directory for exactly this, so no files are created — the module *source* is
+/// still needed on disk, so it is.
+#[test]
+fn parity_import_pkg_sub() {
+    let dir = std::env::temp_dir().join("rak_parity_pkgsub");
+    let pkg = dir.join("pkg");
+    std::fs::create_dir_all(&pkg).expect("create pkg dir");
+    std::fs::write(
+        pkg.join("init.rak"),
+        "pub let pkgver = \"1.0\"\npub fn greet() { return \"hi\" }",
+    )
+    .expect("write init");
+    std::fs::write(
+        pkg.join("sub.rak"),
+        "pub let answer = 42\npub fn twice(x) { return x * 2 }",
+    )
+    .expect("write sub");
+
+    let base = dir.to_string_lossy().to_string();
+
+    // Both the package and the nested module, so `pkg`'s own exports have to
+    // survive the merge. This is the case that needed `Op::MergeModule` rather
+    // than a second `Op::BuildModule`.
+    let both = r#"
+import pkg
+import pkg.sub
+dump pkg.pkgver
+dump pkg.greet()
+dump pkg.sub.answer
+dump pkg.sub.twice(21)
+"#;
+    agree_in("import pkg and pkg.sub", both, &base);
+
+    // The nested import on its own, with no `import pkg` — the package module
+    // does not exist yet and has to be created.
+    let nested_only = r#"
+import pkg.sub
+dump pkg.sub.answer
+dump pkg.sub.twice(21)
+"#;
+    agree_in("import pkg.sub alone", nested_only, &base);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `assert_backends_agree` with an explicit base directory, for tests whose
+/// program imports a module from disk.
+fn agree_in(label: &str, source: &str, base_dir: &str) -> Vec<String> {
+    let parity = rakc::run_on_both(source, base_dir);
+    if let Some(why) = parity.divergence() {
+        panic!("backend divergence in `{}`:\n{}\n--- source ---\n{}", label, why, source);
+    }
+    match parity {
+        rakc::BackendParity::Agree(out) => out,
+        other => panic!(
+            "backend divergence in `{}`: agreed on an error, not a result: {:?}",
+            label, other
+        ),
+    }
+}
+
 /// Encrypted UDP (spec 7A.5), including a real loopback round trip.
 #[test]
 fn parity_udp() {
