@@ -86,7 +86,11 @@ Linux requires `libwebkit2gtk-4.1-dev`, `libgtk-3-dev`,
 
 ## Platform support
 
-Windows and Linux. On Windows, the GUI uses WebView2 (ships with Edge) and is
-display-only. The Linux GUI does not work in 8.0.0: `gui_open` creates the event
-loop off the main thread, which tao rejects. `rakc build` produces `.exe` on
-Windows and an executable with `chmod 755` on Linux.
+Windows and Linux. On Windows the GUI uses WebView2 (ships with Edge); on Linux
+it uses WebKitGTK, so the system packages listed above are needed. The event loop
+runs on the main thread on both platforms, which is a requirement of tao rather
+than a choice — it binds to the display connection from whichever thread creates
+the loop, and rejects any other.
+
+`rakc build` produces `.exe` on Windows and an executable with `chmod 755` on
+Linux.

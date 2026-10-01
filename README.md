@@ -131,7 +131,7 @@ annotations and non-exhaustive matches before you run anything.
 
 **Build standalone executables.** `rakc build file.rak` produces a self-contained binary with the source embedded. On Windows it's a `.exe`. On Linux it gets `chmod 755`. No Rak installation needed on the target machine.
 
-**GUI windows (incomplete).** With `--features gui`, Rak scripts can open a native desktop window rendering HTML, CSS, and JS via WebView2 on Windows. Treat it as a display-only preview: `gui_update`/`gui_title`/`gui_close` do not affect the window yet, JavaScript cannot call back into Rak, closing the window ends the process, and Linux does not work. See [GUI windows](#gui-windows).
+**GUI windows.** With `--features gui`, Rak scripts open native desktop windows rendering HTML, CSS and JS, on Windows and Linux. Windows can be updated, retitled and closed; JavaScript calls back into Rak through `rak_call`, and a callback's return value reaches the page. Closing a window no longer ends the process. See [GUI windows](#gui-windows).
 
 **Package manager.** `rakpkg` is a CLI for Git-based shareable Rak packages. Initialize, add dependencies from GitHub repos, install, run, and build. The manifest is a Rak file with `let` bindings.
 
@@ -275,32 +275,48 @@ rakc build examples/hello.rak   # produces hello.exe on Windows, hello on Linux
 
 ## GUI windows
 
-Incomplete in 8.0.0. Requires `cargo build -p rakc --features gui`.
+Requires `cargo build -p rakc --features gui`. Works on Windows and Linux.
 
 ```rak
-let html = "<h1 style='color:#22c55e;text-align:center;margin-top:40px'>Hello from Rak!</h1>"
+fn on_click(msg) { return "you said: " + msg }
+
+let html = r#"<h1 style='color:#22c55e;text-align:center;margin-top:40px'>Hello from Rak!</h1>
+<button onclick="rak_call('on_click', 'hi'); rak_on('on_click', show)">Click me</button>
+<script>
+  function show(v) { document.body.insertAdjacentHTML('beforeend', '<p>' + v + '</p>') }
+</script>"#
+
+gui_callback("on_click", on_click)
 
 let win = gui_open("Rak GUI Demo", html, 600, 400)
+gui_title(win, "Still here")
+gui_update(win, "<h1>replaced</h1>")
 gui_wait()
 ```
 
-`gui_open` returns a window ID and `gui_wait()` blocks. That is all that
-currently works. Specifically:
+| Builtin | Behaviour |
+|---|---|
+| `gui_open(title, html, w, h)` | Opens a window, returns its id. Blocks until it exists, so the id is real. |
+| `gui_update(id, html)` | Replaces the document. The window keeps its position, size and z-order. |
+| `gui_title(id, title)` | Sets the window title. |
+| `gui_close(id)` | Closes one window. The process keeps running. |
+| `gui_wait()` | Blocks until every window is closed. |
+| `gui_quit(code)` | Stops the GUI with an exit code. |
+| `gui_callback(name, fn)` | Registers a Rak function callable from page JavaScript as `rak_call(name, ...)`. |
 
-- `gui_update`, `gui_title`, `gui_close` are declared but do nothing yet.
-  `gui.rs` stores `HashMap<i64, ()>` and throws away the `Window` and `WebView`
-  handles, so there is nothing to update.
-- `gui_callback` and `window.rak_call(fn, args)` do not work. The IPC handler
-  receives the message and discards it, so JavaScript cannot call into Rak yet.
-- Closing the window ends the process, because tao's `run` calls
-  `process::exit` when the last window closes. `gui_wait()` does not return and
-  code after it is unreachable.
-- Linux does not work: `gui_open` builds the event loop on a spawned thread,
-  which trips tao's main-thread assertion.
-- The VM has no GUI natives; use `rakc run`.
+The page calls Rak with `rak_call(name, ...args)`, and a callback's return value
+reaches the page as `rak_result(name, value)`. Register a page-side handler with
+`rak_on(name, fn)`.
 
-Windows only, display only. The rewrite that fixes all of the above is tracked
-in `docs/V8-ROADMAP.md`.
+**One real limitation.** A callback does not share mutable state with the script
+that registered it. It receives a copy of the environment as it stood at
+`gui_callback` time, so it can read what existed then and return a value to the
+page, but it cannot write to a variable the main script reads afterwards. This
+follows from Rak having no reference types — values are shared rather than moved.
+See [docs/V8-KNOWN-ISSUES.md](docs/V8-KNOWN-ISSUES.md).
+
+Also worth knowing: a function body without an explicit `return` evaluates to
+`nil`, which matters here because `gui_callback` takes a function.
 
 ## Package manager
 
@@ -839,7 +855,7 @@ The generated functions call `extern_call`, which returns an error until a Rust 
 
 ## Platform support
 
-Windows and Linux. On Windows, the GUI uses WebView2 (ships with Edge) and is display-only; Linux GUI does not work in 8.0.0. Note that the feature is per-crate, so it needs `-p rakc --features gui`, not a workspace-wide `--features gui`. `rakc build` produces `.exe` on Windows and an executable with `chmod 755` on Linux. The IDE ships as NSIS/MSI on Windows and `.deb`/AppImage on Linux via GitHub Actions CI, alongside the custom `rak-setup` installer (net-install + offline bundle) on both.
+Windows and Linux. On Windows the GUI uses WebView2 (ships with Edge); on Linux it uses WebKitGTK. Note that the feature is per-crate, so it needs `-p rakc --features gui`, not a workspace-wide `--features gui`. `rakc build` produces `.exe` on Windows and an executable with `chmod 755` on Linux. The IDE ships as NSIS/MSI on Windows and `.deb`/AppImage on Linux via GitHub Actions CI, alongside the custom `rak-setup` installer (net-install + offline bundle) on both.
 
 ## Project structure
 

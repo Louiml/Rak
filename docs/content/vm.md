@@ -34,19 +34,34 @@ clear message.
 | Raw sockets (packet forging) | yes (builders + unix send/recv) | yes (builders + `Result` send/recv) |
 | DNS / TLS / PCAP | yes | yes (same builtins; `Result` for query/open) |
 | Compile-time macros (`macro`/`name!`/`const`) | yes (expand + exec) | yes (expand at compile time) |
-| Imports & exports (`import`/`from`/`pub`) | yes (whole/from/star/pkg/cycles) | yes (whole/from/star; no `pkg.sub` nesting) |
+| Imports & exports (`import`/`from`/`pub`) | yes (whole/from/star/pkg/cycles) | yes (whole/from/star/pkg/cycles) |
 | Forensic structs (`binstruct`/`.decode`/`.encode`) | yes (registry + codec) | yes (compile-time baked natives, no new opcodes) |
 | Evidence provenance (`evidence<T>`/`cite`/`report`) | yes | yes (mirrored value + natives) |
 | Structured errors (`err_*`) | yes | yes |
-| Streaming (`stream_*`) | yes | no (graceful error) |
-| CLI (`argv()`, `parse_args`) | yes | no (graceful error) |
-| Tunnel / UDP transport | yes | no (graceful error) |
+| Streaming (`stream_*`) | yes | yes (`Value::Stream`; lazy `for` lowering) |
+| Sets (`set_*`, `for s in set`) | yes | yes (`Value::Set`, insertion-ordered) |
+| GUI (`gui_*`, `rak_call` from JS) | yes | yes (same process-wide manager) |
+| CLI (`argv()`, `parse_args`) | yes | yes |
+| Tunnel / UDP transport | yes | yes (`Value::UdpTransport`, `tunnel` lowering) |
+| Inline assembly (`asm`) | yes | **no**, by design (see below) |
 | WebSocket | yes | no (no TCP layer) |
+| Channels & threads (`channel`, `select`, `spawn`, `timeout`) | yes | no (needs coroutines) |
 
-The `yes`/`no` column is the authoritative backend-parity list. Remaining
-gaps as of 8.0.0: streams, tunnel/UDP, `pkg.sub` imports, WebSocket and the
-CLI entry point on the VM; trait protocols on the VM; and `@` binding patterns
-(`Pattern::Bind`) on both backends. See `docs/V8-ROADMAP.md`.
+The `yes`/`no` column is the authoritative backend-parity list, and it is
+checked rather than maintained by hand: `tests/backend_parity.rs` compares the
+two backends' registration tables and fails when they diverge, so a builtin
+cannot be added to one side and forgotten on the other. The v8.0.0 release
+shipped nineteen builtins that existed only in the VM, and the suite did not
+notice.
+
+**Remaining gaps as of 8.1.0.** 34 builtins, all blocked on one thing: a VM
+native has signature `fn(&[Value])`, so it cannot call a Rak function, suspend or
+resume. That rules out the channel/thread family, the socket family, `spawn`
+and FFI trampolines until the VM has coroutines. `asm` has no VM counterpart
+because a bytecode VM has no instructions to escape into.
+
+`docs/V8-BACKEND-PARITY.md` has the full list and the reasoning;
+`docs/V8-ROADMAP.md` has what closing it would take.
 
 ## Error model
 

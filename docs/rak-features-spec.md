@@ -1234,7 +1234,7 @@ green). Nothing here is aspirational.
   JSON parser, and tunnel framing.
 
 ### Verification
-- `cargo test -p rakc` (162 lib tests) + `--test proptest_harness` (8) green.
+- `cargo test -p rakc` (327 lib tests) + `--test proptest_harness` (8) green, and `cargo test -p rak-stdlib` (72).
 - `cargo test -p rak-stdlib` (21) green.
 - `examples/async_orchestration.rak`, `examples/streaming.rak`,
   `examples/cli_greeter.rak`, `examples/security_workflow.rak` all run.
@@ -1267,7 +1267,7 @@ green). Nothing here is aspirational.
 - `rakpkg` is now a lib+bin so `parse_manifest_str` is fuzzable and reusable.
 
 ### Verification
-- `cargo test -p rakc` (162 lib tests) + `--test proptest_harness` (8) green.
+- `cargo test -p rakc` (327 lib tests) + `--test proptest_harness` (8) green, and `cargo test -p rak-stdlib` (72).
 - `cargo test -p rak-stdlib` (21) and `cargo test -p rakpkg` (4) green.
 - `fuzz/` type-checks (`cargo check`) with 0 errors; `rakc debug` verified
   end-to-end for break/step/continue/locals/stack/print/disassemble.
@@ -1359,7 +1359,7 @@ arm compiles to `IndexGet` + `Eq` comparisons against the pattern constants
 pattern adds a `Len`-style check via existing length native). Bounds-checked;
 interpreter-only semantics preserved.
 
-### 7A.4 VM streams  **[SPEC]**
+### 7A.4 VM streams  **SHIPPED 8.1.0**
 
 - `value.rs`: `Value::Stream(Arc<Mutex<Box<dyn RakStream>>>)` mirrored from
   the interpreter.
@@ -1368,12 +1368,20 @@ interpreter-only semantics preserved.
 - `compiler.rs::compile_for`: a `Stream` arm drives `next()` until `nil`
   (lazy, backpressure preserved).
 
-Current state: `value.rs` has no `Stream` variant at all.
-`ext_batteries.rs`/`ext_osint.rs` already establish the dual-dispatch pattern
-(`try_interp` for the tree walker, `vm_natives()` for the VM) that this should
-follow rather than adding opcodes.
+As built: `value.rs` has `Value::Stream`, `ext_streams.rs` has the eight stream
+types over `value::Value`, and `stream_next`/`collect` are intercepted in
+`Vm::call_value` rather than registered as plain natives — a native's
+`fn(&[Value])` signature cannot invoke a Rak function, and pulling from a
+`stream_map` or `filter` result means doing exactly that. The `for` lowering
+emits an explicit `stream_next` loop rather than going through `Op::IterItems`,
+which would materialise the stream and break the backpressure guarantee.
 
-### 7A.5 VM `tunnel` / `udp_*`  **[SPEC]**
+The spec's suggested approach here was right in principle — follow the
+`ext_batteries` dual-dispatch pattern rather than adding opcodes, and that is
+what happened. The interception in `call_value` is the same idea applied at the
+one layer where the VM is actually reachable.
+
+### 7A.5 VM `tunnel` / `udp_*`  **SHIPPED 8.1.0**
 
 `compiler.rs` compiles `Stmt::Tunnel` to: `tunnel_preshared_key` native call →
 `udp_bind` native call → define `<name>`/`<name>_udp`/`<name>_addr`/
@@ -1381,17 +1389,45 @@ follow rather than adding opcodes.
 the frame). `value.rs` mirrors `Value::UdpTransport`. `udp_send`/`udp_recv`/
 `udp_local_addr` registered as VM natives.
 
-Current state: `compiler.rs` hard-errors with "VM does not support 'tunnel'
-statement (use `rakc run` with the interpreter)".
+As built: this is `compiler.rs::compile_tunnel`, and it matches. The one thing
+worth recording is that the salt, iteration count and key length now live in
+`ext_stdlib` as `TUNNEL_SALT` / `TUNNEL_ITERS` / `TUNNEL_KEY_LEN` and are read by
+*both* the interpreter's `exec_tunnel` and this lowering. With them inlined on
+each side, the two backends derived different keys from the same passphrase and
+both looked correct. There is now a test that runs one `tunnel` through both
+backends and compares the derived key.
 
-### 7A.6 VM `import pkg.sub`  **[SPEC]**
+Building this also surfaced a platform bug in
+`rak_stdlib::tunnel::udp_recv`, unrelated to the VM: a read timeout was matched
+only against `ErrorKind::WouldBlock`, which is what Unix reports. Windows
+reports the same condition as `TimedOut`, so `udp_recv` returned an error there
+and `nil` on Linux, for identical code. See `docs/V8-KNOWN-ISSUES.md`.
 
-`compiler.rs::inline_module` gains dotted-resolution: `import pkg.sub` resolves
-`pkg/init.rak` then `sub.rak` inside `pkg/` and inlines both modules'
-exports; `pkg` binds as a Module value containing `sub` (interpreter parity).
+### 7A.6 VM `import pkg.sub`  **SHIPPED 8.1.0**
 
-Current state: `inline_module` handles whole/from/star but has no dotted
-resolution.
+SHIPPED in 8.1.0. `import pkg.sub` resolves `pkg/init.rak` then `sub.rak` and
+binds `pkg` as a module containing `sub`, on both backends.
+
+**Correction to the "Current state" this section previously carried.** It said
+`inline_module` "has no dotted resolution", which was wrong. Dotted *file*
+resolution has existed for some time and is shared: `modules::resolve_dotted`
+returns a `DottedResolve { init, leaf }` and `compiler.rs::resolve_target`
+already called it, and `inline_module` already loaded `init` first. The
+interpreter had the whole thing working.
+
+The real gap was narrower and is the one that was actually closed: the VM could
+not *nest* the result. `import pkg.sub` was a hard compile error on the VM, and
+the stated reason — that a module value and its key both need to exist and the
+VM's globals are one flat namespace — was not the obstacle. A module *is* a
+`Value::Map` on the VM, so `pkg.sub.x` is two `Op::FieldGet` calls, which
+`FieldGet` already handled. Two opcodes closed the rest:
+
+- `Op::MergeModule` inserts one entry into an existing module. `BuildModule`
+  cannot, because it always starts from an empty map, so a second
+  `BuildModule` silently discarded the package's own exports.
+- `Op::LoadGlobalOrMap` loads a global as a module or yields an empty map, so
+  `import pkg.sub` works in a file that never imports `pkg` — which the
+  interpreter accepts.
 
 ### 7A.7 Operator overloading  **[SHIPPED]**
 
@@ -1484,13 +1520,29 @@ the existing map-iteration order).
 | Named args | `f(b: 2)` | `Expr::Call { named }` | SHIPPED |
 | Varargs | `fn f(...args)` | `Param::rest` | SHIPPED |
 | Labeled loops | `outer: loop { break outer }` | `Stmt::Loop { label }`, `BreakTarget::Label` | SHIPPED |
-| Sets | `set_of([..])`, `set_add/has/union/intersect/diff`, `for s in set` | `Value::Set` both backends | **[SPEC]** |
+| Sets | `set_of([..])`, `set_add/has/union/intersect/diff`, `for s in set` | `Value::Set` both backends, `setrepr::SetRepr` | **SHIPPED 8.1.0** |
 
-Sets are the one remaining item: no `Value::Set` in either backend, no
-`set_*` builtins, no set literal. `Map` already exists in both backends with
-insertion-order iteration, so the cheapest implementation is a set backed by
-an insertion-ordered map keyed on the element, plus the `ext_batteries.rs`
-dual dispatch (`try_interp` + `vm_natives()`).
+SHIPPED in 8.1.0. `set_of`/`set_add`/`set_has`/`set_discard`/`set_len`/
+`set_has_all`/`set_union`/`set_intersect`/`set_diff`/`set_to_array`, plus
+`for s in set` and `x in set`, on both backends. There is still no set
+*literal* syntax; `set_of([...])` is the constructor.
+
+**Correction to the original plan in this section.** It said sets should be
+"backed by an insertion-ordered map", on the premise that `Map` already iterates
+in insertion order. That premise is false: both backends store maps in
+`std::collections::HashMap` (`interpreter::Value::Map`, `value::Value::Map`),
+whose iteration order is arbitrary and varies between runs of the same program.
+Building sets that way would have given them nondeterministic iteration, which
+defeats the point for deduplication and diffing.
+
+So `setrepr::SetRepr` is an order-preserving `Vec` alongside a `HashSet` of
+element keys: insertion order for iteration, O(1) average membership,
+deterministic output. Element identity is type tag plus rendered form, so `1`,
+`0x1` and `1.0` are one element while `1` and `"1"` are two — matching Rak's
+cross-representation numeric equality.
+
+Making `Map` insertion-ordered too is still open, and is a separate decision
+with a wider blast radius.
 
 ### 7B — Type system & tooling  **[SPEC → SHIPPED for fmt/lint]**
 

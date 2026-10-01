@@ -28,8 +28,9 @@ from mymod import *
 dump PI                  // "local-pi" (local wins)
 dump mul(3, 3)           // 9 (imported)
 
-// Directory package submodule: `from mymod.sub import ...` (VM-compatible;
-// `import mymod.sub` nested access is interpreter-only on the VM subset).
+  // Directory package submodule. Both forms work on the interpreter and the
+  // bytecode VM: `import mymod.sub` binds `mymod` as a module containing `sub`,
+  // and `from mymod.sub import ...` binds the names directly.
 from mymod.sub import sub_add, SUB_NAME, add
 dump SUB_NAME                 // "sub"
 dump sub_add(100, 1)          // 101

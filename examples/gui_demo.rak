@@ -1,18 +1,38 @@
-// gui_demo.rak — creates a desktop window with HTML/CSS/JS
+// gui_demo.rak — a desktop window with a working JavaScript -> Rak callback
 // Run with: rakc run examples/gui_demo.rak (requires --features gui)
+//
+// Demonstrates: gui_callback, gui_open, gui_title, gui_update, and a callback
+// whose return value is handed back to the page.
+//
+// Note the `return` in every function body. A Rak function's value is its
+// `return` expression; a bare expression body evaluates to nil, which would
+// make the callback send nil back to the page. See docs/V8-KNOWN-ISSUES.md.
+
+fn clicked(n) {
+  return n + 1
+}
+
+gui_callback("clicked", clicked)
 
 dump "Opening window..."
 
 let html = "<h1 style='color:#22c55e;text-align:center;margin-top:40px'>Hello from Rak!</h1>
-<p style='text-align:center;color:#666'>This window was created by a Rak script.</p>
-<button onclick=\"window.rak_call('clicked')\" style='display:block;margin:20px auto;padding:10px 30px;font-size:18px;background:#22c55e;color:white;border:none;border-radius:8px;cursor:pointer'>Click me</button>
-<div id='count' style='text-align:center;font-size:24px;margin-top:20px'>0</div>
+<p style='text-align:center;color:#666'>JavaScript can call into Rak.</p>
+<button onclick='bump()' style='display:block;margin:20px auto;padding:10px 30px;font-size:18px;background:#22c55e;color:white;border:none;border-radius:8px;cursor:pointer'>Click me</button>
+<div id='count' style='text-align:center;font-size:24px;margin-top:20px'>clicks: 0</div>
 <script>
-var n = 0;
-window.rak_call('clicked');
+  var n = 0;
+  // The page asks Rak to increment, and Rak hands the answer back.
+  window.rak_on('clicked', function (v) {
+    n = v;
+    document.getElementById('count').textContent = 'clicks: ' + n;
+  });
+  function bump() { window.rak_call('clicked', n + 1); }
 </script>"
 
 let win = gui_open("Rak GUI Demo", html, 600, 400)
 dump f"Window opened with ID: {win}"
+
+gui_title(win, "Rak GUI Demo — click the button")
 gui_wait()
 dump "All windows closed"
