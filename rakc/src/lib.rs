@@ -23,6 +23,7 @@ pub mod caps;
 pub mod fuzz;
 pub mod ext_batteries;
 pub mod ext_osint;
+pub mod ext_stdlib;
 pub mod dap;
 
 use thiserror::Error;
@@ -259,6 +260,145 @@ pub fn eval_in(source: &str, base_dir: &str) -> Result<Vec<String>> {
         let mut interpreter = interpreter::Interpreter::with_base_dir(dir);
         interpreter.run_source(&src)
     })
+}
+
+/// Evaluate Rak code in bytecode-VM mode, resolving imports against `base_dir`.
+///
+/// This is the second half of `run_on_both`: the tree-walking interpreter and
+/// the register VM are two implementations of one language, and this is the
+/// entry point that makes them directly comparable in a test.
+///
+/// The VM recurses over the AST the same way the interpreter does, so it gets
+/// the same oversized stack. Running it on the caller's thread instead
+/// overflows on anything with real nesting depth — a `cargo test` thread has a
+/// couple of megabytes, against the interpreter's 64.
+pub fn eval_vm_in(source: &str, base_dir: &str) -> std::result::Result<Vec<String>, String> {
+    let src = source.to_string();
+    let dir = base_dir.to_string();
+    run_on_big_stack(move || {
+        let tokens = lexer::tokenize(&src).map_err(|e| e.to_string())?;
+        let ast = parser::parse(&tokens, &src).map_err(|e| e.to_string())?;
+        let chunk =
+            compiler::compile_module_in(&ast, &dir).map_err(|e| e.to_string())?;
+        let mut vm = vm::Vm::new();
+        vm.run(&chunk)
+    })
+}
+
+/// The result of running one Rak program on both backends.
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub enum BackendParity {
+    /// Both backends succeeded and produced byte-identical output.
+    Agree(Vec<String>),
+    /// Both backends failed, with the same message.
+    AgreeOnError(String),
+    /// The tree-walking interpreter succeeded and the VM did not.
+    InterpOnly {
+        interp_output: Vec<String>,
+        vm_error: String,
+    },
+    /// The VM succeeded and the interpreter did not.
+    VmOnly {
+        interp_error: String,
+        vm_output: Vec<String>,
+    },
+    /// Both failed but reported different problems.
+    DisagreeOnError {
+        interp_error: String,
+        vm_error: String,
+    },
+    /// Both succeeded but produced different output.
+    DisagreeOnOutput {
+        interp_output: Vec<String>,
+        vm_output: Vec<String>,
+    },
+}
+
+impl BackendParity {
+    /// True when the two backends are interchangeable for this program.
+    pub fn is_agreeing(&self) -> bool {
+        matches!(self, Self::Agree(_) | Self::AgreeOnError(_))
+    }
+
+    /// A human-readable explanation of the divergence, or `None` if they agree.
+    pub fn divergence(&self) -> Option<String> {
+        match self {
+            Self::Agree(_) | Self::AgreeOnError(_) => None,
+            Self::InterpOnly { interp_output, vm_error } => Some(format!(
+                "interpreter produced {} line(s), VM failed: {}",
+                interp_output.len(),
+                vm_error
+            )),
+            Self::VmOnly { interp_error, vm_output } => Some(format!(
+                "VM produced {} line(s), interpreter failed: {}",
+                vm_output.len(),
+                interp_error
+            )),
+            Self::DisagreeOnError { interp_error, vm_error } => Some(format!(
+                "different errors:\n  interpreter: {}\n  VM:           {}",
+                interp_error, vm_error
+            )),
+            Self::DisagreeOnOutput { interp_output, vm_output } => Some(format!(
+                "different output:\n  interpreter: {:?}\n  VM:           {:?}",
+                interp_output, vm_output
+            )),
+        }
+    }
+}
+
+/// Run `source` through both the interpreter and the bytecode VM and classify
+/// how the two agree.
+///
+/// Rak ships two backends, which means every builtin and every language
+/// feature exists twice. v8.0.0 shipped nineteen builtins that existed only in
+/// the VM, so `rakc run` failed with `Unknown function` for every one of them
+/// and no test noticed, because the tests exercised each backend separately.
+/// Comparing them head to head is what catches that class of bug: a builtin
+/// that is registered in one `register_natives` and missing from the other
+/// shows up here immediately, as does any output that differs between them.
+pub fn run_on_both(source: &str, base_dir: &str) -> BackendParity {
+    let interp = eval_in(source, base_dir);
+    let vm = eval_vm_in(source, base_dir);
+    match (interp, vm) {
+        (Ok(i), Ok(v)) => {
+            if i == v {
+                BackendParity::Agree(i)
+            } else {
+                BackendParity::DisagreeOnOutput { interp_output: i, vm_output: v }
+            }
+        }
+        (Err(i), Err(v)) => {
+            if i.to_string() == v {
+                BackendParity::AgreeOnError(i.to_string())
+            } else {
+                BackendParity::DisagreeOnError { interp_error: i.to_string(), vm_error: v.to_string() }
+            }
+        }
+        (Ok(i), Err(v)) => BackendParity::InterpOnly { interp_output: i, vm_error: v },
+        (Err(i), Ok(v)) => BackendParity::VmOnly { interp_error: i.to_string(), vm_output: v },
+    }
+}
+
+/// Assert the two backends behave identically for `source`, panicking with a
+/// diff if they do not. The message names the program so a failure points at
+/// the feature that regressed rather than just at a line number.
+#[track_caller]
+pub fn assert_backends_agree(label: &str, source: &str) -> Vec<String> {
+    let parity = run_on_both(source, ".");
+    if let Some(why) = parity.divergence() {
+        panic!(
+            "backend divergence in `{}`:\n{}\n--- source ---\n{}",
+            label, why, source
+        );
+    }
+    match parity {
+        BackendParity::Agree(out) => out,
+        BackendParity::AgreeOnError(msg) => panic!(
+            "backend divergence in `{}`: both backends failed unexpectedly: {}",
+            label, msg
+        ),
+        _ => unreachable!("divergence() returned None"),
+    }
 }
 
 /// Evaluate Rak code as a CLI program: runs the top-level script, then, if a

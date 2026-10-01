@@ -522,6 +522,12 @@ impl Vm {
         for (n, f) in crate::ext_osint::vm_natives() {
             self.insert_native(n, f);
         }
+        // The stdlib builtins the interpreter always had and the VM did not.
+        // See `ext_stdlib` for why this is a table of plain functions and what
+        // that excludes.
+        for (n, f) in crate::ext_stdlib::vm_natives() {
+            self.insert_native(n, f);
+        }
         // Iterator builtins (Part 7A.10) — pure array transforms. The
         // function-taking fold family is intercepted in `call_value`.
         self.insert_native("zip", |args| iter_pure_native("zip", args));
