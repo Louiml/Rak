@@ -483,6 +483,77 @@ fn vm_set_to_array(args: &Args) -> R {
     Ok(arr(items))
 }
 
+// ---------------------------------------------------------------------------
+// Encrypted UDP (spec 7A.5)
+// ---------------------------------------------------------------------------
+
+type Udp = Arc<std::sync::Mutex<rak_stdlib::tunnel::UdpTransport>>;
+
+fn as_udp(v: Option<&Value>, who: &str) -> Result<Udp, String> {
+    match v {
+        Some(Value::UdpTransport(t)) => Ok(t.clone()),
+        Some(other) => Err(format!(
+            "{}: expected a UDP transport, got {}",
+            who,
+            other.type_name()
+        )),
+        None => Err(format!("{}: expected a UDP transport", who)),
+    }
+}
+
+fn vm_udp_bind(args: &Args) -> R {
+    let addr = match args.first() {
+        Some(v) => to_str(Some(v)),
+        None => "127.0.0.1:0".to_string(),
+    };
+    let (transport, local) =
+        rak_stdlib::tunnel::udp_bind(&addr).map_err(|e| e.to_string())?;
+    Ok(Value::Tuple(Arc::from(vec![
+        Value::UdpTransport(Arc::new(transport)),
+        s_owned(local.to_string()),
+    ])))
+}
+
+/// The salt, iteration count and key length `tunnel` uses.
+///
+/// Shared with the compiler's lowering of the `tunnel` statement so the two
+/// cannot drift: a different salt on one backend would derive a different key
+/// from the same passphrase, which is silent and would look like a
+/// cryptography bug rather than a compilation difference.
+pub(crate) const TUNNEL_SALT: &[u8] = b"rak:secure-elb:tunnel";
+pub(crate) const TUNNEL_ITERS: i64 = 100_000;
+pub(crate) const TUNNEL_KEY_LEN: i64 = 32;
+
+fn vm_udp_send(args: &Args) -> R {
+    let transport = as_udp(args.first(), "udp_send")?;
+    let data = to_bytes(args.get(1));
+    let target = to_str(args.get(2));
+    rak_stdlib::tunnel::udp_send(&transport, &data, &target)
+        .map(|n| Value::I64(n as i64))
+        .map_err(|e| e.to_string())
+}
+
+fn vm_udp_recv(args: &Args) -> R {
+    let transport = as_udp(args.first(), "udp_recv")?;
+    let max = args.get(1).and_then(|v| v.as_u64()).unwrap_or(65535) as usize;
+    let timeout = args.get(2).and_then(|v| v.as_u64()).unwrap_or(0);
+    // A timeout is not an error: it yields `nil`, so a Rak program can poll a
+    // transport in a loop without a `try`.
+    match rak_stdlib::tunnel::udp_recv(&transport, max, timeout) {
+        Ok(Some((data, addr))) => Ok(Value::Tuple(Arc::from(vec![
+            b(data),
+            s_owned(addr.to_string()),
+        ]))),
+        Ok(None) => Ok(Value::Nil),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+fn vm_udp_local_addr(args: &Args) -> R {
+    let transport = as_udp(args.first(), "udp_local_addr")?;
+    Ok(s_owned(rak_stdlib::tunnel::udp_local_addr(&transport)))
+}
+
 fn vm_zip_archive(args: &Args) -> R {
     // Accepts a map of name -> bytes or an array of [name, bytes] pairs, the
     // same two shapes the interpreter accepts.
@@ -1121,5 +1192,10 @@ pub fn vm_natives() -> Vec<(&'static str, fn(&[Value]) -> Result<Value, String>)
         // keeps the name visible to the parity gate and to the LSP.
         ("set_add", vm_set_add),
         ("set_discard", vm_set_discard),
+        // encrypted UDP
+        ("udp_bind", vm_udp_bind),
+        ("udp_send", vm_udp_send),
+        ("udp_recv", vm_udp_recv),
+        ("udp_local_addr", vm_udp_local_addr),
     ]
 }

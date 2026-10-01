@@ -633,6 +633,118 @@ impl Compiler {
         Ok(())
     }
 
+    /// Compile `tunnel <name> <passphrase> { body }` (spec 7A.5).
+    ///
+    /// This is a direct lowering of `Interpreter::exec_tunnel`, statement for
+    /// statement, and the two have to agree exactly or the same passphrase
+    /// would derive a different key on each backend:
+    ///
+    /// ```text
+    ///   psk   := tunnel_preshared_key(passphrase)      // same salt, 100k rounds
+    ///   pair  := udp_bind("127.0.0.1:0")               // (transport, local)
+    ///   <name>      := psk
+    ///   <name>_udp  := pair[0]
+    ///   <name>_addr := pair[1]
+    ///   tunnel_key  := psk
+    ///   <body>
+    /// ```
+    ///
+    /// The names are emitted as locals rather than globals. The interpreter
+    /// pushes a scope for the body so `<name>` cannot leak past the block, and
+    /// locals give the same containment in the VM: the slots are only
+    /// resolvable from inside the body, because `resolve_local` searches the
+    /// compiler's own `locals` list and the body's references are compiled
+    /// while these entries are present.
+    fn compile_tunnel(
+        &mut self,
+        name: &str,
+        passphrase: &str,
+        body: &[Stmt],
+    ) -> Result<(), String> {
+        // `let psk = tunnel_preshared_key(passphrase, salt, 100_000, 32)`
+        //
+        // The salt, iteration count and key length are passed explicitly rather
+        // than relying on the native's defaults. The native's default salt is
+        // empty, and the interpreter's `exec_tunnel` uses
+        // `b"rak:secure-elb:tunnel"` — so omitting the salt here would derive a
+        // *different key from the same passphrase* on the two backends, which
+        // is exactly the kind of divergence that produces an
+        // "it works under run, not under vm" bug report with no visible cause.
+        self.emit_global_call(
+            "tunnel_preshared_key",
+            &[
+                Value::String(Arc::from(passphrase)),
+                Value::Bytes(Arc::from(crate::ext_stdlib::TUNNEL_SALT)),
+                Value::I64(crate::ext_stdlib::TUNNEL_ITERS),
+                Value::I64(crate::ext_stdlib::TUNNEL_KEY_LEN),
+            ],
+        )?;
+        let psk_slot = self.add_local("__tunnel_key".to_string());
+        self.emit_op(Op::StoreLocal);
+        self.emit_byte(psk_slot);
+
+        // `let (transport, local) = udp_bind("127.0.0.1:0")`
+        self.emit_global_call("udp_bind", &[Value::String(Arc::from("127.0.0.1:0"))])?;
+        let pair_slot = self.add_local("__tunnel_pair".to_string());
+        self.emit_op(Op::StoreLocal);
+        self.emit_byte(pair_slot);
+
+        // `let <name>_udp = pair[0]`
+        self.emit_op(Op::LoadLocal);
+        self.emit_byte(pair_slot);
+        self.load_const(Value::I64(0));
+        self.emit_op(Op::IndexGet);
+        let udp_slot = self.add_local(format!("{}_udp", name));
+        self.emit_op(Op::StoreLocal);
+        self.emit_byte(udp_slot);
+
+        // `let <name>_addr = pair[1]`
+        self.emit_op(Op::LoadLocal);
+        self.emit_byte(pair_slot);
+        self.load_const(Value::I64(1));
+        self.emit_op(Op::IndexGet);
+        let addr_slot = self.add_local(format!("{}_addr", name));
+        self.emit_op(Op::StoreLocal);
+        self.emit_byte(addr_slot);
+
+        // The key is bound twice, as the interpreter does: once under the
+        // tunnel's own name and once under the stable `tunnel_key` alias, so a
+        // body can reach it without interpolating the name into source.
+        for (alias, src) in [(name.to_string(), psk_slot), ("tunnel_key".to_string(), psk_slot)] {
+            self.emit_op(Op::LoadLocal);
+            self.emit_byte(src);
+            let slot = self.add_local(alias);
+            self.emit_op(Op::StoreLocal);
+            self.emit_byte(slot);
+        }
+
+        for stmt in body {
+            self.compile_stmt(stmt)?;
+        }
+        Ok(())
+    }
+
+    /// Emit a call to a global function by name, with already-evaluated
+    /// arguments already on the stack.
+    ///
+    /// Used for lowering that has to name a native directly, where there is no
+    /// `Expr` to compile — the `tunnel` statement's key derivation and socket
+    /// bind are the cases today.
+    fn emit_global_call(&mut self, name: &str, args: &[Value]) -> Result<(), String> {
+        // Callee first, then arguments: `Op::Call` pops the arguments in
+        // reverse, reverses them, and *then* pops the callee, so the callee has
+        // to be the deepest thing on the stack.
+        let ci = self.const_str(name);
+        self.emit_op(Op::LoadGlobal);
+        self.emit_u16(ci);
+        for arg in args {
+            self.load_const(arg.clone());
+        }
+        self.emit_op(Op::Call);
+        self.emit_byte(args.len() as u8);
+        Ok(())
+    }
+
     fn compile_stmt(&mut self, stmt: &Stmt) -> Result<(), String> {
         match stmt {
             Stmt::Let { name, pattern: Some(pattern), value, mutable, .. } => {
@@ -911,8 +1023,24 @@ impl Compiler {
                     }
                 }
             }
-            Stmt::Tunnel { .. } => {
-                return Err("VM does not support 'tunnel' statement (use `rakc run` with the interpreter)".to_string());
+            Stmt::Tunnel {
+                name,
+                passphrase,
+                body,
+            } => {
+                // Lowered to the same four steps the interpreter performs, so
+                // the two backends bind the same names and derive the same key:
+                //
+                //   tunnel_preshared_key(passphrase) -> key
+                //   udp_bind("127.0.0.1:0")           -> (transport, local)
+                //   <name> = key, <name>_udp = transport, <name>_addr = local
+                //   tunnel_key = key                 (stable alias)
+                //   <body>
+                //
+                // The salt and iteration count must match `Interpreter::exec_tunnel`
+                // exactly or the two backends would derive different keys for the
+                // same passphrase.
+                self.compile_tunnel(name, passphrase, body)?;
             }
             Stmt::Defer(expr) => {
                 self.compile_defer_call(expr)?;

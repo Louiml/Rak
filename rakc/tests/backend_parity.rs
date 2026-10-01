@@ -511,7 +511,7 @@ if add(1, 1) > 1 { dump "ab" + "c" }
 /// counterpart, so that closing the gap in the registry is not enough — the
 /// implementations have to agree too.
 #[test]
-#[ignore = "VM is missing 158 interpreter builtins; see registrations_match"]
+#[ignore = "the remaining gaps all need VM coroutines; see registrations_match"]
 fn parity_stdlib_surface() {
     agree(
         "stdlib surface",
@@ -547,18 +547,80 @@ dump collect(filter(s, fn(x) { x % 2 == 0 }))
     );
 }
 
-/// Encrypted UDP, which is spec 7A.5 and is interpreter-only today.
+/// Encrypted UDP (spec 7A.5), including a real loopback round trip.
 #[test]
-#[ignore = "spec 7A.5: VM has no Value::UdpTransport and no udp_* natives"]
 fn parity_udp() {
+    // A live socket, not just a registry check: bind two transports, send
+    // between them, read it back. `addr_b` is the destination and `addr_a` the
+    // expected sender — getting those the wrong way round sends the packet to
+    // nobody and the recv times out.
     agree(
-        "udp bind and local address",
+        "udp loopback",
         r#"
-let (t, addr) = udp_bind("127.0.0.1:0")
-dump len(addr) > 0
-dump udp_local_addr(t) == addr
+let (a, addr_a) = udp_bind("127.0.0.1:0")
+let (b, addr_b) = udp_bind("127.0.0.1:0")
+dump udp_send(a, b"ping", addr_b)
+let got = udp_recv(b, 16, 3000)
+dump got[0]
+dump got[1] == addr_a
 "#,
     );
+}
+
+#[test]
+fn parity_udp_recv_timeout_is_nil() {
+    // A read timeout must be `nil` on both backends, not an error. This was a
+    // real cross-platform bug in `rak_stdlib::tunnel::udp_recv`, which matched
+    // only `WouldBlock`; Windows reports the same condition as `TimedOut`.
+    agree(
+        "udp recv timeout",
+        r#"
+let (t, _) = udp_bind("127.0.0.1:0")
+dump udp_recv(t, 16, 150) == nil
+"#,
+    );
+}
+
+#[test]
+fn parity_tunnel_statement() {
+    // The `tunnel` statement's whole point is that both sides of a tunnel derive
+    // the *same* key, so this checks the derived key rather than just that the
+    // block runs. `relay == tunnel_key` covers the stable alias; the hex length
+    // covers the derivation itself.
+    agree(
+        "tunnel statement",
+        r#"
+tunnel relay "hunter2" {
+  dump len(relay) == 32
+  dump relay == tunnel_key
+  dump len(relay_addr) > 0
+}
+"#,
+    );
+}
+
+#[test]
+fn parity_tunnel_key_is_deterministic_across_backends() {
+    // The salt, iteration count and key length are declared once and used by
+    // both the interpreter's `exec_tunnel` and the compiler's lowering. If those
+    // ever drift, a `tunnel` would derive different keys under `run` and `vm`
+    // for the same passphrase — silently, with no error anywhere.
+    let source = r#"tunnel r "pw" { dump hex_encode(r) }"#;
+    let parity = rakc::run_on_both(source, ".");
+    match parity {
+        rakc::BackendParity::Agree(lines) => {
+            let key = lines.join("");
+            assert!(
+                key.starts_with("[DUMP] ") && key.len() > 8,
+                "expected a hex key, got {:?}",
+                lines
+            );
+        }
+        other => panic!(
+            "the two backends derived different tunnel keys:\n{}",
+            other.divergence().unwrap_or_default()
+        ),
+    }
 }
 
 /// The GUI builtin registry, checked without opening a window.

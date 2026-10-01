@@ -2023,9 +2023,18 @@ impl Interpreter {
     /// encrypted UDP conduit, binding `<name>` (key), `<name>_udp` (transport)
     /// and `<name>_addr` (bound ip:port) inside the block.
     fn exec_tunnel(&mut self, name: &str, passphrase: &str, body: &[Stmt]) -> crate::Result<()> {
-        let salt: Vec<u8> = b"rak:secure-elb:tunnel".to_vec();
-        let key = rak_stdlib::tunnel::psk_derive(passphrase, &salt, 100_000, 32)
-            .map_err(crate::RakError::Runtime)?;
+        // Salt, iteration count and key length come from the one shared
+        // definition, because the compiler lowers this same statement for the
+        // VM. Two copies of these constants would eventually disagree, and a
+        // `tunnel` would then derive a different key under `rakc run` and
+        // `rakc vm` for the same passphrase — silently, and with no error.
+        let key = rak_stdlib::tunnel::psk_derive(
+            passphrase,
+            crate::ext_stdlib::TUNNEL_SALT,
+            crate::ext_stdlib::TUNNEL_ITERS as u32,
+            crate::ext_stdlib::TUNNEL_KEY_LEN as u32,
+        )
+        .map_err(crate::RakError::Runtime)?;
         let (transport, local) = rak_stdlib::tunnel::udp_bind("127.0.0.1:0")
             .map_err(crate::RakError::Runtime)?;
 

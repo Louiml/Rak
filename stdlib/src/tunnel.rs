@@ -84,7 +84,27 @@ pub fn udp_recv(
             buf.truncate(n);
             Ok(Some((buf, addr)))
         }
-        Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => Ok(None),
+        // A read timeout is "nothing arrived", not a failure, so a Rak program
+        // can poll a transport in a loop without a `try`.
+        //
+        // Which error kind a timeout produces is platform-dependent, and the
+        // mismatch is not cosmetic. On Unix a timed-out `recv_from` is
+        // `EAGAIN`, which `std` reports as `WouldBlock`. On Windows the same
+        // condition arrives as `WSAETIMEDOUT` (10060), which `std` reports as
+        // `TimedOut` — a different variant. Matching only `WouldBlock`, as
+        // this did, meant `udp_recv(t, n, timeout)` returned an error on
+        // Windows where it returned `nil` on Linux, for identical code.
+        Err(ref e)
+            if matches!(
+                e.kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+            ) =>
+        {
+            Ok(None)
+        }
+        // A signal can interrupt the syscall; treat it as "retry", which for a
+        // caller polling with a timeout is indistinguishable from a timeout.
+        Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => Ok(None),
         Err(e) => Err(format!("udp_recv: {}", e)),
     }
 }
@@ -332,5 +352,39 @@ mod tests {
         let k2 = kdf_next(&key, 2, 32).unwrap();
         assert_ne!(k1, k2);
         assert_ne!(key, k1);
+    }
+
+    #[test]
+    fn udp_loopback_round_trip() {
+        let (a, _addr_a) = udp_bind("127.0.0.1:0").expect("bind a");
+        let (b, addr_b) = udp_bind("127.0.0.1:0").expect("bind b");
+        let addr_a = udp_local_addr(&a).parse::<SocketAddr>().expect("a is bound");
+        assert_ne!(addr_a, addr_b, "the two sockets need distinct ports");
+
+        // Send from `a` to `b`'s address — sending to `a` would deliver to
+        // nobody, since the two sockets are distinct.
+        assert_eq!(udp_send(&a, b"ping", &addr_b.to_string()).unwrap(), 4);
+        let got = udp_recv(&b, 16, 3000)
+            .expect("recv should not error")
+            .expect("packet should arrive");
+        assert_eq!(got.0, b"ping");
+        assert_eq!(got.1, addr_a, "the peer address is the sender");
+    }
+
+    #[test]
+    fn udp_recv_timeout_is_nil_not_an_error() {
+        // A read timeout has to surface as `None` so a Rak program can poll.
+        //
+        // This is a regression test for a platform difference: the same timeout
+        // is `WouldBlock` (EAGAIN) on Unix and `TimedOut` (WSAETIMEDOUT 10060)
+        // on Windows, and matching only the former made identical code error on
+        // one platform and return nil on the other.
+        let (_a, addr) = udp_bind("127.0.0.1:0").expect("bind");
+        match udp_recv(&_a, 16, 150) {
+            Ok(None) => {}
+            Ok(Some((data, _))) => panic!("nothing was sent, got {:?}", data),
+            Err(e) => panic!("a timeout must not be an error, got: {}", e),
+        }
+        let _ = addr;
     }
 }

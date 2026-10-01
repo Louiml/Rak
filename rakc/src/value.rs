@@ -31,6 +31,13 @@ pub enum Value {
     Tuple(Arc<[Value]>),
     Array(Arc<Vec<Value>>),
     Map(Arc<HashMap<String, Value>>),
+    /// An encrypted UDP conduit (spec 7A.5). Mirrors the interpreter's
+    /// `UdpTransport` so `tunnel` and the `udp_*` builtins work on both.
+    ///
+    /// `rak_stdlib`'s helpers take `&Mutex<UdpTransport>` and `udp_bind` returns
+    /// a `Mutex<UdpTransport>`, so the mutex is not an interpreter convention
+    /// being repeated here — it is the type those functions are written against.
+    UdpTransport(Arc<std::sync::Mutex<rak_stdlib::tunnel::UdpTransport>>),
     /// An insertion-ordered set (spec 7A.11).
     ///
     /// The inner `Arc<Mutex<_>>` is what lets `set_add` and `set_discard`
@@ -141,6 +148,7 @@ impl Value {
             Value::Tuple(_) => "tuple",
             Value::Array(_) => "array",
             Value::Map(_) => "map",
+            Value::UdpTransport(_) => "udp-transport",
             Value::Set(_) => "set",
             Value::Struct { .. } => "struct",
             Value::Enum { .. } => "enum",
@@ -364,6 +372,7 @@ impl fmt::Display for Value {
             Value::ForeignLib(_) => write!(f, "<ffi-lib>"),
             Value::ForeignPtr(p) => write!(f, "0x{:X}", p),
             Value::Mmap(_) => write!(f, "<mmap>"),
+            Value::UdpTransport(_) => write!(f, "<udp-transport>"),
             Value::MmapSlice(_, _, n) => write!(f, "<mmap-slice {}B>", n),
             Value::Pcap(_) => write!(f, "<pcap>"),
             Value::Error(err) => write!(f, "{}", err.message),
