@@ -608,12 +608,17 @@ fn vm_parse_csv_line(args: &Args) -> R {
 // JSON
 // ---------------------------------------------------------------------------
 
-fn json_to_value(j: serde_json::Value) -> Value {
-    use serde_json::Value as J;
-    match j {
-        J::Null => Value::Nil,
-        J::Bool(x) => Value::Bool(x),
-        J::Number(n) => {
+/// Convert a parsed JSON value into a VM value. Shared with `ext_streams`,
+/// which needs it for `stream_jsonl`.
+///
+/// Takes a reference: `stream_jsonl` has a borrowed `serde_json::Value` from the
+/// line parser, and cloning the whole tree to convert it would defeat the point
+/// of streaming line by line.
+pub(crate) fn json_to_value(v: &serde_json::Value) -> Value {
+    match v {
+        serde_json::Value::Null => Value::Nil,
+        serde_json::Value::Bool(x) => Value::Bool(*x),
+        serde_json::Value::Number(n) => {
             if let Some(i) = n.as_i64() {
                 Value::I64(i)
             } else if let Some(f) = n.as_f64() {
@@ -622,10 +627,10 @@ fn json_to_value(j: serde_json::Value) -> Value {
                 Value::Nil
             }
         }
-        J::String(x) => s_owned(x),
-        J::Array(a) => arr(a.into_iter().map(json_to_value).collect()),
-        J::Object(o) => Value::Map(Arc::new(
-            o.into_iter().map(|(k, v)| (k, json_to_value(v))).collect(),
+        serde_json::Value::String(x) => s_owned(x.clone()),
+        serde_json::Value::Array(a) => arr(a.iter().map(json_to_value).collect()),
+        serde_json::Value::Object(o) => Value::Map(Arc::new(
+            o.iter().map(|(k, v)| (k.clone(), json_to_value(v))).collect(),
         )),
     }
 }
@@ -675,7 +680,7 @@ fn value_to_json(v: &Value) -> serde_json::Value {
 
 fn vm_json_parse(args: &Args) -> R {
     rak_stdlib::js::json_parse(&to_str(args.first()))
-        .map(json_to_value)
+        .map(|j| json_to_value(&j))
         .map_err(|e| e.to_string())
 }
 
@@ -1197,5 +1202,122 @@ pub fn vm_natives() -> Vec<(&'static str, fn(&[Value]) -> Result<Value, String>)
         ("udp_send", vm_udp_send),
         ("udp_recv", vm_udp_recv),
         ("udp_local_addr", vm_udp_local_addr),
+        // streams
+        ("stream_from_array", vm_stream_from_array),
+        ("stream_map", vm_stream_map),
+        ("filter", vm_stream_filter),
+        ("take", vm_stream_take),
+        ("read_lines", vm_read_lines),
+        ("tcp_stream", vm_tcp_stream),
+        ("stream_csv", vm_stream_csv),
+        ("stream_jsonl", vm_stream_jsonl),
+        // `stream_next` and `collect` are intercepted in `Vm::call_value`:
+        // both pull elements, and pulling past an element produced by `map` or
+        // `filter` means calling a Rak function, which a `fn(&[Value])` native
+        // cannot do. They are registered here as placeholders so the parity gate
+        // and the LSP can see the names.
+        ("stream_next", vm_stream_next_unreachable),
+        ("collect", vm_stream_next_unreachable),
     ]
+}
+
+// ---------------------------------------------------------------------------
+// Streams (spec 7A.4)
+// ---------------------------------------------------------------------------
+
+use crate::ext_streams as st;
+
+/// Unwrap a stream argument.
+///
+/// The error text deliberately omits the builtin's name: `Vm::call_value`
+/// already prefixes `"<name>: "`, and including it here produced
+/// `filter: filter: expected a stream`. The interpreter's arms are written the
+/// same way — with the name on some and not others — so the message here is
+/// matched to what the interpreter produces for the same mistake.
+fn as_stream(v: Option<&Value>, _who: &str) -> Result<st::VmStreamHandle, String> {
+    match v {
+        Some(Value::Stream(s)) => Ok(s.clone()),
+        Some(other) => Err(format!("expected a stream, got {}", other.type_name())),
+        None => Err("expected a stream".to_string()),
+    }
+}
+
+fn fn_value(v: Option<&Value>, _who: &str) -> Result<Value, String> {
+    match v {
+        Some(f) => Ok(f.clone()),
+        None => Err("expected a function argument".to_string()),
+    }
+}
+
+fn stream_value(s: impl st::VmStream + 'static) -> Value {
+    Value::Stream(st::handle(s))
+}
+
+fn vm_stream_from_array(args: &Args) -> R {
+    let items = match args.first() {
+        Some(Value::Array(a)) => a.to_vec(),
+        Some(other) => return Err(format!("expected an array, got {}", other.type_name())),
+        None => return Err("expected an array".to_string()),
+    };
+    Ok(stream_value(st::ArrayStream::new(items)))
+}
+
+fn vm_stream_map(args: &Args) -> R {
+    let inner = as_stream(args.first(), "stream_map")?;
+    let f = fn_value(args.get(1), "stream_map")?;
+    Ok(stream_value(st::MapStream::new(inner, f)))
+}
+
+fn vm_stream_filter(args: &Args) -> R {
+    let inner = as_stream(args.first(), "filter")?;
+    let f = fn_value(args.get(1), "filter")?;
+    Ok(stream_value(st::FilterStream::new(inner, f)))
+}
+
+fn vm_stream_take(args: &Args) -> R {
+    let inner = as_stream(args.first(), "take")?;
+    let n = args.get(1).and_then(|v| v.as_u64()).unwrap_or(0);
+    Ok(stream_value(st::TakeStream::new(inner, n)))
+}
+
+fn vm_read_lines(args: &Args) -> R {
+    st::LinesStream::open(&to_str(args.first()))
+        .map(stream_value)
+        .map_err(|e| e)
+}
+
+fn vm_tcp_stream(args: &Args) -> R {
+    let addr = to_str(args.first());
+    use std::net::TcpStream;
+    let s = TcpStream::connect(&addr)
+        .map_err(|e| format!("{}: {}", addr, e))?;
+    let _ = s.set_read_timeout(Some(std::time::Duration::from_secs(5)));
+    Ok(stream_value(st::TcpLineStream::open(s)))
+}
+
+fn vm_stream_csv(args: &Args) -> R {
+    // The interpreter takes an options string and infers the dialect from it:
+    // a `;` anywhere means semicolon-separated, `header` means the first row is
+    // a header. Kept identical so the same program parses the same file on both
+    // backends.
+    let path = to_str(args.first());
+    let opts = to_str(args.get(1));
+    let delim = if opts.contains(';') { ';' } else { ',' };
+    let has_header = opts.contains("header");
+    let inner = st::LinesStream::open(&path).map_err(|e| e)?;
+    Ok(stream_value(st::CsvStream::new(st::handle(inner), delim, has_header)))
+}
+
+fn vm_stream_jsonl(args: &Args) -> R {
+    let inner = st::LinesStream::open(&to_str(args.first())).map_err(|e| e)?;
+    Ok(stream_value(st::JsonlStream::new(st::handle(inner))))
+}
+
+/// Placeholder for a stream builtin that must be intercepted in
+/// `Vm::call_value`.
+///
+/// Reaching one of these means the interception is missing, which would
+/// otherwise look like a silent `nil` rather than a bug — so it says so.
+fn vm_stream_next_unreachable(_args: &Args) -> R {
+    Err("stream: internal error, this builtin must be driven with VM access".to_string())
 }

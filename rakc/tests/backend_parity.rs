@@ -534,15 +534,78 @@ dump chr(66)
     );
 }
 
-/// Stream builtins, which are spec 7A.4 and are interpreter-only today.
+/// Lazy streams (spec 7A.4), on both backends.
 #[test]
-#[ignore = "spec 7A.4: VM has no Value::Stream and no stream natives"]
 fn parity_streams() {
     agree(
-        "streams",
+        "stream pipeline",
         r#"
-let s = stream_from_array([1, 2, 3, 4])
-dump collect(filter(s, fn(x) { x % 2 == 0 }))
+fn even(x) { return x % 2 == 0 }
+fn dbl(x) { return x * 2 }
+let s = stream_from_array([1, 2, 3, 4, 5])
+dump collect(s)
+dump collect(filter(stream_from_array([1, 2, 3, 4, 5]), even))
+dump collect(take(stream_from_array([1, 2, 3, 4, 5]), 2))
+dump collect(stream_map(stream_from_array([1, 2, 3]), dbl))
+"#,
+    );
+}
+
+#[test]
+fn parity_stream_next_is_an_option() {
+    // `stream_next` yields `some`/`none` rather than a value and a sentinel, so
+    // the end of a stream is distinguishable from a stream that contains nil.
+    agree(
+        "stream_next",
+        r#"
+let s = stream_from_array([1])
+dump stream_next(s)
+dump stream_next(s)
+"#,
+    );
+}
+
+#[test]
+fn parity_stream_type_error() {
+    // Both backends must reject a non-stream with the same message. Before the
+    // prefix fix the VM said `filter: filter: expected a stream, got array`
+    // where the interpreter said `expected a stream, got array` — the same
+    // problem, reported three different ways.
+    //
+    // `agree` is not usable here: it asserts *success*. What this checks is the
+    // error path, so the comparison is written out.
+    let parity = rakc::run_on_both(r#"dump filter([1, 2, 3], fn(x) { return x })"#, ".");
+    match &parity {
+        rakc::BackendParity::AgreeOnError(msg) => {
+            assert!(
+                msg.contains("expected a stream") && msg.contains("array"),
+                "expected a type error naming both types, got: {}",
+                msg
+            );
+        }
+        other => panic!(
+            "the backends did not agree on the stream type error:\n{}",
+            other.divergence().unwrap_or_else(|| "agreed, but not on an error".into())
+        ),
+    }
+}
+
+/// A stream pipeline composed with a *named* function on both backends.
+///
+/// The anonymous-lambda form is deliberately not used here. `stream_map(s, fn(x)
+/// { x * 10 })` — a lambda with no explicit `return` — yields `nil` for every
+/// element on *both* backends, because a function body without `return`
+/// evaluates to nil in Rak. That is a real, separate Rak bug, not a parity one;
+/// see `docs/V8-KNOWN-ISSUES.md`. Using a named function with `return` here
+/// keeps this test about the stream machinery.
+#[test]
+fn parity_stream_composition() {
+    agree(
+        "stream composition",
+        r#"
+fn evens(xs) { return xs }
+let base = stream_from_array([1, 2, 3, 4, 5, 6])
+dump collect(take(filter(base, fn(x) { return x % 2 == 0 }), 2))
 "#,
     );
 }

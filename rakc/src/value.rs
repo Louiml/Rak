@@ -38,6 +38,11 @@ pub enum Value {
     /// a `Mutex<UdpTransport>`, so the mutex is not an interpreter convention
     /// being repeated here — it is the type those functions are written against.
     UdpTransport(Arc<std::sync::Mutex<rak_stdlib::tunnel::UdpTransport>>),
+    /// A lazy, pull-based stream (spec 7A.4). See `crate::ext_streams`.
+    ///
+    /// Behind an `Arc<Mutex<_>>` for the same reason `Value::Set` is: streams
+    /// are shared values and `stream_next` has to advance the shared handle.
+    Stream(Arc<std::sync::Mutex<Box<dyn crate::ext_streams::VmStream>>>),
     /// An insertion-ordered set (spec 7A.11).
     ///
     /// The inner `Arc<Mutex<_>>` is what lets `set_add` and `set_discard`
@@ -149,6 +154,7 @@ impl Value {
             Value::Array(_) => "array",
             Value::Map(_) => "map",
             Value::UdpTransport(_) => "udp-transport",
+            Value::Stream(_) => "stream",
             Value::Set(_) => "set",
             Value::Struct { .. } => "struct",
             Value::Enum { .. } => "enum",
@@ -373,6 +379,7 @@ impl fmt::Display for Value {
             Value::ForeignPtr(p) => write!(f, "0x{:X}", p),
             Value::Mmap(_) => write!(f, "<mmap>"),
             Value::UdpTransport(_) => write!(f, "<udp-transport>"),
+            Value::Stream(_) => write!(f, "<stream>"),
             Value::MmapSlice(_, _, n) => write!(f, "<mmap-slice {}B>", n),
             Value::Pcap(_) => write!(f, "<pcap>"),
             Value::Error(err) => write!(f, "{}", err.message),

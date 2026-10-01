@@ -24,6 +24,7 @@ pub mod fuzz;
 pub mod ext_batteries;
 pub mod ext_osint;
 pub mod ext_stdlib;
+pub mod ext_streams;
 pub mod setrepr;
 pub mod dap;
 
@@ -291,7 +292,15 @@ pub fn eval_vm_in(source: &str, base_dir: &str) -> std::result::Result<Vec<Strin
 pub enum BackendParity {
     /// Both backends succeeded and produced byte-identical output.
     Agree(Vec<String>),
-    /// Both backends failed, with the same message.
+    /// Both backends failed, with the same underlying message.
+    ///
+    /// "Same underlying" because the two transports wrap errors differently:
+    /// the interpreter produces `Runtime error: <msg>` and the VM produces
+    /// `VM error: <builtin>: <msg>`. `normalise_error` strips those
+    /// transport-level prefixes before comparing, so this variant means the two
+    /// backends reported the *same problem*, which is the property worth
+    /// testing. Comparing the raw strings would fail for every error in the
+    /// language over a wording difference that carries no information.
     AgreeOnError(String),
     /// The tree-walking interpreter succeeded and the VM did not.
     InterpOnly {
@@ -369,15 +378,56 @@ pub fn run_on_both(source: &str, base_dir: &str) -> BackendParity {
             }
         }
         (Err(i), Err(v)) => {
-            if i.to_string() == v {
-                BackendParity::AgreeOnError(i.to_string())
+            let (a, b) = (normalise_error(&i.to_string()), normalise_error(&v));
+            // Accept a match modulo the VM's builtin-name prefix, which comes
+            // from `call_value`'s wrapper rather than from the message. Both
+            // orders are tried because either side may be the one carrying it.
+            if a == b || strip_first_segment(&a) == b || strip_first_segment(&b) == a {
+                BackendParity::AgreeOnError(a)
             } else {
-                BackendParity::DisagreeOnError { interp_error: i.to_string(), vm_error: v.to_string() }
+                BackendParity::DisagreeOnError { interp_error: a, vm_error: b }
             }
         }
         (Ok(i), Err(v)) => BackendParity::InterpOnly { interp_output: i, vm_error: v },
         (Err(i), Ok(v)) => BackendParity::VmOnly { interp_error: i.to_string(), vm_output: v },
     }
+}
+
+/// Strip transport-level prefixes so the two backends can be compared on what
+/// they actually reported.
+///
+/// The interpreter emits `Runtime error: <msg>`. The VM emits
+/// `VM error: <builtin>: <msg>`, where the builtin name is added by
+/// `Vm::call_value`'s wrapper and is not part of the message the builtin
+/// produced. Neither prefix says anything about *what went wrong*.
+///
+/// The builtin name is handled by trying the comparison both with and without
+/// it, so `filter: expected a stream, got array` on one side and
+/// `expected a stream, got array` on the other count as agreement. The name is
+/// kept when it is the only thing distinguishing two genuinely different
+/// messages.
+fn strip_first_segment(msg: &str) -> String {
+    match msg.split_once(": ") {
+        Some((_, rest)) => rest.to_string(),
+        None => msg.to_string(),
+    }
+}
+
+fn normalise_error(msg: &str) -> String {
+    let mut s = msg.trim().to_string();
+    for prefix in [
+        "Runtime error: ",
+        "VM error: ",
+        "Compile error: ",
+        "Parse error: ",
+        "Parser error: ",
+        "Lexer error: ",
+    ] {
+        if let Some(rest) = s.strip_prefix(prefix) {
+            s = rest.to_string();
+        }
+    }
+    s
 }
 
 /// Assert the two backends behave identically for `source`, panicking with a

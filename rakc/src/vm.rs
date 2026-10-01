@@ -2072,6 +2072,63 @@ impl Vm {
         Ok(())
     }
 
+    /// `stream_next` / `collect`: pull from a stream.
+    ///
+    /// This is the only place a VM stream can be advanced, and the reason is
+    /// structural rather than stylistic. A native has signature
+    /// `fn(&[Value]) -> Result<Value, String>` — no `&mut Vm`, no frame — so it
+    /// cannot invoke a Rak function. But a stream produced by `stream_map` or
+    /// `filter` holds a closure and has to call it for each element, so pulling
+    /// the next element *is* a VM operation.
+    ///
+    /// `VmStreamCtx` carries the machine, and the callback it is given is the
+    /// same `call_value` path every other call takes, so a stream element that
+    /// calls a Rak function behaves exactly like one called from source.
+    fn vm_stream_call(&mut self, frame: &mut Frame, name: &str, args: &[Value]) -> Result<(), String> {
+        let handle = match args.first() {
+            Some(Value::Stream(s)) => s.clone(),
+            Some(other) => {
+                return Err(format!(
+                    "{}: expected a stream, got {}",
+                    name,
+                    other.type_name()
+                ))
+            }
+            None => return Err(format!("{}: expected a stream", name)),
+        };
+
+        // One pull. The stream handle is a separate `Arc`, so locking it while
+        // `self` and `frame` are borrowed by the callback does not conflict.
+        let mut pull = || -> Result<Option<Value>, String> {
+            let mut call = |f: &Value, arg: Value| {
+                self.call_value(frame, f.clone(), vec![arg])?;
+                Ok(frame.pop())
+            };
+            handle.lock().unwrap().next(&mut call)
+        };
+
+        if name == "collect" {
+            let mut out: Vec<Value> = Vec::new();
+            loop {
+                match pull()? {
+                    Some(v) => out.push(v),
+                    None => break,
+                }
+            }
+            frame.push(Value::Array(Arc::from(out)));
+            return Ok(());
+        }
+
+        // `stream_next` — one element, as an `option`.
+        let item = pull()?;
+        frame.push(match item {
+            Some(v) => Value::Option(Some(Box::new(v))),
+            // `None` rather than an error, so a `for` loop can test it.
+            None => Value::Option(None),
+        });
+        Ok(())
+    }
+
     /// `set_add` / `set_discard`: mutate a set value.
     ///
     /// A set is a shared value, so there is nothing to mutate in place — the
@@ -2127,6 +2184,12 @@ impl Vm {
                         let result = self.vm_set_mutate(&name, &args)?;
                         frame.push(result);
                         return Ok(());
+                    }
+                    // Pulling a stream element may have to call a Rak function —
+                    // that is what `map` and `filter` hold — so it needs the
+                    // machine, which a `fn(&[Value])` native does not have.
+                    "stream_next" | "collect" => {
+                        return self.vm_stream_call(frame, &name, &args);
                     }
                     _ => {}
                 }

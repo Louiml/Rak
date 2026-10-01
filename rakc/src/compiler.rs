@@ -724,6 +724,94 @@ impl Compiler {
         Ok(())
     }
 
+    /// Compile a `for` loop whose iterable is a stream, as a lazy pull loop.
+    ///
+    /// Returns `false` without emitting anything if the iterable is not a
+    /// stream, so the caller can fall back to the ordinary path. The check is a
+    /// syntactic one — the iterable expression is an identifier naming
+    /// `stream_from_array` and friends, or a call to one of them.
+    fn compile_stream_for(
+        &mut self,
+        pattern: &Pattern,
+        iterable: &Expr,
+        body: &[Stmt],
+        label: Option<&str>,
+    ) -> Result<bool, String> {
+        if !self.iterable_is_stream(iterable) {
+            return Ok(false);
+        }
+        let src = self.add_local("__stream".to_string());
+        self.compile_expr(iterable)?;
+        self.emit_op(Op::StoreLocal);
+        self.emit_byte(src);
+
+        let item = self.add_local("__stream_item".to_string());
+        let start = self.emit_jump(Op::Jump);
+        loop {
+            // item = stream_next(src)?  -> Some(v) | None
+            self.emit_op(Op::LoadLocal);
+            self.emit_byte(src);
+            let ci = self.const_str("stream_next");
+            self.emit_op(Op::LoadGlobal);
+            self.emit_u16(ci);
+            self.emit_op(Op::Call);
+            self.emit_byte(1);
+            self.emit_op(Op::StoreLocal);
+            self.emit_byte(item);
+            // `None` is `option(none)`; leave the loop when the option is falsy.
+            let jdone = self.emit_jump(Op::JumpIfFalse);
+
+            let binds = self.emit_pattern_match(pattern, item)?;
+            for bname in binds {
+                let slot = self.add_local(bname);
+                self.emit_op(Op::StoreLocal);
+                self.emit_byte(slot);
+            }
+            for stmt in body {
+                self.compile_stmt(stmt)?;
+            }
+            // Backward jump to re-pull. `patch_jump` writes the target into the
+            // two bytes `emit_jump` reserved.
+            self.patch_jump(start);
+            self.patch_jump(jdone);
+            self.emit_op(Op::Pop);
+            break;
+        }
+        let _ = label;
+        Ok(true)
+    }
+
+    /// Whether an expression denotes a stream.
+    ///
+    /// Syntactic on purpose: deciding at compile time avoids emitting a probe
+    /// and branching on the runtime type. The cost is that a stream held in a
+    /// variable under a different name falls back to `Op::IterItems`, which
+    /// materialises it — correct, but no longer lazy.
+    fn iterable_is_stream(&self, e: &Expr) -> bool {
+        const STREAM_FNS: &[&str] = &[
+            "stream_from_array",
+            "stream_map",
+            "filter",
+            "take",
+            "read_lines",
+            "tcp_stream",
+            "stream_csv",
+            "stream_jsonl",
+        ];
+        match e {
+            Expr::Call { callee, .. } => match callee.as_ref() {
+                Expr::Ident(name) => STREAM_FNS.contains(&name.as_str()),
+                _ => false,
+            },
+            Expr::Ident(name) => {
+                // A bare identifier is assumed to be a stream when it was bound
+                // from one of those constructors.
+                name.starts_with("stream") || name == "lines" || name.ends_with("_stream")
+            }
+            _ => false,
+        }
+    }
+
     /// Emit a call to a global function by name, with already-evaluated
     /// arguments already on the stack.
     ///
