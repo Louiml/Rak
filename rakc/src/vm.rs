@@ -357,6 +357,7 @@ fn contains_vm(coll: &Value, item: &Value) -> Result<bool, String> {
         (Value::Tuple(t), v) => Ok(t.iter().any(|x| x == v)),
         (Value::Map(m), Value::String(k)) => Ok(m.contains_key(k.as_ref())),
         (Value::Map(m), other) => Ok(m.contains_key(&other.to_string())),
+        (Value::Set(s), v) => Ok(s.lock().unwrap().contains(v)),
         (Value::Bytes(b), Value::Bytes(n)) => {
             Ok(n.is_empty() || b.windows(n.len()).any(|w| w == &n[..]))
         }
@@ -2000,9 +2001,12 @@ impl Vm {
                                 s.chars().map(|c| Value::String(Arc::from(c.to_string().as_str()))).collect()
                             }
                         }
-                        Value::Bytes(b) => b.iter().map(|b| Value::I64(*b as i64)).collect(),
-                        Value::MmapSlice(h, off, n) => h.as_slice()[*off..off + n].iter().map(|b| Value::I64(*b as i64)).collect(),
-                        _ => return Err(format!("cannot iterate over this value ({})", obj.type_name())),
+                          Value::Bytes(b) => b.iter().map(|b| Value::I64(*b as i64)).collect(),
+                          // Sets iterate in insertion order, which is the
+                          // reason `SetRepr` keeps one — see `setrepr`.
+                          Value::Set(s) => s.lock().unwrap().to_vec(),
+                          Value::MmapSlice(h, off, n) => h.as_slice()[*off..off + n].iter().map(|b| Value::I64(*b as i64)).collect(),
+                          _ => return Err(format!("cannot iterate over this value ({})", obj.type_name())),
                     };
                     frame.push(Value::Array(Arc::from(items)));
                 }
@@ -2057,6 +2061,36 @@ impl Vm {
         Ok(())
     }
 
+    /// `set_add` / `set_discard`: mutate a set value.
+    ///
+    /// A set is a shared value, so there is nothing to mutate in place — the
+    /// update produces a new `SetRepr` which is then written back through the
+    /// `Arc`. This mirrors the interpreter, where the same value sits in an
+    /// `Arc<Mutex<_>>` and the guard is held across the insert.
+    ///
+    /// Reports whether the element was actually added or removed, so a Rak
+    /// program can branch on it the same way it would on the interpreter.
+    fn vm_set_mutate(&mut self, name: &str, args: &[Value]) -> Result<Value, String> {
+        let (set, item) = match args {
+            [Value::Set(set), item, ..] => (set, item.clone()),
+            [other, ..] => {
+                return Err(format!(
+                    "{}: expected a set, got {}",
+                    name,
+                    other.type_name()
+                ))
+            }
+            [] => return Err(format!("{}: expected a set", name)),
+        };
+        let mut guard = set.lock().unwrap();
+        let changed = match name {
+            "set_add" => guard.insert(item),
+            "set_discard" => guard.remove(&item),
+            other => return Err(format!("{}: not a set mutation", other)),
+        };
+        Ok(Value::Bool(changed))
+    }
+
     /// Invoke a function value (native fn or closure) with the given args and
     /// push the result onto `frame.stack`. Shared by `Op::Call` and defer.
     fn call_value(&mut self, frame: &mut Frame, callee: Value, mut args: Vec<Value>) -> Result<(), String> {
@@ -2074,6 +2108,14 @@ impl Vm {
                     }
                     "fold" | "reduce" | "any" | "all" | "flat_map" | "take_while" => {
                         return self.vm_iter_call(frame, &name, args);
+                    }
+                    // Sets are shared values behind an `Arc`, so a mutating
+                    // builtin has to reach the VM to rebuild and store one.
+                    // The interpreter gets this for free from `&mut self`.
+                    "set_add" | "set_discard" => {
+                        let result = self.vm_set_mutate(&name, &args)?;
+                        frame.push(result);
+                        return Ok(());
                     }
                     _ => {}
                 }

@@ -317,6 +317,57 @@ dump md5("abc")
 }
 
 #[test]
+fn parity_sets() {
+    // Sets are spec 7A.11. The insertion order matters as much as the
+    // membership results: a set that iterated in hash order would print a
+    // different order on every run, and the two backends would disagree here
+    // even though both would be "correct" individually.
+    agree(
+        "sets",
+        r#"
+let s = set_of([3, 1, 2, 3])
+dump s
+dump set_len(s)
+dump set_has(s, 2)
+dump set_has(s, 99)
+dump 2 in s
+dump set_add(s, 4)
+dump set_add(s, 4)
+dump s
+dump set_discard(s, 1)
+dump set_discard(s, 99)
+dump s
+let a = set_of([1, 2, 3])
+let b = set_of([2, 3, 4])
+dump set_union(a, b)
+dump set_intersect(a, b)
+dump set_diff(a, b)
+dump set_has_all(a, [1, 2])
+dump set_has_all(a, [1, 9])
+dump set_to_array(a)
+for x in set_of(["z", "a"]) { dump x }
+dump set_of()
+dump set_len(set_of())
+"#,
+    );
+}
+
+#[test]
+fn parity_set_type_distinctions() {
+    // `1` and `"1"` are different elements; `1` and `1.0` are the same one.
+    // Getting this wrong is silent, so it is worth pinning on both backends.
+    agree(
+        "set type distinctions",
+        r#"
+dump set_len(set_of([1, "1"]))
+dump set_len(set_of([1, 1.0]))
+dump set_len(set_of([1, 0x1]))
+dump set_has(set_of([1, 1.0]), 1.0)
+"#,
+    );
+}
+
+#[test]
 fn parity_core_language() {
     agree(
         "core language surface",

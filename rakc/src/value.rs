@@ -31,6 +31,12 @@ pub enum Value {
     Tuple(Arc<[Value]>),
     Array(Arc<Vec<Value>>),
     Map(Arc<HashMap<String, Value>>),
+    /// An insertion-ordered set (spec 7A.11).
+    ///
+    /// The inner `Arc<Mutex<_>>` is what lets `set_add` and `set_discard`
+    /// mutate a set that other values may also be holding. Without it, a set
+    /// would need a reference type to be updatable, and Rak has none.
+    Set(Arc<std::sync::Mutex<crate::setrepr::SetRepr<Value>>>),
     Struct {
         name: Arc<str>,
         fields: Arc<HashMap<String, Value>>,
@@ -82,6 +88,37 @@ pub struct Provenance {
     pub parent: Option<Arc<Provenance>>,
 }
 
+impl crate::setrepr::SetElement for crate::interpreter::Value {
+    /// Mirrors the VM's `SetElement` impl so that a set behaves the same way
+    /// whichever backend runs it.
+    fn set_key(&self) -> String {
+        // The interpreter's numeric accessors are private to its own module,
+        // and the same key rule is already expressed once for it — in
+        // `interpreter::set_key` — so delegate rather than reimplement and
+        // risk the two drifting apart.
+        crate::interpreter::set_key(self)
+    }
+}
+
+impl crate::setrepr::SetElement for Value {
+    /// Type tag plus rendered form. The tag is what keeps `1` and `"1"` apart
+    /// while `1`, `0x1` and `1.0` collapse, matching Rak's cross-representation
+    /// numeric equality.
+    fn set_key(&self) -> String {
+        if self.is_numeric() {
+            return format!("n:{}", self.as_f64().unwrap_or(0.0) as i64);
+        }
+        match self {
+            Value::String(_) | Value::Char(_) => format!("s:{}", self),
+            Value::Bytes(b) => format!(
+                "b:{}",
+                b.iter().map(|x| format!("{:02x}", x)).collect::<String>()
+            ),
+            other => format!("{:?}:{}", other.type_name(), other),
+        }
+    }
+}
+
 impl Value {
     pub fn type_name(&self) -> &'static str {
         match self {
@@ -104,6 +141,7 @@ impl Value {
             Value::Tuple(_) => "tuple",
             Value::Array(_) => "array",
             Value::Map(_) => "map",
+            Value::Set(_) => "set",
             Value::Struct { .. } => "struct",
             Value::Enum { .. } => "enum",
             Value::Function { .. } => "function",
@@ -201,6 +239,7 @@ impl Value {
             Value::Bytes(b) => !b.is_empty(),
             Value::Array(a) => !a.is_empty(),
             Value::Map(m) => !m.is_empty(),
+            Value::Set(s) => !s.lock().unwrap().is_empty(),
             Value::Tuple(t) => !t.is_empty(),
             Value::Option(Some(_)) => true,
             Value::Option(None) => false,
@@ -234,6 +273,12 @@ impl PartialEq for Value {
             (Value::Tuple(a), Value::Tuple(b)) => a == b,
             (Value::Array(a), Value::Array(b)) => a == b,
             (Value::Map(a), Value::Map(b)) => a == b,
+            // Sets compare by membership, not by insertion order: `{1,2}` and
+            // `{2,1}` are the same set even though they iterate differently.
+            (Value::Set(a), Value::Set(b)) => {
+                let (a, b) = (a.lock().unwrap(), b.lock().unwrap());
+                a.len() == b.len() && a.iter().all(|v| b.contains(v))
+            }
             (Value::Option(a), Value::Option(b)) => a == b,
             // Cross-representation numeric equality: `0xA == 10 == 10.0`.
             (a, b) if a.is_numeric() && b.is_numeric() => {
@@ -286,6 +331,11 @@ impl fmt::Display for Value {
             }
             Value::Map(map) => {
                 let parts: Vec<String> = map.iter().map(|(k, v)| format!("{}: {}", k, v)).collect();
+                write!(f, "{{{}}}", parts.join(", "))
+            }
+            Value::Set(set) => {
+                let guard = set.lock().unwrap();
+                let parts: Vec<String> = guard.iter().map(|v| v.to_string()).collect();
                 write!(f, "{{{}}}", parts.join(", "))
             }
             Value::Struct { name, fields } => {

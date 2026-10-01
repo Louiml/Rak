@@ -24,6 +24,7 @@ pub mod fuzz;
 pub mod ext_batteries;
 pub mod ext_osint;
 pub mod ext_stdlib;
+pub mod setrepr;
 pub mod dap;
 
 use thiserror::Error;

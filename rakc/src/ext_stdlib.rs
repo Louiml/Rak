@@ -376,6 +376,113 @@ fn vm_inflate(args: &Args) -> R {
         .map_err(|e| format!("inflate: {}", e))
 }
 
+// ---------------------------------------------------------------------------
+// Sets (spec 7A.11)
+//
+// The storage is shared with the interpreter (`crate::setrepr::SetRepr`) and
+// keyed identically, so a set behaves the same on either backend: same
+// membership rule, same insertion-order iteration.
+// ---------------------------------------------------------------------------
+
+type Set = Arc<std::sync::Mutex<crate::setrepr::SetRepr<Value>>>;
+
+fn as_set(v: Option<&Value>, who: &str) -> Result<Set, String> {
+    match v {
+        Some(Value::Set(s)) => Ok(s.clone()),
+        Some(other) => Err(format!(
+            "{}: expected a set, got {}",
+            who,
+            other.type_name()
+        )),
+        None => Err(format!("{}: expected a set", who)),
+    }
+}
+
+/// The elements of a set-or-array argument, so `set_of` and `set_has_all`
+/// accept either.
+fn set_items(v: Option<&Value>, who: &str) -> Result<Vec<Value>, String> {
+    match v {
+        Some(Value::Array(a)) => Ok(a.to_vec()),
+        Some(Value::Set(s)) => Ok(s.lock().unwrap().to_vec()),
+        Some(other) => Err(format!(
+            "{}: expected an array or set, got {}",
+            who,
+            other.type_name()
+        )),
+        None => Err(format!("{}: expected an array or set", who)),
+    }
+}
+
+fn vm_set_of(args: &Args) -> R {
+    let items = match args.first() {
+        Some(v) => set_items(Some(v), "set_of")?,
+        None => Vec::new(),
+    };
+    Ok(Value::Set(Arc::new(std::sync::Mutex::new(
+        crate::setrepr::SetRepr::from_iter_ordered(items),
+    ))))
+}
+
+fn vm_set_add(args: &Args) -> R {
+    // The set is behind an `Arc`, not an `Arc<Mutex<_>>`, so a mutating builtin
+    // cannot be a plain `fn(&[Value])`: it needs to reach the VM to copy,
+    // update and write back, exactly like the interpreter does. This one is
+    // registered in `Vm::call_value`'s interception instead.
+    Err("set_add: internal error, should be intercepted".to_string())
+}
+
+fn vm_set_has(args: &Args) -> R {
+    let set = as_set(args.first(), "set_has")?;
+    let item = args.get(1).cloned().unwrap_or(Value::Nil);
+    let guard = set.lock().unwrap();
+    Ok(Value::Bool(guard.contains(&item)))
+}
+
+fn vm_set_discard(args: &Args) -> R {
+    let _ = as_set(args.first(), "set_discard")?;
+    Err("set_discard: internal error, should be intercepted".to_string())
+}
+
+fn vm_set_len(args: &Args) -> R {
+    let set = as_set(args.first(), "set_len")?;
+    let n = set.lock().unwrap().len();
+    Ok(Value::I64(n as i64))
+}
+
+fn vm_set_has_all(args: &Args) -> R {
+    let set = as_set(args.first(), "set_has_all")?;
+    let items = set_items(args.get(1), "set_has_all")?;
+    let guard = set.lock().unwrap();
+    Ok(Value::Bool(items.iter().all(|v| guard.contains(v))))
+}
+
+fn vm_set_union(args: &Args) -> R {
+    let a = as_set(args.first(), "set_union")?;
+    let b = as_set(args.get(1), "set_union")?;
+    let out = a.lock().unwrap().union(&b.lock().unwrap());
+    Ok(Value::Set(Arc::new(std::sync::Mutex::new(out))))
+}
+
+fn vm_set_intersect(args: &Args) -> R {
+    let a = as_set(args.first(), "set_intersect")?;
+    let b = as_set(args.get(1), "set_intersect")?;
+    let out = a.lock().unwrap().intersect(&b.lock().unwrap());
+    Ok(Value::Set(Arc::new(std::sync::Mutex::new(out))))
+}
+
+fn vm_set_diff(args: &Args) -> R {
+    let a = as_set(args.first(), "set_diff")?;
+    let b = as_set(args.get(1), "set_diff")?;
+    let out = a.lock().unwrap().diff(&b.lock().unwrap());
+    Ok(Value::Set(Arc::new(std::sync::Mutex::new(out))))
+}
+
+fn vm_set_to_array(args: &Args) -> R {
+    let set = as_set(args.first(), "set_to_array")?;
+    let items = set.lock().unwrap().to_vec();
+    Ok(arr(items))
+}
+
 fn vm_zip_archive(args: &Args) -> R {
     // Accepts a map of name -> bytes or an array of [name, bytes] pairs, the
     // same two shapes the interpreter accepts.
@@ -999,5 +1106,20 @@ pub fn vm_natives() -> Vec<(&'static str, fn(&[Value]) -> Result<Value, String>)
         ("assert_true", vm_assert_true),
         ("assert_false", vm_assert_false),
         ("panic", vm_panic),
+        // sets
+        ("set_of", vm_set_of),
+        ("set_has", vm_set_has),
+        ("set_len", vm_set_len),
+        ("set_has_all", vm_set_has_all),
+        ("set_union", vm_set_union),
+        ("set_intersect", vm_set_intersect),
+        ("set_diff", vm_set_diff),
+        ("set_to_array", vm_set_to_array),
+        // `set_add` and `set_discard` are registered too, but only as
+        // placeholders: the table's `fn(&[Value])` signature cannot mutate a
+        // set, so they are intercepted in `Vm::call_value`. Registering them
+        // keeps the name visible to the parity gate and to the LSP.
+        ("set_add", vm_set_add),
+        ("set_discard", vm_set_discard),
     ]
 }

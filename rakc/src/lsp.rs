@@ -51,6 +51,9 @@ const BUILTINS: &[&str] = &[
     "read_lines", "tcp_stream",
     "argv", "stdin_read_line", "stdin_read_all", "eprint", "parse_args",
     "stream_csv", "stream_jsonl", "parse_csv_line",
+    // Sets (7A.11)
+    "set_of", "set_add", "set_has", "set_discard", "set_len", "set_has_all",
+    "set_union", "set_intersect", "set_diff", "set_to_array",
     "gzip", "gunzip", "deflate", "inflate", "zip_archive", "zip_list", "zip_extract",
     // --- FFI and memory-mapped files (0.7) ---
     "ffi_load", "ffi_ptr", "ffi_alloc", "ffi_free", "ffi_write", "ffi_read",

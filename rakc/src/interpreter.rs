@@ -1,5 +1,6 @@
 use crate::ast::*;
 use std::collections::{HashMap, HashSet};
+use crate::setrepr::SetRepr;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -45,6 +46,32 @@ pub trait RakStream: Send {
 
 /// A shared stream handle (`Value::Stream`).
 pub type StreamHandle = Arc<Mutex<Box<dyn RakStream>>>;
+
+/// The set-membership key for an interpreter value (spec 7A.11).
+///
+/// Type tag plus rendered form. The tag keeps `1` and `"1"` apart while
+/// `1`, `0x1` and `1.0` collapse into one element, which is what Rak's
+/// cross-representation numeric equality implies for a set keyed on values.
+///
+/// Lives here rather than in `setrepr` because it needs the interpreter's
+/// private numeric accessors. The VM has the mirror image in
+/// `value::SetElement for value::Value`.
+pub(crate) fn set_key(v: &Value) -> String {
+    // `is_numeric` is a free function in this module rather than a method, and
+    // `as_f64` takes `&self`; both are used explicitly so the key rule reads
+    // the same as the VM's.
+    if is_numeric_val(v) {
+        return format!("n:{}", v.as_f64().unwrap_or(0.0) as i64);
+    }
+    match v {
+        Value::String(_) | Value::Char(_) => format!("s:{}", v),
+        Value::Bytes(b) => format!(
+            "b:{}",
+            b.iter().map(|x| format!("{:02x}", x)).collect::<String>()
+        ),
+        other => format!("{:?}:{}", other.type_name(), other),
+    }
+}
 
 /// Stream of an in-memory array / iterator of values.
 pub struct ArrayStream {
@@ -278,6 +305,7 @@ fn contains_member(coll: &Value, item: &Value) -> crate::Result<bool> {
         (Value::Tuple(t), v) => Ok(t.iter().any(|x| x == v)),
         (Value::Map(m), Value::String(k)) => Ok(m.contains_key(k)),
         (Value::Map(m), other) => Ok(m.contains_key(&other.to_string())),
+        (Value::Set(s), v) => Ok(s.lock().unwrap().contains(v)),
         (Value::Bytes(b), Value::Int(i)) => Ok(*i >= 0 && *i <= 255 && b.contains(&(*i as u8))),
         (Value::Bytes(b), Value::Hex(h)) => Ok(*h <= 255 && b.contains(&(*h as u8))),
         (Value::Bytes(b), Value::Char(c)) => Ok((*c as u32) <= 255 && b.contains(&(*c as u8))),
@@ -390,6 +418,12 @@ pub enum Value {
     TcpStream(Arc<Mutex<std::net::TcpStream>>),
     UdpTransport(Arc<Mutex<rak_stdlib::tunnel::UdpTransport>>),
     Stream(Arc<Mutex<Box<dyn RakStream>>>),
+    /// An insertion-ordered set (spec 7A.11). See `crate::setrepr::SetRepr`.
+    ///
+    /// Behind a `Mutex` because `set_add` and `set_discard` mutate in place:
+    /// Rak has no reference types, so every value is shared, and a set is
+    /// shared like any other container.
+    Set(Arc<Mutex<SetRepr<Value>>>),
     JoinHandle(Arc<Mutex<Option<JoinHandle<Value>>>>),
     Sender(Arc<Mutex<mpsc::Sender<Value>>>),
     Receiver(Arc<Mutex<mpsc::Receiver<Value>>>),
@@ -487,6 +521,14 @@ impl fmt::Display for Value {
             }
             Value::Map(map) => {
                 let parts: Vec<String> = map.iter().map(|(k, v)| format!("{}: {}", k, v)).collect();
+                write!(f, "{{{}}}", parts.join(", "))
+            }
+            // Renders in insertion order, which is the whole point of
+            // `SetRepr`. A set printed from a `HashSet` would differ between
+            // two runs of the same program.
+            Value::Set(set) => {
+                let guard = set.lock().unwrap();
+                let parts: Vec<String> = guard.iter().map(|v| v.to_string()).collect();
                 write!(f, "{{{}}}", parts.join(", "))
             }
             Value::Struct { name, fields } => {
@@ -1555,6 +1597,10 @@ impl Interpreter {
                         Value::Map(m) => {
                             m.into_iter().map(|(k, v)| Value::Tuple(vec![Value::String(k), v])).collect()
                         }
+                        // Insertion order, so `for x in set_of([3,1,2])`
+                        // yields 3, 1, 2 — see `setrepr` for why this is
+                        // ordered at all.
+                        Value::Set(s) => s.lock().unwrap().to_vec(),
                         Value::Option(Some(v)) => vec![*v],
                         _ => return Err(crate::RakError::Runtime("Cannot iterate over this value".to_string())),
                     }
@@ -4651,6 +4697,83 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                 let item = args.get(1).cloned().unwrap_or(Value::Nil);
                 contains_member(&coll, &item).map(Value::Bool)
             }
+            // --- Sets (spec 7A.11) ---
+            "set_of" => {
+                // Accepts an array, another set, or nothing at all, so
+                // `set_of()` is the empty set rather than an error.
+                let items: Vec<Value> = match args.first() {
+                    Some(Value::Array(a)) => a.to_vec(),
+                    Some(Value::Set(s)) => s.lock().unwrap().to_vec(),
+                    Some(other) => {
+                        return Err(crate::RakError::Runtime(format!(
+                            "set_of() requires an array or set, got {}",
+                            other.type_name()
+                        )))
+                    }
+                    None => Vec::new(),
+                };
+                Ok(Value::Set(Arc::new(Mutex::new(SetRepr::from_iter_ordered(
+                    items,
+                )))))
+            }
+            "set_add" => {
+                let set = self.set_handle(args.first())?;
+                let item = args.get(1).cloned().unwrap_or(Value::Nil);
+                let added = set.lock().unwrap().insert(item);
+                Ok(Value::Bool(added))
+            }
+            "set_has" => {
+                let set = self.set_handle(args.first())?;
+                let item = args.get(1).cloned().unwrap_or(Value::Nil);
+                let has = set.lock().unwrap().contains(&item);
+                Ok(Value::Bool(has))
+            }
+            "set_discard" => {
+                // Named `discard` rather than `delete` because it reports
+                // whether anything was removed instead of erroring on a
+                // missing element, matching set semantics in most languages.
+                let set = self.set_handle(args.first())?;
+                let item = args.get(1).cloned().unwrap_or(Value::Nil);
+                let removed = set.lock().unwrap().remove(&item);
+                Ok(Value::Bool(removed))
+            }
+            "set_len" => {
+                let set = self.set_handle(args.first())?;
+                let n = set.lock().unwrap().len();
+                Ok(Value::Int(n as i64))
+            }
+            "set_has_all" => {
+                let set = self.set_handle(args.first())?;
+                let items = match args.get(1) {
+                    Some(Value::Array(a)) => a.to_vec(),
+                    Some(Value::Set(other)) => other.lock().unwrap().to_vec(),
+                    _ => {
+                        return Err(crate::RakError::Runtime(
+                            "set_has_all() requires an array or set".to_string(),
+                        ))
+                    }
+                };
+                let guard = set.lock().unwrap();
+                Ok(Value::Bool(items.iter().all(|v| guard.contains(v))))
+            }
+            "set_union" | "set_intersect" | "set_diff" => {
+                let a = self.set_handle(args.first())?;
+                let b = self.set_handle(args.get(1))?;
+                let (x, y) = (a.lock().unwrap(), b.lock().unwrap());
+                let out = match name {
+                    "set_union" => x.union(&y),
+                    "set_intersect" => x.intersect(&y),
+                    _ => x.diff(&y),
+                };
+                drop(x);
+                drop(y);
+                Ok(Value::Set(Arc::new(Mutex::new(out))))
+            }
+            "set_to_array" => {
+                let set = self.set_handle(args.first())?;
+                let items = set.lock().unwrap().to_vec();
+                Ok(Value::Array(items))
+            }
             "to_hex" => Ok(Value::String(format!("0x{:X}", args.first().and_then(|v| v.as_u64()).unwrap_or(0)))),
             "from_hex" => {
                 let s = self.val_to_string(args.first())?;
@@ -6569,6 +6692,24 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
             Some(Value::Error(e)) => Ok(e.clone()),
             Some(v) => Ok(Arc::new(crate::ErrorInfo::new(v.to_string()))),
             None => Err(crate::RakError::Runtime("expected an error value".to_string())),
+        }
+    }
+
+    /// Unwrap a set argument, or report what arrived instead. Sets are the
+    /// only collection whose mutating builtins take a handle and mutate in
+    /// place, so this is where the "you passed the wrong type" message comes
+    /// from.
+    fn set_handle(
+        &self,
+        val: Option<&Value>,
+    ) -> crate::Result<Arc<Mutex<SetRepr<Value>>>> {
+        match val {
+            Some(Value::Set(s)) => Ok(s.clone()),
+            Some(v) => Err(crate::RakError::Runtime(format!(
+                "expected a set, got {}",
+                v.type_name()
+            ))),
+            None => Err(crate::RakError::Runtime("expected a set".to_string())),
         }
     }
 
