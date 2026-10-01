@@ -529,6 +529,17 @@ impl Vm {
         for (n, f) in crate::ext_stdlib::vm_natives() {
             self.insert_native(n, f);
         }
+        // GUI. The VM had no GUI natives at all, so `rakc vm` reported
+        // `Undefined: gui_open` for a program that worked under `rakc run`.
+        //
+        // These resolve the same process-wide manager the interpreter uses, so
+        // a window opened from bytecode is a real window and not a stub.
+        #[cfg(feature = "gui")]
+        for name in [
+            "gui_open", "gui_update", "gui_title", "gui_close", "gui_wait", "gui_quit",
+        ] {
+            self.insert_native(name, |args| crate::gui::vm_native(name, args));
+        }
         // Iterator builtins (Part 7A.10) — pure array transforms. The
         // function-taking fold family is intercepted in `call_value`.
         self.insert_native("zip", |args| iter_pure_native("zip", args));

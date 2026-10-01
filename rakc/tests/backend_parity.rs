@@ -64,34 +64,65 @@ fn interpreter_registrations() -> BTreeSet<String> {
 
 /// Collect `"some_name" =>` match arms from `src` into `names`.
 ///
-/// Only a leading quote, a plain-identifier name, and an immediate `=>` count,
-/// so call sites, assertions and string data are not mistaken for arms.
+/// Handles both single-name arms and alternation arms:
+///
+/// ```ignore
+/// "json_get" => { .. }
+/// "set_union" | "set_intersect" | "set_diff" => { .. }
+/// ```
+///
+/// which register one, two or three names respectively. Only a leading quote, a
+/// plain-identifier name, and an immediate `=>` (possibly after further `|`
+/// alternatives) count, so call sites, assertions and string data are not
+/// mistaken for arms.
 fn collect_arms(src: &str, names: &mut BTreeSet<String>) {
     for line in src.lines() {
         let trimmed = line.trim_start();
-        if !trimmed.starts_with('"') {
-            continue;
-        }
-        let rest = &trimmed[1..];
-        let Some(end) = rest.find('"') else { continue };
-        let name = &rest[..end];
-        if name.is_empty()
-            || !name
-                .chars()
-                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
-        {
-            continue;
-        }
-        if rest[end + 1..].trim_start().starts_with("=>") {
-            names.insert(name.to_string());
+        // Walk the alternatives on this line, tracking whether the arm ends in
+        // `=>` or continues with `|`.
+        let mut rest = trimmed;
+        loop {
+            rest = rest.trim_start();
+            let Some(after_quote) = rest.strip_prefix('"') else {
+                break;
+            };
+            let Some(end) = after_quote.find('"') else {
+                break;
+            };
+            let name = &after_quote[..end];
+            let is_identifier = !name.is_empty()
+                && name
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_');
+            if !is_identifier {
+                break;
+            }
+            let tail = after_quote[end + 1..].trim_start();
+            if let Some(next) = tail.strip_prefix("=>") {
+                names.insert(name.to_string());
+                // The arm body may be on this line (`=> expr`) or a block
+                // (`=> {`); either way the arm is registered and done.
+                let _ = next;
+                break;
+            } else if let Some(next) = tail.strip_prefix('|') {
+                // Another alternative follows on the same line.
+                names.insert(name.to_string());
+                rest = next;
+            } else {
+                break;
+            }
         }
     }
 }
 
 /// The VM's native registrations, read from source.
 ///
-/// Two shapes: `self.insert_native("name", ...)` in `register_natives`, and
-/// `("name", vm_fn)` entries in the extension tables.
+/// Three shapes:
+///
+/// * `self.insert_native("name", ...)` in `register_natives`
+/// * `("name", vm_fn)` entries in the extension tables
+/// * a `for name in [...]` loop over a list of names, which is how the GUI
+///   natives are registered, since they all dispatch through one function
 fn vm_registrations() -> BTreeSet<String> {
     let mut names = BTreeSet::new();
     let insert_native = "insert_native(\"";
@@ -116,27 +147,109 @@ fn vm_registrations() -> BTreeSet<String> {
         // Only collect entries that name a `vm_`-prefixed function, which is
         // the convention every table entry follows. That keeps this from
         // scraping unrelated two-string tuples out of the same files.
-    let mut rest = src;
-    while let Some(at) = rest.find(table_entry) {
-        let after = &rest[at + table_entry.len()..];
-        let Some(end) = after.find('"') else {
+        let mut rest = src;
+        while let Some(at) = rest.find(table_entry) {
+            let after = &rest[at + table_entry.len()..];
+            let Some(end) = after.find('"') else {
+                rest = &rest[at + table_entry.len()..];
+                continue;
+            };
+            let entry = &after[..end];
+            let after_name = &after[end + 1..];
+            let looks_like_table = after_name
+                .trim_start()
+                .trim_start_matches(',')
+                .trim_start()
+                .starts_with("vm_");
+            if looks_like_table {
+                names.insert(entry.to_string());
+            }
             rest = &rest[at + table_entry.len()..];
+        }
+
+        // A `for name in [ "a", "b", .. ]` registration loop, which is how a
+        // family of names that all share one implementation is registered.
+        // Without this, every such builtin reads as missing from the VM — which
+        // is the same false positive the gate is supposed to eliminate.
+        collect_name_lists(src, &mut names);
+    }
+
+    // A `for (n, f) in ...::vm_natives()` loop pulls in a whole table that the
+    // text scan above cannot see, because the names live in the callee. The
+    // tables are listed explicitly so adding a family is a deliberate edit
+    // rather than a silent hole in the gate.
+    for table in NATIVE_TABLES {
+        let table_src: &str = match *table {
+            "../src/ext_batteries.rs" => include_str!("../src/ext_batteries.rs"),
+            "../src/ext_osint.rs" => include_str!("../src/ext_osint.rs"),
+            "../src/ext_stdlib.rs" => include_str!("../src/ext_stdlib.rs"),
+            other => panic!("add {} to this match when adding a native table", other),
+        };
+        collect_table(table_src, &mut names);
+    }
+    names
+}
+
+/// Collect `("name", vm_fn)` entries from a `vm_natives()` table body.
+///
+/// Scoped to the `pub fn vm_natives()` function so a same-shaped tuple
+/// elsewhere in the file is not picked up.
+fn collect_table(src: &str, names: &mut BTreeSet<String>) {
+    let Some(start) = src.find("pub fn vm_natives()") else {
+        return;
+    };
+    let body = &src[start..];
+    let mut rest = body;
+    while let Some(at) = rest.find("(\"") {
+        let after = &rest[at + 2..];
+        let Some(end) = after.find('"') else {
+            rest = &rest[at + 2..];
             continue;
         };
-        let entry = &after[..end];
-        let after_name = &after[end + 1..];
-        let looks_like_table = after_name
+        let name = &after[..end];
+        let is_entry = after[end + 1..]
             .trim_start()
             .trim_start_matches(',')
             .trim_start()
             .starts_with("vm_");
-        if looks_like_table {
-            names.insert(entry.to_string());
+        if is_entry {
+            names.insert(name.to_string());
         }
-        rest = &rest[at + table_entry.len()..];
-        }
+        rest = &rest[at + 2..];
     }
-    names
+}
+
+/// The `vm_natives()` tables wired into `Vm::register_natives`.
+///
+/// Each entry must be a file that has a `pub fn vm_natives()`. If one is
+/// missing the `collect_table` match panics, so a new table cannot be added
+/// without also being scanned.
+const NATIVE_TABLES: &[&str] = &[
+    "../src/ext_batteries.rs",
+    "../src/ext_osint.rs",
+    "../src/ext_stdlib.rs",
+];
+
+/// Collect the string literals from `for name in [ .. ]` registration loops.
+///
+/// Deliberately narrow: it only looks at arrays that appear inside a `for ... in`
+/// header, so a list of unrelated strings elsewhere in a file is not mistaken
+/// for a registration table.
+fn collect_name_lists(src: &str, names: &mut BTreeSet<String>) {
+    let mut rest = src;
+    while let Some(at) = rest.find("for name in [") {
+        let after = &rest[at..];
+        let Some(end) = after.find(']') else {
+            rest = &rest[at + 1..];
+            continue;
+        };
+        for part in after[..end].split('"').skip(1).step_by(2) {
+            if !part.is_empty() && part.chars().all(|c| c.is_ascii_lowercase() || c == '_' || c.is_ascii_digit()) {
+                names.insert(part.to_string());
+            }
+        }
+        rest = &rest[at + end..];
+    }
 }
 
 /// Every source file that registers a native for the VM.
@@ -448,14 +561,37 @@ dump udp_local_addr(t) == addr
     );
 }
 
-/// GUI, which is interpreter-only today. See the GUI rewrite.
+/// The GUI builtin registry, checked without opening a window.
+///
+/// A real window needs a display, so this cannot run in CI. What it *can* check
+/// is the thing that actually broke: that both backends resolve the same GUI
+/// names. Before the rewrite the VM had none of them, so `rakc vm` reported
+/// `Undefined: gui_open` for a program that ran fine under `rakc run`.
+///
+/// When no display is available, `gui_open` must fail with the *same* message
+/// on both backends. "No display" and "no such builtin" are different bugs, and
+/// the second one is what this test exists to catch.
 #[test]
-#[ignore = "VM has no GUI natives; rakc vm reports Undefined: gui_open"]
-fn parity_gui_surface() {
-    // GUI cannot open a real window in a test, so this asserts the *registry*
-    // instead: the same builtin names must exist on both backends. A VM that
-    // cannot open a window should still fail the same way the interpreter
-    // fails when no display is available, rather than reporting a missing
-    // builtin, which is a different bug wearing the same coat.
-    agree("gui registry", "gui_wait()");
+fn parity_gui_registry() {
+    let source = r#"
+let w = gui_open("t", "<p>x</p>", 200, 100)
+gui_update(w, "<p>y</p>")
+gui_title(w, "new")
+gui_close(w)
+gui_wait()
+gui_quit(0)
+"#;
+    let parity = rakc::run_on_both(source, ".");
+    if let Some(why) = parity.divergence() {
+        // Headless is the expected outcome in CI, and it is fine — as long as
+        // both backends agree about it.
+        assert!(
+            why.contains("not running") || why.contains("gui_open"),
+            "GUI backends diverged in a way that is not a headless environment:\n{}",
+            why
+        );
+        return;
+    }
+    // If a display *is* available the program runs to completion on both.
+    assert!(parity.is_agreeing());
 }

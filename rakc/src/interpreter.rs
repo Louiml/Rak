@@ -56,6 +56,25 @@ pub type StreamHandle = Arc<Mutex<Box<dyn RakStream>>>;
 /// Lives here rather than in `setrepr` because it needs the interpreter's
 /// private numeric accessors. The VM has the mirror image in
 /// `value::SetElement for value::Value`.
+/// Call `func` with `args` in a fresh interpreter seeded from `env`, and return
+/// its value.
+///
+/// This is the one supported way to invoke Rak from outside an interpreter —
+/// used by the GUI's JavaScript callbacks, and available for anything else that
+/// needs to run a closure off the main path. It exists as a function rather than
+/// a public method because `env` and `call_function_with_values` are private,
+/// and Rak has no reference type that would let a caller reach them.
+///
+/// The interpreter is fresh, so it shares the environment's *bindings* but not
+/// the caller's mutable state. That is a direct consequence of values being
+/// shared rather than moved, and it is why a GUI callback sees the environment
+/// as it stood when the callback was registered.
+pub fn call_in_env(func: Value, env: Env, args: Vec<Value>) -> crate::Result<Value> {
+    let mut interp = Interpreter::new();
+    interp.env = env;
+    interp.call_function_with_values(func, args)
+}
+
 pub(crate) fn set_key(v: &Value) -> String {
     // `is_numeric` is a free function in this module rather than a method, and
     // `as_f64` takes `&self`; both are used explicitly so the key rule reads
@@ -714,7 +733,10 @@ pub struct Interpreter {
     returning: bool,
     return_value: Value,
     #[cfg(feature = "gui")]
-    gui: Option<crate::gui::GuiManager>,
+    /// Present only when the `gui` feature is on. Shared with the event loop
+    /// on the main thread, which is why it is an `Arc`.
+    #[cfg(feature = "gui")]
+    gui: Option<std::sync::Arc<crate::gui::GuiManager>>,
     /// (trait, type, method) -> function. trait == "" for inherent impls.
     trait_impls: HashMap<(String, String, String), Value>,
     /// (type, method) -> function, used for `obj.method(...)` call syntax.
@@ -5408,45 +5430,62 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
             "gui_open" => {
                 let title = self.val_to_string(args.get(0))?;
                 let html = self.val_to_string(args.get(1))?;
-                let width = args.get(2).and_then(|v| v.as_u64()).unwrap_or(800) as u32;
-                let height = args.get(3).and_then(|v| v.as_u64()).unwrap_or(600) as u32;
-                let mgr = self.gui.get_or_insert(crate::gui::GuiManager::new());
-                Ok(Value::Int(mgr.open(&title, &html, width, height)))
+                let width = args.get(2).and_then(|v| v.as_i64()).unwrap_or(800) as f64;
+                let height = args.get(3).and_then(|v| v.as_i64()).unwrap_or(600) as f64;
+                let mgr = self.gui_manager()?;
+                let id = mgr
+                    .open(&title, &html, width, height)
+                    .map_err(crate::RakError::Runtime)?;
+                Ok(Value::Int(id))
             }
             #[cfg(feature = "gui")]
             "gui_update" => {
                 let id = args.get(0).and_then(|v| v.as_i64()).unwrap_or(-1);
                 let html = self.val_to_string(args.get(1))?;
-                let mgr = self.gui.get_or_insert(crate::gui::GuiManager::new());
-                mgr.update(id, &html);
+                let mgr = self.gui_manager()?;
+                mgr.update(id, &html).map_err(crate::RakError::Runtime)?;
                 Ok(Value::Nil)
             }
             #[cfg(feature = "gui")]
             "gui_title" => {
                 let id = args.get(0).and_then(|v| v.as_i64()).unwrap_or(-1);
                 let title = self.val_to_string(args.get(1))?;
-                let mgr = self.gui.get_or_insert(crate::gui::GuiManager::new());
-                mgr.set_title(id, &title);
+                let mgr = self.gui_manager()?;
+                mgr.set_title(id, &title)
+                    .map_err(crate::RakError::Runtime)?;
                 Ok(Value::Nil)
             }
             #[cfg(feature = "gui")]
             "gui_close" => {
                 let id = args.get(0).and_then(|v| v.as_i64()).unwrap_or(-1);
-                let mgr = self.gui.get_or_insert(crate::gui::GuiManager::new());
-                mgr.close(id);
+                let mgr = self.gui_manager()?;
+                mgr.close(id).map_err(crate::RakError::Runtime)?;
                 Ok(Value::Nil)
             }
             #[cfg(feature = "gui")]
             "gui_wait" => {
-                let mgr = self.gui.get_or_insert(crate::gui::GuiManager::new());
+                let mgr = self.gui_manager()?;
                 mgr.wait();
                 Ok(Value::Nil)
             }
             #[cfg(feature = "gui")]
+            "gui_quit" => {
+                let code = args.first().and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+                let mgr = self.gui_manager()?;
+                mgr.quit(code).map_err(crate::RakError::Runtime)?;
+                Ok(Value::Nil)
+            }
+            #[cfg(feature = "gui")]
             "gui_callback" => {
+                // `gui_callback("name", fn)` — the function is what page
+                // JavaScript reaches through `rak_call("name", ..)`. The
+                // environment is snapshotted here because Rak has no reference
+                // types, so a callback cannot reach the running script's
+                // variables; see the module comment in `gui.rs`.
                 let name = self.val_to_string(args.get(0))?;
-                let mgr = self.gui.get_or_insert(crate::gui::GuiManager::new());
-                mgr.register_callback(&name);
+                let func = args.get(1).cloned().unwrap_or(Value::Nil);
+                let mgr = self.gui_manager()?;
+                mgr.register_callback(&name, func, std::sync::Arc::new(self.env.clone()));
                 Ok(Value::Nil)
             }
             #[cfg(not(feature = "gui"))]
@@ -6699,6 +6738,34 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
     /// only collection whose mutating builtins take a handle and mutate in
     /// place, so this is where the "you passed the wrong type" message comes
     /// from.
+    /// Hand this interpreter the shared GUI manager.
+    ///
+    /// Called by `gui::eval_in_cli_with_gui` after the event loop is about to
+    /// start on the main thread. Public because that driver lives in another
+    /// module, but there is exactly one correct caller.
+    #[cfg(feature = "gui")]
+    pub fn attach_gui(&mut self, manager: Arc<crate::gui::GuiManager>) {
+        self.gui = Some(manager);
+    }
+
+    /// The GUI manager, or a clear error explaining that the event loop was
+    /// never started.
+    ///
+    /// A GUI builtin reaching this means the program called `gui_open` without
+    /// the process having entered `gui::run_event_loop`, which is the caller's
+    /// job — see `lib.rs`. The old code papered over this by creating a manager
+    /// on demand, which produced a window id for a window that did not exist.
+    #[cfg(feature = "gui")]
+    fn gui_manager(&self) -> crate::Result<Arc<crate::gui::GuiManager>> {
+        match &self.gui {
+            Some(m) => Ok(m.clone()),
+            None => Err(crate::RakError::Runtime(
+                "GUI event loop is not running; launch the program with the gui driver"
+                    .to_string(),
+            )),
+        }
+    }
+
     fn set_handle(
         &self,
         val: Option<&Value>,

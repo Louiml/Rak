@@ -592,25 +592,29 @@ fn main() {
     }
 
     match cmd.as_str() {
-        "run" => {
-            let base_dir = std::path::Path::new(file).parent().map(|p| p.to_string_lossy().to_string()).unwrap_or_else(|| ".".to_string());
-            // argv for a `fn main(args)` entry = everything after the file.
-            let script_args: Vec<String> = clean_args;
-            match rakc::eval_in_cli(&source, &base_dir, &script_args) {
-                Ok((output, code)) => {
-                    for line in &output {
-                        println!("{}", line);
+            "run" => {
+                let base_dir = std::path::Path::new(file).parent().map(|p| p.to_string_lossy().to_string()).unwrap_or_else(|| ".".to_string());
+                // argv for a `fn main(args)` entry = everything after the file.
+                let script_args: Vec<String> = clean_args;
+                #[cfg(feature = "gui")]
+                let result = rakc::gui::eval_in_cli_with_gui(&source, &base_dir, &script_args);
+                #[cfg(not(feature = "gui"))]
+                let result = rakc::eval_in_cli(&source, &base_dir, &script_args);
+                match result {
+                    Ok((output, code)) => {
+                        for line in &output {
+                            println!("{}", line);
+                        }
+                        if code != 0 {
+                            std::process::exit(code);
+                        }
                     }
-                    if code != 0 {
-                        std::process::exit(code);
+                    Err(e) => {
+                        eprintln!("Error: {}", e);
+                        std::process::exit(1);
                     }
-                }
-                Err(e) => {
-                    eprintln!("Error: {}", e);
-                    std::process::exit(1);
                 }
             }
-        }
         "debug" => {
             cmd_run_debug(file, &source);
         }

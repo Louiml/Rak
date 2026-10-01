@@ -184,9 +184,12 @@ mod tests {
     #[test]
     fn dedupes_and_reports_insertion() {
         let mut set = s(&[V::Int(1)]);
-        assert!(set.insert(V::Int(1)), "re-adding reports false");
+        // `insert` reports whether the element was *newly* added, which is what
+        // `set_add` returns to Rak. Re-adding a duplicate is therefore false
+        // and must not grow the set.
+        assert!(!set.insert(V::Int(1)), "re-adding a duplicate reports false");
         assert_eq!(set.len(), 1);
-        assert!(set.insert(V::Int(2)));
+        assert!(set.insert(V::Int(2)), "a new element reports true");
         assert_eq!(set.len(), 2);
     }
 
