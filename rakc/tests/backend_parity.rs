@@ -266,14 +266,12 @@ const VM_NATIVE_SOURCES: &[&str] = &[
     "../src/ext_stdlib.rs",
 ];
 
-#[test]
-fn registrations_match() {
-    let interp = interpreter_registrations();
-    let vm = vm_registrations();
-
-    // Names that are deliberately one-sided, with the reason. Adding to either
-    // list is an explicit decision, not a way to silence a regression.
-    const INTERP_ONLY: &[(&str, &str)] = &[
+/// Builtins that deliberately exist on only one backend, with the reason.
+///
+/// Adding to either list is an explicit decision, not a way to silence a
+/// regression: the reason is part of the entry, and a failing gate prints both
+/// the name and the reason so a reader can disagree with it.
+const INTERP_ONLY: &[(&str, &str)] = &[
         (
             "asm",
             "inline assembly has no VM counterpart by design: a bytecode VM has \
@@ -307,15 +305,9 @@ fn registrations_match() {
         ("whois_parse", "ext_osint has a VM native with no interpreter counterpart"),
     ];
 
-    let interp_only: Vec<&String> = interp
-        .iter()
-        .filter(|n| !vm.contains(*n) && !INTERP_ONLY.iter().any(|(k, _)| *k == n.as_str()))
-        .collect();
-    let vm_only: Vec<&String> = vm
-        .iter()
-        .filter(|n| !interp.contains(*n) && !VM_ONLY.iter().any(|(k, _)| *k == n.as_str()))
-        .collect();
-
+#[test]
+fn registrations_match() {
+    let (interp_only, vm_only) = registration_diff();
     assert!(
         interp_only.is_empty() && vm_only.is_empty(),
         "the two backends do not register the same builtins.\n\
@@ -339,33 +331,48 @@ fn registrations_match() {
     );
 }
 
-/// The parity gap is large enough that it needs its own budget and its own
-/// trend line, not just a pass/fail assertion.
+/// The parity gap needs its own budget and its own trend line, not just a
+/// pass/fail assertion.
 ///
 /// `registrations_match` is the gate: once the gap is closed it stays closed.
 /// While it is open, this test records exactly what is still missing so the
-/// backlog is measurable and cannot quietly grow, and so closing a family is
-/// visible in the diff.
+/// backlog is measurable and cannot quietly grow, and so closing a family shows
+/// up in the diff.
+///
+/// The allowance lists are subtracted, so the number here is the *real* gap
+/// rather than the raw set difference. That distinction matters: the raw
+/// difference was 162 when the real one was 51, and reporting 162 would have
+/// made the remaining work look four times larger than it is.
 #[test]
 #[ignore = "backlog tracker; run explicitly with --ignored while the gap is open"]
 fn parity_backlog_report() {
+    let (interp, vm) = registration_diff();
+    println!("interpreter-only: {}", interp.len());
+    println!("vm-only: {}", vm.len());
+    println!("interpreter-only names: {}", interp.join(" "));
+    println!("vm-only names: {}", vm.join(" "));
+}
+
+/// The two registration sets, minus the documented allowances.
+fn registration_diff() -> (Vec<String>, Vec<String>) {
     let interp = interpreter_registrations();
     let vm = vm_registrations();
-    let interp_only: Vec<&str> = interp
+    let allowed = |list: &[(&str, &str)]| -> Vec<String> {
+        list.iter().map(|(k, _)| k.to_string()).collect()
+    };
+    let interp_ok = allowed(INTERP_ONLY);
+    let vm_ok = allowed(VM_ONLY);
+    let interp_only: Vec<String> = interp
         .iter()
-        .filter(|n| !vm.contains(*n))
-        .map(|s| s.as_str())
+        .filter(|n| !vm.contains(*n) && !interp_ok.contains(n))
+        .cloned()
         .collect();
-    let vm_only: Vec<&str> = vm
+    let vm_only: Vec<String> = vm
         .iter()
-        .filter(|n| !interp.contains(*n))
-        .map(|s| s.as_str())
+        .filter(|n| !interp.contains(*n) && !vm_ok.contains(n))
+        .cloned()
         .collect();
-
-    println!("interpreter-only: {}", interp_only.len());
-    println!("vm-only: {}", vm_only.len());
-    println!("interpreter-only names: {}", interp_only.join(" "));
-    println!("vm-only names: {}", vm_only.join(" "));
+    (interp_only, vm_only)
 }
 
 // ---------------------------------------------------------------------------
