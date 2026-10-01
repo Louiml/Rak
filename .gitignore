@@ -30,3 +30,6 @@ Thumbs.db
 # -A` fails outright because it is a nested repository with no checked-out
 # commit.
 adblocker/
+
+# Written by examples/secrets_demo.rak when the example suite runs.
+_feed.txt
