@@ -57,13 +57,23 @@ rustflags = [
     "-C", "link-arg=-Wl,-z,now",
     # Non-executable stack.
     "-C", "link-arg=-Wl,-z,noexecstack",
-    # Force a stack cookie. glibc's __stack_chk_fail is only reached on a real
-    # overflow, so the cost is one canary load per function.
-    "-C", "link-arg=-Wl,-z,stack-chk-guard-size=0x0020",
     # Keep frame pointers. Costs about 1% and makes `rakc profile` and any
     # post-mortem walk of a stack possible at all.
     "-C", "force-frame-pointers=yes",
 ]
+
+# No stack canary on Linux, and that is not a mistake in this file. rustc's
+# x86_64-unknown-linux-gnu target does not enable -fstack-protector, and
+# `-C target-feature=+stack-protector` is rejected outright ("not a recognized
+# feature for this target"). Verified against a real 7.8 MB rakc build: the
+# binary contains no __stack_chk_fail. Getting a canary into Rust code needs
+# nightly `-Z stack-protector`.
+#
+# So dist/verify_hardening.py reports the canary as an advisory finding rather
+# than a required one. Demanding a check the stable toolchain cannot satisfy
+# would mean either a permanently red CI or a check everyone learns to ignore.
+# The C parts of a program can still get one by building them with GCC's
+# -fstack-protector and linking that object in.
 
 # ---------------------------------------------------------------------------
 # Linux / musl (static, for the single-file `rakc build` output)

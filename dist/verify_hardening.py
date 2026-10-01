@@ -47,29 +47,54 @@ LOAD_CONFIG64_WITH_GUARD = 0x140
 
 
 class Result:
-    def __init__(self):
-        self.checks = []  # (label, ok, detail)
+    """Collects checks, separating the ones that can fail from the advisory ones.
 
-    def add(self, label, ok, detail=""):
-        self.checks.append((label, bool(ok), detail))
+    A check the toolchain cannot satisfy is worse than no check at all: it is
+    either a permanently red build or something everyone learns to ignore. The
+    stack canary on Linux is the concrete case here. rustc's
+    x86_64-unknown-linux-gnu target does not enable -fstack-protector and
+    `-C target-feature=+stack-protector` is rejected outright, so on stable it
+    is unreachable. Verified against a real 7.8 MB rakc build, which contains no
+    __stack_chk_fail. It is reported, and it does not fail the build.
+    """
+
+    def __init__(self):
+        self.checks = []  # (label, ok, detail, required)
+
+    def add(self, label, ok, detail="", required=True):
+        self.checks.append((label, bool(ok), detail, required))
 
     @property
     def failed(self):
-        return [c for c in self.checks if not c[1]]
+        return [c for c in self.checks if not c[1] and c[3]]
+
+    @property
+    def advisory(self):
+        return [c for c in self.checks if not c[1] and not c[3]]
 
     def report(self, path):
         print(f"=== {path} ===")
         width = max((len(c[0]) for c in self.checks), default=0)
-        for label, ok, detail in self.checks:
-            mark = "ok  " if ok else "FAIL"
+        for label, ok, detail, required in self.checks:
+            if ok:
+                mark = "ok  "
+            elif required:
+                mark = "FAIL"
+            else:
+                mark = "note"
             line = f"  [{mark}] {label.ljust(width)}"
             if detail:
                 line += f"  {detail}"
             print(line)
         if self.failed:
-            print(f"  -> {len(self.failed)} hardening check(s) FAILED")
+            print(f"  -> {len(self.failed)} required hardening check(s) FAILED")
         else:
-            print("  -> all hardening checks passed")
+            print("  -> all required hardening checks passed")
+        if self.advisory:
+            print(
+                f"  -> {len(self.advisory)} advisory gap(s), see above; "
+                "these are not achievable with the stable toolchain"
+            )
         print()
         return not self.failed
 
@@ -209,7 +234,14 @@ def check_elf(path, data):
                 bind_now = True
     r.add("eager binding (BIND_NOW, needed for full RELRO)", bind_now)
 
-    r.add("stack canary (__stack_chk_fail)", b"__stack_chk_fail" in data)
+    r.add(
+        "stack canary (__stack_chk_fail)",
+        b"__stack_chk_fail" in data,
+        "unreachable on stable: rustc's linux-gnu target does not enable "
+        "-fstack-protector and rejects target-feature=+stack-protector; needs "
+        "nightly -Z stack-protector or a C object built with GCC",
+        required=False,
+    )
     return r
 
 
@@ -247,7 +279,7 @@ def _selftest():
         check("PE guard_cf set", labels["Control Flow Guard (GUARD_CF)"], True)
 
     # --- same PE but with GUARD_CF cleared: must be reported as a failure ---
-    # Keep every other bit set so exactly one check flips.
+    # Keep every other bit set so exactly one required check flips.
     struct.pack_into("<H", pe, 0x80 + 24 + 70, 0x0040 | 0x0020 | 0x0100)
     r2 = check_pe("synthetic", bytes(pe))
     check("PE missing-guard_cf detected", len(r2.failed), 1)
@@ -279,18 +311,24 @@ def _selftest():
     struct.pack_into("<Q", elf, DYN + 16, DT_NULL)
     struct.pack_into("<Q", elf, DYN + 24, 0)
     elf[STR : STR + 15] = b"__stack_chk_fail"
+    # Keep a clean copy: the cases below mutate `elf` in place to break bits.
+    good_elf = bytes(elf)
     r3 = check_elf("synthetic", bytes(elf))
     if r3 is None:
         failures.append("ELF parser returned None on a valid synthetic header")
     else:
-        check("ELF all-pass", r3.failed, [])
+        # The synthetic ELF embeds the symbol, so the canary check passes. That
+        # proves the advisory branch is not taken when a canary really exists.
+        check("ELF no required failures", r3.failed, [])
         labels = {c[0]: c[1] for c in r3.checks}
+        check("ELF canary present", labels["stack canary (__stack_chk_fail)"], True)
+        check("ELF nothing advisory", len(r3.advisory), 0)
         check("ELF PIE", labels["PIE / ASLR (ET_DYN)"], True)
         check("ELF RELRO", labels["RELRO (PT_GNU_RELRO)"], True)
         check("ELF BIND_NOW", labels["eager binding (BIND_NOW, needed for full RELRO)"], True)
-        check("ELF canary", labels["stack canary (__stack_chk_fail)"], True)
 
-    # --- ELF with an executable stack and no RELRO: both must be flagged ---
+    # --- ELF with an executable stack, no RELRO and no BIND_NOW: three
+    #     required bits break at once ---
     struct.pack_into("<I", elf, 64 + 0 * 56 + 4, 0x7)  # RWX
     struct.pack_into("<I", elf, 64 + 1 * 56 + 0, 0)  # clobber RELRO phdr type
     struct.pack_into("<Q", elf, DYN + 16, DT_NULL)
@@ -301,6 +339,18 @@ def _selftest():
     labels = {c[0]: c[1] for c in r4.checks}
     check("ELF exec-stack detected", labels["non-executable stack (PT_GNU_STACK)"], False)
     check("ELF missing-RELRO detected", labels["RELRO (PT_GNU_RELRO)"], False)
+    check("ELF missing-BIND_NOW detected", labels["eager binding (BIND_NOW, needed for full RELRO)"], False)
+    check("ELF three required failures", len(r4.failed), 3)
+
+    # --- an ELF with no canary at all: advisory, never a required failure ---
+    # Start from the clean copy so the earlier mutations do not leak in.
+    r5 = check_elf("synthetic", good_elf[0:STR])
+    check("ELF missing canary is not required", len(r5.failed), 0)
+    check(
+        "ELF missing canary is advisory",
+        any(c[0] == "stack canary (__stack_chk_fail)" for c in r5.advisory),
+        True,
+    )
 
     # --- non-binary input must be rejected, not silently accepted ---
     check("garbage rejected", check_pe("x", b"not a binary at all"), None)

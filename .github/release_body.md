@@ -99,6 +99,28 @@ inside a sandbox because they only construct a `bytes` value.
   already caught a real mistake: an early flag set passed both `/NXCOMPAT` and
   `/NXCOMPAT:NO`, silently disabling DEP.
 
+### Validating the hardening against real binaries
+
+Both platforms were checked before tagging, by building the actual `rakc` and
+reading the result back rather than trusting the flag list.
+
+- **Linux**: `rakc` (7.8 MB) built in WSL with the repo's exact
+  `.cargo/config.toml`. PIE, full RELRO, non-executable stack and `BIND_NOW`
+  all land correctly. The **stack canary does not**, and cannot be made to:
+  rustc's `x86_64-unknown-linux-gnu` target does not enable `-fstack-protector`,
+  and `-C target-feature=+stack-protector` is rejected outright with "not a
+  recognized feature for this target". Getting a canary into Rust code needs
+  nightly `-Z stack-protector`, or a C object built with GCC's
+  `-fstack-protector` and linked in.
+- So the verifier reports the canary as an **advisory** finding rather than a
+  required one. A check the stable toolchain cannot satisfy is either a
+  permanently red build or something everyone learns to ignore, and neither is
+  useful. The four checks that are satisfiable remain hard failures.
+- The same exercise turned up that `rustflags` is silently ignored when placed in
+  `Cargo.toml` ("unused manifest key"). It only takes effect in
+  `.cargo/config.toml`, which is where it lives. A virtual manifest also rejects
+  a `[target]` section outright.
+
 ### Deep recursion no longer kills the process
 
 The tree walker burned several native frames per Rak call, and a Rak call costs
