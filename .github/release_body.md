@@ -1,198 +1,193 @@
-# Rak v8.0.0
+# Rak v8.1.0
 
-## What's new in 8.0.0
+The release where the two backends stopped being two languages.
 
-### Security primitives
+## Why this release exists
 
-- **`unsafe "reason" { ... }` blocks.** Anything touching raw memory, FFI, or a
-  wire format can be wrapped in a block carrying a written justification. The
-  reason is enforced by the parser, so an unjustified exemption is a parse
-  error rather than a warning, and `grep unsafe` returns every exemption with the
-  author's own words attached. `rakc lint --audit` prints the same list as a
-  review artifact, and the interpreter records which blocks were actually
-  entered during a run. This is a review boundary, not a permission: the block
-  executes exactly as written.
-- **`requires` / `ensures` contracts on `fn`.** Preconditions are checked with
-  the parameters bound and before a single statement of the body, so a violated
-  precondition blames the caller and a function that would corrupt state before
-  validating never gets the chance. Postconditions run after deferred cleanup,
-  with `result` and the parameters in scope. Contracts survive into `async fn`,
-  on both the sequential and the concurrent drive path.
-- **`rakc verify`.** Runs a script under finite step, loop-iteration and
-  recursion-depth budgets. It reports three outcomes and they are deliberately
-  distinct, because conflating them would be misleading: `PASS` (completed, all
-  contracts held), `FAIL` (a contract broke, an assert tripped, or a runtime
-  error), and `SKIP` (a budget was hit, so nothing was proved). Exit code 2 means
-  inconclusive, never "looks fine".
-- **Constant-time comparison.** `ct_eq`, `ct_eq_hex`, and `ct_select`. Rak's `==`
-  is a data-dependent branch that leaks the length of a shared prefix through its
-  exit timing, which is enough to recover a MAC or a session token one byte at a
-  time.
-- **Zeroization.** `zeroize(bytes)` overwrites a buffer through a volatile path
-  the optimizer cannot elide. `secret_delete` and the new `secret_delete_all`
-  wipe values from memory and overwrite the store file with zeroes before
-  rewriting it. The serialized buffer in the secrets store is wiped too, and
-  file permissions are now set *before* the data lands rather than after.
+Rak has shipped a tree-walking interpreter and a bytecode VM for several
+versions, behind one frontend. Every builtin and every language feature has to
+be implemented twice, and until now nothing checked that it was.
 
-### Crypto
+v8.0.0 shipped nineteen builtins that existed only in the VM. `rakc run` — the
+default backend — failed with `Unknown function` for every one of them. The test
+suite passed, because it exercised each backend separately and nothing covered
+the new builtins on the interpreter side at all. A per-backend test suite cannot
+catch a per-backend omission.
 
-- **RSA** — `rsa_keypair`, `rsa_sign`, `rsa_verify`, `rsa_encrypt`, `rsa_decrypt`
-  (PKCS#1 v1.5 over SHA-256, OAEP with SHA-256). Keys are DER.
-- **ECDSA over NIST P-256** — `ecdsa_keypair`, `ecdsa_sign`, `ecdsa_verify`, with
-  64-byte `r||s` signatures. DER keys.
+So this release starts by measuring. `rakc::run_on_both` runs a program on both
+backends and classifies how they agree, and `tests/backend_parity.rs` gates on
+that two ways: a structural check that compares the registration tables
+directly, and behavioural tests that require identical output.
 
-The suite previously had only Ed25519 and X25519, both non-standard curves, so
-nothing interoperated with ordinary OpenSSL tooling. Everything remains pure Rust
-with no OpenSSL linkage.
+The measurement found the gap was **140 builtins, not the three**
+`docs/rak-features-spec.md` described. `abs`, `sort`, `split`, `sum`,
+`to_string` and `print` were all missing from `rakc vm`. It could not run an
+ordinary program.
 
-### Static analysis
+**After this release: 34.** All 34 are blocked on the same thing, and that is a
+real limitation rather than a list of forgotten registrations — see *Known
+limitations*.
 
-- Six new security lint rules: `hardcoded-secret`, `plaintext-url`,
-  `weak-crypto`, `secret-compare`, `ffi-raw-pointer`, `insecure-transport`, plus
-  `unsafe-thin-reason`.
-- This required fixing a real bug: the linter had no `Expr::String` arm, so
-  string literals fell through to `_ => {}` and no rule could ever inspect a
-  byte of user text. A hardcoded `sk-live-...` was completely invisible. There is
-  a regression test for exactly that.
-- `rakc fmt` and `rakc lint` are now listed in `rakc --help`.
+## Backend parity
 
-### Packet crafting
+### The gate
 
-- **ICMP** — `net_raw_icmp`, `net_raw_icmp_ping`, `net_raw_icmp_echo_reply`, with
-  matching `id`/`seq` so a reply can be correlated to its request.
-- **ARP** — `net_raw_arp_request`, `net_raw_arp_reply`, and `net_raw_arp_parse`,
-  which accepts a frame with or without the Ethernet header and returns `nil` on
-  anything that is not ARP, so raw capture can be fed straight in.
+Nothing compared the backends before, so a builtin could be added to one and
+forgotten on the other and the suite stayed green. Now it cannot:
 
-`caps.rs` previously gated a `net_raw_icmp` builtin that did not exist; the gate
-now matches real builtins, and packet *builders* are documented as reachable
-inside a sandbox because they only construct a `bytes` value.
+- **`registrations_match`** reads the registration sites in both backends and
+  requires the name sets to match. Four shapes of registration are recognised,
+  each of which was a false positive that would have made the gate untrustworthy
+  if left: alternation arms (`"regex_match" | "regex_is_match"`), `for name in
+  [..]` loops, `vm_natives()` tables, and the scope of `eval_builtin` itself so
+  that `regex` *method* arms are not mistaken for builtins.
+- **Twenty behavioural tests** run programs on both and require identical
+  output, which catches not just missing builtins but any disagreement.
+- **`parity_backlog_report`** prints the current gap, so the backlog is
+  measurable rather than remembered.
 
-### Fuzzing on the stable toolchain
+### Closed
 
-- **`rakc fuzz <target>`** — a deterministic mutation loop in the compiler
-  itself, covering the lexer, parser, interpreter and the stdlib parsers. 12
-  targets, reproducible via `--seed`, with a crashing input written to disk and
-  the seed printed for replay.
-- The 13 `cargo-fuzz` targets in `fuzz/` are still there for long
-  coverage-guided campaigns, but they need nightly and `-fsanitize=fuzzer`,
-  which `stable-x86_64-pc-windows-msvc` cannot provide. Nothing was running them
-  automatically before this.
+- **Sets** (spec 7A.11), on both backends: `set_of`/`add`/`has`/`discard`/
+  `len`/`has_all`/`union`/`intersect`/`diff`/`to_array`, plus `for x in set` and
+  `x in set`.
+- **~100 further builtins** the spec never mentioned: math, strings, codecs,
+  arrays, JSON, HTML, files, zip, process/environment, and assertions.
+- **Spec 7A.4** — VM streams: array, file-line, TCP-line, `map`, `filter`,
+  `take`, CSV and JSONL, with a lazy `for`-over-stream lowering.
+- **Spec 7A.5** — VM `tunnel` and `udp_*`.
+- **Spec 7A.6** — `import pkg.sub` on the VM.
+- **GUI** — the VM had no GUI natives at all.
 
-### Build hardening
+### Sets are ordered, and the spec said they would not be
 
-- Release profile gains `lto = "fat"`, `codegen-units = 1`, `panic = "abort"`
-  and `strip = "symbols"`. The one that matters most is `overflow-checks = true`:
-  Cargo's default in release is `false`, which silently wraps and turns a length
-  calculation into a heap overflow.
-- `.cargo/config.toml` adds `/guard:cf`, `/CETCOMPAT`, `/DYNAMICBASE`,
-  `/HIGHENTROPYVA`, `/NXCOMPAT` on MSVC, and full RELRO, a non-executable stack,
-  a stack canary and forced frame pointers on Linux.
-- **Stated precisely, because these are easy to oversell.** `/guard:cf` marks the
-  image CFG-compatible and guards the dispatch table, but rustc does not
-  instrument Rust's own indirect calls, so there is no `__guard_check_icall` in
-  the binary. This is not equivalent to Clang's `-fsanitize=cfi`. It closes a
-  real class of bugs; it does not close ROP or JOP.
-- `dist/verify_hardening.py` reads the produced binary back and asserts the bits
-  are really set, and both release jobs run it. It has a `--self-test` covering
-  both the PE and ELF parsers on synthetic headers, positive and negative. This
-  already caught a real mistake: an early flag set passed both `/NXCOMPAT` and
-  `/NXCOMPAT:NO`, silently disabling DEP.
+The spec proposed backing sets with `Map`, on the premise that `Map` already
+iterates in insertion order. It does not: both backends store maps in
+`std::HashMap`, whose order is arbitrary and differs between runs. A set built
+that way would enumerate differently every time, which defeats the point for
+deduplication and diffing.
 
-### Validating the hardening against real binaries
+So a set is an order-preserving `Vec` alongside a `HashSet` of element keys.
+Insertion order for iteration, O(1) average membership, deterministic output.
+`1`, `0x1` and `1.0` are one element; `1` and `"1"` are two.
 
-Both platforms were checked before tagging, by building the actual `rakc` and
-reading the result back rather than trusting the flag list.
+### Two bugs the harness found
 
-- **Linux**: `rakc` (7.8 MB) built in WSL with the repo's exact
-  `.cargo/config.toml`. PIE, full RELRO, non-executable stack and `BIND_NOW`
-  all land correctly. The **stack canary does not**, and cannot be made to:
-  rustc's `x86_64-unknown-linux-gnu` target does not enable `-fstack-protector`,
-  and `-C target-feature=+stack-protector` is rejected outright with "not a
-  recognized feature for this target". Getting a canary into Rust code needs
-  nightly `-Z stack-protector`, or a C object built with GCC's
-  `-fstack-protector` and linked in.
-- So the verifier reports the canary as an **advisory** finding rather than a
-  required one. A check the stable toolchain cannot satisfy is either a
-  permanently red build or something everyone learns to ignore, and neither is
-  useful. The four checks that are satisfiable remain hard failures.
-- The same exercise turned up that `rustflags` is silently ignored when placed in
-  `Cargo.toml` ("unused manifest key"). It only takes effect in
-  `.cargo/config.toml`, which is where it lives. A virtual manifest also rejects
-  a `[target]` section outright.
+- **The backends derived different tunnel keys from the same passphrase.** The
+  salt, iteration count and key length were inlined separately in the
+  interpreter and the compiler, and the two had drifted. Both looked correct.
+  They now come from one definition, and a test runs one `tunnel` through both
+  backends and compares the key.
+- **`udp_recv` reported a read timeout as an error on Windows and `nil` on
+  Linux**, for identical code. A socket read timeout is `EAGAIN` on Unix but
+  `WSAETIMEDOUT` on Windows, and `std` surfaces those as different
+  `ErrorKind` variants. The implementation matched only the first. Both
+  variants are handled now, with a regression test.
 
-### Deep recursion no longer kills the process
+## GUI
 
-The tree walker burned several native frames per Rak call, and a Rak call costs
-several KB of native stack in a debug build. `fib(15)` needed roughly a megabyte,
-which is more than the default thread stack allows, so a moderately recursive
-program died with a bare "has overflowed its stack" and no Rak-level line number.
-The interpreter now runs on a thread with an explicit 64 MB stack. `rakc verify`
-additionally bounds recursion depth, loop iterations and total steps, so runaway
-recursion is a reportable outcome rather than a crash.
+The GUI was, in v8.0.0, a `HashMap<i64, ()>` that discarded the `Window` and
+`WebView` it created. `gui_update`, `gui_title` and `gui_close` did nothing.
+JavaScript could not call into Rak. Closing a window ended the process. Linux
+did not work at all.
 
-### Tooling
+Now: one event loop on the main thread (tao binds to the display connection
+there and rejects any other thread, which is why Linux failed), real handles
+kept alive, a command channel from the interpreter's worker thread to the loop,
+JS→Rak IPC through `rak_call` with results returned via `rak_result`, and
+`gui_quit(code)` for the exit status. Closing a window no longer ends the
+process; the loop stops when the program is finished with the GUI.
 
-- The VS Code TextMate grammar's builtin list was a single 2,900-character line,
-  close to TextMate's practical limits and unmaintainable. It is now 17 grouped
-  per-family patterns, the longest 371 characters.
-- The builtin lists in the LSP, the IDE editor, and the grammar were all stale
-  and disagreed with each other. All three are updated, and the LSP list had been
-  missing the entire batteries, OSINT, iterator, FFI, mmap and `net_raw` families.
-- New `docs/content/safety.md`, covering what is enforced and — just as
-  importantly — what is not.
+```
+fn on_click(n) { return n + 1 }
+gui_callback("clicked", on_click)
+let w = gui_open("Demo", html, 600, 400)
+gui_wait()
+```
 
-### Correctness
+**One real limitation:** a callback gets a copy of the environment as it stood
+at `gui_callback`, so it cannot write to a variable the main script later reads.
+That follows from Rak having no reference types.
 
-- `docs/content/vm.md` claimed binary pattern matching, method-call dispatch and
-  user enum patterns were unsupported on the VM. All three shipped; the table was
-  wrong.
-- `Pattern::Bind` does not exist: the `@` binding-pattern syntax the spec
-  advertised does not parse. Marked `[SPEC]` rather than `[SHIPPED]`, with the
-  implementation steps recorded. Spec markers in both directions were wrong and
-  are now corrected against the code.
-- `expr_str` fell back to the AST debug form for calls, indexing, field access
-  and ranges. Contract clauses and assertion failures are mostly calls, so the
-  most important diagnostics were the least readable. Now rendered as source.
+## Inline assembly
 
-### Housekeeping
+`asm` reaches the CPU through a short list of read-only queries: CPUID feature
+bits, `rdtsc`, `rdtscp`, the invariant-TSC frequency. Every one is a stable
+`core::arch` intrinsic, so there is no hand-written machine code in Rak.
 
-- All version strings moved to 8.0.0, including the REPL banner (still said
-  v0.3.0) and `rakpkg` (still said 0.7.0).
-- `raklib/` was an empty untracked directory. Removed.
-- `adblocker/` added to `.gitignore`: it is a nested git repository kept
-  deliberately local, and without this `git add -A` fails outright.
-- `scripts/run-tests-safe.ps1` runs the test binary under a memory and time
-  watchdog. A stack overflow becomes a Windows Error Reporting event, and with
-  the system default of automatic memory dumps that writes a multi-gigabyte file.
+Three independent gates, all required: the `asm` capability (its own, not
+folded into `ffi` or `raw_sockets`, because a capability granted alongside `raw`
+would be granted by habit), an `unsafe` block with a written justification, and
+a new `inline-asm` lint rule.
+
+The operand is restricted to alphanumerics, so it cannot encode an arbitrary
+byte string, and an unknown instruction is an error naming what *is* available.
+
+## Tests and CI
+
+421 unit and integration tests, up from 399, plus 20 parity tests and an example
+suite that runs every example on both backends.
+
+**CI now exists.** Through v8.0.0 the release workflow built and published but
+never ran a test — which is how the nineteen missing builtins shipped. `ci.yml`
+runs on every push and pull request, on Linux and Windows, because the UDP
+timeout bug existed precisely because the two platforms disagree and a
+Linux-only test cannot see it. A separate job runs the hardening verifier's
+self-test, so a bug in the verifier cannot silently make every release report
+"all hardening checks passed".
 
 ## Known limitations
 
-Stated plainly rather than discovered later.
+The full list is in `docs/V8-KNOWN-ISSUES.md`. The two that matter most:
 
-- **The GUI is incomplete and Windows-only.** `gui_update`, `gui_title` and
-  `gui_close` are declared but do nothing: `gui.rs` stores `HashMap<i64, ()>` and
-  discards the `Window` and `WebView` handles. JavaScript cannot call into Rak —
-  the IPC handler receives the message and drops it. Closing a window ends the
-  process, because tao's `run` calls `process::exit`. Linux does not work at all,
-  because `gui_open` builds the event loop off the main thread, which tao
-  rejects. The VM has no GUI natives, so `rakc vm` reports
-  `Undefined: gui_open`. The README and docs now say this instead of implying
-  otherwise.
-- **No ownership or borrowing.** There is no `&` reference type; `&` is
-  bitwise-and. Values are shared rather than moved and there is no lifetime
-  tracking. This is a language redesign, not a version bump.
-- **No instrumented control-flow integrity.** See the hardening section above for
-  exactly what is and is not provided.
-- **No inline assembly.** `extern "C"` FFI is the escape hatch, and it is
-  capability-gated and lint-flagged.
-- **No formal verification.** Contracts are checked at runtime; there is no
-  prover, no loop invariants, no pre/postconditions in the refinement-type sense.
-- **No enclaves.** The capability sandbox is name-based and in-process. It does
-  not confine the process from the kernel. For genuinely untrusted code, run the
-  script in a container or a VM.
-- **Sets are not implemented** (7A.11), and the backend parity items in
-  `docs/rak-features-spec.md` Part 7A.4–7A.6 (VM streams, VM `tunnel`/`udp_*`, VM
-  `import pkg.sub`) remain open.
+**A function body without `return` evaluates to `nil`.**
 
-`docs/V8-ROADMAP.md` records the reasoning and the cost for each gap.
+```rak
+fn dbl(x) { x * 2 }
+dump dbl(3)          // [DUMP] nil
+```
+
+This is the most likely thing to bite you, because it looks like it works. It
+reproduces identically on both backends and on the v8.0.0 tag, so it is not a
+regression — and it is not fixed here, because changing it is a semantics
+change rather than a bug fix, and it belongs with the v9 work. Use `return` in
+every function body.
+
+**34 builtins exist only on the interpreter**, and all of them are blocked on
+one thing. A VM native has signature `fn(&[Value])`: no `&mut Vm`, no frame. So
+a native cannot call a Rak function, suspend, or resume. That rules out
+`channel`, `select`, `timeout`, `await_all`, `task_group`, the socket family,
+`spawn`, and FFI trampolines. The fix is coroutines in the VM, which is a
+project rather than a list of registrations. The parity gate fails on these 34
+deliberately, so the gap cannot be forgotten.
+
+**Instrumented CFI is not available.** The binaries are CFG-compatible with a
+guarded dispatch table and CET shadow stacks, but call sites are not
+instrumented, and the hardening verifier says so on every build. The spike is in
+`docs/CFI-SPIKE.md`: it needs nightly, full LTO, a single codegen unit, a
+rebuilt `std`, and a CFI-clean dependency graph — and it is not supported for
+the Windows target at all.
+
+**Not planned:** enclaves (use a container or a VM), and a prover (contracts are
+checked at runtime, with an honest inconclusive result when the budget runs out
+before the program does).
+
+## Upgrading
+
+No breaking changes for `rakc run` programs. Two things to know:
+
+- `import pkg.sub` now works on the VM as well, so a program that only ran under
+  `rakc run` will run under `rakc vm`.
+- `asm` is new, and it is behind a capability, an `unsafe` block and a lint
+  rule. It is interpreter-only; a bytecode VM has no instructions to escape
+  into.
+
+## Documentation
+
+- `docs/V8-BACKEND-PARITY.md` — the gate, what is closed, and the 34 with
+  reasons.
+- `docs/V8-KNOWN-ISSUES.md` — behaviour you would not expect, led by the
+  implicit-return issue.
+- `docs/CFI-SPIKE.md` — why instrumented CFI is not shippable here.
+- `docs/V8-ROADMAP.md` — what v8.1.0 closed, and ownership and borrowing on
+  v9.0.0.

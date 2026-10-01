@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Release tag/version (e.g. v8.0.0). Empty uses the latest v* tag.'
+        description: 'Release tag/version (e.g. v8.1.0). Empty uses the latest v* tag.'
         required: false
         default: ''
 
@@ -31,7 +31,7 @@ jobs:
           else
             # workflow_dispatch without a version input: reuse the latest v* tag.
             TAG="$(git tag --sort=-v:refname | grep '^v' | head -n1)"
-            [ -z "$TAG" ] && TAG="v8.0.0"
+            [ -z "$TAG" ] && TAG="v8.1.0"
           fi
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           gh release create "$TAG" --title "Rak $TAG" --notes-file .github/release_body.md --repo "$GITHUB_REPOSITORY" || true
