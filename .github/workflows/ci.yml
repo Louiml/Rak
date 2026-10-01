@@ -92,9 +92,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install the pinned toolchain
+        # `rustup component add` as its own step, not `--component a, b` on the
+        # install line: the space after the comma makes rustup read the second
+        # name as a separate argument, and the job fails at toolchain setup
+        # before a single line of clippy runs.
         run: |
-          rustup toolchain install stable --profile minimal --component clippy, rustfmt
-          rustup default stable
+          rustup toolchain install stable --profile minimal
+          rustup component add clippy rustfmt
+          rustc -vV
       - name: Cache cargo
         uses: actions/cache@v4
         with:
