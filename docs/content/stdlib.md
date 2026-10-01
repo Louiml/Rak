@@ -67,6 +67,40 @@ let sig = ed25519_sign(pair.1, b"msg")
 dump ed25519_verify(pair.0, sig, b"msg")   // true
 ```
 
+RSA (PKCS#1 v1.5 signatures, OAEP encryption) and ECDSA over NIST P-256 were
+added in 8.0.0. Keys are DER, so they interoperate with OpenSSL for file
+handling, but no OpenSSL code is linked in.
+
+```rak
+let (pubk, privk) = rsa_keypair(2048)
+let sig = rsa_sign(privk, b"msg")
+dump rsa_verify(pubk, sig, b"msg")          // true
+
+let ct = rsa_encrypt(pubk, b"secret", b"")  // OAEP, empty label
+dump rsa_decrypt(privk, ct, b"")            // b"secret"
+
+let (epub, epriv) = ecdsa_keypair()
+let esig = ecdsa_sign(epriv, b"msg")        // 64-byte r||s
+dump ecdsa_verify(epub, esig, b"msg")       // true
+```
+
+### Constant-time helpers
+
+`==` on a value branches on the first differing byte, so its timing leaks the
+length of a shared prefix. For MACs, tokens, and password hashes, compare with:
+
+```rak
+dump ct_eq(got, expected)        // bytes, no early exit
+dump ct_eq_hex(got, expected)    // hex, case-insensitive
+let masked = ct_select(choice, a, b)   // branchless select, equal lengths
+```
+
+### Zeroization
+
+`zeroize(bytes)` overwrites a buffer so the optimizer cannot elide the write.
+`secret_delete_all()` wipes every stored secret and shreds the store file. See
+[Safety](safety.html) for what this does and does not cover.
+
 The VPN toolkit (X25519 / ChaCha20-Poly1305 / HKDF / UDP transport) is covered
 in [VPN & tunneling](vpn.html).
 

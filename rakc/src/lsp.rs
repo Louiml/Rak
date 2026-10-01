@@ -6,7 +6,7 @@ const KEYWORDS: &[&str] = &[
     "scan", "fetch", "dump", "trace", "loop", "if", "else", "fn", "let", "mut",
     "return", "use", "mod", "pub", "struct", "enum", "impl", "match", "for",
     "while", "break", "continue", "true", "false", "nil", "in",
-    "try", "catch", "raise", "throw", "trait", "async", "await", "spawn", "as", "type", "extern", "macro", "const", "import", "from", "export", "binstruct", "evidence", "tunnel",
+    "try", "catch", "raise", "throw", "trait", "async", "await", "spawn", "as", "type", "extern", "macro", "const", "import", "from", "export", "binstruct", "evidence", "tunnel", "unsafe",
 ];
 
 const TYPES: &[&str] = &[
@@ -52,6 +52,49 @@ const BUILTINS: &[&str] = &[
     "argv", "stdin_read_line", "stdin_read_all", "eprint", "parse_args",
     "stream_csv", "stream_jsonl", "parse_csv_line",
     "gzip", "gunzip", "deflate", "inflate", "zip_archive", "zip_list", "zip_extract",
+    // --- FFI and memory-mapped files (0.7) ---
+    "ffi_load", "ffi_ptr", "ffi_alloc", "ffi_free", "ffi_write", "ffi_read",
+    "ffi_read_i32", "ffi_cstr_to_string", "ffi_string_to_cstr", "ffi_call",
+    "mmap_open", "mmap_slice", "mmap_size", "mmap_close", "mmap_find",
+    "mmap_lines", "mmap_lines_off",
+    // --- raw packet forging (0.7) ---
+    "net_raw_csum", "net_raw_ipv4", "net_raw_tcp", "net_raw_udp", "net_raw_tcp_syn",
+    "net_raw_send", "net_raw_recv",
+    // --- protocol parsers (0.7) ---
+    "dns_query", "dns_build", "dns_parse",
+    "tls_parse_client_hello", "tls_parse_cert_chain",
+    "pcap_open", "pcap_next",
+    // --- HTML scraping ---
+    "html_title", "html_select", "html_select_all", "html_attr", "html_links",
+    "html_images", "html_scripts", "html_forms", "html_inputs", "html_meta",
+    "html_count", "html_headers",
+    // --- iterator builtins (0.8) ---
+    "zip", "enumerate", "fold", "reduce", "any", "all", "flat_map",
+    "take_while", "skip",
+    // --- stdlib batteries (0.7.2) ---
+    "time_now", "time_now_millis", "time_fmt", "time_parse", "time_parts",
+    "time_add", "time_diff", "date_today",
+    "rand_seed", "rand_int", "rand_float", "rand_bytes", "rand_hex",
+    "rand_choice", "rand_shuffle",
+    "csv_parse", "csv_stringify", "yaml_parse",
+    "gzip_compress", "gzip_decompress", "zip_read", "zip_write",
+    // --- OSINT pack (0.7.2) ---
+    "whois_lookup", "whois_parse", "ct_subdomains", "yara_scan", "report_markdown",
+    "report", "cite", "provenance", "strip_evidence",
+    // --- security helpers (8.0.0) ---
+    // Constant-time comparison. `==` on a secret leaks its common-prefix
+    // length through branch timing; these do not.
+    "ct_eq", "ct_eq_hex", "ct_select",
+    // Non-optimizable memory wipe for key material.
+    "zeroize", "secret_delete_all",
+    // RSA: PKCS#1 v1.5 signatures and OAEP encryption. DER keys.
+    "rsa_keypair", "rsa_sign", "rsa_verify", "rsa_encrypt", "rsa_decrypt",
+    // ECDSA over NIST P-256. DER keys, 64-byte r||s signatures.
+    "ecdsa_keypair", "ecdsa_sign", "ecdsa_verify",
+    // ICMP and ARP. The pure builders run no code and are reachable from a
+    // sandbox; only net_raw_send / net_raw_recv open a socket.
+    "net_raw_icmp", "net_raw_icmp_ping", "net_raw_icmp_echo_reply",
+    "net_raw_arp_request", "net_raw_arp_reply", "net_raw_arp_parse",
 ];
 
 #[derive(Debug)]

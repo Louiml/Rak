@@ -103,6 +103,16 @@ pub enum Token {
     Test,
     #[token("assert")]
     Assert,
+    /// `unsafe` — opens a block that is exempt from safety lint rules. Always
+    /// carries a reason string, so the site is greppable and reviewable.
+    #[token("unsafe")]
+    Unsafe,
+    /// `requires` — a function precondition, checked at call time.
+    #[token("requires")]
+    Requires,
+    /// `ensures` — a function postcondition, with `result` in scope.
+    #[token("ensures")]
+    Ensures,
 
     /// A macro placeholder `$name` inside a macro body.
     #[regex(r"\$[a-zA-Z_][a-zA-Z0-9_]*", |lex| lex.slice()[1..].to_string())]

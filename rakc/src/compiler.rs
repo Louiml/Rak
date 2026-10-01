@@ -917,6 +917,17 @@ impl Compiler {
             Stmt::Defer(expr) => {
                 self.compile_defer_call(expr)?;
             }
+            Stmt::Unsafe { body, .. } => {
+                // No new opcode. An `unsafe` block is a plain block that the
+                // linter and `rakc lint --audit` treat specially; the bytecode
+                // is identical, which is the point: the marker is a review
+                // boundary, not a different execution mode. The audit trail
+                // itself is collected statically, so it is the same on both
+                // backends.
+                for s in body {
+                    self.compile_stmt(s)?;
+                }
+            }
             other => {
                 return Err(format!("VM does not support statement: {:?}", other));
             }

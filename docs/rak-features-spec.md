@@ -1279,12 +1279,19 @@ green). Nothing here is aspirational.
 
 ---
 
-## Part 7 — v0.8: Unify + Extend  **[SPEC → SHIPPED]**
+## Part 7 — v0.8 → v8.0.0: Unify + Extend  **[PARTIALLY SHIPPED]**
 
-v0.8 closes the interpreter/VM feature gap, adds operator overloading and
+v8.0.0 closes the interpreter/VM feature gap, adds operator overloading and
 match-pattern upgrades, real (checked) generics, a lazy Iterator protocol, a
 syntax pack, a type-checking/formatter/linter/doc toolchain, and the OSINT
 domain pack. Status markers are updated to **[SHIPPED]** as each feature lands.
+
+As of 8.0.0 the following remain **[SPEC]**: 7A.4 VM streams, 7A.5 VM
+`tunnel`/`udp_*`, 7A.6 VM `import pkg.sub`, 7A.9 checked generics, the lazy
+`Iterator` trait in 7A.10, sets in 7A.11, `rakc check` v2 / `rakc doc` /
+bytecode cache / TCO in 7B, and the binstruct-v2 remainder plus live capture,
+Windows raw sockets and the macOS CI matrix in 7C. `docs/V8-ROADMAP.md` has
+the full breakdown.
 
 ### 7A.1 VM `try`/`catch`  **[SHIPPED]**
 
@@ -1361,6 +1368,11 @@ interpreter-only semantics preserved.
 - `compiler.rs::compile_for`: a `Stream` arm drives `next()` until `nil`
   (lazy, backpressure preserved).
 
+Current state: `value.rs` has no `Stream` variant at all.
+`ext_batteries.rs`/`ext_osint.rs` already establish the dual-dispatch pattern
+(`try_interp` for the tree walker, `vm_natives()` for the VM) that this should
+follow rather than adding opcodes.
+
 ### 7A.5 VM `tunnel` / `udp_*`  **[SPEC]**
 
 `compiler.rs` compiles `Stmt::Tunnel` to: `tunnel_preshared_key` native call →
@@ -1369,11 +1381,17 @@ interpreter-only semantics preserved.
 the frame). `value.rs` mirrors `Value::UdpTransport`. `udp_send`/`udp_recv`/
 `udp_local_addr` registered as VM natives.
 
+Current state: `compiler.rs` hard-errors with "VM does not support 'tunnel'
+statement (use `rakc run` with the interpreter)".
+
 ### 7A.6 VM `import pkg.sub`  **[SPEC]**
 
 `compiler.rs::inline_module` gains dotted-resolution: `import pkg.sub` resolves
 `pkg/init.rak` then `sub.rak` inside `pkg/` and inlines both modules'
 exports; `pkg` binds as a Module value containing `sub` (interpreter parity).
+
+Current state: `inline_module` handles whole/from/star but has no dotted
+resolution.
 
 ### 7A.7 Operator overloading  **[SHIPPED]**
 
@@ -1399,7 +1417,7 @@ then the existing error. The receiver is the **left** operand; if the left
 operand has no impl but the right does, the right's impl is tried with
 commutative fallback only for `Add`/`Mul`/`Eq`. Both backends.
 
-### 7A.8 Match guards, binding patterns, struct patterns  **[SHIPPED]** (guards were pre-existing; bind/struct/enum patterns via MatchPat)
+### 7A.8 Match guards, binding patterns, struct patterns  **[PARTIALLY SHIPPED]**
 
 #### Syntax
 ```rak
@@ -1411,12 +1429,23 @@ match port {
 }
 ```
 
-- `ast.rs`: `MatchArm { guard: Option<Expr> }`, `Pattern::Bind(String,
-  Box<Pattern>)`, `Pattern::Struct(String, Vec<(String, Option<Pattern>)>)`.
-- Guards: matched-then-evaluated in the arm scope; a false guard falls
-  through to the next arm (interpreter + VM `JumpIfFalse` to next arm).
-- `Bind` binds the whole scrutinee (byte arrays bind to `bytes`).
-- Struct patterns destructure by field name; missing fields are an error.
+- **Guards: [SHIPPED]** (pre-existing, before this pass). Matched-then-evaluated
+  in the arm scope; a false guard falls through to the next arm on both
+  backends.
+- **Struct patterns: [SHIPPED]** — `Pattern::Struct(String, Vec<(String,
+  Pattern)>)` destructures by field name, lowered to a descriptor consumed by
+  `Op::MatchPat` on the VM.
+- **Enum patterns: [SHIPPED]** — `Pattern::EnumVariant` via `Op::MatchPat`.
+- **Binding patterns: [SPEC]** — `Pattern::Bind` does **not** exist. There is
+  no `Bind` variant in the `ast.rs` `Pattern` enum, no `At` token in the
+  lexer, and no `@` handling in the parser, so the `x @ [0x89, 'P', ..]` line
+  above does not parse. Implementing it needs a new token, a new `Pattern`
+  variant, descriptor support in `compiler.rs::pattern_descriptor`, and a
+  binding slot in `vm.rs`'s matcher.
+- `Pattern::Struct` is declared as `Vec<(String, Pattern)>`, not
+  `Vec<(String, Option<Pattern>)>`, so field shorthand (`Point { x, y }` rather
+  than `Point { x: x, y: y }`) may not parse. Worth checking before advertising
+  the shorthand form.
 - Exhaustiveness checking (`rakc check`) treats guards as non-exhaustive.
 
 ### 7A.9 Checked generics  **[SPEC]**
@@ -1427,6 +1456,12 @@ unification (`fn identity<T>(v: T) -> T` with `identity(42)`) substitutes
 concrete types to verify the return type. Runtime stays erased
 (backward-compatible); the checker becomes the source of truth.
 
+Current state: the parser and AST carry `type_params`, but
+`typecheck.rs::compatible` blanket-accepts generics —
+`(Generic(_), _) => true` and `(_, Generic(_)) => true` — so there is no
+unification and `identity("x")` against `fn identity<T>(v: T) -> T` passes.
+Generics are currently an escape hatch rather than a checked type.
+
 ### 7A.10 Iterator protocol  **[SHIPPED]** (builtins + map/string for; lazy Iterator trait pending)
 
 Built-in `Iterator` trait with `next(self) -> Option`. `for` prefers
@@ -1436,20 +1471,26 @@ f)`, `any(xs, f)`, `all(xs, f)`, `flat_map(xs, f)`, `take_while(s, f)`,
 `skip(s, n)`. `for (k, v) in map { ... }` iterates key/value pairs (sugar for
 the existing map-iteration order).
 
-### 7A.11 Syntax pack  **[SPEC]**
+### 7A.11 Syntax pack  **[SHIPPED except sets]**
 
-| Feature | Syntax | Implementation |
-|---------|--------|----------------|
-| Raw strings | `r"\d+\.py"` (no escapes; regex `\/` annoyance gone) | lexer, pre-regex-postprocess |
-| Triple-quoted strings | `"""...multi line..."""` | lexer |
-| Nil-safe access | `cfg?.port` (nil if `cfg` is nil) | parse-time desugar |
-| Nil coalescing | `x ?? default` | parse-time desugar |
-| `if let` / `while let` | `if let Some(v) = opt { ... }` | desugar to `match` |
-| Default params | `fn f(a, b = 10)` | parser stores default exprs |
-| Named args | `f(b: 2)` | postfix sugar, positional fallback |
-| Varargs | `fn f(...args)` | binds remaining args as array |
-| Labeled loops | `outer: loop { break outer }` | parser + both backends |
-| Sets | `set_of([..])`, `set_add/has/union/intersect/diff`, `for s in set` | `Value::Set` both backends |
+| Feature | Syntax | Implementation | Status |
+|---------|--------|----------------|--------|
+| Raw strings | `r"\d+\.py"` (no escapes; regex `\/` annoyance gone) | lexer `Token::StringRaw` | SHIPPED |
+| Triple-quoted strings | `"""...multi line..."""` | lexer `Token::StringMulti` | SHIPPED |
+| Nil-safe access | `cfg?.port` (nil if `cfg` is nil) | parse-time desugar | SHIPPED |
+| Nil coalescing | `x ?? default` | parse-time desugar | SHIPPED |
+| `if let` / `while let` | `if let Some(v) = opt { ... }` | `Stmt::IfLet` / `Stmt::WhileLet` | SHIPPED |
+| Default params | `fn f(a, b = 10)` | `Param::default` | SHIPPED |
+| Named args | `f(b: 2)` | `Expr::Call { named }` | SHIPPED |
+| Varargs | `fn f(...args)` | `Param::rest` | SHIPPED |
+| Labeled loops | `outer: loop { break outer }` | `Stmt::Loop { label }`, `BreakTarget::Label` | SHIPPED |
+| Sets | `set_of([..])`, `set_add/has/union/intersect/diff`, `for s in set` | `Value::Set` both backends | **[SPEC]** |
+
+Sets are the one remaining item: no `Value::Set` in either backend, no
+`set_*` builtins, no set literal. `Map` already exists in both backends with
+insertion-order iteration, so the cheapest implementation is a set backed by
+an insertion-ordered map keyed on the element, plus the `ext_batteries.rs`
+dual dispatch (`try_interp` + `vm_natives()`).
 
 ### 7B — Type system & tooling  **[SPEC → SHIPPED for fmt/lint]**
 
@@ -1469,27 +1510,35 @@ the existing map-iteration order).
 - **TCO**: tail-call loop conversion in the tree-walker; tail-flagged VM
   `Call` reuses the frame (deep recursion is safe). **[SPEC]**
 
-### 7C — OSINT domain pack  **[SPEC → bitfields SHIPPED]**
+### 7C — OSINT domain pack  **[SPEC → bitfields + length-prefixed arrays SHIPPED]**
 
-- **binstruct v2**: bitfield fields (`u4`..`u63`, packed LSB-first) are
-  **[SHIPPED]** — any non-multiple-of-8 width parses as a bitfield, packing
-  LSB-first into shared bytes until a byte-aligned field flushes the cursor
-  (identical decode/encode on both backends, round-trip verified). Remaining
-  v2 items — conditional fields (`field: type if <expr>`), length-prefixed
-  arrays (`field: [T; count]`), enum-discriminant tables — **[SPEC]**.
+- **binstruct v2 — bitfields**: **[SHIPPED]** — any non-multiple-of-8 width
+  parses as a bitfield (`BinKind::Bits`), packing LSB-first into shared bytes
+  until a byte-aligned field flushes the cursor. Identical decode/encode on
+  both backends, round-trip verified.
+- **binstruct v2 — length-prefixed arrays**: **[SHIPPED]** — `BinField.repeat`
+  holds the count expression, evaluated at decode/encode time
+  (`field: [T; count]`).
+- **binstruct v2 — conditional fields** (`field: type if <expr>`) and
+  **enum-discriminant tables**: **[SPEC]**.
 - **Evidence auto-propagation (opt-in)**: `#[track_evidence]` on a `fn`
   wraps the return value in `cite(value, fn_name, call_site)`; propagates
-  through `|>` when enabled. Off by default (§4 errata preserved).
+  through `|>` when enabled. Off by default (§4 errata preserved). **[SPEC]**
 - **Live capture**: `tls_inspect(host, port, sni?)` — real ClientHello →
   ServerHello + cert chain (rustls, pure Rust); `pcap_listen(iface, bpf,
   timeout)` behind the `pcap` feature; `net_raw_icmp_ping` +
   `net_raw_arp_request`/`arp_scan` (builders cross-platform, I/O
-  unix-gated like §2.2).
+  unix-gated like §2.2). **[SPEC]** — note that `caps.rs` already lists
+  `tls_inspect` and `pcap_listen` in its capability table, but neither has an
+  implementation in `rakc` or `stdlib`. `stdlib/src/pcap.rs` is a
+  feature-gated stub that errors unless built with `--features pcap`, and
+  `caps.rs` still names the pre-rename `net_raw_icmp`.
 - **Windows raw sockets**: `net_raw_send`/`recv` via Npcap's
   `PacketSendPackets`/`PacketReceivePacket` when the `npcap` feature is on
-  and Npcap is installed.
+  and Npcap is installed. **[SPEC]**
 - **macOS**: CI matrix + build fixes (tauri GUI already cross-platform;
-  raw sockets need sudo, matching §2.2).
+  raw sockets need sudo, matching §2.2). **[SPEC]** — `release.yml` currently
+  builds ubuntu and windows only.
 
 ### Verification (per-feature, as each lands)
 - `cargo test -p rakc` green on both backends (new `test_vm_*` for every

@@ -1,7 +1,7 @@
 use crate::interpreter::Interpreter;
 
 pub fn run() {
-    println!("Rak REPL v0.3.0");
+    println!("Rak REPL v8.0.0");
     println!("Type :help for a list of commands. Ctrl-D or :quit to exit.");
     println!();
 

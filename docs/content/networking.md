@@ -86,6 +86,36 @@ dump net_raw_csum(pkt[0..20])  // 0 (the IP header is self-checking)
 Send/recv are unix-only in this build (Windows returns a clear `Err`). An
 invalid checksum is not an error — forging malformed packets is intentional.
 
+### ICMP and ARP (8.0.0)
+
+```rak
+// Echo request / reply. id and seq are echoed, so a reply can be matched
+// to the request that caused it.
+let echo = net_raw_icmp("10.0.0.5", "10.0.0.10", 0x1234, 1, b"\xAB\xAB")
+let ping = net_raw_icmp_ping("10.0.0.5", "10.0.0.10", 0x1234, 1)
+let rep  = net_raw_icmp_echo_reply("10.0.0.10", "10.0.0.5", 0x1234, 1, b"\xAB\xAB")
+
+// ARP. src_mac must be the real interface MAC or the reply goes astray.
+let req = net_raw_arp_request("aa:bb:cc:dd:ee:ff", "10.0.0.5", "10.0.0.10")
+let rsp = net_raw_arp_reply("aa:bb:cc:dd:ee:ff", "10.0.0.10", "11:22:33:44:55:66", "10.0.0.5")
+```
+
+`net_raw_arp_parse` takes a frame with or without the Ethernet header and
+returns a map, or `nil` if the bytes are not ARP, so raw capture can be fed
+straight in:
+
+```rak
+let a = net_raw_arp_parse(req)
+dump a["opcode"]       // "1" for request, "2" for reply
+dump a["sender_mac"]   // "aa:bb:cc:dd:ee:ff"
+dump a["sender_ip"]    // "10.0.0.5"
+dump a["target_ip"]    // "10.0.0.10"
+```
+
+MACs accept `:` `-` or `.` separators. All of these are pure builders, so they
+work inside `--sandbox`; only `net_raw_send` / `net_raw_recv` need the `raw`
+capability.
+
 ## Protocol parsers (DNS / TLS / PCAP)
 
 Hand-rolled DNS wire-format builder/parser + UDP query (no external DNS crate

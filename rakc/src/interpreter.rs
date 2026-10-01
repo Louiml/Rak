@@ -23,6 +23,11 @@ pub enum FutureState {
         closure: Arc<Env>,
         args: Vec<Value>,
         named: Vec<(String, Value)>,
+        /// Carried so an `async fn` still enforces its own contracts, on both
+        /// the sequential and the concurrent drive path.
+        name: String,
+        requires: Vec<Expr>,
+        ensures: Vec<Expr>,
     },
     Polled,
 }
@@ -365,6 +370,14 @@ pub enum Value {
         body: Vec<Stmt>,
         closure: Arc<Env>,
         is_async: bool,
+        /// Declared name, used in contract diagnostics so a violation says which
+        /// function broke its promise. Anonymous functions report `<anon>`.
+        name: String,
+        /// Preconditions and postconditions carried from the source. Stored on
+        /// the value rather than in a side table so a closure that escapes its
+        /// defining scope still enforces its own contracts.
+        requires: Vec<Expr>,
+        ensures: Vec<Expr>,
     },
     EnumDef {
         variants: Vec<EnumVariant>,
@@ -695,6 +708,78 @@ pub struct Interpreter {
     /// Test blocks collected during a run (`test "name" { ... }`), for the
     /// `rakc test` runner.
     tests: Vec<(String, Vec<crate::ast::Stmt>)>,
+    /// Every `unsafe "reason" { ... }` block that executed, in order. This is
+    /// the audit trail: a run leaves a record of which safety exemptions a
+    /// program actually took, not merely which ones it contains.
+    unsafe_sites: Vec<UnsafeSite>,
+    /// Bounded-execution limits. `None` on every field means unlimited, which
+    /// is the default for `rakc run` so normal programs are neither slowed
+    /// down nor cut short. `rakc verify` sets all three, which is what turns
+    /// an infinite loop or unbounded recursion into a reportable outcome
+    /// instead of a hang or a bare native crash.
+    limits: Limits,
+    /// Current function-call nesting depth, checked against
+    /// `limits.max_depth`. Tracked separately from the OS thread stack, which
+    /// the interpreter cannot grow.
+    call_depth: u32,
+}
+
+/// One `unsafe` block that was entered, with where it was and why.
+#[derive(Debug, Clone)]
+pub struct UnsafeSite {
+    /// The justification string written at the call site.
+    pub reason: String,
+    /// 1-based line in the source file, if known.
+    pub line: usize,
+}
+
+/// Resource ceilings for bounded execution. Each `None` field is unlimited.
+#[derive(Debug, Clone, Default)]
+pub struct Limits {
+    /// Maximum statements before the run is declared inconclusive. Guards
+    /// against an infinite loop.
+    pub max_steps: Option<u64>,
+    /// Maximum function-call nesting depth. Guards against unbounded recursion,
+    /// which would otherwise exhaust the native stack.
+    pub max_depth: Option<u32>,
+    /// Maximum iterations of any single loop.
+    pub max_iterations: Option<u64>,
+    /// Steps consumed so far, reported by `rakc verify`.
+    pub steps: u64,
+}
+
+/// Which limit stopped a run. Reported rather than guessed at, because
+/// "inconclusive" is only actionable if it says which bound was hit.
+#[derive(Debug, Clone, PartialEq)]
+pub enum LimitHit {
+    Steps { used: u64, max: u64 },
+    Depth { used: u32, max: u32 },
+    Iterations { used: u64, max: u64 },
+}
+
+/// Sentinel marking an error as "a resource limit was reached" rather than
+/// "the program failed". `rakc verify` keys off this, so it must be something a
+/// Rak program cannot emit on its own: the text comes from the host, not from
+/// `raise`.
+pub const LIMIT_PREFIX: &str = "resource limit reached";
+
+impl std::fmt::Display for LimitHit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let detail = match self {
+            LimitHit::Steps { used, max } => {
+                format!("step budget exhausted: {} of {} steps used", used, max)
+            }
+            LimitHit::Depth { used, max } => {
+                format!("recursion depth exceeded: {} > {}", used, max)
+            }
+            LimitHit::Iterations { used, max } => {
+                format!("loop iteration cap exceeded: {} > {}", used, max)
+            }
+        };
+        // Sentinel first, so `rakc verify` can tell a limit apart from a
+        // failure without pattern-matching on prose.
+        write!(f, "{}: {}", LIMIT_PREFIX, detail)
+    }
 }
 
 /// A `break`/`continue` signal unwinding through nested loops.
@@ -741,6 +826,28 @@ struct ForeignFnDecl {
 }
 
 impl Interpreter {
+    /// Install resource ceilings for bounded execution. Passing
+    /// `Limits::default()` restores unlimited execution.
+    pub fn set_limits(&mut self, limits: Limits) {
+        self.limits = limits;
+    }
+
+    /// How much of the step budget a run consumed, for reporting.
+    pub fn steps_used(&self) -> u64 {
+        self.limits.steps
+    }
+
+    /// Take the accumulated output, leaving the interpreter empty. Used by
+    /// `rakc verify` to report what a failing run printed before it failed.
+    pub fn take_output(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.output)
+    }
+
+    /// The `unsafe` blocks actually entered during this run, in order.
+    pub fn unsafe_sites(&self) -> &[UnsafeSite] {
+        &self.unsafe_sites
+    }
+
     pub fn new() -> Self {
         Interpreter {
             env: Env::new(),
@@ -749,6 +856,9 @@ impl Interpreter {
             current_line: 0,
             current_file: None,
             program_argv: Vec::new(),
+            unsafe_sites: Vec::new(),
+            limits: Limits::default(),
+            call_depth: 0,
             main_entry: None,
             debug_breakpoints: HashSet::new(),
             debug_active: false,
@@ -779,6 +889,9 @@ impl Interpreter {
             current_line: 0,
             current_file: None,
             program_argv: Vec::new(),
+            unsafe_sites: Vec::new(),
+            limits: Limits::default(),
+            call_depth: 0,
             main_entry: None,
             debug_breakpoints: HashSet::new(),
             debug_active: false,
@@ -1162,7 +1275,35 @@ impl Interpreter {
         }
     }
 
+    /// Charge one step against the budget. Called once per statement. This is
+    /// deliberately coarse: a liveness bound, not an instruction count, and one
+    /// add per statement keeps the cost off the hot path when no limit is set.
+    fn charge_step(&mut self) -> crate::Result<()> {
+        if let Some(max) = self.limits.max_steps {
+            self.limits.steps += 1;
+            if self.limits.steps > max {
+                return Err(crate::RakError::Runtime(
+                    LimitHit::Steps { used: self.limits.steps, max }.to_string(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Check a per-loop iteration count against the cap.
+    fn check_iterations(&self, n: u64) -> crate::Result<()> {
+        if let Some(max) = self.limits.max_iterations {
+            if n > max {
+                return Err(crate::RakError::Runtime(
+                    LimitHit::Iterations { used: n, max }.to_string(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
     fn exec_stmt(&mut self, stmt: &Stmt) -> crate::Result<()> {
+        self.charge_step()?;
         match stmt {
             Stmt::Export(inner) => {
                 self.exec_stmt(inner)?;
@@ -1245,7 +1386,10 @@ impl Interpreter {
                 }
             }
             Stmt::Loop { label, body } => {
+                let mut iter: u64 = 0;
                 loop {
+                    iter += 1;
+                    self.check_iterations(iter)?;
                     self.env.push_scope();
                     for s in body {
                         self.exec_stmt(s)?;
@@ -1264,7 +1408,10 @@ impl Interpreter {
                 }
             }
             Stmt::While { label, cond, body } => {
+                let mut iter: u64 = 0;
                 while is_truthy(&self.eval_expr(cond)?) {
+                    iter += 1;
+                    self.check_iterations(iter)?;
                     self.env.push_scope();
                     for s in body {
                         self.exec_stmt(s)?;
@@ -1283,7 +1430,10 @@ impl Interpreter {
                 }
             }
             Stmt::DoWhile { cond, body } => {
+                let mut iter: u64 = 0;
                 loop {
+                    iter += 1;
+                    self.check_iterations(iter)?;
                     self.env.push_scope();
                     for s in body {
                         self.exec_stmt(s)?;
@@ -1305,12 +1455,18 @@ impl Interpreter {
                 }
             }
             Stmt::WhileLet { pattern, value, body } => {
+                let mut iter: u64 = 0;
                 loop {
                     let v = self.eval_expr(value)?;
                     self.env.push_scope();
                     if !self.pattern_matches(&pattern, &v)? {
                         self.env.pop_scope();
                         break;
+                    }
+                    iter += 1;
+                    if let Err(e) = self.check_iterations(iter) {
+                        self.env.pop_scope();
+                        return Err(e);
                     }
                     self.bind_pattern(&pattern, &v)?;
                     for s in body {
@@ -1332,11 +1488,14 @@ impl Interpreter {
             Stmt::For { label, pattern, iterable, body } => {
                 let iter = self.eval_expr(iterable)?;
                 let tn = iter.type_name();
+                let mut for_iter: u64 = 0;
                 // Lazy stream iteration: pull one element at a time (natural
                 // backpressure). Applies to `Value::Stream` values.
                 if let Value::Stream(s) = &iter {
                     let handle = s.clone();
                     loop {
+                        for_iter += 1;
+                        self.check_iterations(for_iter)?;
                         let item = handle.lock().unwrap().next(self)?;
                         match item {
                             Some(v) => {
@@ -1622,6 +1781,19 @@ impl Interpreter {
             Stmt::Defer(expr) => {
                 self.defers.push(expr.as_ref().clone());
             }
+            Stmt::Unsafe { reason, body } => {
+                // The block executes exactly as written. `unsafe` is a review
+                // marker, not a different execution mode: there is no borrow
+                // checker to suspend, so the only thing it changes is that this
+                // site now appears in the audit trail.
+                self.unsafe_sites.push(UnsafeSite {
+                    reason: reason.clone(),
+                    line: self.current_line as usize,
+                });
+                for s in body {
+                    self.exec_stmt(s)?;
+                }
+            }
             Stmt::Test { name, body } => {
                 // Test declarations are collected (and run by the test runner),
                 // not executed during a normal program run.
@@ -1642,7 +1814,8 @@ impl Interpreter {
     }
 
     fn run_for_loop(&mut self, pattern: &Pattern, label: &Option<String>, items: Vec<Value>, body: &[Stmt]) -> crate::Result<()> {
-        for item in items {
+        for (idx, item) in items.into_iter().enumerate() {
+            self.check_iterations(idx as u64 + 1)?;
             self.env.push_scope();
             self.bind_pattern(pattern, &item)?;
             for s in body {
@@ -2214,12 +2387,15 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                 }
                 Ok(Value::Array(arr))
             }
-            Expr::Function { params, return_type: _, body, captures: _, is_async } => {
+            Expr::Function { params, return_type: _, body, captures: _, is_async, name, requires, ensures } => {
                 Ok(Value::Function {
                     params: params.clone(),
                     body: body.clone(),
                     closure: Arc::new(self.env.clone()),
                     is_async: *is_async,
+                    name: name.clone().unwrap_or_else(|| "<anon>".to_string()),
+                    requires: requires.clone(),
+                    ensures: ensures.clone(),
                 })
             }
             Expr::Lambda { params, body, captures: _ } => {
@@ -2229,6 +2405,9 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                     body: vec![single],
                     closure: Arc::new(self.env.clone()),
                     is_async: false,
+                    name: "<lambda>".to_string(),
+                    requires: vec![],
+                    ensures: vec![],
                 })
             }
             Expr::Call { callee, args, named } => self.eval_call(callee, args, named),
@@ -2984,8 +3163,8 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                 _ => {}
             }
             if let Some(val) = self.env.get(name) {
-                if let Value::Function { params, body, closure, is_async } = val {
-                    return self.call_function(&params, &body, &closure, is_async, args, named);
+                if let Value::Function { params, body, closure, is_async, name: fname, requires, ensures } = val {
+                    return self.call_function(&params, &body, &closure, is_async, &fname, &requires, &ensures, args, named);
                 }
             }
             if let Some(decl) = self.foreign_fns.get(name).cloned() {
@@ -3034,8 +3213,8 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
             }
             // Fallback: a field that itself holds a callable (modules, etc.).
             if let Some(v) = self.field_value(&obj_val, method) {
-                if let Value::Function { params, body, closure, is_async } = v {
-                    return self.call_function(&params, &body, &closure, is_async, args, named);
+                if let Value::Function { params, body, closure, is_async, name: fname, requires, ensures } = v {
+                    return self.call_function(&params, &body, &closure, is_async, &fname, &requires, &ensures, args, named);
                 }
             }
             return Err(crate::RakError::Runtime(format!(
@@ -3044,8 +3223,8 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
             )));
         }
         let callee_val = self.eval_expr(callee)?;
-        if let Value::Function { params, body, closure, is_async } = callee_val {
-            return self.call_function(&params, &body, &closure, is_async, args, named);
+        if let Value::Function { params, body, closure, is_async, name: fname, requires, ensures } = callee_val {
+            return self.call_function(&params, &body, &closure, is_async, &fname, &requires, &ensures, args, named);
         }
         if let Value::Module(map) = callee_val {
             let _ = map;
@@ -3053,14 +3232,15 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
         Err(crate::RakError::Runtime("Cannot call non-function".to_string()))
     }
 
-    fn call_function(&mut self, params: &[Param], body: &[Stmt], closure: &Arc<Env>, is_async: bool, args: &[Expr], named: &[(String, Expr)]) -> crate::Result<Value> {
+    #[allow(clippy::too_many_arguments)]
+    fn call_function(&mut self, params: &[Param], body: &[Stmt], closure: &Arc<Env>, is_async: bool, name: &str, requires: &[Expr], ensures: &[Expr], args: &[Expr], named: &[(String, Expr)]) -> crate::Result<Value> {
         let arg_vals: Vec<Value> = args.iter().map(|a| self.eval_expr(a)).collect::<crate::Result<_>>()?;
         let named_vals: crate::Result<Vec<(String, Value)>> = named
             .iter()
             .map(|(n, e)| Ok((n.clone(), self.eval_expr(e)?)))
             .collect();
         let named_vals = named_vals?;
-        self.call_function_values(params, body, closure, is_async, arg_vals, named_vals)
+        self.call_function_values(params, body, closure, is_async, name, requires, ensures, arg_vals, named_vals)
     }
 
     /// Run a function's body in the current scope (env already set to the
@@ -3084,18 +3264,84 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
         Ok(ret)
     }
 
+    /// Check `requires` clauses. Returns a descriptive error naming the failed
+    /// clause, because "contract violated" with no detail is useless when a
+    /// function has several.
+    fn check_requires(&mut self, requires: &[Expr], name: &str) -> crate::Result<()> {
+        for c in requires {
+            let v = self.eval_expr(c)?;
+            if !is_truthy(&v) {
+                return Err(crate::RakError::Runtime(format!(
+                    "precondition failed in {}: {}",
+                    name,
+                    expr_str(c)
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// Check `ensures` clauses with `result` bound to the return value and the
+    /// function's parameters still in scope.
+    ///
+    /// Both matter. `ensures result == a + b` is the useful form, so the
+    /// parameters have to be visible; and the check runs after `defers` have
+    /// had their chance to repair the return value, so the promise is about
+    /// what the caller actually receives.
+    fn check_ensures(
+        &mut self,
+        ensures: &[Expr],
+        name: &str,
+        result: &Value,
+        params: &[(std::string::String, Value)],
+    ) -> crate::Result<()> {
+        if ensures.is_empty() {
+            return Ok(());
+        }
+        let saved_env = self.env.clone();
+        self.env.push_scope();
+        for (n, v) in params {
+            self.env.define(n, v.clone());
+        }
+        self.env.define("result", result.clone());
+        let mut failed: Option<std::string::String> = None;
+        for c in ensures {
+            match self.eval_expr(c) {
+                Ok(v) => {
+                    if !is_truthy(&v) {
+                        failed = Some(expr_str(c));
+                        break;
+                    }
+                }
+                Err(e) => {
+                    failed = Some(format!("{} (evaluating it failed: {})", expr_str(c), e));
+                    break;
+                }
+            }
+        }
+        self.env = saved_env;
+        if let Some(clause) = failed {
+            return Err(crate::RakError::Runtime(format!(
+                "postcondition failed in {}: {}",
+                name, clause
+            )));
+        }
+        Ok(())
+    }
+
     /// Call a function value with already-evaluated argument values. Used by
     /// trait-method dispatch where the receiver and arguments are computed
     /// before the call.
     fn call_function_with_values(&mut self, func: Value, arg_vals: Vec<Value>) -> crate::Result<Value> {
-        if let Value::Function { params, body, closure, is_async } = func {
-            self.call_function_values(&params, &body, &closure, is_async, arg_vals, vec![])
+        if let Value::Function { params, body, closure, is_async, name, requires, ensures } = func {
+            self.call_function_values(&params, &body, &closure, is_async, &name, &requires, &ensures, arg_vals, vec![])
         } else {
             Err(crate::RakError::Runtime("value is not callable".to_string()))
         }
     }
 
-    fn call_function_values(&mut self, params: &[Param], body: &[Stmt], closure: &Arc<Env>, is_async: bool, arg_vals: Vec<Value>, named_vals: Vec<(String, Value)>) -> crate::Result<Value> {
+    #[allow(clippy::too_many_arguments)]
+    fn call_function_values(&mut self, params: &[Param], body: &[Stmt], closure: &Arc<Env>, is_async: bool, name: &str, requires: &[Expr], ensures: &[Expr], arg_vals: Vec<Value>, named_vals: Vec<(String, Value)>) -> crate::Result<Value> {
         if is_async {
             // An async function does not run its body at call time; it returns a
             // deferred future whose body is driven on the first `await`.
@@ -3106,6 +3352,12 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                     closure: closure.clone(),
                     args: arg_vals,
                     named: named_vals,
+                    // Contracts travel with the future. A contract that stopped
+                    // applying just because the function was declared `async`
+                    // would be worse than no contract at all.
+                    name: name.to_string(),
+                    requires: requires.to_vec(),
+                    ensures: ensures.to_vec(),
                 }),
             })));
         }
@@ -3116,10 +3368,36 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
         self.env = (**closure).clone();
         self.env.push_scope();
         let bound = self.bind_params(params, &arg_vals, &named_vals)?;
+        let bound_params = bound.clone();
         for (name, v) in bound {
             // Function parameters are mutable by default so functions may
             // rebind them (matching existing Rak programs).
             self.env.define_mut(&name, v, true);
+        }
+        // Preconditions run with the parameters bound but before a single
+        // statement of the body. That ordering is the point: a violated
+        // `requires` blames the caller, and a function that would corrupt state
+        // before validating must not get the chance to.
+        if let Err(e) = self.check_requires(requires, name) {
+            self.env = saved_env;
+            self.returning = saved_returning;
+            self.defers = saved_defers;
+            return Err(e);
+        }
+        // Unbounded recursion exhausts the native stack, and the release profile
+        // uses panic = "abort", so the process would die with no diagnostic. A
+        // depth cap turns that into a catchable error naming the limit.
+        self.call_depth += 1;
+        if let Some(max) = self.limits.max_depth {
+            if self.call_depth > max {
+                self.call_depth -= 1;
+                self.env = saved_env;
+                self.returning = saved_returning;
+                self.defers = saved_defers;
+                return Err(crate::RakError::Runtime(
+                    LimitHit::Depth { used: self.call_depth, max }.to_string(),
+                ));
+            }
         }
         for s in body {
             self.exec_stmt(s)?;
@@ -3127,6 +3405,7 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                 break;
             }
         }
+        self.call_depth -= 1;
         let ret = if self.returning {
             std::mem::replace(&mut self.return_value, Value::Nil)
         } else {
@@ -3137,6 +3416,11 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
         self.env = saved_env.clone();
         self.returning = saved_returning;
         self.run_defers()?;
+        // Postconditions are checked after defers have run, so a deferred
+        // cleanup that repairs the return value is accounted for rather than
+        // reported as a broken promise. Parameters are re-bound for the check
+        // because the caller's environment has already been restored.
+        self.check_ensures(ensures, name, &ret, &bound_params)?;
         // Restore the caller's defers (defers registered in a caller must
         // outlive this function call).
         self.defers = saved_defers;
@@ -3224,8 +3508,8 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                 *handle.state.lock().unwrap() = FutureState::Ready(joined.clone());
                 Ok(joined)
             }
-            FutureState::Deferred { params, body, closure, args, named } => {
-                let result = self.call_function_values(&params, &body, &closure, false, args, named)?;
+            FutureState::Deferred { params, body, closure, args, named, name, requires, ensures } => {
+                let result = self.call_function_values(&params, &body, &closure, false, &name, &requires, &ensures, args, named)?;
                 *handle.state.lock().unwrap() = FutureState::Ready(result.clone());
                 Ok(result)
             }
@@ -3267,18 +3551,26 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                 });
                 Ok(th)
             }
-            FutureState::Deferred { params, body, closure, args, named } => {
+            FutureState::Deferred { params, body, closure, args, named, name, requires, ensures } => {
                 let th = std::thread::spawn(move || {
                     let _p = permit.acquire();
                     let mut interp = Interpreter::new();
                     interp.env = (*closure).clone();
                     interp.env.push_scope();
+                    // Collect the bound parameters so the postcondition check
+                    // can see them, matching the synchronous path.
+                    let mut bound_params: Vec<(String, Value)> = Vec::new();
                     for (p, a) in params.iter().zip(args.iter()) {
                         interp.env.define(&p.name, a.clone());
+                        bound_params.push((p.name.clone(), a.clone()));
                     }
                     for (n, v) in &named {
                         interp.env.define(n, v.clone());
+                        bound_params.push((n.clone(), v.clone()));
                     }
+                    // Contracts are enforced on this thread too, so awaiting an
+                    // async fn concurrently is not a way to skip them.
+                    interp.check_requires(&requires, &name)?;
                     let r: crate::Result<()> = (|| {
                         for s in &body {
                             interp.exec_stmt(s)?;
@@ -3292,6 +3584,7 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                     } else {
                         Value::Nil
                     };
+                    interp.check_ensures(&ensures, &name, &ret, &bound_params)?;
                     Ok(ret)
                 });
                 Ok(th)
@@ -3670,8 +3963,8 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
             }
             if let Some(Value::Module(map)) = self.env.get(base) {
                 if let Some(v) = map.get(variant) {
-                    if let Value::Function { params, body, closure, is_async } = v {
-                        return self.call_function(&params, &body, &closure, *is_async, args, named);
+                    if let Value::Function { params, body, closure, is_async, name: fname, requires, ensures } = v {
+                        return self.call_function(&params, &body, &closure, *is_async, &fname, &requires, &ensures, args, named);
                     }
                     return Ok(v.clone());
                 }
@@ -6566,6 +6859,49 @@ fn expr_str(e: &Expr) -> String {
             };
             format!("{} {} {}", expr_str(l), o, expr_str(r))
         }
+        Unary(op, x) => {
+            let o = match op {
+                crate::ast::UnOp::Minus => "-",
+                crate::ast::UnOp::Not => "!",
+                crate::ast::UnOp::BitNot => "~",
+            };
+            format!("{}{}", o, expr_str(x))
+        }
+        // Contract clauses and assert messages are almost always calls or field
+        // reads, so falling through to the Debug form for these would make the
+        // most important diagnostics the least readable.
+        Call { callee, args, named } => {
+            // `String` is the Expr variant brought in by `use Expr::*`, so the
+            // collection type has to be spelled out.
+            let mut parts: Vec<std::string::String> = args.iter().map(expr_str).collect();
+            for (n, v) in named {
+                parts.push(format!("{}: {}", n, expr_str(v)));
+            }
+            format!("{}({})", expr_str(callee), parts.join(", "))
+        }
+        FieldAccess(obj, field) => format!("{}.{}", expr_str(obj), field),
+        Index(obj, idx) => format!("{}[{}]", expr_str(obj), expr_str(idx)),
+        Path(segs) => segs.join("::"),
+        StructLit { name, .. } => format!("{} {{ .. }}", name),
+        Array(items) => format!(
+            "[{}]",
+            items.iter().map(expr_str).collect::<Vec<_>>().join(", ")
+        ),
+        Tuple(items) => format!(
+            "({})",
+            items.iter().map(expr_str).collect::<Vec<_>>().join(", ")
+        ),
+        NilCoalesce(l, r) => format!("{} ?? {}", expr_str(l), expr_str(r)),
+        OptField(o, f) => format!("{}?.{}", expr_str(o), f),
+        Ternary { cond, then, els } => {
+            format!("{} ? {} : {}", expr_str(cond), expr_str(then), expr_str(els))
+        }
+        Range(a, b) => match (a, b) {
+            (None, None) => "..".to_string(),
+            (Some(s), None) => format!("{}..", expr_str(s)),
+            (None, Some(s)) => format!("..{}", expr_str(s)),
+            (Some(x), Some(y)) => format!("{}..{}", expr_str(x), expr_str(y)),
+        },
         other => format!("{:?}", other),
     }
 }
@@ -6601,6 +6937,7 @@ fn is_truthy(value: &Value) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
 
     #[test]
     fn test_interpreter_hex() {
@@ -6814,10 +7151,34 @@ mod tests {
         assert!(output.iter().any(|l| l.contains("true")));
     }
 
+    /// Recursion needs more native stack than a libtest thread has.
+    ///
+    /// A Rak call costs several native frames, and a debug build gives every
+    /// `match` arm its own stack slots instead of sharing them, so `fib(15)`
+    /// needs roughly a megabyte of native stack. The default libtest thread has
+    /// about two, and the interpreter's own frames are large enough that the
+    /// margin disappeared once the call path grew.
+    ///
+    /// So this one test runs on a thread with an explicit stack. Deliberately
+    /// just this test: spawning a big-stack thread per test across the whole
+    /// suite reserves a lot of address space for no benefit, and the failure
+    /// mode of a stack overflow here is Windows Error Reporting writing a
+    /// multi-gigabyte dump, which is far more disruptive than the test failure
+    /// it replaces.
     #[test]
     fn test_interpreter_recursive_fib() {
-        let mut interp = Interpreter::new();
-        let output = interp.run_source("fn fib(n) { if n < 2 { return n } return fib(n - 1) + fib(n - 2) } dump fib(15);").unwrap();
+        let src = "fn fib(n) { if n < 2 { return n } return fib(n - 1) + fib(n - 2) } dump fib(15);";
+        let owned = src.to_string();
+        let handle = std::thread::Builder::new()
+            .stack_size(32 * 1024 * 1024)
+            .spawn(move || {
+                let mut interp = Interpreter::new();
+                interp.run_source(&owned)
+            })
+            .expect("spawn fib thread")
+            .join()
+            .expect("fib thread panicked");
+        let output = handle.unwrap();
         assert!(output.iter().any(|l| l.contains("[DUMP] 610")));
     }
 

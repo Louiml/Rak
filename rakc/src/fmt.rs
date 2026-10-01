@@ -411,6 +411,14 @@ impl Formatter {
                 self.block(body)?;
                 self.line("}");
             }
+            Stmt::Unsafe { reason, body } => {
+                // The reason is printed verbatim, never reflowed or truncated:
+                // it is the justification a reviewer reads, so `rakc fmt` must
+                // not be able to change what it says.
+                self.line(&format!("unsafe {:?} {{", reason));
+                self.block(body)?;
+                self.line("}");
+            }
             Stmt::BinStructDef { name, fields } => {
                 self.line(&format!("binstruct {} {{", name));
                 self.indent += 1;

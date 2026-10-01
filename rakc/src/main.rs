@@ -3,7 +3,9 @@ use std::fs;
 use std::io::{self, Read, Write};
 use std::path::PathBuf;
 
-const VERSION: &str = "0.7.2";
+use rakc::verify_bounded;
+
+const VERSION: &str = "8.0.0";
 const PAYLOAD_MAGIC: u64 = 0x52414B5F50434B; // "RAK_PCK" as u64
 
 fn print_usage() {
@@ -24,6 +26,10 @@ fn print_usage() {
     #[cfg(feature = "bindgen")]
     eprintln!("  bindgen <h> -o <out>  Generate Rak bindings from a C header");
     eprintln!("  check <file>   Lex + parse, print diagnostics");
+    eprintln!("  fmt <file>     Format source (--write, --check)");
+    eprintln!("  lint <file>    Advisory lint checks (--deny)");
+    eprintln!("  fuzz <target>  Property-based fuzz a parser (--runs, --seed, --list)");
+    eprintln!("  verify <file>  Run under resource limits, check contracts (--steps, --depth, --iters)");
     eprintln!("  lex <file>     Tokenize and print tokens");
     eprintln!("  parse <file>   Parse and print AST");
     eprintln!("  test [file]    Run Rak tests (--filter NAME, --verbose)");
@@ -32,6 +38,98 @@ fn print_usage() {
     eprintln!("Use - for file to read from stdin");
     eprintln!();
     eprintln!("Sandbox (run/vm/debug/test): --sandbox [--allow net,fs_write,process,ffi,raw,gui,secrets|all]");
+}
+
+/// Run the `rakc verify` command: execute a script under finite resource
+/// limits, checking every `requires` / `ensures` clause it reaches.
+///
+/// The command has three outcomes and reports them differently, because
+/// conflating them would be actively misleading:
+///
+///   0  completed within budget, every contract held
+///   1  the program failed: a contract was violated, an assert tripped, or a
+///      runtime error was raised
+///   2  a resource limit was reached, so the run proved nothing
+///
+/// Exit code 2 is the one that matters. A liveness bound was hit, so treat it
+/// as "not checked" and raise the budget, never as "looks fine".
+fn cmd_verify(args: &[String]) -> i32 {
+    let mut file: Option<String> = None;
+    let mut max_steps: u64 = 1_000_000;
+    let mut max_depth: u32 = 256;
+    let mut max_iters: u64 = 1_000_000;
+    let mut quiet = false;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--steps" | "-s" => {
+                i += 1;
+                max_steps = args.get(i).and_then(|v| v.parse().ok()).unwrap_or(max_steps);
+            }
+            "--depth" | "-d" => {
+                i += 1;
+                max_depth = args.get(i).and_then(|v| v.parse().ok()).unwrap_or(max_depth);
+            }
+            "--iters" | "-n" => {
+                i += 1;
+                max_iters = args.get(i).and_then(|v| v.parse().ok()).unwrap_or(max_iters);
+            }
+            "--quiet" | "-q" => quiet = true,
+            other if !other.starts_with('-') && file.is_none() => file = Some(other.to_string()),
+            _ => {}
+        }
+        i += 1;
+    }
+    let Some(file) = file else {
+        eprintln!("Usage: rakc verify <file> [--steps N] [--depth N] [--iters N] [--quiet]");
+        return 2;
+    };
+    let source = read_source(&file);
+    let base_dir = std::path::Path::new(&file)
+        .parent()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|| ".".to_string());
+
+    eprintln!(
+        "verify: {} (budget: {} steps, depth {}, {} iters/loop)",
+        file, max_steps, max_depth, max_iters
+    );
+
+    let outcome = verify_bounded(&source, max_steps, max_depth, max_iters);
+    match outcome {
+        rakc::VerifyOutcome::Completed { steps, output } => {
+            if !quiet {
+                for line in &output {
+                    println!("{}", line);
+                }
+            }
+            println!("PASS  completed in {} steps, all contracts held", steps);
+            0
+        }
+        rakc::VerifyOutcome::Failed { message, steps, output } => {
+            if !quiet {
+                for line in &output {
+                    println!("{}", line);
+                }
+            }
+            // Print the contract failure last so it is the last thing on
+            // screen and survives being piped through head.
+            eprintln!("FAIL  after {} steps: {}", steps, message);
+            1
+        }
+        rakc::VerifyOutcome::Inconclusive { reason, steps } => {
+            eprintln!(
+                "SKIP  inconclusive after {} steps: {}",
+                steps, reason
+            );
+            eprintln!(
+                "      nothing was proved. raise the budget, e.g. --steps {} or --depth {}",
+                max_steps.saturating_mul(4),
+                max_depth.saturating_mul(2)
+            );
+            2
+        }
+    }
 }
 
 /// Run the `rakc test` command. Discovers `.rak` test files (an explicitly
@@ -435,9 +533,19 @@ fn main() {
             rakc::repl::run();
             return;
         }
+        "fuzz" => {
+            // Takes no file. Must run from a debug build: the harness relies on
+            // catch_unwind, and the release profile uses panic = "abort".
+            let code = rakc::fuzz::run(&args[2..]);
+            std::process::exit(code);
+        }
         "test" => {
             cmd_test(&args[2..]);
             return;
+        }
+        "verify" => {
+            let code = cmd_verify(&args[2..]);
+            std::process::exit(code);
         }
         #[cfg(feature = "lsp")]
         "lsp" => {
@@ -591,19 +699,27 @@ fn main() {
             }
         }
         "lint" => {
-            // `rakc lint file [--deny]`
+            // `rakc lint file [--deny] [--audit]`
             let flags: Vec<&String> = args.iter().skip(3).collect();
             let deny = flags.iter().any(|f| f.as_str() == "--deny" || f.as_str() == "-d");
-            match rakc::lint::lint_source(&source) {
-                Ok(findings) => {
-                    if findings.is_empty() {
+            let audit = flags.iter().any(|f| f.as_str() == "--audit" || f.as_str() == "-a");
+            match rakc::lint::lint_source_full(&source) {
+                Ok(report) => {
+                    // --audit answers "which safety exemptions does this
+                    // program claim, and what does it say about each one".
+                    // It is the review artifact, so it prints even when the
+                    // file is otherwise clean.
+                    if audit {
+                        println!("{}", rakc::lint::format_audit(file, &report.unsafe_sites));
+                    }
+                    if report.findings.is_empty() && !audit {
                         println!("{}: no warnings", file);
                     } else {
-                        for f in &findings {
+                        for f in &report.findings {
                             println!("warning[{}]: {}", f.rule, f.message);
                         }
-                        if deny {
-                            eprintln!("{}: {} warnings (denied)", file, findings.len());
+                        if deny && !report.findings.is_empty() {
+                            eprintln!("{}: {} warnings (denied)", file, report.findings.len());
                             std::process::exit(1);
                         }
                     }

@@ -24,6 +24,7 @@
     { group: 'Systems', file: 'networking.md', title: 'Networking & protocols' },
     { group: 'Systems', file: 'vpn.md', title: 'VPN & tunneling' },
     { group: 'Systems', file: 'forensics.md', title: 'Forensics' },
+    { group: 'Systems', file: 'safety.md', title: 'Safety' },
 
     { group: 'Reference', file: 'stdlib.md', title: 'Standard library' },
     { group: 'Reference', file: 'batteries.md', title: 'Stdlib batteries' },

@@ -131,7 +131,7 @@ annotations and non-exhaustive matches before you run anything.
 
 **Build standalone executables.** `rakc build file.rak` produces a self-contained binary with the source embedded. On Windows it's a `.exe`. On Linux it gets `chmod 755`. No Rak installation needed on the target machine.
 
-**GUI windows.** With `--features gui`, Rak scripts can open native desktop windows rendering HTML, CSS, and JS. Uses WebView2 on Windows, WebKitGTK on Linux. JavaScript inside the window can call back into Rak through `window.rak_call(fn, args)`.
+**GUI windows (incomplete).** With `--features gui`, Rak scripts can open a native desktop window rendering HTML, CSS, and JS via WebView2 on Windows. Treat it as a display-only preview: `gui_update`/`gui_title`/`gui_close` do not affect the window yet, JavaScript cannot call back into Rak, closing the window ends the process, and Linux does not work. See [GUI windows](#gui-windows).
 
 **Package manager.** `rakpkg` is a CLI for Git-based shareable Rak packages. Initialize, add dependencies from GitHub repos, install, run, and build. The manifest is a Rak file with `let` bindings.
 
@@ -275,17 +275,32 @@ rakc build examples/hello.rak   # produces hello.exe on Windows, hello on Linux
 
 ## GUI windows
 
-Requires `cargo build --features gui`.
+Incomplete in 8.0.0. Requires `cargo build -p rakc --features gui`.
 
 ```rak
-let html = "<h1 style='color:#22c55e;text-align:center;margin-top:40px'>Hello from Rak!</h1>
-<button onclick=\"window.rak_call('clicked')\" style='display:block;margin:20px auto;padding:10px 30px;font-size:18px;background:#22c55e;color:white;border:none;border-radius:8px;cursor:pointer'>Click me</button>"
+let html = "<h1 style='color:#22c55e;text-align:center;margin-top:40px'>Hello from Rak!</h1>"
 
 let win = gui_open("Rak GUI Demo", html, 600, 400)
 gui_wait()
 ```
 
-`gui_open` returns a window ID. `gui_update(id, html)` changes the content. `gui_title(id, title)` changes the title. `gui_close(id)` closes it. `gui_wait()` blocks until all windows close. `gui_callback(name)` registers a Rak function as callable from JS.
+`gui_open` returns a window ID and `gui_wait()` blocks. That is all that
+currently works. Specifically:
+
+- `gui_update`, `gui_title`, `gui_close` are declared but do nothing yet.
+  `gui.rs` stores `HashMap<i64, ()>` and throws away the `Window` and `WebView`
+  handles, so there is nothing to update.
+- `gui_callback` and `window.rak_call(fn, args)` do not work. The IPC handler
+  receives the message and discards it, so JavaScript cannot call into Rak yet.
+- Closing the window ends the process, because tao's `run` calls
+  `process::exit` when the last window closes. `gui_wait()` does not return and
+  code after it is unreachable.
+- Linux does not work: `gui_open` builds the event loop on a spawned thread,
+  which trips tao's main-thread assertion.
+- The VM has no GUI natives; use `rakc run`.
+
+Windows only, display only. The rewrite that fixes all of the above is tracked
+in `docs/V8-ROADMAP.md`.
 
 ## Package manager
 
@@ -824,7 +839,7 @@ The generated functions call `extern_call`, which returns an error until a Rust 
 
 ## Platform support
 
-Windows and Linux. On Windows, the GUI uses WebView2 (ships with Edge). On Linux, it uses WebKitGTK. `rakc build` produces `.exe` on Windows and an executable with `chmod 755` on Linux. The IDE ships as NSIS/MSI on Windows and `.deb`/AppImage on Linux via GitHub Actions CI, alongside the custom `rak-setup` installer (net-install + offline bundle) on both.
+Windows and Linux. On Windows, the GUI uses WebView2 (ships with Edge) and is display-only; Linux GUI does not work in 8.0.0. Note that the feature is per-crate, so it needs `-p rakc --features gui`, not a workspace-wide `--features gui`. `rakc build` produces `.exe` on Windows and an executable with `chmod 755` on Linux. The IDE ships as NSIS/MSI on Windows and `.deb`/AppImage on Linux via GitHub Actions CI, alongside the custom `rak-setup` installer (net-install + offline bundle) on both.
 
 ## Project structure
 
@@ -884,7 +899,7 @@ Rak/
 git clone https://github.com/Louiml/Rak.git
 cd Rak
 cargo build --release                    # rakc + rakpkg
-cargo build --release --features gui     # rakc with GUI support
+cargo build --release -p rakc --features gui   # rakc with GUI support
 cd ide && npm install && npx tauri build # IDE
 ```
 

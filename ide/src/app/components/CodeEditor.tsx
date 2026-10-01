@@ -64,7 +64,7 @@ const KEYWORDS = [
   'while', 'break', 'continue', 'true', 'false', 'nil', 'in',
   'try', 'catch', 'raise', 'throw', 'trait', 'async', 'await', 'spawn', 'as', 'type',
   'import', 'from', 'export', 'macro', 'macro_rules', 'const', 'extern',
-  'binstruct', 'evidence', 'tunnel', 'defer', 'test', 'assert',
+  'binstruct', 'evidence', 'tunnel', 'defer', 'test', 'assert', 'unsafe',
 ];
 
 const KEYWORD_SET = new Set(KEYWORDS);
@@ -138,6 +138,24 @@ const BUILTINS = [
   'gzip_compress', 'gzip_decompress', 'zip_read', 'zip_write',
   // OSINT pack (v0.7.2)
   'whois_lookup', 'whois_parse', 'ct_subdomains', 'yara_scan', 'report_markdown',
+  // Security helpers (v8.0.0) — constant-time compare, secure wipe
+  'ct_eq', 'ct_eq_hex', 'ct_select', 'zeroize', 'secret_delete_all',
+  // Asymmetric crypto (v8.0.0) — RSA and NIST P-256 ECDSA
+  'rsa_keypair', 'rsa_sign', 'rsa_verify', 'rsa_encrypt', 'rsa_decrypt',
+  'ecdsa_keypair', 'ecdsa_sign', 'ecdsa_verify',
+  // ICMP / ARP packet builders (v8.0.0)
+  'net_raw_icmp', 'net_raw_icmp_ping', 'net_raw_icmp_echo_reply',
+  'net_raw_arp_request', 'net_raw_arp_reply', 'net_raw_arp_parse',
+  // Iterator builtins (v0.8)
+  'zip', 'enumerate', 'fold', 'reduce', 'any', 'all', 'flat_map',
+  'take_while', 'skip',
+  // Raw sockets and protocol parsers, previously missing from autocomplete
+  'net_raw_csum', 'net_raw_ipv4', 'net_raw_tcp', 'net_raw_udp',
+  'net_raw_tcp_syn', 'net_raw_send', 'net_raw_recv',
+  'dns_query', 'dns_build', 'dns_parse',
+  'tls_parse_client_hello', 'tls_parse_cert_chain',
+  'pcap_open', 'pcap_next',
+  'parse_csv_line', 'parse_jsonl_line',
 ];
 
 interface Suggestion {

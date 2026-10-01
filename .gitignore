@@ -24,3 +24,9 @@ Thumbs.db
 *.msi
 *.exe
 *.app
+
+# A local demo, kept as its own git repository on purpose: its README says it
+# is "a demo local to this folder and is not published". Without this, `git add
+# -A` fails outright because it is a nested repository with no checked-out
+# commit.
+adblocker/

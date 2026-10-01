@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Release tag/version (e.g. v0.7.2). Empty uses the latest v* tag.'
+        description: 'Release tag/version (e.g. v8.0.0). Empty uses the latest v* tag.'
         required: false
         default: ''
 
@@ -31,7 +31,7 @@ jobs:
           else
             # workflow_dispatch without a version input: reuse the latest v* tag.
             TAG="$(git tag --sort=-v:refname | grep '^v' | head -n1)"
-            [ -z "$TAG" ] && TAG="v0.7.2"
+            [ -z "$TAG" ] && TAG="v8.0.0"
           fi
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           gh release create "$TAG" --title "Rak $TAG" --notes-file .github/release_body.md --repo "$GITHUB_REPOSITORY" || true
@@ -70,6 +70,19 @@ jobs:
 
       - name: Build rak-setup
         run: cargo build --release --bin rak-setup
+
+      - name: Verify the hardening verifier itself
+        run: python dist/verify_hardening.py --self-test
+
+      - name: Verify hardening landed in the binaries
+        # A linker flag is a claim; this reads the produced ELF back and checks
+        # what the linker actually emitted, so a typo in .cargo/config.toml
+        # cannot ship a soft binary.
+        run: |
+          python dist/verify_hardening.py \
+            target/release/rakc \
+            target/release/rakpkg \
+            target/release/rak-setup
 
       - name: Copy binaries for IDE bundling
         run: |
@@ -171,6 +184,19 @@ jobs:
 
       - name: Build rak-setup
         run: cargo build --release --bin rak-setup
+
+      - name: Verify the hardening verifier itself
+        run: python dist/verify_hardening.py --self-test
+
+      - name: Verify hardening landed in the binaries
+        # /guard:cf, /DYNAMICBASE, /HIGHENTROPYVA and /NXCOMPAT are linker
+        # flags, so a typo silently produces an unhardened binary. Read the PE
+        # back and assert the DllCharacteristics bits and the CFG load config.
+        run: |
+          python dist/verify_hardening.py `
+            target\release\rakc.exe `
+            target\release\rakpkg.exe `
+            target\release\rak-setup.exe
 
       - name: Copy binaries for IDE bundling
         run: |

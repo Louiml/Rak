@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use rakpkg::{Manifest, parse_dep_spec, parse_manifest, version_satisfies};
 
-const VERSION: &str = "0.7.0";
+const VERSION: &str = "8.0.0";
 const PACKAGES_DIR: &str = ".rak";
 const PACKAGES_SUBDIR: &str = "packages";
 const MANIFEST_FILE: &str = "package.rak";

@@ -1,0 +1,76 @@
+# Target-specific hardening flags for release binaries.
+#
+# These apply to local builds too, not just CI, so the binary a developer tests
+# is the same one that ships.
+#
+# Scope note, because it matters for what these flags actually buy:
+#
+#   /guard:cf   Marks the PE CFG-compatible and initialises the guard dispatch
+#               table, with load-time checks. rustc does NOT instrument Rust's
+#               own indirect call sites for CFG, so this is not equivalent to
+#               Clang's -fsanitize=cfi, which instruments every call site. What
+#               it does block is the attack that overwrites the guard dispatch
+#               table itself, plus a class of ROP shapes. Treat it as partial.
+#
+#   /CETCOMPAT  Enables Intel CET shadow-stack + indirect-branch tracking, but
+#               only for code the compiler emits the CET instructions for. Also
+#               partial for the same reason.
+#
+#   /DYNAMICBASE + /HIGHENTROPYVA   ASLR with 64-bit address randomization.
+#                                  /HIGHENTROPYVA needs /DYNAMICBASE.
+#   /NXCOMPAT                      DEP: non-executable stack and heap.
+#
+# For the strongest results, build the FFI trampolines and the C parts of a
+# program with a C compiler that instruments them, and link that object in.
+# `rakc bindgen` exists for the declaration half of this.
+#
+# RUSTFLAGS in the environment overrides this file entirely, so CI can still
+# add flags without editing it.
+
+# ---------------------------------------------------------------------------
+# Windows / MSVC
+# ---------------------------------------------------------------------------
+[target.x86_64-pc-windows-msvc]
+rustflags = [
+    # Control Flow Guard: CFG-compatible image + guarded dispatch table.
+    "-C", "link-arg=/guard:cf",
+    # Control-flow Enforcement Technology: shadow stack, indirect branch tracking.
+    "-C", "link-arg=/CETCOMPAT",
+    # ASLR, and 64-bit address space randomization.
+    "-C", "link-arg=/DYNAMICBASE",
+    "-C", "link-arg=/HIGHENTROPYVA",
+    # Non-executable stack and heap (DEP). Do NOT also pass /NXCOMPAT:NO here:
+    # that explicitly turns this back off, and the PE ends up without
+    # IMAGE_DLLCHARACTERISTICS_NX_COMPAT.
+    "-C", "link-arg=/NXCOMPAT",
+]
+
+# ---------------------------------------------------------------------------
+# Linux / glibc
+# ---------------------------------------------------------------------------
+[target.x86_64-unknown-linux-gnu]
+rustflags = [
+    # Full RELRO: the GOT becomes read-only after startup, so a GOT overwrite
+    # primitive cannot redirect a later call through it. `-z now` resolves
+    # every symbol eagerly, which is what makes the read-only GOT possible.
+    "-C", "link-arg=-Wl,-z,relro",
+    "-C", "link-arg=-Wl,-z,now",
+    # Non-executable stack.
+    "-C", "link-arg=-Wl,-z,noexecstack",
+    # Force a stack cookie. glibc's __stack_chk_fail is only reached on a real
+    # overflow, so the cost is one canary load per function.
+    "-C", "link-arg=-Wl,-z,stack-chk-guard-size=0x0020",
+    # Keep frame pointers. Costs about 1% and makes `rakc profile` and any
+    # post-mortem walk of a stack possible at all.
+    "-C", "force-frame-pointers=yes",
+]
+
+# ---------------------------------------------------------------------------
+# Linux / musl (static, for the single-file `rakc build` output)
+# ---------------------------------------------------------------------------
+[target.x86_64-unknown-linux-musl]
+rustflags = [
+    "-C", "link-arg=-Wl,-z,relro",
+    "-C", "link-arg=-Wl,-z,noexecstack",
+    "-C", "force-frame-pointers=yes",
+]

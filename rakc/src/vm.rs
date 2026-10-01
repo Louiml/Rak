@@ -631,6 +631,84 @@ impl Vm {
             let msg = native_bytes(args.get(2));
             rak_stdlib::ed25519_verify(&pk, &sig, &msg).map(Value::Bool).map_err(|e| e)
         });
+        self.insert_native("ct_eq", |args| {
+            let a = native_bytes(args.first());
+            let b = native_bytes(args.get(1));
+            Ok(Value::Bool(rak_stdlib::ct_eq(&a, &b)))
+        });
+        self.insert_native("ct_eq_hex", |args| {
+            let a = native_str(args.first());
+            let b = native_str(args.get(1));
+            Ok(Value::Bool(rak_stdlib::ct_eq_hex(&a, &b)))
+        });
+        self.insert_native("ct_select", |args| {
+            let choice = args.first().and_then(|v| v.as_u64()).unwrap_or(0) as u8;
+            let a = native_bytes(args.get(1));
+            let b = native_bytes(args.get(2));
+            rak_stdlib::ct_select(choice, &a, &b)
+                .map(|v| Value::Bytes(Arc::from(v.as_slice())))
+                .map_err(|e| e)
+        });
+        self.insert_native("zeroize", |args| {
+            match args.first() {
+                Some(Value::Bytes(b)) => {
+                    let mut v = b.to_vec();
+                    rak_stdlib::zeroize_bytes(&mut v);
+                    Ok(Value::Bytes(Arc::from(v.as_slice())))
+                }
+                Some(Value::String(s)) => {
+                    let mut v = s.as_bytes().to_vec();
+                    rak_stdlib::zeroize_bytes(&mut v);
+                    Ok(Value::Bytes(Arc::from(v.as_slice())))
+                }
+                _ => Err("zeroize: expected a string or bytes".to_string()),
+            }
+        });
+        self.insert_native("rsa_keypair", |args| {
+            let bits = args.first().and_then(|v| v.as_u64()).unwrap_or(2048) as u32;
+            rak_stdlib::rsa_keypair(bits).map(|(pk, sk)| {
+                Value::Tuple(Arc::from([Value::Bytes(Arc::from(pk.as_slice())), Value::Bytes(Arc::from(sk.as_slice()))]))
+            }).map_err(|e| e)
+        });
+        self.insert_native("rsa_sign", |args| {
+            let sk = native_bytes(args.first());
+            let msg = native_bytes(args.get(1));
+            rak_stdlib::rsa_sign(&sk, &msg).map(|s| Value::Bytes(Arc::from(s.as_slice()))).map_err(|e| e)
+        });
+        self.insert_native("rsa_verify", |args| {
+            let pk = native_bytes(args.first());
+            let sig = native_bytes(args.get(1));
+            let msg = native_bytes(args.get(2));
+            rak_stdlib::rsa_verify(&pk, &sig, &msg).map(Value::Bool).map_err(|e| e)
+        });
+        self.insert_native("rsa_encrypt", |args| {
+            let pk = native_bytes(args.first());
+            let pt = native_bytes(args.get(1));
+            let label = args.get(2).map(|v| native_bytes(Some(v))).unwrap_or_default();
+            rak_stdlib::rsa_encrypt(&pk, &pt, &label).map(|s| Value::Bytes(Arc::from(s.as_slice()))).map_err(|e| e)
+        });
+        self.insert_native("rsa_decrypt", |args| {
+            let sk = native_bytes(args.first());
+            let ct = native_bytes(args.get(1));
+            let label = args.get(2).map(|v| native_bytes(Some(v))).unwrap_or_default();
+            rak_stdlib::rsa_decrypt(&sk, &ct, &label).map(|s| Value::Bytes(Arc::from(s.as_slice()))).map_err(|e| e)
+        });
+        self.insert_native("ecdsa_keypair", |_args| {
+            rak_stdlib::ecdsa_keypair().map(|(pk, sk)| {
+                Value::Tuple(Arc::from([Value::Bytes(Arc::from(pk.as_slice())), Value::Bytes(Arc::from(sk.as_slice()))]))
+            }).map_err(|e| e)
+        });
+        self.insert_native("ecdsa_sign", |args| {
+            let sk = native_bytes(args.first());
+            let msg = native_bytes(args.get(1));
+            rak_stdlib::ecdsa_sign(&sk, &msg).map(|s| Value::Bytes(Arc::from(s.as_slice()))).map_err(|e| e)
+        });
+        self.insert_native("ecdsa_verify", |args| {
+            let pk = native_bytes(args.first());
+            let sig = native_bytes(args.get(1));
+            let msg = native_bytes(args.get(2));
+            rak_stdlib::ecdsa_verify(&pk, &sig, &msg).map(Value::Bool).map_err(|e| e)
+        });
         self.insert_native("x25519_keypair", |args| {
             let seed = native_bytes(args.first());
             rak_stdlib::tunnel::x25519_keypair(&seed).map(|(pk, sk)| {
@@ -984,6 +1062,55 @@ impl Vm {
             let src_port = args.get(2).and_then(|v| v.as_u64()).unwrap_or(12345) as u16;
             let dport = args.get(3).and_then(|v| v.as_u64()).unwrap_or(80) as u16;
             Ok(Value::Bytes(Arc::from(rak_stdlib::net_raw::tcp_syn(&src, &dst, src_port, dport)?.as_slice())))
+        });
+        self.insert_native("net_raw_icmp", |args| {
+            let src = native_str(args.first());
+            let dst = native_str(args.get(1));
+            let id = args.get(2).and_then(|v| v.as_u64()).unwrap_or(0) as u16;
+            let seq = args.get(3).and_then(|v| v.as_u64()).unwrap_or(0) as u16;
+            let payload = args.get(4).map(|v| native_bytes(Some(v))).unwrap_or_default();
+            Ok(Value::Bytes(Arc::from(rak_stdlib::net_raw::icmp_echo(&src, &dst, id, seq, &payload)?.as_slice())))
+        });
+        self.insert_native("net_raw_icmp_ping", |args| {
+            let src = native_str(args.first());
+            let dst = native_str(args.get(1));
+            let id = args.get(2).and_then(|v| v.as_u64()).unwrap_or(0) as u16;
+            let seq = args.get(3).and_then(|v| v.as_u64()).unwrap_or(0) as u16;
+            Ok(Value::Bytes(Arc::from(rak_stdlib::net_raw::icmp_ping(&src, &dst, id, seq)?.as_slice())))
+        });
+        self.insert_native("net_raw_icmp_echo_reply", |args| {
+            let src = native_str(args.first());
+            let dst = native_str(args.get(1));
+            let id = args.get(2).and_then(|v| v.as_u64()).unwrap_or(0) as u16;
+            let seq = args.get(3).and_then(|v| v.as_u64()).unwrap_or(0) as u16;
+            let payload = args.get(4).map(|v| native_bytes(Some(v))).unwrap_or_default();
+            Ok(Value::Bytes(Arc::from(rak_stdlib::net_raw::icmp_echo_reply(&src, &dst, id, seq, &payload)?.as_slice())))
+        });
+        self.insert_native("net_raw_arp_request", |args| {
+            let src_mac = native_str(args.first());
+            let src_ip = native_str(args.get(1));
+            let target_ip = native_str(args.get(2));
+            Ok(Value::Bytes(Arc::from(rak_stdlib::net_raw::arp_request(&src_mac, &src_ip, &target_ip)?.as_slice())))
+        });
+        self.insert_native("net_raw_arp_reply", |args| {
+            let src_mac = native_str(args.first());
+            let src_ip = native_str(args.get(1));
+            let target_mac = native_str(args.get(2));
+            let target_ip = native_str(args.get(3));
+            Ok(Value::Bytes(Arc::from(rak_stdlib::net_raw::arp_reply(&src_mac, &src_ip, &target_mac, &target_ip)?.as_slice())))
+        });
+        self.insert_native("net_raw_arp_parse", |args| {
+            let frame = native_bytes(args.first());
+            match rak_stdlib::net_raw::arp_parse(&frame) {
+                Some(kv) => {
+                    let mut m: std::collections::HashMap<String, Value> = std::collections::HashMap::new();
+                    for (k, v) in kv {
+                        m.insert(k, Value::String(Arc::from(v.as_str())));
+                    }
+                    Ok(Value::Map(Arc::from(m)))
+                }
+                None => Ok(Value::Nil),
+            }
         });
         self.insert_native("net_raw_send", |args| {
             let pkt = native_bytes(args.first());
@@ -1342,6 +1469,9 @@ impl Vm {
         self.insert_native("secret_ls", |_args| {
             let names = rak_stdlib::secrets::list();
             Ok(Value::Array(Arc::from(names.into_iter().map(|s| Value::String(Arc::from(s.as_str()))).collect::<Vec<_>>())))
+        });
+        self.insert_native("secret_delete_all", |_args| {
+            rak_stdlib::secrets::delete_all().map(|_| Value::Bool(true)).map_err(|e| e)
         });
         // --- HTTP server framework (#4) ---
         self.insert_native("http_server_start", |args| {

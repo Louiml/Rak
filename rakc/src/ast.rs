@@ -46,6 +46,18 @@ pub enum Expr {
         body: Vec<Stmt>,
         captures: Vec<String>,
         is_async: bool,
+        /// The declared name, for contract diagnostics. A `fn` item always has
+        /// one; an anonymous `fn` expression does not.
+        name: Option<String>,
+        /// `requires <expr>` clauses, checked after the parameters are bound and
+        /// before the body runs. Each must be truthy or the call fails. A
+        /// violated precondition means the caller is wrong, which is a
+        /// different bug from the function misbehaving.
+        requires: Vec<Expr>,
+        /// `ensures <expr>` clauses, checked after the body returns, with
+        /// `result` bound to the return value. These describe what the function
+        /// promises its caller.
+        ensures: Vec<Expr>,
     },
     Call {
         callee: Box<Expr>,
@@ -291,6 +303,18 @@ pub enum Stmt {
     Tunnel {
         name: String,
         passphrase: String,
+        body: Vec<Stmt>,
+    },
+    /// `unsafe "why this is sound" { body }` — a block whose contents are
+    /// exempt from the safety lint rules. The reason is mandatory and enforced
+    /// by the parser, so every exemption in a codebase is greppable and has to
+    /// be justified in writing.
+    ///
+    /// The block still executes normally. This marks a *review* boundary, not a
+    /// different execution mode: Rak has no borrow checker to opt out of, so
+    /// `unsafe` buys attribution and auditability rather than capability.
+    Unsafe {
+        reason: String,
         body: Vec<Stmt>,
     },
 }

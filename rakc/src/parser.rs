@@ -431,6 +431,7 @@ impl<'a> Parser<'a> {
                 Ok(Stmt::Defer(Box::new(e)))
             }
             Some(Token::Test) => self.parse_test(),
+            Some(Token::Unsafe) => self.parse_unsafe(),
             Some(Token::Assert) => {
                 self.advance();
                 let e = self.parse_expr()?;
@@ -774,6 +775,34 @@ impl<'a> Parser<'a> {
         Ok(Stmt::Test { name, body })
     }
 
+    /// Parse `unsafe "reason" { body }`.
+    ///
+    /// The reason is required. Accepting `unsafe { ... }` with no justification
+    /// would defeat the point: an exemption nobody can explain is one nobody
+    /// reviews, and the whole value of this construct is that `grep unsafe`
+    /// produces a list a human can read.
+    fn parse_unsafe(&mut self) -> Result<Stmt> {
+        self.expect(Token::Unsafe)?;
+        let reason = match self.peek() {
+            Some(Token::String(s)) => {
+                let s = s.clone();
+                self.advance();
+                s
+            }
+            _ => {
+                return Err(self.perr(
+                    r#"unsafe block requires a reason: unsafe "why this is sound" { ... }"#
+                        .to_string(),
+                ))
+            }
+        };
+        if reason.trim().is_empty() {
+            return Err(self.perr("unsafe block reason cannot be empty".to_string()));
+        }
+        let body = self.parse_block()?;
+        Ok(Stmt::Unsafe { reason, body })
+    }
+
     fn parse_fn(&mut self) -> Result<Stmt> {
         let is_async = self.match_token(&Token::Async);
         self.expect(Token::Fn)?;
@@ -799,6 +828,8 @@ impl<'a> Parser<'a> {
             rt
         };
         let body = self.parse_block()?;
+        let (requires, ensures) = self.parse_contracts()?;
+        let fname = name.clone();
         Ok(Stmt::Let {
             name,
             pattern: None,
@@ -809,9 +840,43 @@ impl<'a> Parser<'a> {
                 body,
                 captures: vec![],
                 is_async,
+                name: Some(fname),
+                requires,
+                ensures,
             }),
             type_hint: None,
         })
+    }
+
+    /// Parse the `requires` / `ensures` clauses that follow a function body:
+    ///
+    /// ```rak
+    /// fn f(x) { ... } requires x > 0 ensures result < 100
+    /// ```
+    ///
+    /// The clauses sit after the body rather than before it so the signature
+    /// stays readable, and so the same `fn` grammar works with and without
+    /// contracts. Both lists may hold several clauses; a function needs all of
+    /// them to hold.
+    fn parse_contracts(&mut self) -> Result<(Vec<Expr>, Vec<Expr>)> {
+        let mut requires = Vec::new();
+        let mut ensures = Vec::new();
+        loop {
+            if self.check(&Token::Requires) {
+                self.advance();
+                requires.push(self.parse_expr()?);
+            } else if self.check(&Token::Ensures) {
+                self.advance();
+                ensures.push(self.parse_expr()?);
+            } else {
+                break;
+            }
+            // Clauses may be newline-separated rather than space-separated, so
+            // an optional semicolon keeps `requires a ensures b` and
+            // `requires a\nensures b` equivalent.
+            self.semi()?;
+        }
+        Ok((requires, ensures))
     }
 
     fn parse_struct(&mut self) -> Result<Stmt> {
@@ -2411,12 +2476,16 @@ impl<'a> Parser<'a> {
         let _ = return_type;
         if self.check(&Token::LBrace) {
             let body = self.parse_block()?;
+            let (requires, ensures) = self.parse_contracts()?;
             Ok(Expr::Function {
                 params,
                 return_type: None,
                 body,
                 captures: vec![],
                 is_async,
+                name: None,
+                requires,
+                ensures,
             })
         } else {
             let body_expr = self.parse_expr()?;

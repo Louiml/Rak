@@ -8,6 +8,9 @@ rakc vm <file>      Run on the bytecode VM
 rakc build <file>   Build a standalone executable
 rakc bench <file>   Benchmark interpreter vs VM
 rakc check <file>   Static type check; print diagnostics with line/column
+rakc fmt <file>     Format source (--write, --check)
+rakc lint <file>    Advisory style and security checks (--deny)
+rakc fuzz <target>  Property-based fuzz a parser (--runs, --seed, --list)
 rakc test [file]    Run test blocks (--filter NAME, --verbose)
 rakc lex <file>     Print tokens
 rakc parse <file>   Print AST
@@ -17,6 +20,39 @@ rakc bindgen <h>    Generate Rak bindings from a C header
 rakc debug <file>   Bytecode-VM source debugger (0.7)
 rakc --version
 ```
+
+### rakc fmt and rakc lint (8.0.0)
+
+`rakc fmt` is an AST-to-source printer: `rakc fmt f.rak` prints the canonical
+form, `--write` rewrites in place, and `--check` exits 1 if the file is not
+already formatted, which is what you want in CI.
+
+`rakc lint` has five style rules (`unused-var`, `shadowed`, `unreachable`,
+`missing-ret-type`, `duplicate-import`) and six security rules
+(`hardcoded-secret`, `plaintext-url`, `weak-crypto`, `secret-compare`,
+`ffi-raw-pointer`, `insecure-transport`). Both are advisory; `--deny` exits 1
+when anything fires. See [Safety](safety.html) for what the security rules
+detect and where they have false negatives.
+
+### rakc fuzz (8.0.0)
+
+```text
+rakc fuzz all                        # 20000 runs per target
+rakc fuzz parse --runs 100000
+rakc fuzz dns --seed 0xC0FFEE        # reproducible
+rakc fuzz --list
+```
+
+Targets: `lex`, `parse`, `eval`, `dns`, `tls`, `json`, `websocket`, `tunnel`,
+`netraw`, `csv`, `gzip`, `zip`, `all`. A crashing input is written to
+`fuzz-crash-<target>.bin` and the printed seed replays the run. Exit is 1 if
+any target crashed.
+
+This is a deterministic mutation loop, not coverage-guided fuzzing, and it is
+meant to run in ordinary CI on any platform. Run it from a debug build: the
+harness uses `catch_unwind` and the release profile sets `panic = "abort"`.
+The coverage-guided `cargo-fuzz` targets in `fuzz/` are still there for long
+Linux or WSL runs.
 
 ### rakc check (0.7.1)
 

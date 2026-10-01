@@ -9,7 +9,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.7.2"
+version = "8.0.0"
 edition = "2021"
 authors = ["Ryuzaki"]
 license = "MIT OR Apache-2.0"
@@ -34,3 +34,27 @@ tauri = { version = "1.6", features = ["shell-open"] }
 serde_json = "1.0"
 tower-lsp = "0.20"       # LSP server implementation
 tokio-util = "0.7"
+
+# Release hardening. These are the compiler-level defenses Rak can actually
+# make about itself; they do not replace the missing control-flow integrity
+# support noted in docs/V8-ROADMAP.md.
+#
+#   lto + codegen-units=1  whole-program optimisation, so a bounds check in
+#                          one crate can be folded against a caller in another
+#                          instead of living behind an opaque call
+#   overflow-checks=true   keep arithmetic overflow panicking in release. The
+#                          default is `false`, which silently wraps and turns
+#                          a length calculation into a heap overflow
+#   panic=abort            no unwinding through the FFI trampolines
+#   strip                  no symbols to attach a debugger to by accident
+[profile.release]
+lto = "fat"
+codegen-units = 1
+overflow-checks = true
+panic = "abort"
+strip = "symbols"
+
+# The fuzzing crate and the IDE both want a usable panic message, so they get
+# their own profile rather than inheriting `panic = "abort"`.
+[profile.release.package."*"]
+opt-level = 2

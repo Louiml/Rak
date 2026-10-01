@@ -79,12 +79,32 @@ See `examples/async_orchestration.rak` for the end-to-end demo.
 
 ## GUI note
 
-With `--features gui`, scripts can open native desktop windows rendering
-HTML/CSS/JS (`gui_open`, `gui_update`, `gui_title`, `gui_close`, `gui_wait`,
-`gui_callback`). JavaScript inside the window calls back into Rak via
-`window.rak_call(fn, args)`.
+With `--features gui`, scripts can open a native desktop window rendering
+HTML/CSS/JS via `gui_open` and block on `gui_wait`.
 
 ```rak
 let win = gui_open("Rak GUI Demo", "<h1>Hello from Rak!</h1>", 600, 400)
 gui_wait()
 ```
+
+**What the other GUI builtins currently do.** This is a known-incomplete
+feature area in 8.0.0, and the documentation is explicit about it rather than
+promising more than the code does:
+
+- `gui_update`, `gui_title`, `gui_close` — declared and callable, but they do
+  not yet affect the window. `gui.rs` stores `HashMap<i64, ()>` and discards the
+  `Window` and `WebView` handles, so there is nothing to update or resize.
+- `gui_callback` / `window.rak_call(fn, args)` — the IPC channel is wired up and
+  the message is discarded. Calling a Rak function from JavaScript does not work
+  yet.
+- Closing a window terminates the whole process, because tao's `run` calls
+  `std::process::exit` when the last window closes. `gui_wait()` therefore does
+  not return, and any statement after it is unreachable.
+- Linux is not functional: `gui_open` creates the tao event loop on a spawned
+  thread, which trips tao's main-thread assertion.
+- The VM backend has no GUI natives at all, so `rakc vm` reports
+  `Undefined: gui_open`. Use `rakc run`.
+
+A rewrite is planned that stores real handles on one event-loop thread, adds an
+event pump, and gives the VM parity. Until then treat the GUI as a Windows-only,
+display-only preview. See `docs/V8-ROADMAP.md`.

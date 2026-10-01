@@ -69,6 +69,12 @@ pub fn disable() {
 /// Map a builtin name to the capability it requires, if any. Pure builders
 /// (packet/header construction, TLS parsing, hashing) are intentionally not
 /// gated — they cannot touch the outside world.
+///
+/// The `raw_sockets` list is the only one that names individual builtins
+/// rather than using a prefix. That is deliberate: `net_raw_` also covers the
+/// pure builders, which must stay available in a sandbox, so the gate names
+/// exactly the three that open a socket. If you add another socket-opening
+/// builtin, add it here or it will be reachable from a sandboxed script.
 fn required_cap(name: &str) -> Option<&'static str> {
     if name == "ffi:extern" {
         return Some("ffi");
@@ -78,18 +84,20 @@ fn required_cap(name: &str) -> Option<&'static str> {
             "net",
             &[
                 "net_listen", "net_accept", "net_connect", "net_local_addr",
-                // every TCP/UDP/HTTP/WebSocket/DNS I/O I/O builtin
+                // every TCP/UDP/HTTP/WebSocket/DNS I/O builtin
                 "tcp_", "udp_", "http_", "ws_", "dns_",
                 // network-capable investigation builtins (ext packs)
                 "scan_ports", "fetch", "tunnel_", "whois", "ct_subdomains",
-                "tls_inspect",
             ],
         ),
         ("process", &["process_"]),
         ("ffi", &["ffi_"]),
+        // Socket-opening only. `net_raw_ipv4`, `net_raw_tcp`, `net_raw_icmp`,
+        // `net_raw_arp_*` and `net_raw_csum` are pure byte construction and
+        // are deliberately reachable from a sandbox.
         (
             "raw_sockets",
-            &["net_raw_send", "net_raw_recv", "net_raw_icmp", "pcap_listen"],
+            &["net_raw_send", "net_raw_recv", "pcap_listen"],
         ),
         ("gui", &["gui_", "window_"]),
         ("secrets", &["secret_"]),
@@ -219,5 +227,57 @@ mod tests {
         assert!(on);
         assert_eq!(allow, "net,ffi");
         assert_eq!(clean, vec!["hello".to_string(), "world".to_string()]);
+    }
+
+    /// Packet *builders* run no code and open no socket, so they must stay
+    /// available inside a sandbox. Only send/recv need `raw`.
+    #[test]
+    fn packet_builders_are_allowed_but_send_recv_are_not() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        enable("");
+        // Pure construction: fine.
+        assert!(check_str("net_raw_ipv4").is_ok());
+        assert!(check_str("net_raw_tcp").is_ok());
+        assert!(check_str("net_raw_udp").is_ok());
+        assert!(check_str("net_raw_tcp_syn").is_ok());
+        assert!(check_str("net_raw_csum").is_ok());
+        assert!(check_str("net_raw_icmp").is_ok());
+        assert!(check_str("net_raw_icmp_ping").is_ok());
+        assert!(check_str("net_raw_arp_request").is_ok());
+        assert!(check_str("net_raw_arp_reply").is_ok());
+        assert!(check_str("net_raw_arp_parse").is_ok());
+        // Socket-opening: denied.
+        assert!(check_str("net_raw_send").is_err());
+        assert!(check_str("net_raw_recv").is_err());
+        disable();
+    }
+
+    /// `pcap_listen` is gated ahead of its implementation, so the moment
+    /// somebody adds the builtin it is already closed by default.
+    #[test]
+    fn pcap_listen_is_gated_preemptively() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        enable("");
+        assert!(check_str("pcap_listen").is_err());
+        enable("raw");
+        assert!(check_str("pcap_listen").is_ok());
+        disable();
+    }
+
+    /// The new crypto helpers must not be reachable as a way to bypass the
+    /// secrets gate, and the constant-time ones must work with no capability
+    /// at all because they touch nothing.
+    #[test]
+    fn crypto_helpers_need_no_capability_but_secret_wipe_does() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        enable("");
+        assert!(check_str("ct_eq").is_ok());
+        assert!(check_str("ct_eq_hex").is_ok());
+        assert!(check_str("ct_select").is_ok());
+        assert!(check_str("zeroize").is_ok());
+        assert!(check_str("rsa_keypair").is_ok());
+        assert!(check_str("ecdsa_sign").is_ok());
+        assert!(check_str("secret_delete_all").is_err());
+        disable();
     }
 }

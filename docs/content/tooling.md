@@ -112,11 +112,20 @@ actual FFI linking happens.
 
 ## Fuzzing
 
+Three layers, cheapest first.
+
+- `rakc fuzz <target>` (8.0.0) — a deterministic mutation loop in the compiler
+  itself, on the stable toolchain, so it runs in ordinary CI and on a Windows dev
+  box. `rakc fuzz all --runs 20000` covers the lexer, parser, interpreter, and
+  the stdlib parsers. `--seed` makes a run reproducible and a crash replayable.
+  Needs a debug build: it uses `catch_unwind`, and release sets `panic = "abort"`.
 - `rakc/tests/proptest_harness.rs` — 8 proptest suites on the stable CI
   toolchain (no-panic / bounded-termination / no-OOB) for the lexer, parser,
   DNS parser, raw packet builders, WebSocket frame parser, TLS parser, JSON
   parser, and tunnel framing.
 - `fuzz/` — a standalone libFuzzer workspace (13 targets: lexer, parser, eval,
   manifest, dns, tls, json, websocket, tunnel, netraw, csv, gzip, zip) for
-  coverage-guided campaigns on nightly:
-  `cargo +nightly fuzz run <target>`.
+  real coverage-guided campaigns on nightly:
+  `cargo +nightly fuzz run <target>`. Needs `-fsanitize=fuzzer`, which
+  `stable-x86_64-pc-windows-msvc` cannot provide, so this layer does not run
+  anywhere automatically. Use a Linux or WSL box for a long campaign.

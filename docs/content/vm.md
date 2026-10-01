@@ -18,10 +18,10 @@ clear message.
 |---------|:-----------:|:--:|
 | Pipeline `\|>` | yes | yes (desugar) |
 | Regex literals | yes (methods + builtins) | yes (builtins) |
-| Binary pattern matching | yes | no (graceful error) |
+| Binary pattern matching | yes | yes (`Op::MatchPat` descriptors) |
 | Trait protocols | yes | no (graceful error) |
-| Method-call dispatch | yes | no (no dispatch layer) |
-| User enum patterns (`Event::Variant(..)`) | yes | no (graceful error) |
+| Method-call dispatch | yes | yes (`Op::CallMethod`) |
+| User enum patterns (`Event::Variant(..)`) | yes | yes (`Op::MatchPat`) |
 | Generic functions (`fn f<T>`) | yes | yes |
 | `defer` (LIFO cleanup) | yes | yes (`Op::DeferCall`) |
 | `char` type | yes | yes |
@@ -42,6 +42,11 @@ clear message.
 | CLI (`argv()`, `parse_args`) | yes | no (graceful error) |
 | Tunnel / UDP transport | yes | no (graceful error) |
 | WebSocket | yes | no (no TCP layer) |
+
+The `yes`/`no` column is the authoritative backend-parity list. Remaining
+gaps as of 8.0.0: streams, tunnel/UDP, `pkg.sub` imports, WebSocket and the
+CLI entry point on the VM; trait protocols on the VM; and `@` binding patterns
+(`Pattern::Bind`) on both backends. See `docs/V8-ROADMAP.md`.
 
 ## Error model
 
