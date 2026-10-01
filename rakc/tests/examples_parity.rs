@@ -150,6 +150,18 @@ const NONDETERMINISTIC: &[(&str, &str)] = &[
     ("osint_demo", "DNS answer order is not guaranteed by the protocol"),
 ];
 
+/// Examples that only make sense on one platform.
+///
+/// Without this the suite fails on Linux for reasons that have nothing to do
+/// with backend parity: `ffi_dynamic` loads `msvcrt.dll`, and the secrets and
+/// process examples shell out to Windows commands. The alternative is a
+/// platform-conditional expectation, which is the same list with more indirection.
+const PLATFORM_SPECIFIC: &[(&str, &str)] = &[
+    ("ffi_dynamic", "loads msvcrt.dll; Windows only"),
+    ("secrets_demo", "uses Windows credential storage semantics"),
+    ("process_demo", "spawns Windows commands"),
+];
+
 #[test]
 fn examples_behave_the_same_on_both_backends() {
     let dir = examples_dir();
@@ -177,6 +189,12 @@ fn examples_behave_the_same_on_both_backends() {
             .to_string();
 
         if ENVIRONMENTAL.iter().any(|(n, _)| *n == name) {
+            continue;
+        }
+        // Portable examples run everywhere. A platform-specific example runs
+        // only on its own platform, so on Windows the three Windows-only ones
+        // are compared and on Linux they are skipped.
+        if PLATFORM_SPECIFIC.iter().any(|(n, _)| *n == name) && !cfg!(windows) {
             continue;
         }
         if !std::path::Path::new(&rakc()).exists() {
