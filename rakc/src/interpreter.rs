@@ -4502,6 +4502,94 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                 let msg = self.val_to_bytes(args.get(2))?;
                 rak_stdlib::ed25519_verify(&pk, &sig, &msg).map(Value::Bool).map_err(crate::RakError::Runtime)
             }
+            // Constant-time helpers. `==` on a value is a data-dependent branch,
+            // so comparing a MAC or a token with it leaks the length of the
+            // shared prefix through timing. These do not.
+            "ct_eq" => {
+                let a = self.val_to_bytes(args.first())?;
+                let b = self.val_to_bytes(args.get(1))?;
+                Ok(Value::Bool(rak_stdlib::ct_eq(&a, &b)))
+            }
+            "ct_eq_hex" => {
+                let a = self.val_to_string(args.first())?;
+                let b = self.val_to_string(args.get(1))?;
+                Ok(Value::Bool(rak_stdlib::ct_eq_hex(&a, &b)))
+            }
+            "ct_select" => {
+                let choice = args.first().and_then(|v| v.as_u64()).unwrap_or(0) as u8;
+                let a = self.val_to_bytes(args.get(1))?;
+                let b = self.val_to_bytes(args.get(2))?;
+                rak_stdlib::ct_select(choice, &a, &b).map(Value::Bytes).map_err(crate::RakError::Runtime)
+            }
+            // Overwrite a buffer in place in a way the optimizer cannot elide.
+            // Rak values are copy-on-write, so this returns the wiped buffer;
+            // use it on a value you are about to discard.
+            "zeroize" => {
+                match args.first() {
+                    Some(Value::Bytes(b)) => {
+                        let mut v = b.to_vec();
+                        rak_stdlib::zeroize_bytes(&mut v);
+                        Ok(Value::Bytes(v))
+                    }
+                    Some(Value::String(s)) => {
+                        let mut v = s.as_bytes().to_vec();
+                        rak_stdlib::zeroize_bytes(&mut v);
+                        Ok(Value::Bytes(v))
+                    }
+                    _ => Err(crate::RakError::Runtime("zeroize: expected a string or bytes".to_string())),
+                }
+            }
+            "rsa_keypair" => {
+                let bits = args.first().and_then(|v| v.as_u64()).unwrap_or(2048) as u32;
+                match rak_stdlib::rsa_keypair(bits) {
+                    Ok((pk, sk)) => Ok(Value::Tuple(vec![Value::Bytes(pk), Value::Bytes(sk)])),
+                    Err(e) => Err(crate::RakError::Runtime(e)),
+                }
+            }
+            "rsa_sign" => {
+                let sk = self.val_to_bytes(args.first())?;
+                let msg = self.val_to_bytes(args.get(1))?;
+                rak_stdlib::rsa_sign(&sk, &msg).map(Value::Bytes).map_err(crate::RakError::Runtime)
+            }
+            "rsa_verify" => {
+                let pk = self.val_to_bytes(args.first())?;
+                let sig = self.val_to_bytes(args.get(1))?;
+                let msg = self.val_to_bytes(args.get(2))?;
+                rak_stdlib::rsa_verify(&pk, &sig, &msg).map(Value::Bool).map_err(crate::RakError::Runtime)
+            }
+            "rsa_encrypt" => {
+                let pk = self.val_to_bytes(args.first())?;
+                let pt = self.val_to_bytes(args.get(1))?;
+                let label = match args.get(2) {
+                    Some(v) => self.val_to_bytes(Some(v))?,
+                    None => Vec::new(),
+                };
+                rak_stdlib::rsa_encrypt(&pk, &pt, &label).map(Value::Bytes).map_err(crate::RakError::Runtime)
+            }
+            "rsa_decrypt" => {
+                let sk = self.val_to_bytes(args.first())?;
+                let ct = self.val_to_bytes(args.get(1))?;
+                let label = match args.get(2) {
+                    Some(v) => self.val_to_bytes(Some(v))?,
+                    None => Vec::new(),
+                };
+                rak_stdlib::rsa_decrypt(&sk, &ct, &label).map(Value::Bytes).map_err(crate::RakError::Runtime)
+            }
+            "ecdsa_keypair" => match rak_stdlib::ecdsa_keypair() {
+                Ok((pk, sk)) => Ok(Value::Tuple(vec![Value::Bytes(pk), Value::Bytes(sk)])),
+                Err(e) => Err(crate::RakError::Runtime(e)),
+            },
+            "ecdsa_sign" => {
+                let sk = self.val_to_bytes(args.first())?;
+                let msg = self.val_to_bytes(args.get(1))?;
+                rak_stdlib::ecdsa_sign(&sk, &msg).map(Value::Bytes).map_err(crate::RakError::Runtime)
+            }
+            "ecdsa_verify" => {
+                let pk = self.val_to_bytes(args.first())?;
+                let sig = self.val_to_bytes(args.get(1))?;
+                let msg = self.val_to_bytes(args.get(2))?;
+                rak_stdlib::ecdsa_verify(&pk, &sig, &msg).map(Value::Bool).map_err(crate::RakError::Runtime)
+            }
             "xor" => Ok(Value::Bytes(rak_stdlib::xor_encrypt(&self.val_to_bytes(args.first())?, &self.val_to_bytes(args.get(1))?))),
             "rot13" => Ok(Value::String(rak_stdlib::rot13(&self.val_to_string(args.first())?))),
             "hex_encode" => Ok(Value::String(rak_stdlib::hex_encode(&self.val_to_bytes(args.first())?))),
@@ -5477,6 +5565,62 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                     Err(e) => Ok(Value::Result(None, Some(Box::new(Value::String(e))))),
                 }
             }
+            // ICMP and ARP builders. These only construct a `bytes` value and
+            // open no socket, so they are reachable inside a sandbox; only
+            // `net_raw_send` / `net_raw_recv` need the `raw` capability.
+            "net_raw_icmp" => {
+                let src = self.val_to_string(args.first())?;
+                let dst = self.val_to_string(args.get(1))?;
+                let id = args.get(2).and_then(|v| v.as_u64()).unwrap_or(0) as u16;
+                let seq = args.get(3).and_then(|v| v.as_u64()).unwrap_or(0) as u16;
+                let payload = match args.get(4) {
+                    Some(v) => self.val_to_bytes(Some(v))?,
+                    None => Vec::new(),
+                };
+                Ok(Value::Bytes(rak_stdlib::net_raw::icmp_echo(&src, &dst, id, seq, &payload).map_err(crate::RakError::Runtime)?))
+            }
+            "net_raw_icmp_ping" => {
+                let src = self.val_to_string(args.first())?;
+                let dst = self.val_to_string(args.get(1))?;
+                let id = args.get(2).and_then(|v| v.as_u64()).unwrap_or(0) as u16;
+                let seq = args.get(3).and_then(|v| v.as_u64()).unwrap_or(0) as u16;
+                Ok(Value::Bytes(rak_stdlib::net_raw::icmp_ping(&src, &dst, id, seq).map_err(crate::RakError::Runtime)?))
+            }
+            "net_raw_icmp_echo_reply" => {
+                let src = self.val_to_string(args.first())?;
+                let dst = self.val_to_string(args.get(1))?;
+                let id = args.get(2).and_then(|v| v.as_u64()).unwrap_or(0) as u16;
+                let seq = args.get(3).and_then(|v| v.as_u64()).unwrap_or(0) as u16;
+                let payload = match args.get(4) {
+                    Some(v) => self.val_to_bytes(Some(v))?,
+                    None => Vec::new(),
+                };
+                Ok(Value::Bytes(rak_stdlib::net_raw::icmp_echo_reply(&src, &dst, id, seq, &payload).map_err(crate::RakError::Runtime)?))
+            }
+            "net_raw_arp_request" => {
+                let src_mac = self.val_to_string(args.first())?;
+                let src_ip = self.val_to_string(args.get(1))?;
+                let target_ip = self.val_to_string(args.get(2))?;
+                Ok(Value::Bytes(rak_stdlib::net_raw::arp_request(&src_mac, &src_ip, &target_ip).map_err(crate::RakError::Runtime)?))
+            }
+            "net_raw_arp_reply" => {
+                let src_mac = self.val_to_string(args.first())?;
+                let src_ip = self.val_to_string(args.get(1))?;
+                let target_mac = self.val_to_string(args.get(2))?;
+                let target_ip = self.val_to_string(args.get(3))?;
+                Ok(Value::Bytes(rak_stdlib::net_raw::arp_reply(&src_mac, &src_ip, &target_mac, &target_ip).map_err(crate::RakError::Runtime)?))
+            }
+            "net_raw_arp_parse" => {
+                let frame = self.val_to_bytes(args.first())?;
+                match rak_stdlib::net_raw::arp_parse(&frame) {
+                    Some(kv) => Ok(Value::Map(
+                        kv.into_iter()
+                            .map(|(k, v)| (k, Value::String(v)))
+                            .collect::<HashMap<String, Value>>(),
+                    )),
+                    None => Ok(Value::Nil),
+                }
+            }
             // --- VPN / encrypted tunneling ---
             "x25519_keypair" => {
                 let seed = self.val_to_bytes(args.first())?;
@@ -6278,6 +6422,12 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
             "secret_ls" => {
                 let names = rak_stdlib::secrets::list();
                 Ok(Value::Array(names.into_iter().map(Value::String).collect()))
+            }
+            // Wipe every stored secret, including the on-disk file, which is
+            // overwritten with zeroes rather than just unlinked.
+            "secret_delete_all" => {
+                rak_stdlib::secrets::delete_all().map_err(crate::RakError::Runtime)?;
+                Ok(Value::Bool(true))
             }
             // --- HTTP server framework (#4) ---
             "http_server_start" => {
