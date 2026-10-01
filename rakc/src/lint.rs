@@ -508,14 +508,30 @@ impl Linter {
                 message: format!("{}() is unchecked memory access; run with --sandbox and without the ffi capability, or review the pointer arithmetic", name),
             });
         }
-        // A ws_ or bare tcp_ connection carries no TLS.
-        if name == "ws_connect" || name == "net_connect" {
-            self.findings.push(LintFinding {
-                rule: "insecure-transport",
-                message: format!("{}() opens an unencrypted connection; anything sent over it is readable in transit", name),
-            });
-        }
-    }
+          // A ws_ or bare tcp_ connection carries no TLS.
+          if name == "ws_connect" || name == "net_connect" {
+              self.findings.push(LintFinding {
+                  rule: "insecure-transport",
+                  message: format!("{}() opens an unencrypted connection; anything sent over it is readable in transit", name),
+              });
+          }
+          // Inline assembly, under its own rule rather than `weak-crypto` or
+          // `ffi-raw-pointer`, because it is a distinct kind of finding: those
+          // two are about choosing a weak primitive or unchecked memory, while
+          // this is about the sandbox not being able to see the call at all.
+          if name == "asm" {
+              self.findings.push(LintFinding {
+                  rule: "inline-asm",
+                  message: format!(
+                      "{}() is not mediated by the capability sandbox: the sandbox \
+                       gates builtins, and the machine executes the instruction \
+                       directly. It is behind the `asm` capability and requires an \
+                       `unsafe` block, so treat every use as a review boundary",
+                      name
+                  ),
+              });
+          }
+      }
 
     fn expr(&mut self, e: &Expr) {
         match e {

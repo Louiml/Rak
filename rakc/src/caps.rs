@@ -28,6 +28,9 @@ pub struct Sandbox {
     pub raw_sockets: bool,
     pub gui: bool,
     pub secrets: bool,
+    /// Inline assembly. Separate from `ffi` and `raw_sockets` on purpose — see
+    /// the note at the `asm` entry in `required_cap`.
+    pub asm: bool,
 }
 
 static ACTIVE: RwLock<Option<Sandbox>> = RwLock::new(None);
@@ -45,7 +48,7 @@ pub fn enable(allow: &str) {
         match cap {
             "all" => sb = Sandbox {
                 net: true, fs_write: true, process: true, ffi: true,
-                raw_sockets: true, gui: true, secrets: true,
+                raw_sockets: true, gui: true, secrets: true, asm: true,
             },
             "net" => sb.net = true,
             "fs" | "fs_write" => sb.fs_write = true,
@@ -54,6 +57,7 @@ pub fn enable(allow: &str) {
             "raw" | "raw_sockets" => sb.raw_sockets = true,
             "gui" => sb.gui = true,
             "secrets" => sb.secrets = true,
+            "asm" => sb.asm = true,
             other => eprintln!("sandbox: unknown capability '{}' (ignored)", other),
         }
     }
@@ -99,8 +103,16 @@ fn required_cap(name: &str) -> Option<&'static str> {
             "raw_sockets",
             &["net_raw_send", "net_raw_recv", "pcap_listen"],
         ),
-        ("gui", &["gui_", "window_"]),
-        ("secrets", &["secret_"]),
+          ("gui", &["gui_", "window_"]),
+          ("secrets", &["secret_"]),
+          // Inline assembly. A separate capability rather than a reuse of `ffi`
+          // or `raw` on purpose: `ffi` is about calling named functions through
+          // a library Rak chose, and `raw` is about packet bytes. Assembly is
+          // arbitrary machine code, which can do either of those and a great
+          // deal more, including anything the sandbox has not thought to name.
+          // A capability that is granted in the same breath as `raw` would be
+          // granted by habit.
+          ("asm", &["asm"]),
         (
             "fs_write",
             &["file_write", "file_append", "append_file", "mkdir", "remove_file",
@@ -132,11 +144,12 @@ pub fn check_str(name: &str) -> Result<(), String> {
         "fs_write" => sb.fs_write,
         "process" => sb.process,
         "ffi" => sb.ffi,
-        "raw_sockets" => sb.raw_sockets,
-        "gui" => sb.gui,
-        "secrets" => sb.secrets,
-        _ => false,
-    };
+            "raw_sockets" => sb.raw_sockets,
+            "gui" => sb.gui,
+            "secrets" => sb.secrets,
+            "asm" => sb.asm,
+            _ => false,
+        };
     if allowed {
         Ok(())
     } else {
@@ -176,9 +189,9 @@ pub fn parse_cli(rest: &[String]) -> (bool, String, Vec<String>) {
 }
 
 /// List the recognized sandbox capabilities (for `--help` text).
-pub fn capability_names() -> &'static [&'static str] {
-    &["net", "fs_write", "process", "ffi", "raw", "gui", "secrets", "all"]
-}
+    pub fn capability_names() -> &'static [&'static str] {
+        &["net", "fs_write", "process", "ffi", "raw", "gui", "secrets", "asm", "all"]
+    }
 
 #[cfg(test)]
 mod tests {

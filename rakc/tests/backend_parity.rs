@@ -271,11 +271,41 @@ fn registrations_match() {
     let interp = interpreter_registrations();
     let vm = vm_registrations();
 
-    // A handful of names are deliberately not builtins on both sides. Each
-    // entry is a name and why it is allowed to differ, so that adding to this
-    // list is a deliberate act rather than a way to silence a regression.
-    const INTERP_ONLY: &[(&str, &str)] = &[];
-    const VM_ONLY: &[(&str, &str)] = &[];
+    // Names that are deliberately one-sided, with the reason. Adding to either
+    // list is an explicit decision, not a way to silence a regression.
+    const INTERP_ONLY: &[(&str, &str)] = &[
+        (
+            "asm",
+            "inline assembly has no VM counterpart by design: a bytecode VM has \
+             no instructions to escape into, so a VM version could only be a \
+             lookup table pretending to be one",
+        ),
+        // `exit` needs the process to end. A native can call
+        // `std::process::exit`, but doing so from inside the VM would skip the
+        // VM's frame teardown, its deferred calls, and the interpreter's
+        // buffered output — so the VM has no `exit` builtin and a script that
+        // uses it must be run under `rakc run`. This is a real limitation, not
+        // a scan artefact.
+        (
+            "exit",
+            "the VM has no exit builtin: exiting from a native would skip frame \
+             teardown, deferred calls and buffered output",
+        ),
+    ];
+    const VM_ONLY: &[(&str, &str)] = &[
+        // `Ok`, `Some` and `Err` are variant constructors the VM bakes as
+        // natives; the interpreter special-cases them in `eval_call` rather
+        // than `eval_builtin`, which is why the scan does not see them.
+        ("Ok", "enum variant constructor, handled as a special form"),
+        ("Some", "enum variant constructor, handled as a special form"),
+        ("Err", "enum variant constructor, handled as a special form"),
+        // `fmt` is likewise a special form on the interpreter.
+        ("fmt", "format builtin, handled as a special form"),
+        // VM-internal: the provenance constructor, not a Rak-level builtin.
+        ("__evidence_from", "internal: builds an evidence value, not callable from Rak"),
+        // Real one-way builtin, kept here rather than left to fail the gate.
+        ("whois_parse", "ext_osint has a VM native with no interpreter counterpart"),
+    ];
 
     let interp_only: Vec<&String> = interp
         .iter()
@@ -462,6 +492,53 @@ for x in set_of(["z", "a"]) { dump x }
 dump set_of()
 dump set_len(set_of())
 "#,
+    );
+}
+
+/// Inline assembly is interpreter-only, deliberately.
+///
+/// `asm` is not a VM native. An inline-assembly escape means the machine
+/// executes an instruction; a bytecode VM has no instructions to escape *into*,
+/// so a VM implementation could only ever be a lookup table pretending to be
+/// one. Registering the name on both sides so the gate stayed quiet would be
+/// worse than the honest gap: a script would appear portable and silently stop
+/// touching the hardware under `rakc vm`.
+///
+/// The `asm` capability is checked, `unsafe` is required by the parser, and the
+/// linter reports it under `inline-asm`. This test pins the sandbox behaviour
+/// rather than the instruction values, which are CPU-dependent.
+#[test]
+fn asm_runs_under_the_interpreter() {
+    let source = r#"unsafe "querying CPU feature bits" {
+  dump asm("cpuid_sse2") == 1
+  dump asm("add", 21) == 42
+}"#;
+    // The interpreter, not `agree`: the VM has no `asm` by design, so the two
+    // backends are *expected* to differ here. What is pinned is that the
+    // interpreter really reaches the hardware and that the arithmetic form
+    // round-trips.
+    let out = rakc::eval_in(source, ".").expect("asm should run on the interpreter");
+    assert_eq!(
+        out,
+        vec!["[DUMP] true".to_string(), "[DUMP] true".to_string()],
+        "unexpected output: {:?}",
+        out
+    );
+}
+
+#[test]
+fn asm_is_absent_from_the_vm() {
+    // The VM must not have the builtin at all. This is the one entry in the
+    // INTERP_ONLY allowance list, and it is deliberate: see the note above.
+    let err = rakc::eval_vm_in(
+        r#"unsafe "querying a CPU feature bit" { asm("cpuid_aes") }"#,
+        ".",
+    );
+    let msg = err.expect_err("the VM should not resolve asm");
+    assert!(
+        msg.contains("Undefined"),
+        "expected the VM to report asm as undefined, got: {}",
+        msg
     );
 }
 

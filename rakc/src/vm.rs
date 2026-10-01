@@ -893,11 +893,16 @@ impl Vm {
             let flags = native_str(args.get(1));
             build_vm_regex(&pattern, &flags).map(Value::Regex)
         });
-        self.insert_native("regex_match", |args| {
-            let re = vm_regex(args.first())?;
-            let hay = native_str(args.get(1));
-            Ok(Value::Bool(re.is_match(&hay)))
-        });
+          // `regex_is_match` is an alias of `regex_match`, matching the
+          // interpreter's `"regex_match" | "regex_is_match"` arm. Registered
+          // through the same closure so the two cannot drift.
+          for name in ["regex_match", "regex_is_match"] {
+              self.insert_native(name, |args| {
+                  let re = vm_regex(args.first())?;
+                  let hay = native_str(args.get(1));
+                  Ok(Value::Bool(re.is_match(&hay)))
+              });
+          }
         self.insert_native("regex_find", |args| {
             let re = vm_regex(args.first())?;
             let hay = native_str(args.get(1));
@@ -910,13 +915,17 @@ impl Vm {
                 re.find_iter(&hay).map(|m| Value::String(Arc::from(m.as_str()))).collect::<Vec<_>>(),
             )))
         });
-        self.insert_native("regex_replace", |args| {
-            let re = vm_regex(args.first())?;
-            let hay = native_str(args.get(1));
-            let rep = native_str(args.get(2));
-            let cow = re.replace_all(&hay, rep.as_str());
-            Ok(Value::String(Arc::from(&*cow)))
-        });
+          // `regex_replace_all` is an alias of `regex_replace`, matching the
+          // interpreter's `"regex_replace" | "regex_replace_all"` arm.
+          for name in ["regex_replace", "regex_replace_all"] {
+              self.insert_native(name, |args| {
+                  let re = vm_regex(args.first())?;
+                  let hay = native_str(args.get(1));
+                  let rep = native_str(args.get(2));
+                  let cow = re.replace_all(&hay, rep.as_str());
+                  Ok(Value::String(Arc::from(&*cow)))
+              });
+          }
         // --- FFI ---
         self.insert_native("ffi_load", |args| {
             let path = native_str(args.first());

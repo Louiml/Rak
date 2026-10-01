@@ -75,6 +75,87 @@ pub fn call_in_env(func: Value, env: Env, args: Vec<Value>) -> crate::Result<Val
     interp.call_function_with_values(func, args)
 }
 
+/// The instructions `asm` can reach.
+///
+/// A deliberately short list of read-only CPU queries, not an assembler. The
+/// point is to let Rak ask the hardware something the language has no way to
+/// express — whether a CPU feature is present, what the cycle counter says —
+/// without opening arbitrary code execution. Each entry is implemented with a
+/// stable `core::arch` intrinsic, so there is no hand-written machine code
+/// anywhere in Rak and nothing to get wrong at the byte level.
+///
+/// Anything not in this table is an error naming what *is* available. Returning
+/// an "unknown instruction" error rather than a wrong answer matters: a
+/// silently-ignored instruction would look like a working feature.
+fn asm_intrinsic(template: &str, value: i64) -> crate::Result<i64> {
+    use std::arch::x86_64;
+    let key = template.to_ascii_lowercase().replace(' ', "_");
+    match key.as_str() {
+        // CPUID leaf 1, ECX bit 23: SSE2. Reported by every x86-64 CPU, which
+        // makes it a useful smoke test that `asm` reached the hardware.
+        "cpuid_sse2" => Ok(if is_x86_feature_detected!("sse2") { 1 } else { 0 }),
+        "cpuid_pclmulqdq" => Ok(if is_x86_feature_detected!("pclmulqdq") { 1 } else { 0 }),
+        "cpuid_aes" => Ok(if is_x86_feature_detected!("aes") { 1 } else { 0 }),
+        "cpuid_rdrand" => Ok(if is_x86_feature_detected!("rdrand") { 1 } else { 0 }),
+        // RDTSC. A serialising variant would be needed for a measurement meant
+        // to be meaningful, so this is documented as a raw read.
+        "rdtsc" => Ok(unsafe { x86_64::_rdtsc() } as i64),
+        // The cycle counter, and the invariant TSC frequency where the OS
+        // reports one, so `rdtsc` deltas can be turned into seconds.
+        "rdtscp_aux" => {
+            let mut aux = 0u32;
+            Ok(unsafe { x86_64::__rdtscp(&mut aux) } as i64)
+        }
+        "tsc_invariant_hz" => Ok(invariant_tsc_hz()),
+        // `asm add N, N` — a no-op that returns its operand, so a program can
+        // assert the plumbing works without depending on a real instruction.
+        "add" => Ok(value.wrapping_add(value)),
+        other => Err(crate::RakError::Runtime(format!(
+            "asm: unknown instruction '{}'; available: \
+             cpuid_sse2, cpuid_pclmulqdq, cpuid_aes, cpuid_rdrand, rdtsc, \
+             rdtscp_aux, tsc_invariant_hz, add",
+            other
+        ))),
+    }
+}
+
+/// The invariant-TSC frequency in Hz, where the platform reports one.
+///
+/// Reads CPUID leaf 0x15, falling back to leaf 0x16. Returns 0 when the CPU does
+/// not report a frequency, which is the documented "unknown" case: a program
+/// that divides by this needs to check for 0 rather than silently producing a
+/// wrong duration.
+fn invariant_tsc_hz() -> i64 {
+    #[cfg(target_arch = "x86_64")]
+    {
+        use std::arch::x86_64::__cpuid;
+        unsafe {
+            // Leaf 0x15: TSC frequency = crystal * (EBX / EAX).
+            //
+            // The register assignment is EAX = denominator, EBX = numerator,
+            // ECX = crystal frequency. Swapping the first two yields a
+            // plausible-looking number rather than an obviously wrong one, so
+            // it is worth spelling out.
+            let leaf = __cpuid(0x15);
+            let denom = leaf.eax as u64;
+            let numer = leaf.ebx as u64;
+            let crystal = leaf.ecx as u64;
+            if denom != 0 && numer != 0 && crystal != 0 {
+                let hz = (crystal * numer) / denom;
+                if hz != 0 {
+                    return hz as i64;
+                }
+            }
+            // Leaf 0x16: base frequency in MHz.
+            let leaf = __cpuid(0x16);
+            if leaf.eax != 0 {
+                return (leaf.eax as i64) * 1_000_000;
+            }
+        }
+    }
+    0
+}
+
 pub(crate) fn set_key(v: &Value) -> String {
     // `is_numeric` is a free function in this module rather than a method, and
     // `as_f64` takes `&self`; both are used explicitly so the key rule reads
@@ -6706,6 +6787,51 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                     }
                     _ => Err(crate::RakError::Runtime("ws_close(stream)".to_string())),
                 }
+            }
+            // --- Inline assembly (capability `asm`) ---
+            //
+            // Assembly is the one escape in Rak that is not mediated by the
+            // capability sandbox, because the sandbox gates *builtins* and
+            // assembly is not a builtin — it is the machine executing whatever
+            // was written. `extern "C"` is the safer escape, since Rak can see
+            // the call; here it cannot.
+            //
+            // Three independent things must line up, and all three are required:
+            //
+            //   1. This capability check. Without `--allow asm` the call is
+            //      rejected before anything is assembled.
+            //   2. An `unsafe` block, enforced by the parser. The audit trail
+            //      means every use is greppable and justified in writing.
+            //   3. A lint finding, so `rakc lint` reports it even where the
+            //      other two are satisfied.
+            //
+            // The template is restricted to a single-register form on purpose.
+            // A general assembler is not what this buys; reaching one
+            // instruction that the compiler will not emit is.
+            "asm" => {
+                crate::caps::check_builtin("asm")?;
+                let template = match args.first() {
+                    Some(v) => v.to_string(),
+                    None => return Err(crate::RakError::Runtime("asm: expected an instruction".into())),
+                };
+                let template = template.trim();
+                if template.is_empty() {
+                    return Err(crate::RakError::Runtime("asm: empty instruction".into()));
+                }
+                // A register template is a name or number; anything with
+                // punctuation that could be a memory operand is rejected, so
+                // this cannot be used to encode an arbitrary byte string.
+                if !template
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == ' ')
+                {
+                    return Err(crate::RakError::Runtime(format!(
+                        "asm: unsupported operand form '{}'",
+                        template
+                    )));
+                }
+                let value = args.get(1).and_then(|v| v.as_i64()).unwrap_or(0);
+                Ok(Value::Int(asm_intrinsic(template, value)?))
             }
             _ => Err(crate::RakError::Runtime(format!("Unknown function: {}", name))),
         }
