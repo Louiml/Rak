@@ -33,3 +33,6 @@ adblocker/
 
 # Written by examples/secrets_demo.rak when the example suite runs.
 _feed.txt
+
+# scratch tree for scripts/_test_pin.py
+.tmp-pin-test/

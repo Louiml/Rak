@@ -39,6 +39,8 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   linux:
+    env:
+      TAG: ${{ steps.set-tag.outputs.tag }}
     needs: create-release
     runs-on: ubuntu-latest
     steps:
@@ -47,6 +49,17 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
+      # Tauri's bundler names the .deb, .AppImage and .msi after the IDE crate
+      # version, and that version lives in three files. Bumping them by hand is
+      # how v8.1.0 published rak-ide_8.0.0_amd64.deb inside the v8.1.0 release:
+      # the workspace and the VS Code extension were bumped, the IDE was not, and
+      # an MSI upgrade from 8.0.0 would not have been offered. Derive it from the
+      # tag instead so the two cannot drift, and fail loudly if the substitution
+      # misses a file. It is a script rather than inline shell so it can be run
+      # against a throwaway tree instead of only being found wrong once a release
+      # is already public.
+      - name: Pin the IDE version to the release tag
+        run: bash scripts/pin-ide-version.sh
       - name: Install Node.js
         uses: actions/setup-node@v4
         with:
@@ -163,6 +176,8 @@ jobs:
           tag_name: ${{ needs.create-release.outputs.tag }}
 
   windows:
+    env:
+      TAG: ${{ steps.set-tag.outputs.tag }}
     needs: create-release
     runs-on: windows-latest
     steps:
@@ -171,6 +186,12 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
+      # The MSI and NSIS installer are named from the IDE crate version as
+      # well, so this job needs the same pinning the Linux one has. Leaving it
+      # out here would have produced a 8.0.0 installer alongside a 8.0.0 .deb and
+      # been noticed only by whoever tried to upgrade.
+      - name: Pin the IDE version to the release tag
+        run: bash scripts/pin-ide-version.sh
       - name: Install Node.js
         uses: actions/setup-node@v4
         with:
