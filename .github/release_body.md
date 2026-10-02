@@ -1,8 +1,62 @@
+# Rak v8.1.1
+
+A patch release, and the reason for it is a packaging bug rather than a feature.
+
+## Why this release exists
+
+v8.1.0 published 14 assets, and four of them were named `rak-ide_8.0.0`:
+`rak-ide_8.0.0_amd64.deb`, `rak-ide_8.0.0_amd64.AppImage`,
+`rak-ide_8.0.0_x64-setup.exe` and `rak-ide_8.0.0_x64_en-US.msi`. Tauri's bundler
+names its output from the IDE crate version, and
+`ide/src-tauri/Cargo.toml`, `ide/src-tauri/tauri.conf.json` and
+`ide/package.json` were never taken past 8.0.0. The Rust workspace and the VS Code
+extension had been bumped; the IDE had been missed, and nothing in the pipeline
+looked. So the installers in v8.1.0 self-reported as 8.0.0, and a user already on
+8.0.0 would not have been offered the upgrade.
+
+The compilers in v8.1.0 — `rakc`, `rakpkg`, `rak-setup` and the offline bundle —
+were correctly versioned. This is only the four Tauri IDE bundles.
+
+## What changed
+
+**The IDE version now comes from the release tag.** Both the Linux and the
+Windows job run `scripts/pin-ide-version.sh`, which takes the version from the
+tag, rewrites all three files, and exits non-zero if any of them did not take.
+Deriving it is the actual fix — the workspace and the IDE can no longer drift —
+and the check turns a silent miss into a failed build instead of a wrong artifact.
+
+**CI is green, and it was not before.** v8.1.0 introduced CI, and its first run
+failed all three jobs. Each had a different cause:
+
+- The lint job died before clippy ran: `--component clippy, rustfmt` on the rustup
+  install line, where the space after the comma makes rustup read `rustfmt` as a
+  separate argument.
+- With that fixed it reached `cargo fmt` and failed. The tree has never been
+  rustfmt-clean — 1313 locations across 67 files. Reformatting it inside a feature
+  release would have put an 8000-line diff through unreviewed code, so the check
+  now reports as a warning. It becomes a gate in its own commit, against a tree
+  that has had the suite run on it.
+- The test jobs failed on the parity gate and on three Windows-only examples.
+
+**The parity gate is a ratchet.** `registrations_match` fails when the backend gap
+*grows* and passes when it shrinks, with the current shortfall recorded as 34. A
+builtin added to one backend and forgotten on the other still fails immediately,
+because that is precisely the regression v8.0.0 shipped. A strict
+`registrations_match_strictly` is ignored by default, so "the gap is zero" remains
+a claim someone can check rather than assume.
+
+## What v8.1.0 was
+
+v8.1.0 is the release where the two backends stopped being two languages. Its
+notes follow, unchanged.
+
+---
+
 # Rak v8.1.0
 
 The release where the two backends stopped being two languages.
 
-## Why this release exists
+## Why v8.1.0 existed
 
 Rak has shipped a tree-walking interpreter and a bytecode VM for several
 versions, behind one frontend. Every builtin and every language feature has to
@@ -135,6 +189,9 @@ timeout bug existed precisely because the two platforms disagree and a
 Linux-only test cannot see it. A separate job runs the hardening verifier's
 self-test, so a bug in the verifier cannot silently make every release report
 "all hardening checks passed".
+
+All three of those jobs failed on this branch's first run. *What changed*,
+above, is what fixed them; CI being present was not the same as CI working.
 
 ## Known limitations
 
