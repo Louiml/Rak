@@ -45,16 +45,77 @@ fn to_str(v: Option<&Value>) -> String {
     }
 }
 
+/// Coerce a value to bytes, mirroring `Interpreter::val_to_bytes`.
+///
+/// An array or tuple of byte values becomes *those bytes*, not the text of the
+/// array. Mirroring matters here rather than being tidiness: on one backend
+/// `bytes([0x89, 0x50])` produced `[137, 80]` as text and on the other a two-byte
+/// buffer, so every caller had to know which backend it was on.
 fn to_bytes(v: Option<&Value>) -> Vec<u8> {
     match v {
         Some(Value::Bytes(b)) => b.to_vec(),
         Some(Value::String(s)) => s.as_bytes().to_vec(),
         Some(Value::Hex(h, _)) => h.to_le_bytes().to_vec(),
+        Some(Value::Array(a)) => {
+            let a: &[Value] = a.as_slice();
+            let mut out = Vec::with_capacity(a.len());
+            for item in a.iter() {
+                match item {
+                    Value::Char(c) => {
+                        let mut buf = [0u8; 4];
+                        out.extend_from_slice((*c).encode_utf8(&mut buf).as_bytes());
+                    }
+                    Value::Bytes(b) => out.extend_from_slice(b),
+                    other => match other.as_i64() {
+                        Some(i) if (0..=255).contains(&i) => out.push(i as u8),
+                        // Anything else is the caller's mistake; the interpreter
+                        // reports the offending element by name and the VM cannot
+                        // from here, so it falls back to the text of the value and
+                        // the length differs visibly.
+                        _ => out.extend_from_slice(other.to_string().as_bytes()),
+                    },
+                }
+            }
+            out
+        }
+        Some(Value::Mmap(h)) => h.as_slice().to_vec(),
+        Some(Value::MmapSlice(h, off, n)) => h.as_slice()[*off..off + n].to_vec(),
         Some(v) => match v.as_i64() {
             Some(i) => i.to_le_bytes().to_vec(),
             None => v.to_string().into_bytes(),
         },
         None => vec![],
+    }
+}
+
+/// A non-negative byte offset from an argument, accepting `Int`, `Hex` and
+/// `Float` - `0`, `0x10` and `16.0` all have to mean the same offset.
+fn to_offset(v: Option<&Value>) -> Result<usize, String> {
+    match v {
+        Some(Value::F64(f)) if *f >= 0.0 && f.fract() == 0.0 => Ok(*f as usize),
+        Some(other) => match other.as_i64() {
+            Some(i) if i >= 0 => Ok(i as usize),
+            _ => Err(format!(
+                "expected a non-negative integer offset, got {}",
+                other
+            )),
+        },
+        None => Err("expected an offset argument".to_string()),
+    }
+}
+
+/// One byte from an argument: `0xFF`, `255` and `'A'` are the same byte.
+pub fn to_byte(v: Option<&Value>) -> Result<u8, String> {
+    match v {
+        Some(Value::Char(c)) => {
+            let mut buf = [0u8; 4];
+            Ok(c.encode_utf8(&mut buf).as_bytes()[0])
+        }
+        Some(other) => match other.as_i64() {
+            Some(i) if (0..=255).contains(&i) => Ok(i as u8),
+            _ => Err(format!("expected a byte value (0..255 or a char), got {}", other)),
+        },
+        None => Err("expected a byte argument".to_string()),
     }
 }
 
@@ -832,6 +893,65 @@ fn vm_file_write(args: &Args) -> R {
         .map_err(|e| e.to_string())
 }
 
+/// Read a whole file as raw bytes.
+///
+/// `vm_file_read` is `fs::read_to_string`, which *fails* on any file containing a
+/// byte sequence that is not valid UTF-8 - so between them there was no way to
+/// open a binary file on either backend.
+/// Write one byte through a writable mapping.
+///
+/// Unlike `set_add`, this needs no `&mut Vm`: the handle already owns the mapping
+/// behind an `Arc`, so the write is an ordinary native. The mapping is the file,
+/// so there is nothing to flush and no second handle to keep in step - which is
+/// the reason to write through the mapping rather than seek-and-write a path.
+fn vm_mmap_write(args: &Args) -> R {
+    let (handle, base) = match args.first() {
+        Some(Value::Mmap(h)) => (h.clone(), 0usize),
+        // A slice is a view, so an offset relative to it has to be rebased onto
+        // the mapping before use.
+        Some(Value::MmapSlice(h, off, _)) => (h.clone(), *off),
+        Some(other) => {
+            return Err(format!(
+                "mmap_write: first argument must be a mapping from mmap_open, got {}",
+                other.type_name()
+            ))
+        }
+        None => return Err("mmap_write: expected a mapping".to_string()),
+    };
+    let off = base + to_offset(args.get(1))?;
+    let byte = to_byte(args.get(2))?;
+    rak_stdlib::mmap::write_byte(&handle, off, byte).map(|_| Value::Bool(true))
+}
+
+/// `bytes(x)` - coerce to a byte buffer.
+///
+/// Closed on the VM in this change. `to_bytes` now builds a real buffer from an
+/// array of byte values rather than the array's text, which is what makes this
+/// worth having on both sides: `bytes([0x89, 0x50])` was the 9-byte string
+/// `[137, 80]` on the VM and a 2-byte buffer on the interpreter, so a program
+/// reading a binary file could not hand the result anywhere on the VM.
+fn vm_bytes(args: &Args) -> R {
+    Ok(b(to_bytes(args.first())))
+}
+
+fn vm_file_read_bytes(args: &Args) -> R {
+    rak_stdlib::file::read_bytes(&to_str(args.first()))
+        .map(b)
+        .map_err(|e| e.to_string())
+}
+
+fn vm_file_write_bytes(args: &Args) -> R {
+    rak_stdlib::file::write_bytes(&to_str(args.first()), &to_bytes(args.get(1)))
+        .map(|_| Value::Bool(true))
+        .map_err(|e| e.to_string())
+}
+
+fn vm_file_append_bytes(args: &Args) -> R {
+    rak_stdlib::file::append_bytes(&to_str(args.first()), &to_bytes(args.get(1)))
+        .map(|_| Value::Bool(true))
+        .map_err(|e| e.to_string())
+}
+
 fn vm_file_append(args: &Args) -> R {
     rak_stdlib::file::append(&to_str(args.first()), &to_str(args.get(1)))
         .map(|_| Value::Bool(true))
@@ -1155,6 +1275,11 @@ pub fn vm_natives() -> Vec<(&'static str, fn(&[Value]) -> Result<Value, String>)
         ("write", vm_write),
         ("file_read", vm_file_read),
         ("file_write", vm_file_write),
+        ("file_read_bytes", vm_file_read_bytes),
+        ("mmap_write", vm_mmap_write),
+        ("bytes", vm_bytes),
+        ("file_write_bytes", vm_file_write_bytes),
+        ("file_append_bytes", vm_file_append_bytes),
         ("file_append", vm_file_append),
         ("file_exists", vm_file_exists),
         ("file_size", vm_file_size),

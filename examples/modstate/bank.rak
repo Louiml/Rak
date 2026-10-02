@@ -1,0 +1,24 @@
+pub let mut BALANCE = 0
+
+pub let mut LOG = []
+
+let rate = 0.1
+
+pub fn deposit(n) -> int {
+  BALANCE = BALANCE + n
+  LOG = push(LOG, n)
+  return BALANCE
+}
+
+pub fn interest() -> int {
+  BALANCE = BALANCE + 1
+  return BALANCE
+}
+
+pub fn deposits() -> int {
+  return len(LOG)
+}
+
+pub fn private_rate() -> f64 {
+  return rate
+}

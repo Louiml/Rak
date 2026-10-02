@@ -7,11 +7,12 @@
 //! pages with no copy.
 
 use memmap2::{Mmap, MmapOptions};
+use std::cell::UnsafeCell;
 use std::fs::File;
 use std::sync::Arc;
 
-/// A mapped file. `Ro` is a read-only mapping; `Rw` is a copy-on-write / writable
-/// mapping. The `File` is kept alive for the mapping's lifetime.
+/// A mapped file. `Ro` is a read-only mapping; `Rw` is a writable one. The
+/// `File` is kept alive for the mapping's lifetime.
 pub struct MmapHandle {
     pub inner: MmapInner,
     pub _file: File,
@@ -19,7 +20,52 @@ pub struct MmapHandle {
 
 pub enum MmapInner {
     Ro(Mmap),
-    Rw(memmap2::MmapMut),
+    Rw(WritableMapping),
+}
+
+/// A writable mapping that can also be read through `&self`.
+///
+/// `MmapMut`'s write path is `IndexMut`, which needs `&mut MmapMut`, and this
+/// crate hands out `Arc<MmapHandle>` — a shared reference, because a `bytes` view
+/// into the mapping has to be able to outlive the expression that made it. memmap2
+/// 0.9 offers no `&self` write accessor (`as_ptr_mut` arrived later), so the
+/// interior mutability lives here rather than at twenty-odd call sites.
+///
+/// SAFETY, for a caller of this type: mutation must not overlap a read of the same
+/// bytes. In Rak that holds because a builtin runs to completion and the mapping is
+/// not shared across threads without the caller's own synchronisation — the handle
+/// is `Send + Sync`, so a Rak program *could* move it into a thread and write while
+/// another read the same offset, and the compiler would not stop it. That is the
+/// same hazard `Arc<Mutex<..>>` exists to prevent, and the honest description is
+/// that a writable mapping is a single-owner resource that Rak does not yet enforce.
+/// Reads are unaffected and remain safe.
+pub struct WritableMapping(UnsafeCell<memmap2::MmapMut>);
+
+// SAFETY: see the type's doc comment. `MmapMut` is itself `Send`/`Sync`-able for
+// the same reason, and the mapping is not mutated concurrently by Rak's own code.
+unsafe impl Send for WritableMapping {}
+unsafe impl Sync for WritableMapping {}
+
+impl WritableMapping {
+    fn new(m: memmap2::MmapMut) -> Self {
+        WritableMapping(UnsafeCell::new(m))
+    }
+
+    pub fn as_slice(&self) -> &[u8] {
+        // SAFETY: as documented on the type. `MmapMut` derefs to `[u8]`, and the
+        // reference lives only as long as `&self`; nothing hands out a `&mut` to
+        // the mapping while it is alive.
+        unsafe { &*self.0.get() }
+    }
+
+    /// Store one byte. `off` is bounds-checked by the caller.
+    fn write_byte(&self, off: usize, byte: u8) {
+        // SAFETY: as `as_slice` above, plus `off < len`, checked before the call.
+        unsafe {
+            let base = (*self.0.get()).as_mut_ptr();
+            std::ptr::write(base.add(off), byte);
+        }
+    }
 }
 
 impl MmapHandle {
@@ -27,7 +73,7 @@ impl MmapHandle {
     pub fn as_slice(&self) -> &[u8] {
         match &self.inner {
             MmapInner::Ro(m) => m.as_ref(),
-            MmapInner::Rw(m) => m.as_ref(),
+            MmapInner::Rw(m) => m.as_slice(),
         }
     }
 
@@ -57,7 +103,7 @@ pub fn open(path: &str, mode: &str) -> Result<Arc<MmapHandle>, String> {
     let inner = if writable {
         let m = unsafe { MmapOptions::new().map_mut(&file) }
             .map_err(|e| format!("mmap_open: cannot map '{}': {}", path, e))?;
-        MmapInner::Rw(m)
+        MmapInner::Rw(WritableMapping::new(m))
     } else {
         let m = unsafe { Mmap::map(&file) }
             .map_err(|e| format!("mmap_open: cannot map '{}': {}", path, e))?;
@@ -77,6 +123,55 @@ pub fn find(h: &MmapHandle, needle: &[u8]) -> Option<usize> {
     h.as_slice()
         .windows(needle.len())
         .position(|w| w == needle)
+}
+
+/// Write one byte through a writable mapping.
+///
+/// Only a `"rw"` mapping accepts this; a read-only one is refused by name rather
+/// than by letting the OS fault. The bounds check happens *before* anything is
+/// written, so a rejected write leaves the mapping exactly as it was.
+///
+/// `MmapMut`'s write path (`IndexMut`) needs `&mut MmapMut`, which a handle behind
+/// an `Arc` cannot produce — every read path in this crate works through `&self`.
+/// `as_ptr_mut` is memmap2's own safe accessor for exactly that situation.
+pub fn write_byte(h: &MmapHandle, off: usize, byte: u8) -> Result<(), String> {
+    match &h.inner {
+        // No builtin name in the message: the VM wraps native errors as
+        // `<builtin>: <msg>` and an already-prefixed message reads as
+        // `mmap_write: mmap_write: ...`.
+        MmapInner::Ro(_) => {
+            Err("the mapping is read-only; open it with mmap_open(path, \"rw\")".to_string())
+        }
+        MmapInner::Rw(m) => {
+            if off >= h.len() {
+                return Err(format!(
+                    "offset {} is out of range (mapping is {} bytes)",
+                    off,
+                    h.len()
+                ));
+            }
+            m.write_byte(off, byte);
+            Ok(())
+        }
+    }
+}
+
+/// Overwrite a run of bytes. All-or-nothing: the range is checked before the first
+/// write, so a request that runs off the end does not leave the file partly
+/// modified.
+pub fn write_bytes_at(h: &MmapHandle, off: usize, data: &[u8]) -> Result<(), String> {
+    if data.len() > h.len().saturating_sub(off) {
+        return Err(format!(
+            "{} bytes at offset {} runs past the end of a {} byte mapping",
+            data.len(),
+            off,
+            h.len()
+        ));
+    }
+    for (i, b) in data.iter().enumerate() {
+        write_byte(h, off + i, *b)?;
+    }
+    Ok(())
 }
 
 /// Iterate line offsets/lengths by splitting on `delim` (default `"\n"`).
@@ -133,6 +228,56 @@ mod tests {
         let offs = lines_off(&h, b"\n");
         assert_eq!(offs[0], (0, 4));
         assert_eq!(offs[1], (5, 5));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A writable mapping round-trips a byte back to disk.
+    ///
+    /// `flush` is not called: on both platforms the mapping is the file, and a
+    /// fresh read of the file observes the write. Flushing explicitly would make
+    /// the test depend on a syscall the editor does not need to make.
+    #[test]
+    fn mmap_write_round_trips_to_disk() {
+        let path = std::env::temp_dir().join("rak_mmap_write_test.bin");
+        std::fs::write(&path, b"\x00\x01\x02\x03\x04").unwrap();
+
+        {
+            let h = open(path.to_str().unwrap(), "rw").unwrap();
+            write_byte(&h, 1, 0xFF).unwrap();
+            write_bytes_at(&h, 3, b"\xAA\xBB").unwrap();
+            // And through the read path, so a write is not invisible to `as_slice`.
+            assert_eq!(h.as_slice()[1], 0xFF);
+            assert_eq!(&h.as_slice()[3..5], b"\xAA\xBB");
+        }
+
+        assert_eq!(std::fs::read(&path).unwrap(), b"\x00\xFF\x02\xAA\xBB");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn mmap_write_refuses_a_read_only_mapping() {
+        let path = std::env::temp_dir().join("rak_mmap_ro_test.bin");
+        std::fs::write(&path, b"\x00\x01").unwrap();
+        let h = open(path.to_str().unwrap(), "r").unwrap();
+        let err = write_byte(&h, 0, 0xFF).unwrap_err();
+        assert!(err.contains("read-only"), "got: {}", err);
+        // Nothing was written on the way to refusing.
+        assert_eq!(std::fs::read(&path).unwrap(), b"\x00\x01");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn mmap_write_out_of_range_changes_nothing() {
+        let path = std::env::temp_dir().join("rak_mmap_range_test.bin");
+        std::fs::write(&path, b"\x00\x01").unwrap();
+        {
+            let h = open(path.to_str().unwrap(), "rw").unwrap();
+            assert!(write_byte(&h, 2, 0xFF).is_err());
+            assert!(write_bytes_at(&h, 1, b"\xFF\xFF").is_err());
+            // The rejected multi-byte write must not have applied its first byte.
+            assert_eq!(h.as_slice()[1], 0x01);
+        }
+        assert_eq!(std::fs::read(&path).unwrap(), b"\x00\x01");
         let _ = std::fs::remove_file(&path);
     }
 }

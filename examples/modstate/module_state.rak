@@ -1,0 +1,55 @@
+import bank
+
+from bank import BALANCE as opened_at, deposits as deposits_so_far
+
+import ledger
+
+dump bank.deposit(10)
+
+dump bank.deposit(5)
+
+dump bank.BALANCE
+
+fn total(m, n) {
+  return m.deposit(n)
+}
+
+dump total(bank, 4)
+
+dump bank.BALANCE
+
+bank.BALANCE = 100
+
+dump bank.BALANCE
+
+dump bank.interest()
+
+dump bank.BALANCE
+
+bank.deposit(9)
+
+dump opened_at
+
+dump bank.BALANCE
+
+dump deposits_so_far()
+
+dump bank.private_rate()
+
+dump ledger.deposit(7)
+
+dump bank.BALANCE
+
+mod counter {
+  let mut COUNT = 0
+  fn bump() -> int {
+    COUNT = COUNT + 1
+    return COUNT
+  }
+}
+
+dump counter.bump()
+
+dump counter.bump()
+
+dump counter.COUNT

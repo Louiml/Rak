@@ -41,8 +41,14 @@ pub struct Compiler {
     loop_stack: Vec<LoopInfo>,
     /// Names exported by the module currently being compiled (`pub`/`export`).
     current_exports: Vec<String>,
-    /// Import-once cache: canonical module path → its exported global names.
-    module_cache: HashMap<std::path::PathBuf, Vec<String>>,
+    /// Import-once cache: canonical module path → its exported global names and
+    /// the global holding its namespace handle. The second half is what lets a
+    /// second import of the same file bind the *same* live namespace rather than
+    /// a second view that has drifted out of step with the first.
+    module_cache: HashMap<std::path::PathBuf, InlinedModule>,
+    /// Counter behind `next_cell_global`, so each inlined module gets one
+    /// private namespace-handle global.
+    cell_counter: u32,
     /// Modules currently being inlined (circular-import detection).
     compiling: std::collections::HashSet<std::path::PathBuf>,
     /// Base directory for resolving name-based imports of the current module.
@@ -57,6 +63,10 @@ struct LoopInfo {
     /// (the increment for `for`, loop-start for `while`/`loop`).
     continue_jumps: Vec<usize>,
 }
+
+/// What `inline_module` produced for one module file: the names it exports, and
+/// the chunk global holding its namespace handle.
+type InlinedModule = (Vec<String>, String);
 
 impl Compiler {
     pub fn new() -> Self {
@@ -78,6 +88,7 @@ impl Compiler {
             loop_stack: Vec::new(),
             current_exports: Vec::new(),
             module_cache: HashMap::new(),
+            cell_counter: 0,
             compiling: std::collections::HashSet::new(),
             base_dir: ".".to_string(),
         }
@@ -277,32 +288,53 @@ impl Compiler {
         }
     }
 
-    /// Inline an imported module's exported items as globals into the current
-    /// chunk (recursively, cached). Returns the exported global names.
-    fn inline_module(&mut self, leaf: PathBuf, init: Option<PathBuf>) -> Result<Vec<String>, String> {
+    /// Inline an imported module's items as globals into the current chunk
+    /// (recursively, cached), and create the namespace `import m` binds.
+    ///
+    /// Returns the exported global names and the global holding the module's
+    /// namespace handle. The two are needed separately: `import m` binds the
+    /// handle (a live view), while `from m import x` reads the names (a copy).
+    fn inline_module(&mut self, leaf: PathBuf, init: Option<PathBuf>) -> Result<InlinedModule, String> {
         let canon = crate::modules::canonical(&leaf);
-        if let Some(names) = self.module_cache.get(&canon).cloned() {
-            return Ok(names);
+        if let Some(found) = self.module_cache.get(&canon).cloned() {
+            return Ok(found);
         }
         if self.compiling.contains(&canon) {
-            return Ok(self.module_cache.get(&canon).cloned().unwrap_or_default());
+            // Cycle: hand back whatever exists so far. The namespace is already
+            // created and bound, so a module further round the cycle that reads
+            // `m.X` gets a live (if not yet populated) namespace rather than
+            // nothing.
+            // The partial entry always exists: `compiling.insert` and the
+            // `module_cache.insert` that follows it are adjacent, with nothing
+            // fallible between them. An empty cell name here would make the
+            // caller bind a global literally called "", so it is better to say so.
+            return Ok(self.module_cache.get(&canon).cloned().unwrap_or_else(|| {
+                (Vec::new(), String::new())
+            }));
         }
         // Load the package init first.
         if let Some(init_path) = init {
             let _ = self.inline_module(init_path.clone(), None)?;
         }
         self.compiling.insert(canon.clone());
-        self.module_cache.insert(canon.clone(), Vec::new()); // partial for cycles
+        // A partial entry for cycles. The cell global is real from here on, so a
+        // cyclic importer that binds the namespace gets the handle.
+        let cell_global = self.next_cell_global();
+        self.module_cache.insert(canon.clone(), (Vec::new(), cell_global.clone()));
 
         let source = std::fs::read_to_string(&leaf)
             .map_err(|e| format!("import: cannot read '{}': {}", leaf.display(), e))?;
         let tokens = crate::lexer::tokenize(&source).map_err(|e| e.to_string())?;
         let module = crate::parser::parse(&tokens, &source).map_err(|e| e.to_string())?;
-        let saved_base = self.base_dir.clone();
-        if let Some(parent) = leaf.parent() {
-            self.base_dir = parent.to_string_lossy().to_string();
-        }
+        let saved_base = std::mem::replace(
+            &mut self.base_dir,
+            leaf.parent().map(|p| p.to_string_lossy().to_string()).unwrap_or_default(),
+        );
         let saved_exports = std::mem::take(&mut self.current_exports);
+        // Exports this module declared `pub let mut`, and which an importer may
+        // therefore assign through the module handle. Scoped to this module: a
+        // re-export is a copy and stays fixed, whichever module it came from.
+        let mut mutable_exports: Vec<String> = Vec::new();
 
         // Pre-pass for this imported module: collect fns (incl. pub fn), macros,
         // externs. Exported names are recorded in `self.current_exports`.
@@ -319,7 +351,7 @@ impl Compiler {
                     }
                 }
                 Stmt::Export(inner) => match inner.as_ref() {
-                    Stmt::Let { name, value, .. } => {
+                    Stmt::Let { name, value, mutable, .. } => {
                         if let Expr::Function { params, body, .. } = value.as_ref() {
                             self.func_names.insert(name.clone());
                             let cl = self.compile_function(name, params, body)?;
@@ -327,6 +359,9 @@ impl Compiler {
                             local_closures.push((name.clone(), cl));
                         }
                         self.current_exports.push(name.clone());
+                        if *mutable {
+                            mutable_exports.push(name.clone());
+                        }
                     }
                     Stmt::Const { name, .. } | Stmt::Struct { name, .. } | Stmt::Enum { name, .. } => {
                         self.current_exports.push(name.clone());
@@ -351,101 +386,160 @@ impl Compiler {
                 _ => {}
             }
         }
-        for (n, cl) in &local_closures {
-            self.load_const(cl.clone());
-            let ci = self.const_str(n);
-            self.emit_op(Op::StoreGlobal);
-            self.emit_u16(ci);
-        }
-        for (n, nf) in &local_foreigns {
-            self.load_const(nf.clone());
-            let ci = self.const_str(n);
-            self.emit_op(Op::StoreGlobal);
-            self.emit_u16(ci);
-        }
-        // Bake per-binstruct decode/encode natives for this module's binstructs.
-        let bin_names: Vec<String> = self.binstructs.keys().cloned().collect();
-        for name in &bin_names {
-            // Only bake binstructs defined in this module (not ones already
-            // present from a parent compile) — skip if already baked this run.
-            let resolved = resolve_binstruct(name, &self.binstructs)?;
-            let dn = make_bin_decode_native(name.clone(), resolved.clone());
-            let en = make_bin_encode_native(name.clone(), resolved);
-            self.load_const(dn);
-            let ci = self.const_str(&format!("__bin_decode_{}", name));
-            self.emit_op(Op::StoreGlobal);
-            self.emit_u16(ci);
-            self.load_const(en);
-            let ci = self.const_str(&format!("__bin_encode_{}", name));
-            self.emit_op(Op::StoreGlobal);
-            self.emit_u16(ci);
-        }
-        // Process this module's own imports (recursive inline).
-        for imp in &module.imports {
-            self.compile_import(imp)?;
-        }
-        // Compile its non-fn items (pub let/const/struct/enum...).
-        for stmt in &module.items {
-            if let Stmt::Let { value, .. } = stmt {
-                if matches!(value.as_ref(), Expr::Function { .. }) {
-                    continue;
-                }
+        let result: Result<InlinedModule, String> = (|| {
+            // Create this module's namespace *before* its body is emitted, so that
+            // every `Op::StoreGlobal` the body makes has a namespace to republish
+            // into. The exported names are not known yet — a `pub use` re-export
+            // further down the module has not been compiled — so `ModulePublish`
+            // adds them at the end. The values are already correct by then because
+            // the publish index writes them whether or not the name is public yet.
+            self.emit_make_module(&cell_global);
+
+            for (n, cl) in &local_closures {
+                self.load_const(cl.clone());
+                let ci = self.const_str(n);
+                self.emit_op(Op::StoreGlobal);
+                self.emit_u16(ci);
             }
-            if let Stmt::Export(inner) = stmt {
-                if let Stmt::Let { value, .. } = inner.as_ref() {
+            for (n, nf) in &local_foreigns {
+                self.load_const(nf.clone());
+                let ci = self.const_str(n);
+                self.emit_op(Op::StoreGlobal);
+                self.emit_u16(ci);
+            }
+            // Bake per-binstruct decode/encode natives for this module's binstructs.
+            let bin_names: Vec<String> = self.binstructs.keys().cloned().collect();
+            for name in &bin_names {
+                // Only bake binstructs defined in this module (not ones already
+                // present from a parent compile) — skip if already baked this run.
+                let resolved = resolve_binstruct(name, &self.binstructs)?;
+                let dn = make_bin_decode_native(name.clone(), resolved.clone());
+                let en = make_bin_encode_native(name.clone(), resolved);
+                self.load_const(dn);
+                let ci = self.const_str(&format!("__bin_decode_{}", name));
+                self.emit_op(Op::StoreGlobal);
+                self.emit_u16(ci);
+                self.load_const(en);
+                let ci = self.const_str(&format!("__bin_encode_{}", name));
+                self.emit_op(Op::StoreGlobal);
+                self.emit_u16(ci);
+            }
+            // Process this module's own imports (recursive inline).
+            for imp in &module.imports {
+                self.compile_import(imp)?;
+            }
+            // Compile its non-fn items (pub let/const/struct/enum...).
+            for stmt in &module.items {
+                if let Stmt::Let { value, .. } = stmt {
                     if matches!(value.as_ref(), Expr::Function { .. }) {
                         continue;
                     }
                 }
-                if matches!(inner.as_ref(), Stmt::MacroDef { .. }) {
+                if let Stmt::Export(inner) = stmt {
+                    if let Stmt::Let { value, .. } = inner.as_ref() {
+                        if matches!(value.as_ref(), Expr::Function { .. }) {
+                            continue;
+                        }
+                    }
+                    if matches!(inner.as_ref(), Stmt::MacroDef { .. }) {
+                        continue;
+                    }
+                }
+                if matches!(stmt, Stmt::Extern { .. }) {
                     continue;
                 }
+                if matches!(stmt, Stmt::MacroDef { .. }) {
+                    continue;
+                }
+                if matches!(stmt, Stmt::BinStructDef { .. }) {
+                    continue;
+                }
+                self.compile_stmt(stmt)?;
             }
-            if matches!(stmt, Stmt::Extern { .. }) {
-                continue;
-            }
-            if matches!(stmt, Stmt::MacroDef { .. }) {
-                continue;
-            }
-            if matches!(stmt, Stmt::BinStructDef { .. }) {
-                continue;
-            }
-            self.compile_stmt(stmt)?;
-        }
 
-        // Capture this module's exports (including re-exports added during
-        // import processing) and restore the parent's export list.
-        let local_exports = std::mem::replace(&mut self.current_exports, saved_exports);
-        self.module_cache.insert(canon.clone(), local_exports.clone());
+            // Capture this module's exports (including re-exports added during
+            // import processing) and restore the parent's export list.
+            let local_exports = std::mem::take(&mut self.current_exports);
+            self.module_cache
+                .insert(canon.clone(), (local_exports.clone(), cell_global.clone()));
+
+            // Now that the export list is final, tell the VM which of this module's
+            // globals are readable from outside, and record the mapping so
+            // `Op::StoreGlobal` can keep republishing them.
+            let cell = crate::bytecode::ModuleCell {
+                global: cell_global.clone(),
+                exports: local_exports.iter().map(|n| (n.clone(), n.clone())).collect(),
+                mutable: mutable_exports.clone(),
+            };
+            self.chunk.module_cells.push(cell);
+            for n in &local_exports {
+                self.emit_module_publish(&cell_global, n, mutable_exports.contains(n));
+            }
+            Ok((local_exports, cell_global))
+        })();
+        // Restored on both paths. A module that failed to compile used to
+        // leave `base_dir` pointing inside its own directory and leave itself
+        // in `compiling`, so the next import of the same file looked like a
+        // cycle.
         self.base_dir = saved_base;
+        self.current_exports = saved_exports;
         self.compiling.remove(&canon);
-        Ok(local_exports)
+        result
     }
 
-    /// Emit, at run time, a `Value::Module` built from `exports` (a list of
-    /// global names), then `StoreGlobal name`.
-    fn emit_build_module(&mut self, exports: &[String], name: &str) {
-        for n in exports {
-            // BuildModule pops (value, name) per pair, so push name then value.
-            let ki = self.const_str(n);
-            self.emit_op(Op::LoadConst);
-            self.emit_u16(ki);
-            let ci = self.const_str(n);
-            self.emit_op(Op::LoadGlobal);
-            self.emit_u16(ci);
-        }
-        self.emit_op(Op::BuildModule);
-        self.emit_byte(exports.len() as u8);
-        let gi = self.const_str(name);
-        self.emit_op(Op::StoreGlobal);
+    /// A private global name to hold a module's namespace handle.
+    ///
+    /// Namespaced per inlined module rather than per import site, so `import m`
+    /// and `import m as k` — and `import a` plus `a`'s own `import m` — all
+    /// resolve to the one namespace, which is what makes them the same module
+    /// rather than two copies of it.
+    fn next_cell_global(&mut self) -> String {
+        self.cell_counter += 1;
+        format!("__rak_modcell_{}", self.cell_counter)
+    }
+
+    fn emit_make_module(&mut self, cell_global: &str) {
+        let ci = self.const_str(cell_global);
+        self.emit_op(Op::MakeModule);
+        self.emit_u16(ci);
+        // `BindModule`, not `StoreGlobal`: the handle is a binding, and
+        // `StoreGlobal` republishes whatever it stores into any namespace that
+        // exports a global of the same name, which would put a module handle
+        // where another module's export belongs.
+        let gi = self.const_str(cell_global);
+        self.emit_op(Op::BindModule);
         self.emit_u16(gi);
     }
+
+    fn emit_module_publish(&mut self, cell_global: &str, export: &str, mutable: bool) {
+        let ci = self.const_str(cell_global);
+        let ei = self.const_str(export);
+        self.emit_op(Op::ModulePublish);
+        self.emit_u16(ci);
+        self.emit_u16(ei);
+        self.emit_byte(u8::from(mutable));
+    }
+
+    /// Bind a module's namespace to `name`.
+    ///
+    /// This is the whole of `import m`: a load of the handle, not a copy of the
+    /// module's values. The load has to be separate from the store because the
+    /// importer's own `pub` handling and `import pkg.sub` both reuse it.
+    fn emit_bind_module(&mut self, cell_global: &str, name: &str) {
+        let ci = self.const_str(cell_global);
+        self.emit_op(Op::LoadGlobal);
+        self.emit_u16(ci);
+        let gi = self.const_str(name);
+        self.emit_op(Op::BindModule);
+        self.emit_u16(gi);
+    }
+
 
     fn compile_import(&mut self, import: &Import) -> Result<(), String> {
         let resolved = self.resolve_target(import)?;
         match import.kind {
             ImportKind::Whole => {
-                let exports = self.inline_module(resolved.leaf.clone(), resolved.init.clone())?;
+                let (exports, cell_global) = self.inline_module(resolved.leaf.clone(), resolved.init.clone())?;
                 let bind_name = if let Some(a) = &import.alias {
                     a.clone()
                 } else if import.is_file {
@@ -462,44 +556,31 @@ impl Compiler {
                     }
                     return Ok(());
                 }
-                if import.is_file || import.path.len() == 1 {
-                    self.emit_build_module(&exports, &bind_name);
-                } else {
-                    // `import pkg.sub` binds `pkg` as a module containing `sub`.
-                    //
-                    // The old reason this errored was that a module value and
-                    // its key both have to exist, and the VM's globals are one
-                    // flat namespace. That is still true, but it is not
-                    // blocking: a module *is* a `Value::Map` on the VM, so
-                    // `pkg.sub.x` reduces to two `Op::FieldGet`s, which
-                    // `FieldGet` already handles for maps.
-                    //
-                    // The nesting has to *merge* into `pkg` rather than build a
-                    // fresh map, because `import pkg` and `import pkg.sub` in
-                    // the same file are both legal and the second must not
-                    // discard the first's exports. Hence `Op::MergeModule`
-                    // instead of a second `Op::BuildModule`.
-                    let sub_name = import.path.last().unwrap().clone();
-                    // Build `sub` into a private staging global first, because
-                    // `BuildModule` needs all of its (name, value) pairs on the
-                    // stack at once and the pairs for `sub` have to be nested
-                    // inside the `sub` key rather than sit beside it.
-                    let leaf_global = format!("__rak_mod_{}_{}", bind_name, self.next_temp_id());
-                    self.emit_build_module(&exports, &leaf_global);
+                // The package's own exports live in its init module, so bind that
+                // namespace first: `import pkg.sub` then resolves `pkg.f` as well
+                // as `pkg.sub.f`, and `import pkg` after `import pkg.sub` rebinds
+                // the same namespace instead of replacing it.
+                let pkg_cell = match resolved.init.clone() {
+                    Some(init) => self.inline_module(init, None)?.1,
+                    None => cell_global.clone(),
+                };
+                self.emit_bind_module(&pkg_cell, &bind_name);
 
-                    // `MergeModule` pops name, then entry, then module, so the
-                    // pushes are in reverse: module first, then the entry, then
-                    // the key on top.
-                    //
-                    // `LoadGlobalOrMap` rather than `LoadGlobal` because `pkg`
-                    // may not be bound at all: a file that only does
-                    // `import pkg.sub` is legal, and the interpreter creates the
-                    // package module on demand.
+                if import.path.len() > 1 && !import.is_file {
+                    // `import pkg.sub`: merge `sub` into the package namespace in
+                    // place, so both keep resolving whichever order they are in.
+                    let sub_name = import.path.last().unwrap().clone();
+
+                    // `LoadGlobalOrMap` rather than `LoadGlobal` because `pkg` may
+                    // not be bound: a file that only does `import pkg.sub` is
+                    // legal, and the interpreter creates the package namespace on
+                    // demand. It is bound by the line above in the normal case, so
+                    // this only matters when the init could not be resolved.
                     let gi = self.const_str(&bind_name);
                     self.emit_op(Op::LoadGlobalOrMap);
                     self.emit_u16(gi);
 
-                    let li = self.const_str(&leaf_global);
+                    let li = self.const_str(&cell_global);
                     self.emit_op(Op::LoadGlobal);
                     self.emit_u16(li);
 
@@ -508,13 +589,27 @@ impl Compiler {
                     self.emit_u16(ki);
 
                     self.emit_op(Op::MergeModule);
-                    self.emit_op(Op::StoreGlobal);
+                    // `BindModule`, not `StoreGlobal`: this is a namespace, not a
+                    // value, and republishing it would put a module where another
+                    // module's export belongs.
+                    self.emit_op(Op::BindModule);
                     self.emit_u16(gi);
-                }
-                Ok(())
+                }                Ok(())
             }
             ImportKind::From => {
-                let exports = self.inline_module(resolved.leaf.clone(), resolved.init.clone())?;
+                let (exports, _cell_global) = self.inline_module(resolved.leaf.clone(), resolved.init.clone())?;
+                // A misspelling and a missing `pub` look identical from out here,
+                // so the diagnostic says what the module *does* export. Without
+                // that, "is not exported" on a name that is spelled correctly is
+                // a dead end.
+                let mut sorted = exports.clone();
+                sorted.sort();
+                let exports_list = sorted.join(", ");
+                // Macros are exported too, and `from m import <macro>` is not
+                // supported, so naming them is the difference between "you typed
+                // it wrong" and "that name is a macro".
+                let mut macro_names: Vec<String> = self.macros.keys().cloned().collect();
+                macro_names.sort();
                 if import.reexport {
                     if import.star {
                         for n in &exports {
@@ -525,7 +620,11 @@ impl Compiler {
                     } else {
                         for (n, _) in &import.from_names {
                             if !exports.contains(n) {
-                                return Err(format!("from {} import {}: '{}' is not exported", import.path.join("."), n, n));
+                                let mut msg = format!("from {} import {}: '{}' is not exported (module exports: {})", import.path.join("."), n, n, exports_list);
+                        if !macro_names.is_empty() {
+                            msg.push_str(&format!("; macros: {}", macro_names.join(", ")));
+                        }
+                        return Err(msg);
                             }
                             if !self.current_exports.contains(n) {
                                 self.current_exports.push(n.clone());
@@ -540,7 +639,7 @@ impl Compiler {
                 }
                 for (n, alias) in &import.from_names {
                     if !exports.contains(n) {
-                        return Err(format!("from {} import {}: '{}' is not exported", import.path.join("."), n, n));
+                        return Err(format!("from {} import {}: '{}' is not exported (module exports: {})", import.path.join("."), n, n, exports_list));
                     }
                     if let Some(a) = alias {
                         let ci = self.const_str(n);
@@ -1199,6 +1298,85 @@ impl Compiler {
                 for s in body {
                     self.compile_stmt(s)?;
                 }
+            }
+            Stmt::Mod { name, items } => {
+                // The in-file spelling of a module, and the same machinery: its
+                // own namespace, its items compiled into this chunk, its exports
+                // published. `pub` is optional inside a `mod` block — the block is
+                // already explicit about being a boundary — but `export` is
+                // accepted and treated the same way.
+                let mut exports: Vec<String> = Vec::new();
+                let mut mutable_names: Vec<String> = Vec::new();
+                let mut closures: Vec<(String, crate::value::Value)> = Vec::new();
+                for stmt in items {
+                    let candidate = match stmt {
+                        Stmt::Export(inner) => Some(inner.as_ref()),
+                        _ => Some(stmt),
+                    };
+                    let Some(candidate) = candidate else { continue };
+                    match candidate {
+                        Stmt::Let { name: n, value, mutable, .. } => {
+                            if let Expr::Function { params, body, .. } = value.as_ref() {
+                                let cl = self.compile_function(n, params, body)?;
+                                closures.push((n.clone(), cl));
+                            }
+                            if !exports.contains(n) {
+                                exports.push(n.clone());
+                            }
+                            if *mutable && !mutable_names.contains(n) {
+                                mutable_names.push(n.clone());
+                            }
+                        }
+                        Stmt::Const { name: n, .. } | Stmt::Struct { name: n, .. } | Stmt::Enum { name: n, .. } => {
+                            if !exports.contains(n) {
+                                exports.push(n.clone());
+                            }
+                        }
+                        Stmt::MacroDef { name: n, params, body } => {
+                            self.macros.insert(n.clone(), (params.clone(), body.clone()));
+                        }
+                        _ => {}
+                    }
+                }
+
+                let cell_global = self.next_cell_global();
+                self.emit_make_module(&cell_global);
+                for (n, cl) in &closures {
+                    self.load_const(cl.clone());
+                    let ci = self.const_str(n);
+                    self.emit_op(Op::StoreGlobal);
+                    self.emit_u16(ci);
+                }
+                for stmt in items {
+                    if let Stmt::Let { value, .. } = stmt {
+                        if matches!(value.as_ref(), Expr::Function { .. }) {
+                            continue;
+                        }
+                    }
+                    if let Stmt::Export(inner) = stmt {
+                        if let Stmt::Let { value, .. } = inner.as_ref() {
+                            if matches!(value.as_ref(), Expr::Function { .. }) {
+                                continue;
+                            }
+                        }
+                        if matches!(inner.as_ref(), Stmt::MacroDef { .. }) {
+                            continue;
+                        }
+                    }
+                    if matches!(stmt, Stmt::MacroDef { .. }) {
+                        continue;
+                    }
+                    self.compile_stmt(stmt)?;
+                }
+                self.chunk.module_cells.push(crate::bytecode::ModuleCell {
+                    global: cell_global.clone(),
+                    exports: exports.iter().map(|n| (n.clone(), n.clone())).collect(),
+                    mutable: mutable_names.clone(),
+                });
+                for n in &exports {
+                    self.emit_module_publish(&cell_global, n, mutable_names.contains(n));
+                }
+                self.emit_bind_module(&cell_global, name);
             }
             other => {
                 return Err(format!("VM does not support statement: {:?}", other));

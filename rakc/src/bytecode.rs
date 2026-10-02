@@ -53,6 +53,38 @@ pub enum Op {
     /// Build a `Value::Module` from `n` (name, value) pairs. Operand: `n` (1 byte).
     /// Pops `2*n` values (alternating name string, value), pushes the Module.
     BuildModule,
+    /// Push an empty module namespace. Operand: u16 const index of the name of
+    /// the global that will hold the handle.
+    ///
+    /// The namespace starts with no exported names. `ModulePublish` adds them
+    /// once the compiler knows the module's full export list, which it cannot
+    /// know at this point because a `pub use` re-export inside the module has not
+    /// been compiled yet. `Op::StoreGlobal` republishes values into the
+    /// namespace in the meantime, so the values are correct before they become
+    /// readable.
+    MakeModule,
+    /// Mark one name of a module namespace as exported. Operands: u16 const index
+    /// of the namespace's global name, u16 const index of the exported name, and
+    /// a 1-byte mutability flag (1 for `pub let mut`, 0 for `pub let` / `pub const`).
+    ///
+    /// The flag is what stops an importer assigning a name the module declared
+    /// `let`. Without it the VM knew which names existed but not which were fixed,
+    /// and `m.X = v` was refused for a `pub let mut` while the interpreter allowed
+    /// it.
+    ModulePublish,
+    /// Pop a module namespace and bind it to the named global. Operand: u16 const
+    /// index of the global name.
+    ///
+    /// This exists instead of `Op::StoreGlobal` because binding a module is not a
+    /// write to a variable. `Op::StoreGlobal` republishes whatever it stores into
+    /// every namespace that exports a global of the same name, so storing a handle
+    /// through it replaced that name inside *other* modules: with
+    /// `alpha.rak` exporting `pub fn beta()`, a later `import beta` stored the
+    /// `beta` handle into the global `beta`, republished it into alpha's namespace
+    /// under the export name `beta`, and `alpha.beta()` stopped resolving.
+    ///
+    /// A handle is a binding, so it is stored here and never republished.
+    BindModule,
     /// Insert one entry into an existing module: pops (value, name, module) and
     /// pushes the module with `name` set to `value`.
     ///
@@ -133,6 +165,43 @@ pub struct Chunk {
     pub code: Vec<u8>,
     pub constants: Vec<crate::value::Value>,
     pub lines: Vec<u32>,
+    /// The module namespaces this chunk's globals are published into.
+    ///
+    /// The VM inlines an imported module's body into the *same* chunk, so a
+    /// module's top-level bindings are ordinary chunk globals. `import m`
+    /// hands the script a namespace rather than a copy of those globals, and
+    /// this table is what keeps the two in step: every store to a global listed
+    /// here is republished into that module's namespace under its exported name,
+    /// so `m.X` reflects whatever the module's own code last did to `X`.
+    ///
+    /// Filled at compile time and read by the VM when it builds its publish
+    /// index; it carries no runtime state of its own.
+    pub module_cells: Vec<ModuleCell>,
+}
+
+/// One imported module's namespace: the global that will hold its handle, and
+/// which chunk globals back each of its exported names.
+#[derive(Clone, Debug, Default)]
+pub struct ModuleCell {
+    /// The chunk global the namespace handle is stored into by `MakeModule` +
+    /// `BindModule`. Private by convention (`__rak_modcell_`).
+    pub global: String,
+    /// `(exported name, the chunk global that backs it)`.
+    pub exports: Vec<(String, String)>,
+    /// Exports the module declared `pub let mut`, and which may therefore be
+    /// assigned through the module handle. A name absent from this is fixed, so
+    /// `m.X = v` is refused even though `m.X` reads fine.
+    pub mutable: Vec<String>,
+}
+
+impl ModuleCell {
+    /// Flatten to `(global, cell_global, export)` triples, which is the shape the
+    /// VM's publish index wants.
+    pub fn triples(&self) -> impl Iterator<Item = (&str, &str, &str)> {
+        self.exports
+            .iter()
+            .map(move |(export, global)| (global.as_str(), self.global.as_str(), export.as_str()))
+    }
 }
 
 impl Chunk {

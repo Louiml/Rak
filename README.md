@@ -366,8 +366,7 @@ from math import add as plus, mul as times
 from math import *           // all exports; local bindings win on clash
 
 // Directory packages: `import pkg` runs pkg/init.rak; `import pkg.sub`
-// runs pkg/init.rak + pkg/sub.rak (interpreter; use `from pkg.sub import x`
-// on the VM).
+// runs pkg/init.rak + pkg/sub.rak, so both `pkg.f` and `pkg.sub.f` resolve.
 import pkg
 import pkg.sub
 
@@ -386,6 +385,47 @@ Module resolution for a name `m`: the importing file's directory, then
 `./packages/`, then the `RAK_PATH` env var (`;` on Windows, `:` on Unix),
 trying `m.rak` then `m/init.rak`. Modules are imported once (cached); a
 circular import returns the partially-initialized module (Python semantics).
+
+### `import m` gives you the module; `from m import x` gives you a value
+
+This is the one rule worth knowing before writing a multi-file program.
+
+```rak
+// bank.rak
+pub let mut BALANCE = 0
+pub fn deposit(n) { BALANCE = BALANCE + n  return BALANCE }
+```
+
+```rak
+import bank                        // <- a live view of the module's state
+from bank import BALANCE           // <- a copy, taken once, at import time
+
+bank.deposit(10)
+bank.deposit(10)
+dump bank.BALANCE                  // 20 — the view followed the module
+```
+
+`m` is a handle on the module's own top-level bindings, so `m.X` reads what the
+module last stored there and `m.X = v` writes the module's state. It survives
+aliases, function arguments, and being stored in a map. A module's top-level
+`let mut` is therefore real state: it persists across calls and across a call
+chain, not a per-call copy.
+
+`m.X = v` writes the module's own state, and is bounded by the module's own
+declarations: `pub let mut X` is assignable through the handle, `pub let X` is
+readable but fixed, and a name with no `pub` is unreachable. Both backends enforce
+both rules.
+
+`from m import x` binds the value as it stood at import time — Python's rule,
+and worth keeping, because a live binding there would be a second invisible way
+for a module to mutate a caller's variables. Alias it (`from bank import
+BALANCE as opening`) when you want a snapshot under a name of your choosing;
+that copies on both backends.
+
+`pub use` copies too, for the same reason. See
+[docs/content/modules.md](docs/content/modules.md) for the full rules, and
+[docs/V8-KNOWN-ISSUES.md](docs/V8-KNOWN-ISSUES.md) for the six symptoms of the
+VM's flat global namespace, which is where the two backends still differ.
 
 ## SQL server
 
@@ -663,6 +703,29 @@ dump j.id                           // 7
 dump json_stringify(j)              // {"user":"admin","id":7}
 ```
 
+### Byte-exact file I/O
+
+`read`/`file_read` are UTF-8, which means `file_read` **fails** on any file
+containing a byte sequence that is not valid UTF-8, and `write` turns a `0xFF`
+into U+FFFD on the way out. Between them there was no way to open a binary file.
+
+```rak
+let buf = file_read_bytes("firmware.bin")     // bytes, any content
+buf[0] = 0xFF                                  // mutate in place
+dump hex_encode(buf)
+file_write_bytes("patched.bin", buf)           // byte-exact write
+file_append_bytes("log.bin", bytes([0xDE, 0xAD]))
+
+let m = mmap_open("firmware.bin", "rw")        // no copy, no flush
+mmap_write(m, 0x100, 0x90)                     // the mapping *is* the file
+dump m[0x100]
+```
+
+`bytes([...])` builds a buffer from numbers, `buf[i] = v` writes a byte, `for b in
+buf` yields the bytes as ints, and `b1 + b2` joins buffers. `mmap_write` refuses a
+read-only mapping and an out-of-range offset by name, and a rejected multi-byte
+write applies none of its bytes.
+
 ### OSINT (where it started)
 
 ```rak
@@ -905,6 +968,10 @@ Rak/
 │   ├── parsers.rak         DNS / TLS / PCAP wire-format parsers
 │   ├── macros.rak          Compile-time macros: macro / name! / const
 │   ├── import_demo.rak    Python-style import / from / export (with mymod/ package)
+│   ├── modstate/           Cross-module variable semantics: live `import m` vs
+│   │   ├── module_state.rak  copying `from m import x`, module-level `let mut`,
+│   │   ├── bank.rak          `pub` as the visibility boundary, `pub use` copying
+│   │   └── ledger.rak
 │   ├── forensic_structs.rak  binstruct decode/encode round-trip + evidence provenance
 │   └── stdlib_demo.rak     String, array, and math builtins
 ```

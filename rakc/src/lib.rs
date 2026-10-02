@@ -26,6 +26,7 @@ pub mod ext_osint;
 pub mod ext_stdlib;
 pub mod ext_streams;
 pub mod setrepr;
+pub mod modns;
 pub mod dap;
 
 use thiserror::Error;

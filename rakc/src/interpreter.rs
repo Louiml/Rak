@@ -513,7 +513,13 @@ pub enum Value {
     StructDef {
         fields: Vec<Param>,
     },
-    Module(HashMap<String, Value>),
+    /// An imported module, held as a *live* view of that module's globals.
+    ///
+    /// Behind an `Arc<Mutex<_>>` for the same reason `Value::Set` is: a module's
+    /// top-level `let mut` bindings are shared state that has to stay visible
+    /// through `m.X` after the importing script has moved on. See
+    /// [`crate::modns::ModuleNamespace`].
+    Module(Arc<Mutex<crate::modns::ModuleNamespace<Value>>>),
     TcpListener(Arc<Mutex<std::net::TcpListener>>),
     TcpStream(Arc<Mutex<std::net::TcpStream>>),
     UdpTransport(Arc<Mutex<rak_stdlib::tunnel::UdpTransport>>),
@@ -690,8 +696,24 @@ impl Default for Env {
 
 impl Env {
     pub fn new() -> Self {
+        Env::with_global(Arc::new(Mutex::new(HashMap::new())))
+    }
+
+    /// A fresh environment whose top-level bindings live in `cell`.
+    ///
+    /// This is what gives a module real top-level state. A module body runs in
+    /// an `Env` built here rather than in a scope pushed onto the importer's,
+    /// which fixes two things at once:
+    ///
+    /// * the module's top-level `let mut` lands in the shared cell, and every
+    ///   function defined in the module closes over that same cell, so
+    ///   `COUNT = COUNT + 1` inside `bump()` accumulates across calls instead
+    ///   of landing in a per-call copy of the scope;
+    /// * the module cannot see the importer's globals, so a name in a module
+    ///   means what the module's own file says it means.
+    pub fn with_global(cell: Arc<Mutex<HashMap<String, Value>>>) -> Self {
         Env {
-            global: Arc::new(Mutex::new(HashMap::new())),
+            global: cell,
             scopes: Vec::new(),
             immutable_scopes: Arc::new(Mutex::new(Vec::new())),
             global_immutable: Arc::new(Mutex::new(HashSet::new())),
@@ -837,12 +859,18 @@ pub struct Interpreter {
     macros: HashMap<String, crate::ast::Stmt>,
     /// `binstruct Name { ... }` definitions, keyed by struct name.
     binstructs: HashMap<String, Vec<crate::ast::BinField>>,
-    /// Import-once module cache: canonical file path → the module's exported
-    /// names + macros. Supports circular imports (a module in
+    /// Import-once module cache: canonical file path → the module's live
+    /// namespace + its exported macros. Supports circular imports (a module in
     /// `loading_modules` returns its partially-built entry).
     module_cache: HashMap<PathBuf, ModuleEntry>,
-    /// Modules currently being loaded (for circular-import detection).
-    loading_modules: HashSet<PathBuf>,
+    /// Modules currently being loaded, innermost last.
+    ///
+    /// A stack rather than a set because it doubles as "which module am I
+    /// inside": `collect_export` and the re-export helpers have to attribute a
+    /// `pub` to the module being executed, and `HashSet::iter().last()` is not
+    /// the most recently pushed element. With nested imports (`a` importing
+    /// `b`, both exporting) that picked the wrong module.
+    loading_modules: Vec<PathBuf>,
     /// Pending loop control raised by `break`/`continue` (with optional label
     /// or numeric depth). Loops consume it via `resolve_loop_signal`.
     loop_signal: Option<LoopSignal>,
@@ -956,11 +984,47 @@ pub enum DebugAction {
     Quit,
 }
 
-/// A loaded module's exported runtime values and macro definitions.
+use crate::modns::ModuleNamespace;
+
+/// A loaded module: its live namespace plus the macros it exported.
 #[derive(Clone)]
 struct ModuleEntry {
-    exports: HashMap<String, Value>,
-    macros: HashMap<String, crate::ast::Stmt>,
+    ns: Arc<Mutex<ModuleNamespace<Value>>>,
+    macros: Arc<Mutex<HashMap<String, crate::ast::Stmt>>>,
+}
+
+impl ModuleEntry {
+    fn partial() -> Self {
+        ModuleEntry {
+            ns: Arc::new(Mutex::new(ModuleNamespace::empty())),
+            macros: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    /// Read an exported name.
+    fn get_export(&self, name: &str) -> Option<Value> {
+        self.ns.lock().unwrap().get(name)
+    }
+
+    /// The error for `from m import x` when `x` is not exported.
+    ///
+    /// Macros are listed alongside values. A `pub macro twice(x)` is genuinely
+    /// exported, so a diagnostic that said "the module exports: A, B" while
+    /// `twice` was missing sent the reader looking for a spelling mistake when
+    /// the real answer was "you cannot import a macro that way".
+    fn missing_export(&self, module: &str, name: &str) -> crate::RakError {
+        let values = self.ns.lock().unwrap().public_names().join(", ");
+        let mut macros: Vec<String> = self.macros.lock().unwrap().keys().cloned().collect();
+        macros.sort();
+        let mut message = format!(
+            "from {} import {}: '{}' is not exported (module exports: {})",
+            module, name, name, values
+        );
+        if !macros.is_empty() {
+            message.push_str(&format!("; macros: {}", macros.join(", ")));
+        }
+        crate::RakError::Runtime(message)
+    }
 }
 
 /// An `extern "C"` declaration plus the (lazily resolved) library it lives in.
@@ -1019,7 +1083,7 @@ impl Interpreter {
             macros: HashMap::new(),
             binstructs: HashMap::new(),
             module_cache: HashMap::new(),
-            loading_modules: HashSet::new(),
+            loading_modules: Vec::new(),
             loop_signal: None,
             tests: Vec::new(),
             defers: Vec::new(),
@@ -1052,7 +1116,7 @@ impl Interpreter {
             macros: HashMap::new(),
             binstructs: HashMap::new(),
             module_cache: HashMap::new(),
-            loading_modules: HashSet::new(),
+            loading_modules: Vec::new(),
             tests: Vec::new(),
             loop_signal: None,
             defers: Vec::new(),
@@ -1200,7 +1264,7 @@ impl Interpreter {
         }
     }
 
-    /// Load a module file once (cached). Returns its exported names + macros.
+    /// Load a module file once (cached). Returns its namespace + macros.
     /// Circular imports return the partially-built entry (Python semantics).
     fn load_module_file(&mut self, leaf: PathBuf, init: Option<PathBuf>) -> crate::Result<ModuleEntry> {
         let canon = crate::modules::canonical(&leaf);
@@ -1208,65 +1272,106 @@ impl Interpreter {
             return Ok(entry);
         }
         if self.loading_modules.contains(&canon) {
-            // Cycle: return whatever has been exported so far.
-            return Ok(self.module_cache.get(&canon).cloned().unwrap_or_else(|| ModuleEntry {
-                exports: HashMap::new(),
-                macros: HashMap::new(),
-            }));
+            // Cycle: return whatever has been exported so far. The namespace is
+            // live, so a module further along the cycle that fills it in later
+            // is visible to whoever holds this handle.
+            return Ok(self.module_cache.get(&canon).cloned().unwrap_or_else(ModuleEntry::partial));
         }
         // Load the package init first (binds the package's own exports).
         if let Some(init_path) = init {
             let _ = self.load_module_file(init_path.clone(), None)?;
         }
 
-        self.loading_modules.insert(canon.clone());
-        // Insert an empty entry so cyclic imports during execution see a partial.
-        self.module_cache.insert(canon.clone(), ModuleEntry { exports: HashMap::new(), macros: HashMap::new() });
+        // The module gets its own global cell rather than a scope on the
+        // importer's environment. That cell is both where its top-level
+        // bindings live and what `m.X` reads through, so one structure serves
+        // as the module's state and as its public face.
+        let cell: Arc<Mutex<HashMap<String, Value>>> = Arc::new(Mutex::new(HashMap::new()));
+        let entry = ModuleEntry {
+            ns: Arc::new(Mutex::new(ModuleNamespace::new(cell.clone()))),
+            macros: Arc::new(Mutex::new(HashMap::new())),
+        };
+        self.loading_modules.push(canon.clone());
+        // Register before running the body so a cyclic import sees a partial.
+        self.module_cache.insert(canon.clone(), entry.clone());
 
-        let source = std::fs::read_to_string(&leaf).map_err(|e| {
+        let result = self.run_module_body(&leaf, &cell);
+        self.loading_modules.pop();
+
+        match result {
+            Ok(()) => Ok(self.module_cache.get(&canon).cloned().unwrap_or(entry)),
+            // A module that failed to load leaves nothing behind, so a later
+            // import of the same file is a fresh attempt rather than a replay
+            // of a half-executed body.
+            Err(e) => {
+                self.module_cache.remove(&canon);
+                Err(e)
+            }
+        }
+    }
+
+    /// Parse and execute a module's body with `self.env` pointed at the
+    /// module's own global cell.
+    ///
+    /// Both swaps are restored on the way out, including on the error path —
+    /// a module that raised halfway through used to leave `base_dir` pointing
+    /// inside its own directory, so every import after the failure resolved
+    /// against the wrong place.
+    fn run_module_body(
+        &mut self,
+        leaf: &std::path::Path,
+        cell: &Arc<Mutex<HashMap<String, Value>>>,
+    ) -> crate::Result<()> {
+        let source = std::fs::read_to_string(leaf).map_err(|e| {
             crate::RakError::Runtime(format!("import: cannot read '{}': {}", leaf.display(), e))
         })?;
         let tokens = crate::lexer::tokenize(&source)?;
         let module = crate::parser::parse(&tokens, &source)?;
-        let saved_base = self.base_dir.clone();
-        if let Some(parent) = leaf.parent() {
-            self.base_dir = parent.to_string_lossy().to_string();
-        }
-        self.env.push_scope();
 
-        // Process the module's own imports (its deps + re-exports).
-        for imp in &module.imports {
-            self.load_import(imp)?;
-        }
-        // Execute the module's items, collecting `pub`/`export` declarations.
-        for stmt in &module.items {
-            self.exec_stmt(stmt)?;
-            if let Stmt::Export(inner) = stmt {
-                self.collect_export(inner)?;
+        let saved_base = std::mem::replace(
+            &mut self.base_dir,
+            leaf.parent().map(|p| p.to_string_lossy().to_string()).unwrap_or_default(),
+        );
+        // No scope is pushed: a top-level `let` in a module goes straight into
+        // the cell, which is what makes it shared module state rather than a
+        // per-call copy.
+        let saved_env = std::mem::replace(&mut self.env, Env::with_global(cell.clone()));
+
+        let result = (|| {
+            // The module's own imports (its deps + re-exports).
+            for imp in &module.imports {
+                self.load_import(imp)?;
             }
-        }
+            // Execute the module's items, marking `pub`/`export` declarations.
+            for stmt in &module.items {
+                self.exec_stmt(stmt)?;
+                if let Stmt::Export(inner) = stmt {
+                    self.collect_export(inner)?;
+                }
+            }
+            Ok(())
+        })();
 
-        self.env.pop_scope();
+        self.env = saved_env;
         self.base_dir = saved_base;
-
-        let entry = self.module_cache.get(&canon).cloned().unwrap_or_else(|| ModuleEntry {
-            exports: HashMap::new(),
-            macros: HashMap::new(),
-        });
-        self.loading_modules.remove(&canon);
-        Ok(entry)
+        result
     }
 
-    /// Add a `pub`/`export` declaration's value to the current module's export
-    /// map (and register exported macros).
+    /// Mark a `pub`/`export` declaration's name as part of the current module's
+    /// public surface (and register exported macros).
+    ///
+    /// There is no value copy here any more, and that is the whole point: the
+    /// namespace already *is* the module's global cell, so a `pub let mut` the
+    /// module later reassigns reaches every importer through `m.X`. All this
+    /// has to do is record that the name is visible.
     fn collect_export(&mut self, inner: &Stmt) -> crate::Result<()> {
-        let canon_key = self.loading_modules.iter().last().cloned();
+        let canon_key = self.loading_modules.last().cloned();
         let name = match inner {
             Stmt::Let { name, .. } | Stmt::Const { name, .. } | Stmt::Struct { name, .. } | Stmt::Enum { name, .. } => Some(name.clone()),
             Stmt::MacroDef { name, .. } => {
                 if let Some(canon) = canon_key.as_ref() {
-                    if let Some(entry) = self.module_cache.get_mut(canon) {
-                        entry.macros.insert(name.clone(), inner.clone());
+                    if let Some(entry) = self.module_cache.get(canon) {
+                        entry.macros.lock().unwrap().insert(name.clone(), inner.clone());
                     }
                 }
                 None
@@ -1274,10 +1379,16 @@ impl Interpreter {
             _ => None,
         };
         if let Some(name) = name {
-            let val = self.env.get(&name).unwrap_or(Value::Nil);
             if let Some(canon) = canon_key.as_ref() {
-                if let Some(entry) = self.module_cache.get_mut(canon) {
-                    entry.exports.insert(name, val);
+                if let Some(entry) = self.module_cache.get(canon) {
+                    let mut guard = entry.ns.lock().unwrap();
+                    // A `pub let mut` is exported *and* writable through the
+                    // module; a `pub let` is exported but fixed. `pub const` is
+                    // fixed by definition.
+                    match inner {
+                        Stmt::Let { mutable: true, .. } => guard.mark_public_mut(&name),
+                        _ => guard.mark_public(&name),
+                    }
                 }
             }
         }
@@ -1305,45 +1416,89 @@ impl Interpreter {
 
         if import.reexport {
             // Re-export all of the module's exports from the current module.
-            self.add_reexports(&entry.exports, &entry.macros);
+            self.add_reexports(&entry);
             return Ok(());
         }
 
-        // Bind the whole module.
-        let module_val = Value::Module(entry.exports.clone());
         if import.is_file || import.path.len() == 1 {
-            self.env.define(&bind_name, module_val);
-        } else {
-            // `import pkg.sub`: bind `pkg` as a module containing `sub`.
-            let sub_name = import.path.last().unwrap().clone();
-            let mut pkg_exports = if let Some(Value::Module(m)) = self.env.get(&bind_name) {
-                m
-            } else {
-                HashMap::new()
-            };
-            pkg_exports.insert(sub_name, module_val);
-            self.env.define(&bind_name, Value::Module(pkg_exports));
+            // Bind the module's live namespace. If `bind_name` already holds a
+            // namespace — `import pkg` after `import pkg.sub`, which merged a
+            // submodule into it — merge into that instead of replacing it, or the
+            // second import would silently drop the first's work.
+            self.bind_namespace(&bind_name, &entry);
+            return Ok(());
+        }
+
+        // `import pkg.sub`: `pkg` is a namespace holding the package's own
+        // exports plus one entry per submodule. Bind the package first so
+        // `pkg.f` resolves however the two imports are ordered, then merge `sub`
+        // into it in place.
+        let sub_name = import.path.last().unwrap().clone();
+        let pkg_entry = match resolved.init.clone() {
+            Some(init) => self.load_module_file(init, None)?,
+            None => entry.clone(),
+        };
+        self.bind_namespace(&bind_name, &pkg_entry);
+        if let Some(Value::Module(ns)) = self.env.get(&bind_name) {
+            let sub_val = Value::Module(entry.ns.clone());
+            let mut guard = ns.lock().unwrap();
+            guard.mark_public(&sub_name);
+            guard.values.lock().unwrap().insert(sub_name, sub_val);
         }
         Ok(())
+    }
+
+    /// Bind `name` to `entry`'s namespace, merging rather than replacing when
+    /// `name` already holds a namespace.
+    ///
+    /// Merging is what makes `import pkg` and `import pkg.sub` order-independent.
+    /// A plain `define` would replace, so `import pkg.sub` followed by
+    /// `import pkg` left `pkg` holding only the package's own exports and
+    /// `pkg.sub` stopped resolving.
+    fn bind_namespace(&mut self, name: &str, entry: &ModuleEntry) {
+        if let Some(Value::Module(existing)) = self.env.get(name) {
+            // Two guards here, and they are the same mutex when `name` already
+            // holds this very namespace - a repeated `import m`, or `import pkg`
+            // after `import pkg.sub`, which bound `pkg` to the package's own
+            // namespace. `std::sync::Mutex` is not reentrant, so taking it twice
+            // deadlocks, which is exactly what `import m` twice did.
+            //
+            // `Arc::ptr_eq` says "same namespace" without touching either lock,
+            // and the merge is skipped because there is nothing to merge.
+            if !Arc::ptr_eq(&existing, &entry.ns) {
+                // Materialise under the first lock, then *release* it before
+                // taking the second, so a chain of imports cannot hold a chain of
+                // namespace locks at once.
+                let exports = existing.lock().unwrap().exports();
+                let mut guard = entry.ns.lock().unwrap();
+                for (n, v) in exports {
+                    if !guard.values.lock().unwrap().contains_key(&n) {
+                        guard.publish(&n, v);
+                }
+                }
+            }
+        }
+        self.env.define(name, Value::Module(entry.ns.clone()));
     }
 
     fn load_from_import(&mut self, import: &Import) -> crate::Result<()> {
         let resolved = self.resolve_target(import)?;
         let entry = self.load_module_file(resolved.leaf.clone(), resolved.init.clone())?;
+        let module_label = import.path.join(".");
 
         if import.reexport {
             if import.star {
-                self.add_reexports(&entry.exports, &entry.macros);
+                self.add_reexports(&entry);
             } else {
                 for (n, alias) in &import.from_names {
-                    let val = entry.exports.get(n).cloned().ok_or_else(|| {
-                        crate::RakError::Runtime(format!("from {} import {}: '{}' is not exported", import.path.join("."), n, n))
-                    })?;
+                    let val = entry
+                        .get_export(n)
+                        .ok_or_else(|| entry.missing_export(&module_label, n))?;
                     let out = alias.clone().unwrap_or_else(|| n.clone());
                     self.add_reexport(&out, val);
                 }
                 for (n, _) in &import.from_names {
-                    if let Some(mdef) = entry.macros.get(n).cloned() {
+                    if let Some(mdef) = entry.macros.lock().unwrap().get(n).cloned() {
                         self.add_reexport_macro(n.clone(), mdef);
                     }
                 }
@@ -1353,12 +1508,14 @@ impl Interpreter {
 
         if import.star {
             // `from m import *` — copy all exports without overwriting locals.
-            for (n, v) in &entry.exports {
-                if self.env.get(n).is_none() {
-                    self.env.define(n, v.clone());
+            // A copy, like every other `from` binding: names imported this way
+            // are a snapshot taken at import time, and Python has the same rule.
+            for (n, v) in entry.ns.lock().unwrap().exports() {
+                if self.env.get(&n).is_none() {
+                    self.env.define(&n, v);
                 }
             }
-            for (n, mdef) in &entry.macros {
+            for (n, mdef) in entry.macros.lock().unwrap().iter() {
                 if !self.macros.contains_key(n) {
                     self.macros.insert(n.clone(), mdef.clone());
                 }
@@ -1367,15 +1524,15 @@ impl Interpreter {
         }
 
         for (n, alias) in &import.from_names {
-            let val = entry.exports.get(n).cloned().ok_or_else(|| {
-                crate::RakError::Runtime(format!("from {} import {}: '{}' is not exported", import.path.join("."), n, n))
-            })?;
+            let val = entry
+                .get_export(n)
+                .ok_or_else(|| entry.missing_export(&module_label, n))?;
             let out = alias.clone().unwrap_or_else(|| n.clone());
             self.env.define(&out, val);
         }
         // Import macros too.
         for (n, alias) in &import.from_names {
-            if let Some(mdef) = entry.macros.get(n).cloned() {
+            if let Some(mdef) = entry.macros.lock().unwrap().get(n).cloned() {
                 let out = alias.clone().unwrap_or_else(|| n.clone());
                 self.macros.insert(out, mdef);
             }
@@ -1383,40 +1540,59 @@ impl Interpreter {
         Ok(())
     }
 
-    /// Add a set of exports/macros to the module currently being built (for
-    /// `pub use m` re-exports).
-    fn add_reexports(&mut self, exports: &HashMap<String, Value>, macros: &HashMap<String, crate::ast::Stmt>) {
-        let canon = match self.loading_modules.iter().last().cloned() {
+    /// Add another module's exports to the module currently being built, for
+    /// `pub use m` re-exports.
+    ///
+    /// The values are copied, so a re-export is a snapshot of what `m` exported
+    /// at this point rather than a second live view of it. That matches Python's
+    /// `from m import *`, and it means a re-export chain cannot be used to
+    /// smuggle a live binding — `pub use` hands out values, `import m` hands out
+    /// the module.
+    fn add_reexports(&mut self, from: &ModuleEntry) {
+        let canon = match self.loading_modules.last().cloned() {
             Some(c) => c,
             None => return,
         };
-        if let Some(entry) = self.module_cache.get_mut(&canon) {
+        let exports = from.ns.lock().unwrap().exports();
+        let macros: Vec<(String, crate::ast::Stmt)> =
+            from.macros.lock().unwrap().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        if let Some(entry) = self.module_cache.get(&canon).cloned() {
             for (n, v) in exports {
-                entry.exports.entry(n.clone()).or_insert_with(|| v.clone());
+                let mut ns = entry.ns.lock().unwrap();
+                // `or_insert` so a local declaration wins over a re-export of
+                // the same name, which is what makes `pub use` non-destructive.
+                let already = ns.values.lock().unwrap().contains_key(&n);
+                if !already {
+                    ns.values.lock().unwrap().insert(n.clone(), v);
+                    ns.mark_public(&n);
+                }
             }
+            let mut own = entry.macros.lock().unwrap();
             for (n, m) in macros {
-                entry.macros.entry(n.clone()).or_insert_with(|| m.clone());
+                own.entry(n).or_insert(m);
             }
         }
     }
 
     fn add_reexport(&mut self, name: &str, val: Value) {
-        let canon = match self.loading_modules.iter().last().cloned() {
+        let canon = match self.loading_modules.last().cloned() {
             Some(c) => c,
             None => return,
         };
-        if let Some(entry) = self.module_cache.get_mut(&canon) {
-            entry.exports.insert(name.to_string(), val);
+        if let Some(entry) = self.module_cache.get(&canon).cloned() {
+            let mut ns = entry.ns.lock().unwrap();
+            ns.values.lock().unwrap().insert(name.to_string(), val);
+            ns.mark_public(name);
         }
     }
 
     fn add_reexport_macro(&mut self, name: String, mdef: crate::ast::Stmt) {
-        let canon = match self.loading_modules.iter().last().cloned() {
+        let canon = match self.loading_modules.last().cloned() {
             Some(c) => c,
             None => return,
         };
-        if let Some(entry) = self.module_cache.get_mut(&canon) {
-            entry.macros.insert(name, mdef);
+        if let Some(entry) = self.module_cache.get(&canon).cloned() {
+            entry.macros.lock().unwrap().insert(name, mdef);
         }
     }
 
@@ -1705,6 +1881,11 @@ impl Interpreter {
                         // ordered at all.
                         Value::Set(s) => s.lock().unwrap().to_vec(),
                         Value::Option(Some(v)) => vec![*v],
+                        // `for b in buf` yields the bytes as ints, which is what
+                        // every consumer wants - a hex dump, a checksum, a
+                        // comparison. Yielding one-character strings instead would
+                        // put `hex_encode` and friends out of reach from a loop.
+                        Value::Bytes(b) => b.iter().map(|x| Value::Int(*x as i64)).collect(),
                         _ => return Err(crate::RakError::Runtime("Cannot iterate over this value".to_string())),
                     }
                 };
@@ -1755,19 +1936,43 @@ impl Interpreter {
                 self.loop_signal = Some(LoopSignal::Continue { label, depth });
             }
             Stmt::Mod { name, items } => {
-                self.env.push_scope();
-                for s in items {
-                    self.exec_stmt(s)?;
-                }
-                let exports = self.env.current_scope_clone();
-                self.env.pop_scope();
-                let mut filtered = HashMap::new();
-                for (k, v) in exports {
-                    if !k.starts_with("__") {
-                        filtered.insert(k, v);
+                // An inline module gets the same treatment as an imported one: its
+                // own global cell, so `X = X + 1` inside a `fn` in the block
+                // accumulates, and `name.X` reads the live value.
+                let cell: Arc<Mutex<HashMap<String, Value>>> = Arc::new(Mutex::new(HashMap::new()));
+                let ns = Arc::new(Mutex::new(ModuleNamespace::new(cell.clone())));
+                let saved_env = std::mem::replace(&mut self.env, Env::with_global(cell));
+                let result: crate::Result<()> = (|| {
+                    for s in items {
+                        self.exec_stmt(s)?;
                     }
+                    Ok(())
+                })();
+                self.env = saved_env;
+                result?;
+                // Everything the block declared is exported, which is what it
+                // meant before; `__`-prefixed compiler temporaries are not. The
+                // block's own `let mut` stays writable through it and a `let` does
+                // not, so the names are read off the items rather than assumed.
+                let declared: Vec<String> = {
+                    let guard = ns.lock().unwrap();
+                    let values = guard.values.lock().unwrap();
+                    values.keys().filter(|k| !k.starts_with("__")).cloned().collect()
+                };
+                let mutable: Vec<String> = items
+                    .iter()
+                    .filter_map(|s| match s {
+                        Stmt::Let { name, mutable: true, pattern: None, .. } => Some(name.clone()),
+                        _ => None,
+                    })
+                    .filter(|n| declared.contains(n))
+                    .collect();
+                {
+                    let mut guard = ns.lock().unwrap();
+                    guard.mark_public_all(declared);
+                    guard.mark_mutable_all(mutable);
                 }
-                self.env.define(name, Value::Module(filtered));
+                self.env.define(name, Value::Module(ns));
             }
             Stmt::Struct { name, type_params: _, fields } => {
                 self.env.define(name, Value::StructDef { fields: fields.clone() });
@@ -2465,6 +2670,20 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                     Value::Map(m) => {
                         m.insert(idx_val.to_string(), v.clone());
                     }
+                    Value::Bytes(b) => {
+                        // `b[i] = v` on a byte buffer. Editing bytes in place is the
+                        // whole point of a byte-oriented language, and a buffer was
+                        // the one container that could not be written to.
+                        let i = self.offset_arg(Some(&idx_val), "index-assign index")?;
+                        if i >= b.len() {
+                            return Err(crate::RakError::Runtime(format!(
+                                "index-assign: index {} out of bounds (len {})",
+                                i,
+                                b.len()
+                            )));
+                        }
+                        b[i] = self.byte_arg(&v)?;
+                    }
                     _ => return Err(crate::RakError::Runtime("cannot index-assign this value".to_string())),
                 }
                 self.store_back(obj, container)?;
@@ -2473,14 +2692,10 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
             Expr::FieldAssign { obj, field, value } => {
                 let v = self.eval_expr(value)?;
                 let mut container = self.eval_expr(obj)?;
-                match &mut container {
-                    Value::Map(m) => {
-                        m.insert(field.clone(), v.clone());
-                    }
-                    Value::Struct { fields, .. } => {
-                        fields.insert(field.clone(), v.clone());
-                    }
-                    _ => return Err(crate::RakError::Runtime("cannot field-assign this value".to_string())),
+                if self.assign_field(&mut container, field, v.clone())? {
+                    // A module was written through in place; it is already the
+                    // module's state, so there is nothing to store back.
+                    return Ok(v);
                 }
                 self.store_back(obj, container)?;
                 Ok(v)
@@ -2517,8 +2732,8 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                     Value::Struct { fields, .. } => fields.get(field).cloned().ok_or_else(|| {
                         crate::RakError::Runtime(format!("Field '{}' not found", field))
                     }),
-                    Value::Module(map) => map.get(field).cloned().ok_or_else(|| {
-                        crate::RakError::Runtime(format!("'{}' not found in module", field))
+                    Value::Module(ns) => ns.lock().unwrap().get(field).ok_or_else(|| {
+                        crate::RakError::Runtime(format!("'{}' is not exported from this module", field))
                     }),
                     Value::Tuple(t) => {
                         let idx: usize = field.parse().map_err(|_| crate::RakError::Runtime("Bad tuple index".to_string()))?;
@@ -3220,6 +3435,45 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
         }
     }
 
+    /// Write `container.field = value`, returning whether the write went into a
+    /// shared cell that needs no store-back.
+    ///
+    /// A `Map` or `Struct` is a plain owned value, so the caller has to write the
+    /// modified copy back through the binding it came from. A module's
+    /// namespace is not: it *is* the module's global cell, so `m.X = v` lands in
+    /// the module's own state and is visible to the module's functions and to
+    /// every other importer without any of them being told.
+    fn assign_field(
+        &mut self,
+        container: &mut Value,
+        field: &str,
+        value: Value,
+    ) -> crate::Result<bool> {
+        match container {
+            Value::Map(m) => {
+                m.insert(field.to_string(), value);
+                Ok(false)
+            }
+            Value::Struct { fields, .. } => {
+                fields.insert(field.to_string(), value);
+                Ok(false)
+            }
+            Value::Module(ns) => {
+                let guard = ns.lock().unwrap();
+                if guard.set(field, value) {
+                    Ok(true)
+                } else {
+                    // Ask the namespace which rule applied, rather than assuming
+                    // the name was unexported: `pub let NAME = 1` is exported and
+                    // still not assignable, and saying "not exported" about it
+                    // sends the reader looking for the wrong problem.
+                    Err(crate::RakError::Runtime(guard.refusal(field)))
+                }
+            }
+            _ => Err(crate::RakError::Runtime("cannot field-assign this value".to_string())),
+        }
+    }
+
     fn store_back(&mut self, target: &Expr, value: Value) -> crate::Result<()> {
         match target {
             Expr::Ident(name) => {
@@ -3228,14 +3482,8 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
             }
             Expr::FieldAccess(obj, field) => {
                 let mut container = self.eval_expr(obj)?;
-                match &mut container {
-                    Value::Map(m) => {
-                        m.insert(field.clone(), value);
-                    }
-                    Value::Struct { fields, .. } => {
-                        fields.insert(field.clone(), value);
-                    }
-                    _ => return Err(crate::RakError::Runtime("cannot field-assign this value".to_string())),
+                if self.assign_field(&mut container, field, value)? {
+                    return Ok(());
                 }
                 self.store_back(obj, container)
             }
@@ -3252,6 +3500,20 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                     }
                     Value::Map(m) => {
                         m.insert(idx_val.to_string(), value);
+                    }
+                    Value::Bytes(b) => {
+                        // `b[i] = v` on a byte buffer. Editing bytes in place is the
+                        // whole point of a byte-oriented language, and a buffer was
+                        // the one container that could not be written to.
+                        let i = self.offset_arg(Some(&idx_val), "index-assign index")?;
+                        if i >= b.len() {
+                            return Err(crate::RakError::Runtime(format!(
+                                "index-assign: index {} out of bounds (len {})",
+                                i,
+                                b.len()
+                            )));
+                        }
+                        b[i] = self.byte_arg(&value)?;
                     }
                     _ => return Err(crate::RakError::Runtime("cannot index-assign this value".to_string())),
                 }
@@ -3818,7 +4080,7 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
         match obj {
             Value::Map(m) => m.get(field).cloned(),
             Value::Struct { fields, .. } => fields.get(field).cloned(),
-            Value::Module(m) => m.get(field).cloned(),
+            Value::Module(ns) => ns.lock().unwrap().get(field),
             Value::Tuple(t) => field.parse::<usize>().ok().and_then(|i| t.get(i).cloned()),
             _ => None,
         }
@@ -4119,10 +4381,10 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                     return Ok(Value::Enum { name: base.clone(), variant: variant.clone(), data });
                 }
             }
-            if let Some(Value::Module(map)) = self.env.get(base) {
-                if let Some(v) = map.get(variant) {
+            if let Some(Value::Module(ns)) = self.env.get(base) {
+                if let Some(v) = ns.lock().unwrap().get(variant) {
                     if let Value::Function { params, body, closure, is_async, name: fname, requires, ensures } = v {
-                        return self.call_function(&params, &body, &closure, *is_async, &fname, &requires, &ensures, args, named);
+                        return self.call_function(&params, &body, &closure, is_async, &fname, &requires, &ensures, args, named);
                     }
                     return Ok(v.clone());
                 }
@@ -4230,6 +4492,15 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
         }
         match (op, left, right) {
             (BinOp::Add, Value::String(a), b) => Ok(Value::String(format!("{}{}", a, b))),
+            // `b1 + b2` builds a buffer. Slicing buffers and joining the pieces is
+            // how a caller assembles one, and without this there was no way to do
+            // that at all.
+            (BinOp::Add, Value::Bytes(a), Value::Bytes(b)) => {
+                let mut out = Vec::with_capacity(a.len() + b.len());
+                out.extend_from_slice(a);
+                out.extend_from_slice(b);
+                Ok(Value::Bytes(out))
+            }
             (BinOp::Add, Value::Array(a), Value::Array(b)) => {
                 let mut r = a.clone();
                 r.extend(b.clone());
@@ -5075,6 +5346,26 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                 Ok(_) => Ok(Value::Bool(true)),
                 Err(e) => Err(crate::RakError::Runtime(format!("{}", e))),
             },
+            // Byte-exact file I/O.
+            //
+            // `file_read` and `write` go through UTF-8, so `file_read` *fails* on
+            // any file containing a byte sequence that is not valid UTF-8, and
+            // `write` turns a `0xFF` into U+FFFD on the way out. Between them that
+            // means there was no way to open a binary file at all, and no way to
+            // put arbitrary bytes back. These are the two that fix it, and they
+            // take a `bytes` rather than a string so no coercion is possible.
+            "file_read_bytes" => match rak_stdlib::file::read_bytes(&self.val_to_string(args.first())?) {
+                Ok(c) => Ok(Value::Bytes(c)),
+                Err(e) => Err(crate::RakError::Runtime(format!("{}", e))),
+            },
+            "file_write_bytes" => match rak_stdlib::file::write_bytes(&self.val_to_string(args.first())?, &self.val_to_bytes(args.get(1))?) {
+                Ok(_) => Ok(Value::Bool(true)),
+                Err(e) => Err(crate::RakError::Runtime(format!("{}", e))),
+            },
+            "file_append_bytes" => match rak_stdlib::file::append_bytes(&self.val_to_string(args.first())?, &self.val_to_bytes(args.get(1))?) {
+                Ok(_) => Ok(Value::Bool(true)),
+                Err(e) => Err(crate::RakError::Runtime(format!("{}", e))),
+            },
             "file_exists" => Ok(Value::Bool(rak_stdlib::file::exists(&self.val_to_string(args.first())?))),
             "file_size" => Ok(Value::Int(rak_stdlib::file::size(&self.val_to_string(args.first())?).unwrap_or(0) as i64)),
             "file_list" => Ok(Value::Array(rak_stdlib::file::list(&self.val_to_string(args.first())?).into_iter().map(Value::String).collect())),
@@ -5697,6 +5988,33 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                 Some(Value::MmapSlice(_, _, n)) => Ok(Value::Int(*n as i64)),
                 _ => Err(crate::RakError::Runtime("mmap_size(mmap)".to_string())),
             },
+            // Write one byte through a writable mapping. The mapping *is* the
+            // file, so this needs no flush and no second handle - which is the
+            // point over `file_write_at`.
+            "mmap_write" => {
+                let h = match args.first() {
+                    Some(Value::Mmap(h)) | Some(Value::MmapSlice(h, _, _)) => h.clone(),
+                    _ => {
+                        return Err(crate::RakError::Runtime(
+                            "mmap_write: first argument must be a mapping from mmap_open".to_string(),
+                        ))
+                    }
+                };
+                // A slice is a view, so an offset relative to the view has to be
+                // rebased onto the mapping before it is used.
+                let base = match args.first() {
+                    Some(Value::MmapSlice(_, off, _)) => *off,
+                    _ => 0,
+                };
+                // Read through `val_to_string` rather than a numeric coercion:
+                // Rak's numeric literals arrive as `Hex` or `Int` depending on how
+                // they were written, and `0x10` has to mean sixteen here, not fail.
+                let off = base + self.offset_arg(args.get(1), "mmap_write offset")?;
+                let byte = self.offset_arg(args.get(2), "mmap_write byte")? as u8;
+                rak_stdlib::mmap::write_byte(&h, off, byte)
+                    .map_err(crate::RakError::Runtime)?;
+                Ok(Value::Bool(true))
+            }
             "mmap_close" => Ok(Value::Nil),
             "mmap_find" => {
                 let h = match args.first() {
@@ -6848,6 +7166,44 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
         }
     }
 
+    /// One byte from an argument, accepting the three ways Rak spells a byte.
+    ///
+    /// `0xFF`, `255` and `'A'` all have to mean the same byte, or a caller writing
+    /// a hex constant would silently write something else.
+    fn byte_arg(&self, val: &Value) -> crate::Result<u8> {
+        match val {
+            Value::Int(i) if (0..=255).contains(i) => Ok(*i as u8),
+            Value::Hex(h) if *h <= 255 => Ok(*h as u8),
+            Value::Char(c) => {
+                let mut buf = [0u8; 4];
+                Ok(c.encode_utf8(&mut buf).as_bytes()[0])
+            }
+            other => Err(crate::RakError::Runtime(format!(
+                "expected a byte value (0..255 or a char), got {}",
+                other
+            ))),
+        }
+    }
+
+    /// A non-negative byte offset from an argument, accepting `Int`, `Hex` and
+    /// `Float`.
+    ///
+    /// Byte offsets arrive written three ways in practice - `0`, `0x10`, `16.0`
+    /// - and rejecting the first two would make `mmap_write(m, 0x10, 0xFF)` fail
+    /// for no good reason.
+    fn offset_arg(&self, val: Option<&Value>, what: &str) -> crate::Result<usize> {
+        match val {
+            Some(Value::Int(i)) if *i >= 0 => Ok(*i as usize),
+            Some(Value::Hex(h)) => Ok(*h as usize),
+            Some(Value::Float(f)) if *f >= 0.0 && f.fract() == 0.0 => Ok(*f as usize),
+            _ => Err(crate::RakError::Runtime(format!(
+                "{} must be a non-negative integer, got {}",
+                what,
+                val.map(|v| v.to_string()).unwrap_or_else(|| "nothing".to_string())
+            ))),
+        }
+    }
+
     fn val_to_bytes(&self, val: Option<&Value>) -> crate::Result<Vec<u8>> {
         match val {
             Some(Value::Bytes(b)) => Ok(b.clone()),
@@ -6856,6 +7212,31 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
             Some(Value::Int(i)) => Ok(i.to_le_bytes().to_vec()),
             Some(Value::MmapSlice(h, off, n)) => Ok(h.as_slice()[*off..off + n].to_vec()),
             Some(Value::Mmap(h)) => Ok(h.as_slice().to_vec()),
+            // An array of byte values becomes those bytes, not the text of the
+            // array. Without this, `bytes([0x89, 0x50])` produced the 9-character
+            // string "[137, 80]" - so there was no way to build a buffer from
+            // numbers, which is most of what a binary tool does.
+            Some(Value::Array(a)) | Some(Value::Tuple(a)) => {
+                let mut out = Vec::with_capacity(a.len());
+                for v in a {
+                    match v {
+                        Value::Int(i) if *i >= 0 && *i <= 255 => out.push(*i as u8),
+                        Value::Hex(h) if *h <= 255 => out.push(*h as u8),
+                        Value::Char(c) => {
+                            let mut buf = [0u8; 4];
+                            out.extend_from_slice((*c).encode_utf8(&mut buf).as_bytes());
+                        }
+                        Value::Bytes(b) => out.extend_from_slice(b),
+                        other => {
+                            return Err(crate::RakError::Runtime(format!(
+                                "bytes: {} is not a byte value (expected 0..255, a char, or bytes)",
+                                other
+                            )))
+                        }
+                    }
+                }
+                Ok(out)
+            }
             Some(v) => Ok(v.to_string().bytes().collect()),
             None => Ok(vec![]),
         }

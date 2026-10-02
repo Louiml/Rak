@@ -213,6 +213,13 @@ pub struct Vm {
     debug_handler: Option<Box<dyn FnMut(u32, Vec<(String, Value)>, std::collections::HashMap<String, Value>, Vec<String>) -> VmDebugAction + Send>>,
     /// Current call stack of frame names (pushed on function entry, popped on return).
     debug_callstack: Vec<String>,
+    /// Which chunk globals each imported module namespace republishes.
+    ///
+    /// Keyed by the chunk global, valued by `(the namespace's global, the name it
+    /// is published under)`. Built once from `Chunk::module_cells` before the
+    /// first instruction runs, so `Op::StoreGlobal` costs one hash lookup and
+    /// nothing at all for a global no module exports.
+    module_publish: HashMap<String, Vec<(String, String)>>,
 }
 
 /// A pending `try` region in a frame: where to jump on error, plus the stack /
@@ -453,9 +460,32 @@ impl Vm {
             debug_step: false,
             debug_handler: None,
             debug_callstack: Vec::new(),
+            module_publish: HashMap::new(),
         };
         vm.register_natives();
         vm
+    }
+
+    /// Build the republish index for a chunk, so `Op::StoreGlobal` can keep every
+    /// `import m` handle live.
+    ///
+    /// Called from `run` before the first instruction. Re-entrant chunks (a
+    /// closure's own chunk) have no `module_cells`, which is correct: a closure
+    /// body writes through the globals the module already published.
+    fn index_module_cells(&mut self, code: &crate::bytecode::Chunk) {
+        // Cleared first: every current caller builds a fresh `Vm`, so this is a
+        // no-op today, but a long-lived VM running a second chunk would otherwise
+        // keep publishing into the first chunk's namespaces - whose cell globals
+        // are stale names by then.
+        self.module_publish.clear();
+        for cell in &code.module_cells {
+            for (global, cell_global, export) in cell.triples() {
+                self.module_publish
+                    .entry(global.to_string())
+                    .or_default()
+                    .push((cell_global.to_string(), export.to_string()));
+            }
+        }
     }
 
     /// Enable the debugger, installing a handler that is invoked at source-line
@@ -1553,6 +1583,7 @@ impl Vm {
     }
 
     pub fn run(&mut self, chunk: &Chunk) -> Result<Vec<String>, String> {
+        self.index_module_cells(chunk);
         let mut frame = Frame { code: chunk, ip: 0, stack: Vec::new(), locals: Vec::new(), defers: Vec::new(), catches: Vec::new() };
         self.exec_frame(&mut frame)?;
         Ok(std::mem::take(&mut self.output))
@@ -1649,6 +1680,45 @@ impl Vm {
                         _ => return Err("bad global name".to_string()),
                     };
                     let v = frame.pop();
+                    self.globals.insert(name.clone(), v.clone());
+                    // Keep every `import m` handle live. A module's top-level
+                    // bindings are plain chunk globals on this backend, so a
+                    // store to one of them is only visible through `m.X` if it
+                    // is republished into the module's namespace here.
+                    //
+                    // `module_publish` is empty unless the chunk imported
+                    // something, so a module-free program pays one branch and no
+                    // hashing per store - which matters, because every `x = x + 1`
+                    // in the whole language lands here.
+                    if let Some(publishers) = self.module_publish.get(&name) {
+                        for (cell_global, export) in publishers {
+                            if let Some(Value::Module(ns)) = self.globals.get(cell_global) {
+                                // A module *handle* is a binding, not a value, and
+                                // is stored by `Op::BindModule` instead. If one
+                                // ever arrives here it must not be republished: the
+                                // handle's own name may be an export of some other
+                                // module, and republishing would put a module where
+                                // that module's export belongs.
+                                if matches!(v, Value::Module(_)) {
+                                    continue;
+                                }
+                                // Unconditional: the export check gates reads from
+                                // outside the module, and `ModulePublish` has not
+                                // necessarily run yet for this name.
+                                ns.lock().unwrap().store(export, v.clone());
+                            }
+                        }
+                    }
+                }
+                Op::BindModule => {
+                    let ci = frame.code.read_u16(frame.ip) as usize;
+                    frame.ip += 2;
+                    let name = match &frame.code.constants[ci] {
+                        Value::String(s) => s.to_string(),
+                        _ => return Err("BindModule: name must be a string".to_string()),
+                    };
+                    let v = frame.pop();
+                    // Deliberately no republishing — see `Op::BindModule`.
                     self.globals.insert(name, v);
                 }
                 Op::Pop => { frame.pop(); }
@@ -1817,6 +1887,13 @@ impl Vm {
                         (Value::Map(m), Value::String(k)) => {
                             frame.push(m.get(k.as_ref()).cloned().unwrap_or(Value::Nil));
                         }
+                        // A module read goes through its namespace, so `m.X` sees
+                        // what the module's own code last stored in `X`. A name
+                        // the module did not export reads as nil, matching the
+                        // interpreter's error-then-nil on the VM's nil convention.
+                        (Value::Module(ns), Value::String(k)) => {
+                            frame.push(ns.lock().unwrap().get(k.as_ref()).unwrap_or(Value::Nil));
+                        }
                         (Value::Struct { fields, .. }, Value::String(k)) => {
                             frame.push(fields.get(k.as_ref()).cloned().unwrap_or(Value::Nil));
                         }
@@ -1877,6 +1954,89 @@ impl Vm {
                     };
                     frame.push(resolved);
                 }
+                Op::MakeModule => {
+                    // Operand names the global that will hold the handle, so the
+                    // VM can report a module it could not create against a real
+                    // name rather than an index.
+                    let ci = frame.code.read_u16(frame.ip) as usize;
+                    frame.ip += 2;
+                    let cell_global = match &frame.code.constants[ci] {
+                        Value::String(s) => s.to_string(),
+                        _ => return Err("MakeModule: operand must be a string".to_string()),
+                    };
+                    // Tell the namespace which chunk global backs each of its
+                    // exports, so `m.X = v` can be written through to the real
+                    // binding instead of into the projection.
+                    let cell = frame.code.module_cells.iter().find(|c| c.global == cell_global);
+                    let backing: std::collections::HashMap<String, String> = cell
+                        .map(|c| c.exports.iter())
+                        .unwrap_or_default()
+                        .map(|(export, global)| (export.clone(), global.clone()))
+                        .collect();
+                    let mut ns = crate::modns::ModuleNamespace::empty();
+                    ns.set_backing(backing);
+                    // Seed the mutability here rather than waiting for the
+                    // `ModulePublish` ops, so a write that arrives before they run
+                    // is judged by the same rule as one that arrives after.
+                    if let Some(cell) = cell {
+                        ns.mark_mutable_all(cell.mutable.iter().cloned());
+                    }
+                    frame.push(Value::Module(Arc::new(std::sync::Mutex::new(ns))));
+                }
+                Op::ModulePublish => {
+                    let ci = frame.code.read_u16(frame.ip) as usize;
+                    frame.ip += 2;
+                    let ei = frame.code.read_u16(frame.ip) as usize;
+                    frame.ip += 2;
+                    let mutable = frame.code.code[frame.ip] != 0;
+                    frame.ip += 1;
+                    let cell_global = match &frame.code.constants[ci] {
+                        Value::String(s) => s.to_string(),
+                        _ => return Err("ModulePublish: module name must be a string".to_string()),
+                    };
+                    let export = match &frame.code.constants[ei] {
+                        Value::String(s) => s.to_string(),
+                        _ => return Err("ModulePublish: export name must be a string".to_string()),
+                    };
+                    match self.globals.get(&cell_global) {
+                        Some(Value::Module(ns)) => {
+                            let mut guard = ns.lock().unwrap();
+                            if mutable {
+                                guard.mark_public_mut(&export);
+                            } else {
+                                guard.mark_public(&export);
+                            }
+                            // Seed the namespace with the export's current value.
+                            //
+                            // `Op::StoreGlobal` is what normally fills a namespace,
+                            // but a name can reach this module without one: a
+                            // `pub use {x} from other` re-export adds `x` to this
+                            // module's export list long after `other`'s body ran
+                            // and published `x` into its *own* namespace. Without
+                            // this, `outer.x` would resolve against a namespace
+                            // that never heard of `x`.
+                            let backing = frame
+                                .code
+                                .module_cells
+                                .iter()
+                                .find(|c| c.global == cell_global)
+                                .and_then(|c| c.exports.iter().find(|(e, _)| *e == export))
+                                .map(|(_, g)| g.clone());
+                            if let Some(global) = backing {
+                                if let Some(v) = self.globals.get(&global).cloned() {
+                                    guard.store(&export, v);
+                                }
+                            }
+                        }
+                        other => {
+                            return Err(format!(
+                                "ModulePublish: '{}' is not a module namespace (got {})",
+                                cell_global,
+                                other.map(|v| v.type_name()).unwrap_or("nothing")
+                            ))
+                        }
+                    }
+                }
                 Op::BuildModule => {
                     let n = frame.code.code[frame.ip] as usize;
                     frame.ip += 1;
@@ -1900,11 +2060,14 @@ impl Vm {
                     };
                     match self.globals.get(name.as_ref()) {
                         Some(Value::Map(m)) => frame.push(Value::Map(m.clone())),
+                        Some(Value::Module(ns)) => frame.push(Value::Module(ns.clone())),
                         // Either the global is unbound — a file that does
                         // `import pkg.sub` without importing `pkg` — or it holds
                         // something that is not a module. Both start empty,
                         // matching the interpreter.
-                        _ => frame.push(Value::Map(Arc::from(HashMap::new()))),
+                        _ => frame.push(Value::Module(Arc::new(std::sync::Mutex::new(
+                            crate::modns::ModuleNamespace::empty(),
+                        )))),
                     }
                 }
                 Op::MergeModule => {
@@ -1932,17 +2095,32 @@ impl Vm {
                     };
                     let entry = frame.pop();
                     let module = frame.pop();
-                    let mut m = match module {
-                        Value::Map(existing) => (*existing).clone(),
+                    match module {
+                        Value::Map(existing) => {
+                            let mut m = (*existing).clone();
+                            m.insert(key, entry);
+                            frame.push(Value::Map(Arc::from(m)));
+                        }
+                        // The package namespace is shared state, so `sub` is
+                        // added in place. Rebuilding a fresh namespace here would
+                        // detach `pkg` from the module's own globals, and any
+                        // importer already holding the handle would keep a stale
+                        // copy.
+                        Value::Module(ns) => {
+                            {
+                                let mut guard = ns.lock().unwrap();
+                                guard.mark_public(&key);
+                                guard.values.lock().unwrap().insert(key, entry);
+                            }
+                            frame.push(Value::Module(ns));
+                        }
                         other => {
                             return Err(format!(
                                 "MergeModule: expected a module, got {}",
                                 other.type_name()
                             ))
                         }
-                    };
-                    m.insert(key, entry);
-                    frame.push(Value::Map(Arc::from(m)));
+                    }
                 }
                 Op::Try => {
                     let handler = frame.code.read_u16(frame.ip) as usize;
@@ -2046,6 +2224,53 @@ impl Vm {
                     };
                     let val = frame.pop();
                     let mut obj = frame.pop();
+                    // A module write has to reach the chunk global that backs the
+                    // export, not just the namespace projection: the module's own
+                    // functions read the global, and the next `Op::StoreGlobal`
+                    // republishing into the namespace would otherwise undo it.
+                    if let Value::Module(ns) = &obj {
+                        // Decide everything under one acquisition of the namespace
+                        // lock, and release it before touching globals or taking
+                        // any other lock. Asking `is_writable` and then, a few
+                        // lines later, locking `ns` again deadlocked: the guard
+                        // from the first question was still alive and a `Mutex` is
+                        // not reentrant. A name with no backing global took that
+                        // path, so `m.private = v` hung the VM instead of being
+                        // refused.
+                        let mut refusal: Option<String> = None;
+                        let mut backing: Option<String> = None;
+                        {
+                            let guard = ns.lock().unwrap();
+                            if !guard.is_writable(&field) {
+                                // The same two rules the interpreter applies: the
+                                // name has to be exported, and the module has to
+                                // have declared it `let mut`.
+                                refusal = Some(guard.refusal(&field));
+                            } else if let Some(global) = guard.backing_global(&field) {
+                                backing = Some(global.to_string());
+                            }
+                        }
+                        if let Some(message) = refusal {
+                            return Err(message);
+                        }
+                        if let Some(global) = backing {
+                            self.globals.insert(global.clone(), val.clone());
+                            // Keep every handle to this module current, including
+                            // the one the importer is holding.
+                            if let Some(publishers) = self.module_publish.get(&global) {
+                                for (cell_global, export) in publishers {
+                                    if let Some(Value::Module(other)) = self.globals.get(cell_global) {
+                                        other.lock().unwrap().store(export, val.clone());
+                                    }
+                                }
+                            }
+                            frame.push(obj);
+                            continue;
+                        }
+                        // No backing global, which is the interpreter's shape:
+                        // the cell *is* the module's state, so `vm_field_set`
+                        // below writes it directly.
+                    }
                     vm_field_set(&mut obj, &field, val)?;
                     frame.push(obj);
                 }
@@ -2399,6 +2624,10 @@ impl Vm {
         let field = match &recv {
             Value::Map(m) => m.get(&method).cloned(),
             Value::Struct { fields, .. } => fields.get(&method).cloned(),
+            // `m.f(...)` reads through the module's namespace, so it finds a
+            // function the module exported even though the function itself was
+            // compiled into this chunk as an ordinary global.
+            Value::Module(ns) => ns.lock().unwrap().get(&method),
             _ => None,
         };
         if let Some(f) = field {
@@ -2447,6 +2676,15 @@ impl Vm {
                 let mut out = a.to_vec();
                 out.extend(b.to_vec());
                 frame.push(Value::Array(Arc::from(out)));
+                return Ok(());
+            }
+            // `b1 + b2` builds a buffer. Mirrors the interpreter: assembling a
+            // buffer from slices needs this, and without it there was no way.
+            if let (Value::Bytes(a), Value::Bytes(b)) = (&l, &r) {
+                let mut out = Vec::with_capacity(a.len() + b.len());
+                out.extend_from_slice(a);
+                out.extend_from_slice(b);
+                frame.push(Value::Bytes(Arc::from(out.as_slice())));
                 return Ok(());
             }
         }
@@ -2629,12 +2867,21 @@ fn native_str(v: Option<&Value>) -> String {
     }
 }
 
+/// Coerce a value to bytes for a native.
+///
+/// The `Mmap`/`MmapSlice` arms used to be missing, so `hex_encode(mmap_slice(..))`
+/// hex-encoded the slice's *display text* - "<mmap-slice 4B>" - rather than its
+/// bytes. That call is how a hex view renders a row, and it failed by producing
+/// plausible-looking nonsense. Same coercion as `ext_stdlib::to_bytes`, which
+/// already had the arms.
 fn native_bytes(v: Option<&Value>) -> Vec<u8> {
     match v {
         Some(Value::Bytes(b)) => b.to_vec(),
         Some(Value::String(s)) => s.bytes().collect(),
         Some(Value::Hex(h, _)) => h.to_le_bytes().to_vec(),
         Some(Value::I64(i)) => i.to_le_bytes().to_vec(),
+        Some(Value::Mmap(h)) => h.as_slice().to_vec(),
+        Some(Value::MmapSlice(h, off, n)) => h.as_slice()[*off..off + n].to_vec(),
         Some(v) => v.to_string().into_bytes(),
         None => Vec::new(),
     }
@@ -2996,8 +3243,12 @@ fn vm_index_set(obj: &mut Value, idx: &Value, val: Value) -> Result<(), String> 
             let raw = idx.as_i64().ok_or_else(|| "index-assign: index must be an int".to_string())?;
             let i = normalize_index_vm(b.len(), raw)
                 .ok_or_else(|| format!("index-assign: index {} out of bounds (len {})", raw, b.len()))?;
+            // `0xFF`, `255` and `'A'` are the same byte. `as_i64` alone rejected
+            // the first and the third, so the same edit spelled three ways behaved
+            // three ways.
+            let byte = crate::ext_stdlib::to_byte(Some(&val))?;
             let m = Arc::make_mut(b);
-            m[i] = val.as_i64().ok_or_else(|| "index-assign: expected a byte".to_string())? as u8;
+            m[i] = byte;
             Ok(())
         }
         other => Err(format!("cannot index-assign this value ({})", other.type_name())),
@@ -3005,6 +3256,9 @@ fn vm_index_set(obj: &mut Value, idx: &Value, val: Value) -> Result<(), String> 
 }
 
 /// `obj.field = value` — copy-on-write mutation for structs and maps.
+/// The module case does not copy: its namespace *is* the module's state, so
+/// the write lands there and needs no store-back.
+
 fn vm_field_set(obj: &mut Value, field: &str, val: Value) -> Result<(), String> {
     match obj {
         Value::Map(m) => {
@@ -3018,6 +3272,20 @@ fn vm_field_set(obj: &mut Value, field: &str, val: Value) -> Result<(), String> 
                 Ok(())
             } else {
                 Err(format!("field-assign: field '{}' not found", field))
+            }
+        }
+        // `m.X = v` lands in the module's own namespace, so the module's code
+        // and every other importer see it. No store-back is needed because the
+        // namespace is shared state rather than an owned copy — and the caller's
+        // `store_ident_to` writes the handle back unchanged, which is harmless.
+        Value::Module(ns) => {
+            if ns.lock().unwrap().set(field, val) {
+                Ok(())
+            } else {
+                Err(format!(
+                    "'{}' is not exported from this module, so it cannot be assigned",
+                    field
+                ))
             }
         }
         other => Err(format!("cannot field-assign this value ({})", other.type_name())),

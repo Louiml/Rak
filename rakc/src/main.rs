@@ -458,6 +458,15 @@ fn cmd_run_debug(file: &str, source: &str) {
                             | rakc::bytecode::Op::StoreLocal
                             | rakc::bytecode::Op::Call
                             | rakc::bytecode::Op::BuildModule => 1,
+                            // The module opcodes carry a const-index operand, so
+                            // leaving them out of this table made `:dis` decode
+                            // their operands as opcodes and print nonsense for
+                            // every instruction after the first import.
+                            rakc::bytecode::Op::MakeModule
+                            | rakc::bytecode::Op::BindModule => 2,
+                            // Two const indices (the namespace's global, then the
+                            // exported name) plus a 1-byte mutability flag.
+                            rakc::bytecode::Op::ModulePublish => 5,
                             _ => 0,
                         };
                         let operand = if width == 2 {
@@ -581,11 +590,52 @@ fn main() {
         std::process::exit(1);
     }
 
-    let file = &args[2];
+    // Split the tail into flags and the file, so `rakc fmt --check f.rak` and
+    // `rakc lint --deny f.rak` find `f.rak` rather than trying to open
+    // `--check`. The usage text spells the flags after the file and that order
+    // worked, but a flag-first invocation panicked on a read of the flag rather
+    // than reporting a bad argument — and flag-first is the natural way to write
+    // it, and what a CI invocation tends to end up as.
+    //
+    // `--allow` takes a value, so the argument after it is a flag's value and not
+    // the filename; without that, `rakc run --sandbox --allow csv f.rak` would try
+    // to run `csv`.
+    let mut flag_slots: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    let mut i = 2;
+    while i < args.len() {
+        if args[i].starts_with('-') {
+            flag_slots.insert(i);
+            if args[i] == "--allow" || args[i] == "-A" {
+                i += 1;
+                if i < args.len() {
+                    flag_slots.insert(i);
+                }
+            }
+        }
+        i += 1;
+    }
+    let file_index = match (2..args.len()).find(|i| !flag_slots.contains(i)) {
+        Some(i) => i,
+        None => {
+            eprintln!("Missing file argument (only flags were given)");
+            print_usage();
+            std::process::exit(1);
+        }
+    };
+    let file = &args[file_index];
     let source = read_source(file);
 
+    // Everything after the file, minus the flags that preceded it: those belong
+    // to `rakc`, not to the script.
+    let script_args: Vec<String> = args[file_index + 1..]
+        .iter()
+        .enumerate()
+        .filter(|(k, _)| !flag_slots.contains(&(file_index + 1 + k)))
+        .map(|(_, a)| (*a).clone())
+        .collect();
+
     // Sandbox flags: --sandbox [--allow csv]. Stripped from script argv.
-    let (sandbox_on, sandbox_allow, clean_args) = rakc::caps::parse_cli(&args[3..]);
+    let (sandbox_on, sandbox_allow, clean_args) = rakc::caps::parse_cli(&script_args);
     if sandbox_on {
         rakc::caps::enable(&sandbox_allow);
         eprintln!("sandbox: active (allow: {})", if sandbox_allow.is_empty() { "none".to_string() } else { sandbox_allow.clone() });
@@ -673,7 +723,13 @@ fn main() {
         }
         "fmt" => {
             // `rakc fmt file [--write|--check]`
-            let flags: Vec<&String> = args.iter().skip(3).collect();
+            // Flags may sit before or after the file, so collect every one of them.
+            let flags: Vec<&String> = args
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| flag_slots.contains(i))
+                .map(|(_, a)| a)
+                .collect();
             let write = flags.iter().any(|f| f.as_str() == "--write" || f.as_str() == "-w");
             let check = flags.iter().any(|f| f.as_str() == "--check" || f.as_str() == "-c");
             match rakc::fmt::format_source(&source) {
@@ -704,7 +760,13 @@ fn main() {
         }
         "lint" => {
             // `rakc lint file [--deny] [--audit]`
-            let flags: Vec<&String> = args.iter().skip(3).collect();
+            // Flags may sit before or after the file, so collect every one of them.
+            let flags: Vec<&String> = args
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| flag_slots.contains(i))
+                .map(|(_, a)| a)
+                .collect();
             let deny = flags.iter().any(|f| f.as_str() == "--deny" || f.as_str() == "-d");
             let audit = flags.iter().any(|f| f.as_str() == "--audit" || f.as_str() == "-a");
             match rakc::lint::lint_source_full(&source) {

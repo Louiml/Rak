@@ -59,7 +59,11 @@ const BUILTINS: &[&str] = &[
     "ffi_load", "ffi_ptr", "ffi_alloc", "ffi_free", "ffi_write", "ffi_read",
     "ffi_read_i32", "ffi_cstr_to_string", "ffi_string_to_cstr", "ffi_call",
     "mmap_open", "mmap_slice", "mmap_size", "mmap_close", "mmap_find",
-    "mmap_lines", "mmap_lines_off",
+    "mmap_lines", "mmap_lines_off", "mmap_write",
+    // --- byte-exact file I/O (8.2.0) ---
+    // `file_read`/`write` are UTF-8, so these are the only way to open a binary
+    // file; `bytes` builds a buffer from numbers.
+    "file_read_bytes", "file_write_bytes", "file_append_bytes", "bytes",
     // --- raw packet forging (0.7) ---
     "net_raw_csum", "net_raw_ipv4", "net_raw_tcp", "net_raw_udp", "net_raw_tcp_syn",
     "net_raw_send", "net_raw_recv",

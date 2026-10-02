@@ -116,7 +116,12 @@ fn required_cap(name: &str) -> Option<&'static str> {
         (
             "fs_write",
             &["file_write", "file_append", "append_file", "mkdir", "remove_file",
-              "zip_write", "report_write"],
+              "zip_write", "report_write",
+              // Byte-exact writers, and writing through a mapping. Each of these
+              // modifies a file, so gating `file_write` while leaving these
+              // ungated would have been a hole in the sandbox rather than a
+              // narrower surface.
+              "file_write_bytes", "file_append_bytes", "mmap_write"],
         ),
     ];
     for (cap, prefixes) in table {

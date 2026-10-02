@@ -320,7 +320,7 @@ const INTERP_ONLY: &[(&str, &str)] = &[
 ///
 /// If the gap ever reaches zero, replace this with a plain `assert!(...is_empty())`
 /// and delete `MAX_KNOWN_INTERP_ONLY`.
-const MAX_KNOWN_INTERP_ONLY: usize = 34;
+const MAX_KNOWN_INTERP_ONLY: usize = 33;
 
 /// The VM-only names, in addition to the documented allowances.
 const MAX_KNOWN_VM_ONLY: usize = 0;

@@ -92,6 +92,9 @@ struct Linter {
     findings: Vec<LintFinding>,
     /// `(name, mutable)` bindings from plain `let`/`const` statements.
     declared: Vec<(String, bool)>,
+    /// Top-level names this file marks `pub`/`export`. Read by other files, so
+    /// they are never "unused" here.
+    exported: HashSet<String>,
     /// All names ever bound (patterns included) — never "unused".
     defined: HashSet<String>,
     /// Names read anywhere in the program.
@@ -99,7 +102,9 @@ struct Linter {
     /// Names that appear on the left of `=`/`+=` (assigned, not just declared).
     assigned: HashSet<String>,
     saw_return: bool,
-    imported: HashSet<String>,
+    /// Import targets seen, as (form, module) so a rom-import and a whole
+    /// import of the same module are not counted as duplicates of each other.
+    imported: HashSet<(&'static str, String)>,
     /// Reason strings from every `unsafe` block, for the `--audit` report.
     unsafe_sites: Vec<String>,
 }
@@ -109,6 +114,7 @@ impl Linter {
         Linter {
             findings: Vec::new(),
             declared: Vec::new(),
+            exported: HashSet::new(),
             defined: HashSet::new(),
             reads: HashSet::new(),
             assigned: HashSet::new(),
@@ -125,6 +131,22 @@ impl Linter {
         for s in &m.items {
             self.stmt(s);
         }
+        // Anything this file exports is read by whoever imports it, so it cannot
+        // be unused merely because this file does not mention it. Collected after
+        // the walk rather than during it, so an `export` appearing before its
+        // declaration still counts. The linter parses one file at a time and has
+        // no view of the importers, which is exactly why this is needed.
+        for s in &m.items {
+            let Stmt::Export(inner) = s else { continue };
+            match inner.as_ref() {
+                // `pub fn name(..)` is an exported `let` whose value is a
+                // function, so this one arm covers functions and values.
+                Stmt::Let { name, .. } | Stmt::Const { name, .. } => {
+                    self.exported.insert(name.clone());
+                }
+                _ => {}
+            }
+        }
     }
 
     fn import(&mut self, imp: &Import) {
@@ -133,10 +155,21 @@ impl Linter {
         } else {
             imp.path.join(".")
         };
-        if !self.imported.insert(target.clone()) {
+        // Keyed by form as well as target. `import m` and `from m import x` are
+        // not a redundant pair: the first binds a live view of the module and the
+        // second copies a value out of it, and a program that wants both writes
+        // both. Only the same *form* twice is worth a second look — and even then
+        // `import m` plus `import m as k` is a deliberate way to hold two names
+        // for one module, so the warning names what it saw rather than claiming
+        // the second import is pointless.
+        let key = match imp.kind {
+            crate::ast::ImportKind::Whole => ("whole", target.clone()),
+            crate::ast::ImportKind::From => ("from", target.clone()),
+        };
+        if !self.imported.insert(key) {
             self.findings.push(LintFinding {
                 rule: "duplicate-import",
-                message: format!("module '{}' is imported more than once", target),
+                message: format!("module '{}' is imported more than once in the same form", target),
             });
         }
     }
@@ -311,7 +344,34 @@ impl Linter {
             }
             Stmt::Trait { .. } => {}
             Stmt::Test { body, .. } => self.block(body),
-            Stmt::Mod { items, .. } => self.block(items),
+            Stmt::Mod { items, .. } => {
+                // Every top-level name in a `mod` block is exported - the block is
+                // already the boundary - so `counter.bump()` from outside means
+                // `bump` is used, and reporting it as unused would be wrong.
+                //
+                // The names are read off the block's own items rather than by
+                // diffing `declared` across the block. Diffing also caught
+                // function-locals declared inside the block's functions, because
+                // `declared` is only drained in `finish` and so never resets at a
+                // function boundary - which silently stopped `unused-var`
+                // working for every function in a `mod` block. It was also
+                // quadratic in the file's size.
+                self.block(items);
+                for stmt in items {
+                    // pub fn f() is an exported let whose value is a function,
+                    // so both spellings have to be unwrapped.
+                    let decl = match stmt {
+                        Stmt::Export(inner) => inner.as_ref(),
+                        other => other,
+                    };
+                    match decl {
+                        Stmt::Let { name, .. } | Stmt::Const { name, .. } => {
+                            self.exported.insert(name.clone());
+                        }
+                        _ => {}
+                    }
+                }
+            }
             Stmt::Use { .. } | Stmt::TypeAlias { .. } => {}
             Stmt::Async(body) => self.block(body),
             Stmt::Export(inner) => {
@@ -695,6 +755,9 @@ impl Linter {
         for (name, _mutable) in declared {
             if name.starts_with('_') {
                 continue; // convention: `_name` silences the lint
+            }
+            if self.exported.contains(&name) {
+                continue; // read by the files that import this one
             }
             if !self.reads.contains(&name) {
                 self.findings.push(LintFinding {

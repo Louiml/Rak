@@ -853,25 +853,38 @@ pub use {add, mul} from math // re-export named
 - `modules.rs` (new): `resolve_dotted(importer_dir, parts)` searches
   `importer_dir`, `./packages/`, `RAK_PATH` (in order) for `<name>.rak` then
   `<name>/init.rak`. Shared by both backends.
-- Interpreter: a `module_cache: HashMap<PathBuf, ModuleEntry>` (exports +
-  macros) + `loading_modules` set. `load_module_file` inserts an empty entry
-  before executing (so circular imports see a partial), runs the module's own
-  imports + items, collecting every `Export(<kind>)` into the entry. `load_import`
-  handles Whole/From/Reexport, directory packages (`pkg` bound as a Module
-  containing `sub`), `import *` (locals win), and macro import (registers in
-  `self.macros`).
+- Interpreter: a `module_cache: HashMap<PathBuf, ModuleEntry>` (a **live**
+  namespace + exported macros) + a `loading_modules` **stack**. A module body runs
+  in its own `Env` built by `Env::with_global`, whose global cell *is* its
+  namespace, so a module's top-level `let mut` is module state rather than a
+  per-call copy and a module cannot see the importer's globals.
+  `load_module_file` inserts an empty entry before executing (so circular imports
+  see a partial), runs the module's own imports + items, marking every
+  `Export(<kind>)` public in the entry. `loading_modules` is a stack rather than a
+  set because it also answers "which module am I inside", and a set's
+  `iter().last()` is not the innermost. `load_import` handles Whole/From/Reexport,
+  directory packages (`pkg` bound as a namespace containing `sub`, merged in place
+  so either import order works), `import *` (locals win, copies), and macro import
+  (registers in `self.macros`).
 - VM (`compiler.rs` + `vm.rs` + `bytecode.rs`): a compile-time `module_cache`
-  + `compiling` set; `inline_module` compiles each imported module's exported
-  items as globals in the current chunk (recursively, cached, cycle-aware). A
-  new `Op::BuildModule` builds a `Value::Module` from a list of exported global
-  names at run time; `from m import x` copies/aliases globals; `from m import *`
-  is a no-op (already inlined); re-exports add to the module's export list.
-  `compile_module_in(module, base_dir)` resolves name-based imports relative to
-  the file.
+  + `compiling` set; `inline_module` compiles each imported module's items as
+  globals in the current chunk (recursively, cached, cycle-aware) and records a
+  `ModuleCell` in `Chunk::module_cells` naming the global that will hold the
+  module's namespace. Three opcodes carry the namespace: `Op::MakeModule` creates
+  an empty one and records which global backs each export, `Op::ModulePublish`
+  marks a name public (and whether the module declared it `let mut`), and
+  `Op::BindModule` binds the handle. `Op::StoreGlobal` republishes into every
+  namespace that exports a global of the same name, which is what keeps `m.X` live
+  even though the module's bindings are chunk globals. `from m import x` copies or
+  aliases globals; `from m import *` is a no-op (already inlined); re-exports add
+  to the module's export list. `compile_module_in(module, base_dir)` resolves
+  name-based imports relative to the file.
 
 #### Error handling & edge cases
 - **Missing module** → `Runtime("import: cannot find module 'm' (searched: dir, packages, RAK_PATH)")`.
-- **Missing name** → `Runtime("from m import x: 'x' is not exported")`.
+- **Missing name** → `Runtime("from m import x: 'x' is not exported (module exports:
+  a, b, c)")`. The list is included because a misspelling and a missing `pub`
+  look identical from the importing file.
 - **Circular imports** → return the partially-built entry (Python semantics);
   a name not yet defined at the cycle point is a `Undefined variable` error.
 - **Import-once** → modules are cached by canonical path; re-importing returns
@@ -881,17 +894,25 @@ pub use {add, mul} from math // re-export named
   to the module.
 
 #### Errata (VM subset)
-- **`import pkg.sub`** (directory-package nested access) is interpreter-only;
-  the VM's flat-globals architecture can't isolate per-module scopes. Use
-  `from pkg.sub import x` on the VM.
 - **`pub struct`/`pub enum`** are exported on the interpreter; the VM (which
   has no `Value::StructDef`/`EnumDef`) errors on struct/enum export — use
   `pub let`/`fn`/`const`/`macro` for cross-VM modules.
-- **Non-pub top-level** of an imported module is inlined as globals on the VM
-  (visible to the importer); the interpreter keeps them in the module's
-  private scope.
+- **Flat globals.** The VM compiles a module's body into the same chunk, so a
+  module's top-level bindings are ordinary chunk globals rather than a cell of
+  their own. Three consequences, all recorded in docs/V8-KNOWN-ISSUES.md and all
+  sharing one root cause — the module's globals are not namespaced:
+  - a module can read the *importer's* globals; the interpreter cannot;
+  - `from m import x` with no alias stays live instead of copying;
+  - a `pub use` re-exported name resolves to the original's live global.
+
+  The headline semantics do not depend on this: `import m; m.X` is live on both
+  backends, `pub` is enforced on both, and `from m import x as y` copies on both.
+
+  `import pkg.sub` is unaffected and works on both (`Op::MergeModule`,
+  `Op::LoadGlobalOrMap`), nesting a live namespace inside the package's.
 
 ---
+
 
 ## Cross-cutting concerns
 
@@ -1418,15 +1439,16 @@ interpreter had the whole thing working.
 The real gap was narrower and is the one that was actually closed: the VM could
 not *nest* the result. `import pkg.sub` was a hard compile error on the VM, and
 the stated reason — that a module value and its key both need to exist and the
-VM's globals are one flat namespace — was not the obstacle. A module *is* a
-`Value::Map` on the VM, so `pkg.sub.x` is two `Op::FieldGet` calls, which
-`FieldGet` already handled. Two opcodes closed the rest:
+VM's globals are one flat namespace - was not the obstacle. A module is a
+namespace on the VM, so `pkg.sub.x` is two field reads and `FieldGet` handles
+both. Three opcodes closed the rest:
 
-- `Op::MergeModule` inserts one entry into an existing module. `BuildModule`
-  cannot, because it always starts from an empty map, so a second
-  `BuildModule` silently discarded the package's own exports.
-- `Op::LoadGlobalOrMap` loads a global as a module or yields an empty map, so
-  `import pkg.sub` works in a file that never imports `pkg` — which the
+- `Op::MergeModule` inserts one entry into an existing namespace, in place. It
+  has to merge rather than rebuild: replacing the namespace would detach `pkg`
+  from the globals its own body published, and would drop any submodule merged
+  in by an earlier `import pkg.sub`.
+- `Op::LoadGlobalOrMap` loads a global as a namespace or yields an empty one,
+  so `import pkg.sub` works in a file that never imports `pkg` - which the
   interpreter accepts.
 
 ### 7A.7 Operator overloading  **[SHIPPED]**

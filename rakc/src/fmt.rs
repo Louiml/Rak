@@ -96,7 +96,17 @@ impl Formatter {
                         None => n.clone(),
                     })
                     .collect();
-                format!("{}from {} import {}", prefix, target, names.join(", "))
+                // A re-export has to keep the `from` form. `pub use {a, b} from m`
+                // and `from m import a, b` are the same names but not the same
+                // statement: only the first exports them onward. Rendering a
+                // re-export as `pub use from m import a, b` produced a line that
+                // no longer parses, so `rakc fmt --write` could turn a working
+                // module into a file that fails to load.
+                if imp.reexport {
+                    format!("pub use {{{}}} from {}", names.join(", "), target)
+                } else {
+                    format!("from {} import {}", target, names.join(", "))
+                }
             }
             _ => format!("{}import {}{}", prefix, target, alias),
         };

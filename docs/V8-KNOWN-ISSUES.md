@@ -185,6 +185,111 @@ The full spike, including why `-Zsanitizer=cfi` cannot be used here, is in
 single codegen unit, a rebuilt `std`, and a CFI-clean dependency graph — and it
 is not supported for the Windows target at all.
 
+## The VM's module globals are not namespaced
+
+**Severity: medium.** Six symptoms, one cause. The interpreter gives each module
+its own `Env`, so a module's top-level bindings live in a cell of its own and a
+name in a module means what that module's file says it means. The VM compiles a
+module's body into the *same chunk*, so a module's top-level bindings are ordinary
+chunk globals in one flat namespace with the importer's.
+
+What does work on both: `import m` binds a live namespace, `m.X` tracks the
+module's state, `pub` blocks *writes* through the handle, `pub let mut` blocks them
+too, `from m import x as y` copies, `m.X = v` reaches the module's real state, and
+`import pkg.sub` composes with `import pkg` in either order. The headline semantics
+do not depend on any of what follows.
+
+### 1. A module can read the importer's globals
+
+```
+rakc run:  Error: Runtime error: Undefined variable: TOKEN
+rakc vm:   [DUMP] from-main
+```
+
+`peek.rak` is `pub fn peek() { return TOKEN }` and `TOKEN` is declared only in
+the importing file.
+
+### 2. A module's private top-level is visible to the importer
+
+The same cause, seen from the other side. With `collide.rak` holding
+`let shared = 100` (no `pub`) and the importer doing `dump shared`, the interpreter
+reports an undefined variable and the VM prints `100`. This is the reason the
+`pub` guarantee below is only half true.
+
+### 3. Reading a private name through the handle differs
+
+```rak
+// p.rak
+pub let PUBV = 1
+let privv = 2
+```
+```rak
+import p
+dump p.privv          // interp: error    vm: nil
+```
+
+The VM's field-read convention is nil for a missing key, so the diagnostic is lost.
+The *write* side does report, on both.
+
+### 4. Two modules exporting the same name share one binding
+
+The worst of the six, because nothing reports it.
+
+```rak
+// a1.rak                              // b1.rak
+pub let mut shared = 0                 pub let mut shared = 100
+pub fn sa() { shared = shared + 1      pub fn sb() { shared = shared + 1
+              return shared }                          return shared }
+```
+```rak
+import a1
+import b1
+dump a1.sa()      // interp: 1    vm: 101
+dump b1.sb()      // interp: 101  vm: 102
+dump a1.shared    // interp: 1    vm: 102
+```
+
+Both modules' `shared` are the same chunk global, so `a1` reports `b1`'s state.
+
+### 5. `from m import x` without an alias stays live
+
+`import m; m.X` is live on both, and `from m import x as y` copies on both. Only
+the unaliased `from` differs:
+
+```
+rakc run:  [DUMP] 0     (the snapshot you asked for)
+rakc vm:   [DUMP] 10    (the module's live global)
+```
+
+`from m import *` is the same case by another name: a snapshot on the interpreter,
+live on the VM.
+
+**Workaround.** Alias it — `from bank import BALANCE as opening_balance` — which
+copies on both backends and is the form to reach for whenever the value is meant
+to be yours. Do not rely on two modules being unable to see each other's names, or
+on a private top-level staying private.
+
+### 6. `mod { }` blocks are inlined into the enclosing namespace
+
+A `mod` block is a module on the interpreter and a set of ordinary globals on the
+VM, so its private names leak and two blocks declaring the same name collide:
+
+```rak
+mod a { let hidden = 5  pub fn g() { return hidden } }
+mod b { let mut N = 100  pub fn g() { return N } }
+dump hidden        // interp: error   vm: 5
+dump a.g()          // interp: N from a   vm: N from b
+```
+
+**Fix.** Namespace the VM's module globals: give each inlined module's top-level
+bindings a mangled prefix, so a module's free names are its own. This is a
+compiler change rather than a one-line fix — the renaming has to reach the closure
+chunks that `compile_function` emits separately, and `compile_function` builds a
+fresh sub-compiler — and it would close all six at once.
+
+`rakc/tests/module_state.rs` asserts today's behaviour for the ones that are
+observable from a program (1, 3, 5), so a change here cannot land unnoticed.
+
 ## `import pkg.sub` requires the files on disk
 
 **Severity: none.** Both backends resolve an import against the importing

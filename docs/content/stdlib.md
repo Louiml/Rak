@@ -157,6 +157,53 @@ dump secret_get("API_KEY")
 `file_list`, `file_delete`, `file_mkdir`, `file_copy`, `file_rename`,
 `file_ext`, `file_basename`, `file_dirname`.
 
+## Byte-exact file I/O
+
+The family above is **UTF-8**. `file_read` fails on any file containing a byte
+sequence that is not valid UTF-8, and `write` turns a `0xFF` into U+FFFD on the way
+out. Between them there was no way to open a binary file.
+
+| Builtin | Does |
+| --- | --- |
+| `file_read_bytes(path)` | whole file as `bytes`, any content |
+| `file_write_bytes(path, bytes)` | byte-exact overwrite |
+| `file_append_bytes(path, bytes)` | byte-exact append, creating the file |
+| `mmap_write(map, off, byte)` | one byte through a writable mapping |
+
+Building and editing a buffer:
+
+| Builtin | Does |
+| --- | --- |
+| `bytes(x)` | coerce to a buffer; an **array or tuple of 0..255, a char, or bytes** becomes those bytes |
+| `b[i]` | read a byte as an int; negative indices count from the end |
+| `b[i] = v` | write a byte - `0xFF`, `255` and `'A'` are the same byte |
+| `for b in buf` | yields each byte as an int |
+| `b1 + b2` | join two buffers |
+| `buf[a..b]` | slice to a new buffer |
+| `hex_encode(buf)` | one lowercase hex string for the whole buffer |
+
+```rak
+let buf = file_read_bytes("firmware.bin")
+buf[0] = 0xFF
+file_write_bytes("patched.bin", buf)
+
+let m = mmap_open("firmware.bin", "rw")
+mmap_write(m, 0x100, 0x90)
+dump m[0x100]
+```
+
+`mmap_write` needs `mmap_open(path, "rw")`. The mapping is the file, so a write needs
+no flush and no second handle, which is why it beats a seek-and-write on a path. It
+refuses a read-only mapping and an out-of-range offset *by name*, and a multi-byte
+write that would run past the end applies none of its bytes.
+
+The three writers are gated by the `fs_write` capability, alongside `file_write`.
+
+Hex-editor code has one trap here: `0x00` and `0` are different values in Rak and
+the VM renders and compares `Hex` differently from the interpreter. Write byte
+values in decimal where a byte is meant. See
+[docs/V8-KNOWN-ISSUES.md](../V8-KNOWN-ISSUES.md).
+
 ## Misc
 
 `sleep`, `now_ms`, `args`/`argv`, `env_get`, `env_set`, `ord`, `chr`,

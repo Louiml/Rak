@@ -49,6 +49,15 @@ pub enum Value {
     /// mutate a set that other values may also be holding. Without it, a set
     /// would need a reference type to be updatable, and Rak has none.
     Set(Arc<std::sync::Mutex<crate::setrepr::SetRepr<Value>>>),
+    /// An imported module, held as a *live* view of that module's globals.
+    ///
+    /// The VM inlines a module body into the same chunk, so the module's
+    /// top-level bindings are ordinary chunk globals; `Op::StoreGlobal`
+    /// republishes them into this namespace, which is what makes `m.X` track the
+    /// module instead of a snapshot of it taken at import time. Mirrors the
+    /// interpreter's `Module` variant so both backends agree on what `import m`
+    /// hands out.
+    Module(Arc<std::sync::Mutex<crate::modns::ModuleNamespace<Value>>>),
     Struct {
         name: Arc<str>,
         fields: Arc<HashMap<String, Value>>,
@@ -153,6 +162,7 @@ impl Value {
             Value::Tuple(_) => "tuple",
             Value::Array(_) => "array",
             Value::Map(_) => "map",
+            Value::Module(_) => "module",
             Value::UdpTransport(_) => "udp-transport",
             Value::Stream(_) => "stream",
             Value::Set(_) => "set",
@@ -378,6 +388,7 @@ impl fmt::Display for Value {
             Value::ForeignLib(_) => write!(f, "<ffi-lib>"),
             Value::ForeignPtr(p) => write!(f, "0x{:X}", p),
             Value::Mmap(_) => write!(f, "<mmap>"),
+            Value::Module(_) => write!(f, "<module>"),
             Value::UdpTransport(_) => write!(f, "<udp-transport>"),
             Value::Stream(_) => write!(f, "<stream>"),
             Value::MmapSlice(_, _, n) => write!(f, "<mmap-slice {}B>", n),

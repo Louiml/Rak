@@ -11,6 +11,24 @@ pub fn read_bytes(path: &str) -> anyhow::Result<Vec<u8>> {
     fs::read(path).map_err(|e| anyhow::anyhow!("{}", e))
 }
 
+/// Write raw bytes to a file, overwriting it.
+///
+/// Byte-exact, and the only way to get arbitrary bytes onto disk: `write` takes a
+/// `&str` and goes through UTF-8, so a buffer holding `0xFF` becomes U+FFFD and a
+/// binary file comes back corrupted.
+pub fn write_bytes(path: &str, content: &[u8]) -> anyhow::Result<()> {
+    fs::write(path, content).map_err(|e| anyhow::anyhow!("{}", e))
+}
+
+/// Append raw bytes to a file, creating it if absent. Byte-exact; see
+/// [`write_bytes`].
+pub fn append_bytes(path: &str, content: &[u8]) -> anyhow::Result<()> {
+    use std::io::Write;
+    let mut file = fs::OpenOptions::new().append(true).create(true).open(path)?;
+    file.write_all(content)?;
+    Ok(())
+}
+
 /// Write content to a file (overwrites)
 pub fn write(path: &str, content: &str) -> anyhow::Result<()> {
     fs::write(path, content).map_err(|e| anyhow::anyhow!("{}", e))
