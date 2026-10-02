@@ -40,7 +40,7 @@ jobs:
 
   linux:
     env:
-      TAG: ${{ steps.set-tag.outputs.tag }}
+      TAG: ${{ needs.create-release.outputs.tag }}
     needs: create-release
     runs-on: ubuntu-latest
     steps:
@@ -177,7 +177,7 @@ jobs:
 
   windows:
     env:
-      TAG: ${{ steps.set-tag.outputs.tag }}
+      TAG: ${{ needs.create-release.outputs.tag }}
     needs: create-release
     runs-on: windows-latest
     steps:
