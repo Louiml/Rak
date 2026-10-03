@@ -1739,7 +1739,7 @@ impl Vm {
                     };
                     match self.globals.get(&name) {
                         Some(v) => frame.push(v.clone()),
-                        None => return Err(format!("Undefined: {}", name)),
+                        None => return Err(format!("Undefined variable: {}", name)),
                     }
                 }
                 Op::StoreGlobal => {
@@ -2813,13 +2813,19 @@ impl Vm {
                 (I64(a), I64(b)) => match op {
                     BinArith::Div => {
                         if b == 0 {
-                            return Err("div by zero".to_string());
+                            // Same wording as the interpreter. "div by zero" was Rust's phrasing leaking
+        // through a hand-written error string; the interpreter said "Division by zero".
+        return Err("Division by zero".to_string());
                         }
                         push(frame, I64(a / b))
                     }
                     BinArith::Rem => {
                         if b == 0 {
-                            return Err("rem by zero".to_string());
+                            // Same wording as the interpreter, for the same reason: `x % 0` is a division by
+        // zero and a user should not have to know which backend they are on to find
+        // out. It previously said "rem by zero" on the VM and "Division by zero" on
+        // the interpreter.
+        return Err("Division by zero".to_string());
                         }
                         push(frame, I64(a % b))
                     }

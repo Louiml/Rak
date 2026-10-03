@@ -1,0 +1,8 @@
+// Tight arithmetic loop: the shape constant folding targets.
+let mut acc = 0
+let mut i = 0
+while i < 500000 {
+  acc = acc + (2 * 3) + (i % 7) + (1 << 4) - (4 / 2)
+  i = i + 1
+}
+dump acc

@@ -1,0 +1,9 @@
+// Map field read and write.
+let mut m = {a: 1, b: 2, c: 3}
+let mut i = 0
+while i < 4000 { m.a = m.a + i
+  m.b = m.b + 1
+  i = i + 1 }
+dump m.a
+dump m.b
+dump m.c

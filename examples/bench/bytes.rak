@@ -1,0 +1,7 @@
+// Byte buffers: build, mutate, iterate, format.
+let mut buf = bytes([0, 1, 2, 3, 250, 251, 252, 253])
+let mut i = 0
+while i < 8 { buf[i] = 255 - buf[i]
+  i = i + 1 }
+dump hex_encode(buf)
+dump len(buf)

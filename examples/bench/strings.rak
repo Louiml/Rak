@@ -1,0 +1,9 @@
+// String concatenation and interpolation in a loop.
+let mut s = ""
+let mut i = 0
+while i < 3000 {
+  s = s + fmt("{:04X}", i % 65536) + ":"
+  i = i + 1
+}
+dump len(s)
+dump fmt("{}", len(s) / 5)

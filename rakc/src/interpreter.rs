@@ -2729,7 +2729,7 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                 Ok(v)
             }
             Expr::CompoundAssign(op, name, value) => {
-                let cur = self.env.get(name).ok_or_else(|| crate::RakError::Runtime(format!("Undefined: {}", name)))?;
+                let cur = self.env.get(name).ok_or_else(|| crate::RakError::Runtime(format!("Undefined variable: {}", name)))?;
                 let rv = self.eval_expr(value)?;
                 let binop = match op {
                     CompoundOp::Add => BinOp::Add,

@@ -633,8 +633,13 @@ fn main() {
     // there can never see a flag written after the filename, which is the order the
     // usage text documents. Parsing from `args` covers both orders, since this loop
     // scans the whole thing.
+    // Samples per phase for `rakc bench`.
+    let mut bench_repeat: usize = 5;
     let mut max_depth_override: Option<u32> = None;
     for w in args.windows(2) {
+        if w[0] == "--repeat" {
+            bench_repeat = w[1].parse::<usize>().unwrap_or(0);
+        }
         if w[0] == "--max-depth" {
             match w[1].parse::<u32>() {
                 Ok(d) if d > 0 => max_depth_override = Some(d),
@@ -874,18 +879,110 @@ fn main() {
             }
         }
         "bench" => {
-            let tokens = rakc::lexer::tokenize(&source).expect("lex");
-            let ast = rakc::parser::parse(&tokens, &source).expect("parse");
-            let t0 = std::time::Instant::now();
+            // Five phases, measured separately.
+            //
+            // The old version timed `rakc::eval(&source)` against `vm.run()` and
+            // nothing else. That is not a comparison of two backends: the
+            // interpreter side includes lexing, parsing and setup, while the VM side
+            // is bytecode execution with the chunk already compiled, and compile time
+            // was attributed to nobody. The reported gap was therefore mostly
+            // front-end cost -- and `as_millis()` meant anything under a millisecond
+            // printed `0 ms`.
+            //
+            // Now each phase is measured over `--repeat` samples after an unmeasured
+            // warm-up, and the two execution numbers are finally like for like.
+            let repeat = if bench_repeat == 0 {
+                eprintln!("--repeat needs a positive number");
+                std::process::exit(1);
+            } else {
+                bench_repeat
+            };
+
+            let tokens = match rakc::lexer::tokenize(&source) {
+                Ok(t) => t,
+                Err(e) => {
+                    eprintln!("lex: {}", e);
+                    std::process::exit(1);
+                }
+            };
+            let ast = match rakc::parser::parse(&tokens, &source) {
+                Ok(a) => a,
+                Err(e) => {
+                    eprintln!("parse: {}", e);
+                    std::process::exit(1);
+                }
+            };
+            let chunk = match rakc::compiler::compile_module(&ast) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("compile: {}", e);
+                    std::process::exit(1);
+                }
+            };
+
+            // One unmeasured run first, so page faults, allocator growth and the CPU's
+            // frequency ramp are not charged to sample 1.
             let _ = rakc::eval(&source);
-            let interp_ms = t0.elapsed().as_millis();
-            let chunk = rakc::compiler::compile_module(&ast).expect("compile");
-            let t1 = std::time::Instant::now();
-            let mut vm = rakc::vm::Vm::new();
-            vm.run(&chunk).expect("vm run");
-            let vm_ms = t1.elapsed().as_millis();
-            println!("interpreter: {} ms", interp_ms);
-            println!("vm:           {} ms", vm_ms);
+            let _ = rakc::vm::Vm::new().run(&chunk);
+
+            let mut v: Vec<Vec<u64>> = vec![Vec::new(); 5];
+            for _ in 0..repeat {
+                let t = std::time::Instant::now();
+                let toks = rakc::lexer::tokenize(&source).expect("lex");
+                v[0].push(t.elapsed().as_nanos() as u64);
+
+                let t = std::time::Instant::now();
+                let parsed = rakc::parser::parse(&toks, &source).expect("parse");
+                v[1].push(t.elapsed().as_nanos() as u64);
+
+                let t = std::time::Instant::now();
+                let c = rakc::compiler::compile_module(&parsed).expect("compile");
+                v[2].push(t.elapsed().as_nanos() as u64);
+                std::hint::black_box(&c);
+
+                let t = std::time::Instant::now();
+                let out = rakc::eval(&source);
+                v[3].push(t.elapsed().as_nanos() as u64);
+                std::hint::black_box(&out);
+
+                let t = std::time::Instant::now();
+                let out = rakc::vm::Vm::new().run(&chunk);
+                v[4].push(t.elapsed().as_nanos() as u64);
+                std::hint::black_box(&out);
+            }
+
+            // Median, not mean: one scheduler interrupt in twenty samples moves a
+            // mean by 5% and a median by nothing.
+            fn median(v: &mut Vec<u64>) -> f64 {
+                v.sort_unstable();
+                v[v.len() / 2] as f64 / 1_000_000.0
+            }
+            let lex = median(&mut v[0]);
+            let parse = median(&mut v[1]);
+            let compile = median(&mut v[2]);
+            let interp = median(&mut v[3]);
+            let vm = median(&mut v[4]);
+
+            println!("{} ({} samples, median)", file, repeat);
+            println!("  lex      {:>9.3} ms", lex);
+            println!("  parse    {:>9.3} ms", parse);
+            println!("  compile  {:>9.3} ms", compile);
+            println!("  ---");
+            println!("  interp   {:>9.3} ms  (execution only)", interp);
+            println!("  vm       {:>9.3} ms  (execution only)", vm);
+            let front = lex + parse + compile;
+            let total = interp + front;
+            println!("  ---");
+            if total > 0.0 {
+                println!(
+                    "  front end (lex+parse+compile) {:>7.3} ms, {:.0}% of the interpreter path",
+                    front,
+                    100.0 * front / total
+                );
+            }
+            if vm > 0.0 {
+                println!("  execution speedup (vm vs interp): {:.2}x", interp / vm);
+            }
         }
         _ => {
             eprintln!("Unknown command: {}", cmd);

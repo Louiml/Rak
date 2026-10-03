@@ -1,0 +1,11 @@
+// Array indexing and mutation.
+let mut a = []
+let mut i = 0
+while i < 20000 {
+  a = push(a, i * 2)
+  i = i + 1
+}
+let mut total = 0
+for v in a { total = total + v }
+dump len(a)
+dump total

@@ -114,6 +114,58 @@ fn backing_of(exports: &[(String, String)], name: &str) -> String {
 /// `$` separates the two halves and cannot appear in a Rak identifier, so no
 /// user-written name can collide with a mangled one. The cell prefix is what keeps
 /// two modules that both declare `COUNT` apart.
+/// Fold `lhs <op> rhs` when both sides are integer literals and the result is
+/// exact. Returns `None` for anything it should not touch.
+///
+/// Exactness is the whole discipline. Division by zero yields `None` rather than a
+/// value, overflow yields `None` rather than a wrapped one, and `checked_*` is used
+/// throughout so a folded constant can never differ from what the runtime would have
+/// produced.
+fn fold_int_binary(op: &BinOp, l: &Expr, r: &Expr) -> Option<crate::value::Value> {
+    use crate::value::Value;
+    let (Expr::Int(a), Expr::Int(b)) = (l, r) else {
+        return None;
+    };
+    let (a, b) = (*a as i64, *b as i64);
+    let v = match op {
+        BinOp::Add => a.checked_add(b)?,
+        BinOp::Sub => a.checked_sub(b)?,
+        BinOp::Mul => a.checked_mul(b)?,
+        BinOp::Div => {
+            // Integer division by zero is an error at runtime, so folding it to a
+            // value here would turn a crash into a silent answer.
+            if b == 0 {
+                return None;
+            }
+            a.checked_div(b)?
+        }
+        BinOp::Rem => {
+            if b == 0 {
+                return None;
+            }
+            a.checked_rem(b)?
+        }
+        BinOp::BitAnd => a & b,
+        BinOp::BitOr => a | b,
+        BinOp::BitXor => a ^ b,
+        BinOp::Shl => {
+            // A negative shift count, or one past the width, is a runtime error.
+            if !(0..64).contains(&b) {
+                return None;
+            }
+            a.checked_shl(b as u32)?
+        }
+        BinOp::Shr => {
+            if !(0..64).contains(&b) {
+                return None;
+            }
+            a.checked_shr(b as u32)?
+        }
+        _ => return None,
+    };
+    Some(Value::I64(v))
+}
+
 fn mangled_global(cell_global: &str, name: &str) -> String {
     format!("{}${}", cell_global, name)
 }
@@ -1942,6 +1994,21 @@ impl Compiler {
                 }
             }
             Expr::Binary(op, l, r) => {
+                // Fold `2 * 3` to a single constant.
+                //
+                // Deliberately narrow: only integer literals, only the arithmetic
+                // and bitwise operators, and only when both sides are literals. That
+                // is the case where folding cannot be wrong -- there is nothing to
+                // observe but the value -- and it is the case that appears in
+                // innermost loops, which is where the work matters.
+                //
+                // Anything involving a name could be a variable that changes, and
+                // folding that is the classic way to introduce a bug that only shows
+                // up on the second iteration.
+                if let Some(folded) = fold_int_binary(op, l, r) {
+                    self.load_const(folded);
+                    return Ok(());
+                }
                 if matches!(op, BinOp::In) {
                     // `a in b` desugars to the `contains(b, a)` native on the
                     // VM (identical semantics to the interpreter's BinOp::In).
