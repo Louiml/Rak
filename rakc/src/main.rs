@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 use rakc::verify_bounded;
 
-const VERSION: &str = "8.1.1";
+const VERSION: &str = "0.8.3";
 const PAYLOAD_MAGIC: u64 = 0x52414B5F50434B; // "RAK_PCK" as u64
 
 fn print_usage() {

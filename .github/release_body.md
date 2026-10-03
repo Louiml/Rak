@@ -1,250 +1,144 @@
-# Rak v8.1.1
+# Rak v0.8.3
 
-A patch release, and the reason for it is a packaging bug rather than a feature.
+Cross-module variables that behave like Python's, byte-exact binary file I/O, a
+`for` loop that survives a NUL byte, and `fmt` that understands a format spec.
 
-## Why this release exists
+## About the version number
 
-v8.1.0 published 14 assets, and four of them were named `rak-ide_8.0.0`:
-`rak-ide_8.0.0_amd64.deb`, `rak-ide_8.0.0_amd64.AppImage`,
-`rak-ide_8.0.0_x64-setup.exe` and `rak-ide_8.0.0_x64_en-US.msi`. Tauri's bundler
-names its output from the IDE crate version, and
-`ide/src-tauri/Cargo.toml`, `ide/src-tauri/tauri.conf.json` and
-`ide/package.json` were never taken past 8.0.0. The Rust workspace and the VS Code
-extension had been bumped; the IDE had been missed, and nothing in the pipeline
-looked. So the installers in v8.1.0 self-reported as 8.0.0, and a user already on
-8.0.0 would not have been offered the upgrade.
+This release is tagged **v0.8.3**. The tags before it read `v0.4.0` … `v0.7.2` and
+then switched to `v8.0.0`, `v8.1.0`, `v8.1.1`, so v0.8.3 sits numerically below the
+8.x line it follows.
 
-The compilers in v8.1.0 — `rakc`, `rakpkg`, `rak-setup` and the offline bundle —
-were correctly versioned. This is only the four Tauri IDE bundles.
+That is deliberate, and it has one consequence worth stating plainly: **`cargo`
+will read this as a downgrade from 8.1.1.** A `cargo update` will move the dependency
+backwards rather than forwards, and a lockfile pinning `8.1.1` will not move to
+`0.8.3` on its own. If you depend on Rak, take the commit rather than the tag, or
+specify `=0.8.3` deliberately.
 
-## What changed
+The two commits this release contains are titled `Rak v8.2.0`, which was the number
+in use when they were written. Rewriting them would have meant force-pushing already
+public history to make the subjects agree with a number decided afterwards, which
+seemed the worse trade. The titles describe the work; the tag names the release.
 
-**The IDE version now comes from the release tag.** Both the Linux and the
-Windows job run `scripts/pin-ide-version.sh`, which takes the version from the
-tag, rewrites all three files, and exits non-zero if any of them did not take.
-Deriving it is the actual fix — the workspace and the IDE can no longer drift —
-and the check turns a silent miss into a failed build instead of a wrong artifact.
+## A `for` loop stopped at the first `0x00`
 
-**CI is green, and it was not before.** v8.1.0 introduced CI, and its first run
-failed all three jobs. Each had a different cause:
-
-- The lint job died before clippy ran: `--component clippy, rustfmt` on the rustup
-  install line, where the space after the comma makes rustup read `rustfmt` as a
-  separate argument.
-- With that fixed it reached `cargo fmt` and failed. The tree has never been
-  rustfmt-clean — 1313 locations across 67 files. Reformatting it inside a feature
-  release would have put an 8000-line diff through unreviewed code, so the check
-  now reports as a warning. It becomes a gate in its own commit, against a tree
-  that has had the suite run on it.
-- The test jobs failed on the parity gate and on three Windows-only examples.
-
-**The parity gate is a ratchet.** `registrations_match` fails when the backend gap
-*grows* and passes when it shrinks, with the current shortfall recorded as 34. A
-builtin added to one backend and forgotten on the other still fails immediately,
-because that is precisely the regression v8.0.0 shipped. A strict
-`registrations_match_strictly` is ignored by default, so "the gap is zero" remains
-a claim someone can check rather than assume.
-
-## What v8.1.0 was
-
-v8.1.0 is the release where the two backends stopped being two languages. Its
-notes follow, unchanged.
-
----
-
-# Rak v8.1.0
-
-The release where the two backends stopped being two languages.
-
-## Why v8.1.0 existed
-
-Rak has shipped a tree-walking interpreter and a bytecode VM for several
-versions, behind one frontend. Every builtin and every language feature has to
-be implemented twice, and until now nothing checked that it was.
-
-v8.0.0 shipped nineteen builtins that existed only in the VM. `rakc run` — the
-default backend — failed with `Unknown function` for every one of them. The test
-suite passed, because it exercised each backend separately and nothing covered
-the new builtins on the interpreter side at all. A per-backend test suite cannot
-catch a per-backend omission.
-
-So this release starts by measuring. `rakc::run_on_both` runs a program on both
-backends and classifies how they agree, and `tests/backend_parity.rs` gates on
-that two ways: a structural check that compares the registration tables
-directly, and behavioural tests that require identical output.
-
-The measurement found the gap was **140 builtins, not the three**
-`docs/rak-features-spec.md` described. `abs`, `sort`, `split`, `sum`,
-`to_string` and `print` were all missing from `rakc vm`. It could not run an
-ordinary program.
-
-**After this release: 34.** All 34 are blocked on the same thing, and that is a
-real limitation rather than a list of forgotten registrations — see *Known
-limitations*.
-
-## Backend parity
-
-### The gate
-
-Nothing compared the backends before, so a builtin could be added to one and
-forgotten on the other and the suite stayed green. Now it cannot:
-
-- **`registrations_match`** reads the registration sites in both backends and
-  requires the name sets to match. Four shapes of registration are recognised,
-  each of which was a false positive that would have made the gate untrustworthy
-  if left: alternation arms (`"regex_match" | "regex_is_match"`), `for name in
-  [..]` loops, `vm_natives()` tables, and the scope of `eval_builtin` itself so
-  that `regex` *method* arms are not mistaken for builtins.
-- **Twenty behavioural tests** run programs on both and require identical
-  output, which catches not just missing builtins but any disagreement.
-- **`parity_backlog_report`** prints the current gap, so the backlog is
-  measurable rather than remembered.
-
-### Closed
-
-- **Sets** (spec 7A.11), on both backends: `set_of`/`add`/`has`/`discard`/
-  `len`/`has_all`/`union`/`intersect`/`diff`/`to_array`, plus `for x in set` and
-  `x in set`.
-- **~100 further builtins** the spec never mentioned: math, strings, codecs,
-  arrays, JSON, HTML, files, zip, process/environment, and assertions.
-- **Spec 7A.4** — VM streams: array, file-line, TCP-line, `map`, `filter`,
-  `take`, CSV and JSONL, with a lazy `for`-over-stream lowering.
-- **Spec 7A.5** — VM `tunnel` and `udp_*`.
-- **Spec 7A.6** — `import pkg.sub` on the VM.
-- **GUI** — the VM had no GUI natives at all.
-
-### Sets are ordered, and the spec said they would not be
-
-The spec proposed backing sets with `Map`, on the premise that `Map` already
-iterates in insertion order. It does not: both backends store maps in
-`std::HashMap`, whose order is arbitrary and differs between runs. A set built
-that way would enumerate differently every time, which defeats the point for
-deduplication and diffing.
-
-So a set is an order-preserving `Vec` alongside a `HashSet` of element keys.
-Insertion order for iteration, O(1) average membership, deterministic output.
-`1`, `0x1` and `1.0` are one element; `1` and `"1"` are two.
-
-### Two bugs the harness found
-
-- **The backends derived different tunnel keys from the same passphrase.** The
-  salt, iteration count and key length were inlined separately in the
-  interpreter and the compiler, and the two had drifted. Both looked correct.
-  They now come from one definition, and a test runs one `tunnel` through both
-  backends and compares the key.
-- **`udp_recv` reported a read timeout as an error on Windows and `nil` on
-  Linux**, for identical code. A socket read timeout is `EAGAIN` on Unix but
-  `WSAETIMEDOUT` on Windows, and `std` surfaces those as different
-  `ErrorKind` variants. The implementation matched only the first. Both
-  variants are handled now, with a regression test.
-
-## GUI
-
-The GUI was, in v8.0.0, a `HashMap<i64, ()>` that discarded the `Window` and
-`WebView` it created. `gui_update`, `gui_title` and `gui_close` did nothing.
-JavaScript could not call into Rak. Closing a window ended the process. Linux
-did not work at all.
-
-Now: one event loop on the main thread (tao binds to the display connection
-there and rejects any other thread, which is why Linux failed), real handles
-kept alive, a command channel from the interpreter's worker thread to the loop,
-JS→Rak IPC through `rak_call` with results returned via `rak_result`, and
-`gui_quit(code)` for the exit status. Closing a window no longer ends the
-process; the loop stops when the program is finished with the GUI.
-
-```
-fn on_click(n) { return n + 1 }
-gui_callback("clicked", on_click)
-let w = gui_open("Demo", html, 600, 400)
-gui_wait()
-```
-
-**One real limitation:** a callback gets a copy of the environment as it stood
-at `gui_callback`, so it cannot write to a variable the main script later reads.
-That follows from Rak having no reference types.
-
-## Inline assembly
-
-`asm` reaches the CPU through a short list of read-only queries: CPUID feature
-bits, `rdtsc`, `rdtscp`, the invariant-TSC frequency. Every one is a stable
-`core::arch` intrinsic, so there is no hand-written machine code in Rak.
-
-Three independent gates, all required: the `asm` capability (its own, not
-folded into `ffi` or `raw_sockets`, because a capability granted alongside `raw`
-would be granted by habit), an `unsafe` block with a written justification, and
-a new `inline-asm` lint rule.
-
-The operand is restricted to alphanumerics, so it cannot encode an arbitrary
-byte string, and an unknown instruction is an error naming what *is* available.
-
-## Tests and CI
-
-421 unit and integration tests, up from 399, plus 20 parity tests and an example
-suite that runs every example on both backends.
-
-**CI now exists.** Through v8.0.0 the release workflow built and published but
-never ran a test — which is how the nineteen missing builtins shipped. `ci.yml`
-runs on every push and pull request, on Linux and Windows, because the UDP
-timeout bug existed precisely because the two platforms disagree and a
-Linux-only test cannot see it. A separate job runs the hardening verifier's
-self-test, so a bug in the verifier cannot silently make every release report
-"all hardening checks passed".
-
-All three of those jobs failed on this branch's first run. *What changed*,
-above, is what fixed them; CI being present was not the same as CI working.
-
-## Known limitations
-
-The full list is in `docs/V8-KNOWN-ISSUES.md`. The two that matter most:
-
-**A function body without `return` evaluates to `nil`.**
+The headline fix, and it is worse than anything else in this release.
 
 ```rak
-fn dbl(x) { x * 2 }
-dump dbl(3)          // [DUMP] nil
+let buf = bytes([0, 15, 16, 255])
+let mut n = 0
+for b in buf { n = n + 1 }
+dump n            // interpreter: 4    VM, before: 0
 ```
 
-This is the most likely thing to bite you, because it looks like it works. It
-reproduces identically on both backends and on the v8.0.0 tag, so it is not a
-regression — and it is not fixed here, because changing it is a semantics
-change rather than a bug fix, and it belongs with the v9 work. Use `return` in
-every function body.
+The VM's loop decided whether to continue by testing the **element's truthiness**
+rather than the loop bound — `IndexGet`, then `JumpIfFalse`. Since `0`, `""` and
+`false` are all falsy, iteration ended at the first of them. No diagnostic, and
+silent, because the interpreter was fine and the divergence gate did not cover it.
 
-**34 builtins exist only on the interpreter**, and all of them are blocked on
-one thing. A VM native has signature `fn(&[Value])`: no `&mut Vm`, no frame. So
-a native cannot call a Rak function, suspend, or resume. That rules out
-`channel`, `select`, `timeout`, `await_all`, `task_group`, the socket family,
-`spawn`, and FFI trampolines. The fix is coroutines in the VM, which is a
-project rather than a list of registrations. The parity gate fails on these 34
-deliberately, so the gap cannot be forgotten.
+`0x00` is the most common byte in a binary file, so `for b in buffer` walked a buffer
+and then stopped dead at the first NUL. It was found by writing a hex editor on top
+of Rak: the engine's first buffer walk died partway through a test file, and the
+cause was a language bug rather than anything in the editor.
 
-**Instrumented CFI is not available.** The binaries are CFG-compatible with a
-guarded dispatch table and CET shadow stacks, but call sites are not
-instrumented, and the hardening verifier says so on every build. The spike is in
-`docs/CFI-SPIKE.md`: it needs nightly, full LTO, a single codegen unit, a
-rebuilt `std`, and a CFI-clean dependency graph — and it is not supported for
-the Windows target at all.
+`Op::Len` now makes the bound `idx < len`. A loop bound has to be a comparison
+against a length, not a test of the value being carried.
 
-**Not planned:** enclaves (use a container or a VM), and a prover (contracts are
-checked at runtime, with an honest inconclusive result when the budget runs out
-before the program does).
+It survived review because the one test covering byte iteration used `bytes([1, 2])`,
+which has no falsy byte in it.
 
-## Upgrading
+## `fmt` takes real format specs
 
-No breaking changes for `rakc run` programs. Two things to know:
+```rak
+dump fmt("{:02X}", 5)     // 5, before.  05, now.
+dump fmt("{:#x}", 255)    // 0xff
+dump fmt("[{:>4}]", n)     // right-aligned, width 4
+dump fmt("{:.2f}", ratio)  // two decimals, on both backends
+```
 
-- `import pkg.sub` now works on the VM as well, so a program that only ran under
-  `rakc run` will run under `rakc vm`.
-- `asm` is new, and it is behind a capability, an `unsafe` block and a lint
-  rule. It is interpreter-only; a bytecode VM has no instructions to escape
-  into.
+The spec was matched by asking whether the text *contained* `04X`, `08X`, `x` or `X`.
+Exactly two widths worked and no other type did, so `{:02X}` — the width a hex dump
+wants — fell through to the default rendering.
 
-## Documentation
+The VM's copy had drifted further and had **no float branch at all**, so
+`fmt("{:.2f}", x)` printed a rounded value on the interpreter and the raw float on
+the VM. Two hand-written copies of the same chain is the underlying mistake; they are
+now one shared parser (`rakc/src/fmt_spec.rs`), and `rakc/tests/fmt_specs.rs` runs a
+table of specs through both backends and fails if they disagree.
 
-- `docs/V8-BACKEND-PARITY.md` — the gate, what is closed, and the 34 with
-  reasons.
-- `docs/V8-KNOWN-ISSUES.md` — behaviour you would not expect, led by the
-  implicit-return issue.
-- `docs/CFI-SPIKE.md` — why instrumented CFI is not shippable here.
-- `docs/V8-ROADMAP.md` — what v8.1.0 closed, and ownership and borrowing on
-  v9.0.0.
+The width counts the sign, matching Rust, Python and Go: `{:05}` of `-42` is `-0042`.
+
+## Cross-module variables
+
+`import m` used to bind a *snapshot* of the module's exports, so a `pub let mut` the
+module reassigned never reached the importer. A module's own top-level `let mut`
+reset on every call, because a module body ran in a scope on the importer's
+environment and `Env::clone` deep-copies scopes — `bump(); bump()` gave `1, 1`.
+
+```rak
+import m
+m.X = v         // writes the module's state, and only if it is `pub let mut`
+from m import x as y   // a copy, on both backends
+```
+
+The interpreter already did this. Five of the six documented VM differences are now
+closed: a private top-level is no longer visible to the importer, two modules may
+export the same name, `from m import x` copies with or without an alias, `mod { }`
+blocks no longer collide, and reading a private or misspelled name through a handle
+reports it by name instead of returning `nil`.
+
+The last one is not fixed, and `docs/V8-KNOWN-ISSUES.md` says what it needs: a
+module body still sees a name it never *declared*. Closing it requires a module
+scope in the compiler, and the compiler has no list of builtin globals — the VM
+registers those at startup — so it cannot tell `len` from a leaked name. Guessing
+would break every module that calls a builtin. The test that covers it fails loudly
+with "convert this to agree_on" if it ever closes.
+
+## Byte-exact binary file I/O
+
+`file_read` is `fs::read_to_string`, so it **fails** on any file containing a byte
+sequence that is not valid UTF-8, and `write` coerces through UTF-8, so a `0xFF`
+came back as U+FFFD. There was no way to open a binary file at all.
+
+```rak
+let buf = file_read_bytes("firmware.bin")
+buf[0] = 0xFF
+file_write_bytes("patched.bin", buf)
+
+let m = mmap_open("firmware.bin", "rw")
+mmap_write(m, 0x100, 0x90)          // the mapping *is* the file
+```
+
+Plus `bytes([...])`, byte indexing, byte assignment, byte iteration, and buffer
+concatenation. `mmap_write` refuses a read-only mapping and an out-of-range offset
+*by name*, and a multi-byte write that would run past the end applies none of its
+bytes.
+
+## Smaller things
+
+  * **`Hex` no longer renders padded.** `dump 0x00` printed
+    `0x0000000000000000` on the VM. The value carried a digit width and `Display`
+    used it, but nothing ever set that width from the source — the compiler
+    hardcoded 64 — so all sixteen slots were used. The field had exactly one reader,
+    so it is gone.
+  * **A corrected claim.** The known-issues entry said the two backends *compared*
+    `Hex` differently. They never did: `PartialEq` has a cross-representation numeric
+    fallback and `Op::Eq` goes straight through it. Retracted, with the evidence,
+    rather than left as a warning that would send someone hunting a bug that is not
+    there.
+  * **`:dis` desynced** by one byte after every `for` loop, because `IterItems` has
+    a 1-byte operand and was missing from the width table.
+  * **The VM's `len` did not accept a struct**, which the interpreter's did.
+  * **The IDE version is pinned from the tag** by `scripts/pin-ide-version.sh`, which
+    has been run against `v0.8.3` to confirm all three files take. v8.1.0 shipped
+    four Tauri bundles named `8.0.0` because that check did not exist.
+
+## Tests
+
+505 workspace tests pass. `module_state.rs` is 33, `fmt_specs.rs` is 9,
+`bytes_io.rs` is 11 — each running its cases on both backends and failing on any
+disagreement. The tests that used to *pin* a divergence now assert agreement; the one
+that is still real says so in its name.
+
+The hex editor these primitives were built for is at
+<https://github.com/Louiml/HexEditor>.
