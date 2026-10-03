@@ -75,7 +75,12 @@ pub fn manifest_path(scope: super::Scope) -> Result<PathBuf> {
 /// already exist are returned.
 pub fn user_shell_rc_files() -> Result<Vec<PathBuf>> {
     let h = home()?;
-    let candidates = [h.join(".bashrc"), h.join(".zshrc"), h.join(".bash_profile"), h.join(".profile")];
+    let candidates = [
+        h.join(".bashrc"),
+        h.join(".zshrc"),
+        h.join(".bash_profile"),
+        h.join(".profile"),
+    ];
     Ok(candidates.into_iter().filter(|p| p.exists()).collect())
 }
 
@@ -104,7 +109,8 @@ pub mod win {
     /// The user (HKCU) environment key.
     pub const USER_ENV_KEY: &str = "HKCU\\Environment";
     /// The system (HKLM) environment key.
-    pub const SYSTEM_ENV_KEY: &str = r"HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment";
+    pub const SYSTEM_ENV_KEY: &str =
+        r"HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment";
 
     /// Parse one `reg query` output line for value `name`. `reg query` prints
     /// `    <name>    <TYPE>    <data...>`; the data is everything after the
@@ -199,7 +205,10 @@ pub mod win {
         let Some(current) = query_value(key, "PATH") else {
             return;
         };
-        let kept: Vec<&str> = current.split(';').filter(|p| !same_path_entry(p, entry)).collect();
+        let kept: Vec<&str> = current
+            .split(';')
+            .filter(|p| !same_path_entry(p, entry))
+            .collect();
         if kept.is_empty() {
             delete_value(key, "PATH");
         } else if kept.join(";") != current {
@@ -210,7 +219,8 @@ pub mod win {
     /// Base64-encode a UTF-16LE string (the format PowerShell's
     /// `-EncodedCommand` expects). Avoids every shell-quoting hazard.
     fn utf16le_base64(s: &str) -> String {
-        const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        const TABLE: &[u8; 64] =
+            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
         let bytes: Vec<u8> = s.encode_utf16().flat_map(|u| u.to_le_bytes()).collect();
         let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
         for chunk in bytes.chunks(3) {
@@ -220,8 +230,16 @@ pub mod win {
             let n = (b0 << 16) | (b1 << 8) | b2;
             out.push(TABLE[(n >> 18) as usize & 63] as char);
             out.push(TABLE[(n >> 12) as usize & 63] as char);
-            out.push(if chunk.len() > 1 { TABLE[(n >> 6) as usize & 63] as char } else { '=' });
-            out.push(if chunk.len() > 2 { TABLE[n as usize & 63] as char } else { '=' });
+            out.push(if chunk.len() > 1 {
+                TABLE[(n >> 6) as usize & 63] as char
+            } else {
+                '='
+            });
+            out.push(if chunk.len() > 2 {
+                TABLE[n as usize & 63] as char
+            } else {
+                '='
+            });
         }
         out
     }
@@ -237,7 +255,12 @@ pub mod win {
             "[Win32.NativeMethods]::SendMessageTimeout([IntPtr]0xffff, 0x1a, [UIntPtr]::Zero, 'Environment', 2, 5000, [ref]$r) | Out-Null"
         );
         let _ = Command::new("powershell")
-            .args(["-NoProfile", "-NonInteractive", "-EncodedCommand", &utf16le_base64(script)])
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-EncodedCommand",
+                &utf16le_base64(script),
+            ])
             .creation_flags(CREATE_NO_WINDOW)
             .status();
     }
@@ -257,19 +280,31 @@ pub mod win {
 
         #[test]
         fn parse_handles_reg_sz_and_case() {
-            assert_eq!(parse_query_line("    Path    REG_SZ    a;b", "PATH").as_deref(), Some("a;b"));
-            assert_eq!(parse_query_line("    RAK_PATH    REG_SZ    C:\\pkgs", "PATH"), None);
+            assert_eq!(
+                parse_query_line("    Path    REG_SZ    a;b", "PATH").as_deref(),
+                Some("a;b")
+            );
+            assert_eq!(
+                parse_query_line("    RAK_PATH    REG_SZ    C:\\pkgs", "PATH"),
+                None
+            );
         }
 
         #[test]
         fn parse_ignores_key_and_header_lines() {
-            assert_eq!(parse_query_line("HKEY_CURRENT_USER\\Environment", "PATH"), None);
+            assert_eq!(
+                parse_query_line("HKEY_CURRENT_USER\\Environment", "PATH"),
+                None
+            );
             assert_eq!(parse_query_line("", "PATH"), None);
         }
 
         #[test]
         fn same_entry_ignores_case_and_trailing_sep() {
-            assert!(same_path_entry(r"C:\Users\x\.rak\bin\", r"c:\users\X\.rak\bin"));
+            assert!(same_path_entry(
+                r"C:\Users\x\.rak\bin\",
+                r"c:\users\X\.rak\bin"
+            ));
             assert!(!same_path_entry(r"C:\a", r"C:\b"));
         }
 

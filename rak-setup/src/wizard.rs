@@ -35,7 +35,9 @@ pub fn config_from_flags(
         None => Component::all().to_vec(),
     };
     if comps.is_empty() {
-        return Err(anyhow!("--install: no valid components (use rakc,rakpkg,ide,rakpath,shortcuts,man)"));
+        return Err(anyhow!(
+            "--install: no valid components (use rakc,rakpkg,ide,rakpath,shortcuts,man)"
+        ));
     }
     let scope = match scope.as_deref() {
         Some("system") => Scope::System,
@@ -77,7 +79,9 @@ pub fn interactive(offline: Option<PathBuf>) -> Result<Config> {
             0 => { /* proceed with fresh install over top */ }
             1 => {
                 crate::uninstall::run(false)?;
-                return Err(anyhow!("uninstall complete; re-run rak-setup to install fresh"));
+                return Err(anyhow!(
+                    "uninstall complete; re-run rak-setup to install fresh"
+                ));
             }
             _ => return Err(anyhow!("cancelled")),
         }
@@ -85,7 +89,10 @@ pub fn interactive(offline: Option<PathBuf>) -> Result<Config> {
 
     // Component selection — a MULTI-select: toggle each entry with <space>,
     // confirm the whole set with <enter>. Any combination can be chosen.
-    let comp_items: Vec<String> = Component::all().iter().map(|c| c.label().to_string()).collect();
+    let comp_items: Vec<String> = Component::all()
+        .iter()
+        .map(|c| c.label().to_string())
+        .collect();
     let preselected: Vec<bool> = Component::all()
         .iter()
         .map(|c| matches!(c, Component::Rakc | Component::Rakpkg))
@@ -95,13 +102,22 @@ pub fn interactive(offline: Option<PathBuf>) -> Result<Config> {
         .items(&comp_items)
         .defaults(&preselected)
         .interact()?;
-    let components: Vec<Component> = selection.into_iter().filter_map(|i| Component::all().get(i).copied()).collect();
+    let components: Vec<Component> = selection
+        .into_iter()
+        .filter_map(|i| Component::all().get(i).copied())
+        .collect();
     if components.is_empty() {
-        return Err(anyhow!("no components selected — toggle at least one with <space>, then press <enter>"));
+        return Err(anyhow!(
+            "no components selected — toggle at least one with <space>, then press <enter>"
+        ));
     }
     status(&format!(
         "selected components: {}",
-        components.iter().map(|c| c.key()).collect::<Vec<_>>().join(", ")
+        components
+            .iter()
+            .map(|c| c.key())
+            .collect::<Vec<_>>()
+            .join(", ")
     ));
 
     let scope_items = [Scope::User.label(), Scope::System.label()];
@@ -110,16 +126,29 @@ pub fn interactive(offline: Option<PathBuf>) -> Result<Config> {
         .items(&scope_items)
         .default(0)
         .interact()?;
-    let scope = if scope_idx == 1 { Scope::System } else { Scope::User };
+    let scope = if scope_idx == 1 {
+        Scope::System
+    } else {
+        Scope::User
+    };
     if scope == Scope::System && !confirm("System scope needs admin/sudo. Continue?", true) {
         return Err(anyhow!("cancelled"));
     }
 
-    let needs_bin = components.contains(&Component::Rakc) || components.contains(&Component::Rakpkg);
+    let needs_bin =
+        components.contains(&Component::Rakc) || components.contains(&Component::Rakpkg);
     let ide_mode = if components.contains(&Component::Ide) {
         let items = ["portable dir", "system location"];
-        let idx = Select::new().with_prompt("IDE install mode").items(&items).default(0).interact()?;
-        if idx == 1 { IdeMode::System } else { IdeMode::Portable }
+        let idx = Select::new()
+            .with_prompt("IDE install mode")
+            .items(&items)
+            .default(0)
+            .interact()?;
+        if idx == 1 {
+            IdeMode::System
+        } else {
+            IdeMode::Portable
+        }
     } else {
         IdeMode::Portable
     };
@@ -163,17 +192,39 @@ pub fn interactive(offline: Option<PathBuf>) -> Result<Config> {
     // Summary.
     println!("\n--- Summary ---");
     println!("scope:       {}", scope.label());
-    println!("components:  {}", components.iter().map(|c| c.key()).collect::<Vec<_>>().join(","));
+    println!(
+        "components:  {}",
+        components
+            .iter()
+            .map(|c| c.key())
+            .collect::<Vec<_>>()
+            .join(",")
+    );
     if needs_bin {
         println!("bin dir:     {}", bin_dir.display());
     }
     if components.contains(&Component::Ide) {
-        println!("ide dir:     {} ({})", ide_dir.display(), if ide_mode == IdeMode::System { "system" } else { "portable" });
+        println!(
+            "ide dir:     {} ({})",
+            ide_dir.display(),
+            if ide_mode == IdeMode::System {
+                "system"
+            } else {
+                "portable"
+            }
+        );
     }
     if components.contains(&Component::RakPath) {
         println!("packages:    {}", packages_dir.display());
     }
-    println!("mode:        {}", if net { "net-install (download latest release)" } else { "offline bundle" });
+    println!(
+        "mode:        {}",
+        if net {
+            "net-install (download latest release)"
+        } else {
+            "offline bundle"
+        }
+    );
     println!();
 
     if !confirm("Proceed with install?", true) {
@@ -195,5 +246,9 @@ pub fn interactive(offline: Option<PathBuf>) -> Result<Config> {
 /// Resolve the GitHub release download URL for a given (already-suffixed) asset
 /// name on the latest release.
 pub fn download_url(asset: &str) -> String {
-    format!("https://github.com/{}/releases/latest/download/{}", crate::REPO, asset)
+    format!(
+        "https://github.com/{}/releases/latest/download/{}",
+        crate::REPO,
+        asset
+    )
 }

@@ -106,7 +106,8 @@ mod tests {
         assert_eq!(b.len(), 16);
         let h = gen_hex(9);
         assert_eq!(h.len(), 9);
-        assert!(h.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+        assert!(h
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
     }
 }
-

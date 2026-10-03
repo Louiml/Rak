@@ -210,8 +210,9 @@ fn tokenize(src: &str) -> Result<Vec<Tok>, String> {
                     j += 1;
                 }
                 let num: String = chars[i..j].iter().collect();
-                let v = u64::from_str_radix(num.trim_start_matches("0x").trim_start_matches("0X"), 16)
-                    .map_err(|_| format!("yara: bad integer '{}'", num))?;
+                let v =
+                    u64::from_str_radix(num.trim_start_matches("0x").trim_start_matches("0X"), 16)
+                        .map_err(|_| format!("yara: bad integer '{}'", num))?;
                 toks.push(Tok::Int(v));
                 // Position for the loop's trailing `i += 1` to land on `j`.
                 i = j.saturating_sub(1);
@@ -255,7 +256,11 @@ fn tokenize(src: &str) -> Result<Vec<Tok>, String> {
 }
 
 fn line_at(src: &str, idx: usize) -> usize {
-    src[..idx.min(src.len())].chars().filter(|&c| c == '\n').count() + 1
+    src[..idx.min(src.len())]
+        .chars()
+        .filter(|&c| c == '\n')
+        .count()
+        + 1
 }
 
 fn read_string(chars: &[char], start: usize) -> Result<(String, usize), String> {
@@ -271,10 +276,9 @@ fn read_string(chars: &[char], start: usize) -> Result<(String, usize), String> 
                     't' => out.push('\t'),
                     'r' => out.push('\r'),
                     '0' => out.push('\0'),
-                    'x'
-                        if i + 3 < chars.len()
-                            && chars[i + 2].is_ascii_hexdigit()
-                            && chars[i + 3].is_ascii_hexdigit() =>
+                    'x' if i + 3 < chars.len()
+                        && chars[i + 2].is_ascii_hexdigit()
+                        && chars[i + 3].is_ascii_hexdigit() =>
                     {
                         let hex: String = chars[i + 2..i + 4].iter().collect();
                         if let Ok(b) = u8::from_str_radix(&hex, 16) {
@@ -311,7 +315,8 @@ fn tokenize_hex(chunk: &str) -> Result<Vec<Option<u8>>, String> {
             return Err(format!("odd hex nibble in hex string near '{}'", clean));
         }
         let pair: String = bytes[i..i + 2].iter().collect();
-        let b = u8::from_str_radix(&pair, 16).map_err(|_| format!("invalid hex byte '{}'", pair))?;
+        let b =
+            u8::from_str_radix(&pair, 16).map_err(|_| format!("invalid hex byte '{}'", pair))?;
         out.push(Some(b));
         i += 2;
     }
@@ -346,7 +351,10 @@ impl Parser {
     fn expect(&mut self, t: Tok, what: &str) -> Result<(), String> {
         match self.next() {
             Some(x) if x == t => Ok(()),
-            other => Err(format!("yara: expected {} in rule, found {:?}", what, other)),
+            other => Err(format!(
+                "yara: expected {} in rule, found {:?}",
+                what, other
+            )),
         }
     }
 
@@ -371,7 +379,10 @@ impl Parser {
             match self.peek() {
                 Some(Tok::Strings) => {
                     if condition.is_some() {
-                        return Err(format!("yara: 'strings' after 'condition' in rule '{}'", name));
+                        return Err(format!(
+                            "yara: 'strings' after 'condition' in rule '{}'",
+                            name
+                        ));
                     }
                     self.next();
                     while matches!(self.peek(), Some(Tok::Dollar)) {
@@ -398,14 +409,23 @@ impl Parser {
         }
         let condition =
             condition.ok_or_else(|| format!("yara: rule '{}' has no condition", name))?;
-        Ok(Rule { name: name.to_string(), strings, condition })
+        Ok(Rule {
+            name: name.to_string(),
+            strings,
+            condition,
+        })
     }
 
     fn parse_string_def(&mut self) -> Result<RuleString, String> {
         self.expect(Tok::Dollar, "'$'")?;
         let id = match self.next() {
             Some(Tok::Ident(n)) => n,
-            other => return Err(format!("yara: expected string id after '$', found {:?}", other)),
+            other => {
+                return Err(format!(
+                    "yara: expected string id after '$', found {:?}",
+                    other
+                ))
+            }
         };
         self.expect(Tok::Assign, "'='")?;
         let (pattern, was_hex) = match self.next() {
@@ -423,7 +443,11 @@ impl Parser {
             self.next();
             nocase = true;
         }
-        Ok(RuleString { id, pattern, nocase })
+        Ok(RuleString {
+            id,
+            pattern,
+            nocase,
+        })
     }
 
     fn parse_cond(&mut self) -> Result<Cond, String> {
@@ -470,7 +494,10 @@ impl Parser {
                 let id = match self.next() {
                     Some(Tok::Ident(n)) => n,
                     other => {
-                        return Err(format!("yara: expected string id after '$', found {:?}", other))
+                        return Err(format!(
+                            "yara: expected string id after '$', found {:?}",
+                            other
+                        ))
                     }
                 };
                 match self.peek() {
@@ -548,7 +575,10 @@ pub fn scan(rules: &RuleSet, data: &[u8]) -> Vec<RuleMatch> {
         let mut hits: Vec<Hit> = Vec::new();
         for rs in &rule.strings {
             for off in find_pattern(rs, data) {
-                hits.push(Hit { id: rs.id.clone(), offset: off });
+                hits.push(Hit {
+                    id: rs.id.clone(),
+                    offset: off,
+                });
             }
         }
         let present = matches_present(&hits, &rule.strings);
@@ -580,10 +610,14 @@ fn has_hit(present: &HashMap<String, Vec<u64>>, id: &str) -> bool {
 fn eval_cond(cond: &Cond, hits: &[Hit], present: &HashMap<String, Vec<u64>>) -> bool {
     match cond {
         Cond::Id(id) => has_hit(present, id),
-        Cond::At(id, pos) => present.get(id).map(|v: &Vec<u64>| v.contains(pos)).unwrap_or(false),
-        Cond::In(id, lo, hi) => {
-            present.get(id).map(|v| v.iter().any(|o| o >= lo && o <= hi)).unwrap_or(false)
-        }
+        Cond::At(id, pos) => present
+            .get(id)
+            .map(|v: &Vec<u64>| v.contains(pos))
+            .unwrap_or(false),
+        Cond::In(id, lo, hi) => present
+            .get(id)
+            .map(|v| v.iter().any(|o| o >= lo && o <= hi))
+            .unwrap_or(false),
         Cond::AllOfThem => !present.is_empty() && present.values().all(|v| !v.is_empty()),
         Cond::AnyOfThem => present.values().any(|v| !v.is_empty()),
         Cond::NoneOfThem => present.values().all(|v| v.is_empty()),
@@ -620,8 +654,16 @@ fn find_pattern(rs: &RuleString, data: &[u8]) -> Vec<u64> {
                 for (k, b) in seq.iter().enumerate() {
                     if let Some(want) = b {
                         let cur = data[start + k];
-                        let cur = if rs.nocase { cur.to_ascii_lowercase() } else { cur };
-                        let want = if rs.nocase { want.to_ascii_lowercase() } else { *want };
+                        let cur = if rs.nocase {
+                            cur.to_ascii_lowercase()
+                        } else {
+                            cur
+                        };
+                        let want = if rs.nocase {
+                            want.to_ascii_lowercase()
+                        } else {
+                            *want
+                        };
                         if cur != want {
                             continue 'outer;
                         }
@@ -680,7 +722,10 @@ rule evil_import {
         let rules = compile(RULES).unwrap();
         let data = pe_blob();
         let matches = scan(&rules, &data);
-        let pe = matches.iter().find(|m| m.rule == "pe_header").unwrap_or_else(|| panic!("pe_header missing: {:?}", matches));
+        let pe = matches
+            .iter()
+            .find(|m| m.rule == "pe_header")
+            .unwrap_or_else(|| panic!("pe_header missing: {:?}", matches));
         // string ids are stored without the `$` prefix; `$mz` must hit at 0.
         assert!(pe.hits.iter().any(|(id, off)| id == "mz" && *off == 0));
     }
@@ -709,9 +754,11 @@ rule evil_import {
 
     #[test]
     fn in_range_constraint() {
-        let rules = compile("rule ranged { strings: $s = { 41 41 } condition: $s in (2..4) }").unwrap();
+        let rules =
+            compile("rule ranged { strings: $s = { 41 41 } condition: $s in (2..4) }").unwrap();
         assert_eq!(scan(&rules, b"xxAAyy").len(), 1, "offset 2 in range");
-        let rules2 = compile("rule ranged2 { strings: $s = { 41 41 } condition: $s in (0..1) }").unwrap();
+        let rules2 =
+            compile("rule ranged2 { strings: $s = { 41 41 } condition: $s in (0..1) }").unwrap();
         assert_eq!(scan(&rules2, b"xxAAyy").len(), 0, "offset 2 outside range");
     }
 

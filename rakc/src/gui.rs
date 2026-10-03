@@ -62,15 +62,15 @@ use std::sync::{Arc, Condvar, Mutex};
 
 use crate::interpreter::{Env, Interpreter, Value};
 
-    /// The event type carried into the loop.
-    ///
-    /// `LoopEvent` is just `Command`; there is no wrapper type. The one thing
-    /// that has to be `Clone` is the *loop's* event enum, which tao derives
-    /// `Clone` for — and `Command` is not `Clone` because `Command::Open`
-    /// holds a reply sender. tao only requires `Clone` when the handler asks for
-    /// it, so a plain `Command` payload is fine and avoids a needless
-    /// allocation per event.
-    pub type LoopEvent = Command;
+/// The event type carried into the loop.
+///
+/// `LoopEvent` is just `Command`; there is no wrapper type. The one thing
+/// that has to be `Clone` is the *loop's* event enum, which tao derives
+/// `Clone` for — and `Command` is not `Clone` because `Command::Open`
+/// holds a reply sender. tao only requires `Clone` when the handler asks for
+/// it, so a plain `Command` payload is fine and avoids a needless
+/// allocation per event.
+pub type LoopEvent = Command;
 
 /// A request to the event-loop thread.
 ///
@@ -89,16 +89,32 @@ pub enum Command {
     /// Replace a window's document. The `Window` is kept — so position, size
     /// and z-order survive — and the `WebView` is rebuilt, because wry cannot
     /// swap a document in place.
-    Update { id: i64, html: String },
-    SetTitle { id: i64, title: String },
+    Update {
+        id: i64,
+        html: String,
+    },
+    SetTitle {
+        id: i64,
+        title: String,
+    },
     /// Close one window. The loop keeps running.
-    Close { id: i64 },
+    Close {
+        id: i64,
+    },
     /// Evaluate JavaScript in a window, used to deliver a callback's result.
-    Eval { id: i64, js: String },
+    Eval {
+        id: i64,
+        js: String,
+    },
     /// A call from page JavaScript into a registered Rak callback.
-    Ipc { name: String, args: Vec<String> },
+    Ipc {
+        name: String,
+        args: Vec<String>,
+    },
     /// Stop the loop with this exit code.
-    Quit { code: i32 },
+    Quit {
+        code: i32,
+    },
     /// The script has finished running.
     ///
     /// Sent by the worker when `run_source` and `run_main` return. The loop
@@ -228,7 +244,8 @@ impl GuiManager {
             width,
             height,
         })?;
-        rx.recv().map_err(|_| "GUI event loop closed before the window opened".to_string())?
+        rx.recv()
+            .map_err(|_| "GUI event loop closed before the window opened".to_string())?
     }
 
     pub fn update(&self, id: i64, html: &str) -> std::result::Result<(), String> {
@@ -653,12 +670,13 @@ pub(crate) fn current_manager() -> Option<Arc<GuiManager>> {
 /// the manager through [`current_manager`]. That is the same constraint that
 /// rules out the stream and socket families, and it is why this lives here
 /// rather than in `ext_stdlib`.
-pub(crate) fn vm_native(name: &str, args: &[crate::value::Value]) -> Result<crate::value::Value, String> {
+pub(crate) fn vm_native(
+    name: &str,
+    args: &[crate::value::Value],
+) -> Result<crate::value::Value, String> {
     use crate::value::Value;
     let mgr = current_manager().ok_or_else(|| "GUI event loop is not running".to_string())?;
-    let s = |i: usize| -> String {
-        args.get(i).map(vm_to_string).unwrap_or_default()
-    };
+    let s = |i: usize| -> String { args.get(i).map(vm_to_string).unwrap_or_default() };
     let id = args.first().and_then(|v| v.as_i64()).unwrap_or(-1);
     match name {
         "gui_open" => {
@@ -758,7 +776,10 @@ mod tests {
     fn bridge_exposes_both_directions() {
         let js = bridge_js();
         assert!(js.contains("rak_call"), "page must be able to call Rak");
-        assert!(js.contains("rak_result"), "Rak must be able to call the page");
+        assert!(
+            js.contains("rak_result"),
+            "Rak must be able to call the page"
+        );
         assert!(js.contains("rak_on"));
     }
 

@@ -87,7 +87,10 @@ const ENVIRONMENTAL: &[(&str, &str)] = &[
     ("echo_server", "binds a port and serves until interrupted"),
     ("http_server_demo", "starts an HTTP server and blocks"),
     ("ws_server_demo", "starts a WebSocket server and blocks"),
-    ("gui_demo", "opens a window and waits; needs the gui feature and a display"),
+    (
+        "gui_demo",
+        "opens a window and waits; needs the gui feature and a display",
+    ),
     ("echo_client", "connects to a server that is not running"),
     ("ws_client_demo", "connects to a server that is not running"),
     ("sql_client", "connects to a database that is not running"),
@@ -122,7 +125,10 @@ const VM_BLOCKED: &[(&str, &str)] = &[
     ("osint_pack_demo", "subdomain_enum"),
     ("osint_scan", "scan_subdomains"),
     ("parsers", "read_lines / file_read"),
-    ("pipeline", "filter / take / collect over streams with closures"),
+    (
+        "pipeline",
+        "filter / take / collect over streams with closures",
+    ),
     ("process_demo", "process_spawn"),
     ("regex", "regex_is_match"),
     ("secrets_demo", "secret_get"),
@@ -145,9 +151,18 @@ const VM_BLOCKED: &[(&str, &str)] = &[
 /// either. Listing them is not an excuse — it is the shortfall stated where it
 /// is measured. `docs/V8-ROADMAP.md` has insertion-ordered maps as a planned fix.
 const NONDETERMINISTIC: &[(&str, &str)] = &[
-    ("osint_scan", "log fields are a map, iterated in HashMap order"),
-    ("security_workflow", "log fields are a map, iterated in HashMap order"),
-    ("osint_demo", "DNS answer order is not guaranteed by the protocol"),
+    (
+        "osint_scan",
+        "log fields are a map, iterated in HashMap order",
+    ),
+    (
+        "security_workflow",
+        "log fields are a map, iterated in HashMap order",
+    ),
+    (
+        "osint_demo",
+        "DNS answer order is not guaranteed by the protocol",
+    ),
 ];
 
 /// Examples that only make sense on one platform.
@@ -316,11 +331,7 @@ fn first_difference(a: &str, b: &str) -> String {
         }
     }
     if al.len() != bl.len() {
-        return format!(
-            "line count: interpreter={} vm={}",
-            al.len(),
-            bl.len()
-        );
+        return format!("line count: interpreter={} vm={}", al.len(), bl.len());
     }
     "identical?".to_string()
 }

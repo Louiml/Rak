@@ -81,7 +81,10 @@ pub fn parse(text: &str) -> BTreeMap<String, String> {
         if key.is_empty() {
             continue;
         }
-        let multi = matches!(key.as_str(), "status" | "domain status" | "name server" | "dnssec");
+        let multi = matches!(
+            key.as_str(),
+            "status" | "domain status" | "name server" | "dnssec"
+        );
         match out.get_mut(&key) {
             Some(prev) if multi => {
                 if !prev.split_whitespace().any(|v| v == value) {
@@ -106,9 +109,15 @@ pub fn get<'a>(fields: &'a BTreeMap<String, String>, key: &str) -> Option<&'a st
 /// `true` when the response text indicates the domain is not registered.
 pub fn is_unregistered(text: &str) -> bool {
     let t = text.to_lowercase();
-    ["no match", "not found", "not been registered", "no entries found", "not registered"]
-        .iter()
-        .any(|needle| t.contains(needle))
+    [
+        "no match",
+        "not found",
+        "not been registered",
+        "no entries found",
+        "not registered",
+    ]
+    .iter()
+    .any(|needle| t.contains(needle))
 }
 
 #[cfg(test)]
@@ -137,10 +146,22 @@ DNSSEC: signedDelegation
     #[test]
     fn parse_basic_fields() {
         let f = parse(FIXTURE);
-        assert_eq!(f.get("domain name").map(String::as_str), Some("EXAMPLE.COM"));
-        assert_eq!(f.get("creation date").map(String::as_str), Some("1995-08-14T04:00:00Z"));
-        assert_eq!(f.get("registry expiry date").map(String::as_str), Some("2024-08-13T04:00:00Z"));
-        assert_eq!(f.get("registrar").map(String::as_str), Some("RESERVED-Internet Assigned Numbers Authority"));
+        assert_eq!(
+            f.get("domain name").map(String::as_str),
+            Some("EXAMPLE.COM")
+        );
+        assert_eq!(
+            f.get("creation date").map(String::as_str),
+            Some("1995-08-14T04:00:00Z")
+        );
+        assert_eq!(
+            f.get("registry expiry date").map(String::as_str),
+            Some("2024-08-13T04:00:00Z")
+        );
+        assert_eq!(
+            f.get("registrar").map(String::as_str),
+            Some("RESERVED-Internet Assigned Numbers Authority")
+        );
     }
 
     #[test]
@@ -162,8 +183,12 @@ DNSSEC: signedDelegation
 
     #[test]
     fn unregistered_detection() {
-        assert!(is_unregistered("NOT FOUND\nNo match for \"does-not-exist.example\"."));
-        assert!(is_unregistered("No entries found for the selected source(s)."));
+        assert!(is_unregistered(
+            "NOT FOUND\nNo match for \"does-not-exist.example\"."
+        ));
+        assert!(is_unregistered(
+            "No entries found for the selected source(s)."
+        ));
         assert!(!is_unregistered(FIXTURE));
     }
 }

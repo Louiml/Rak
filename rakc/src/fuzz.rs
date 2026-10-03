@@ -252,8 +252,19 @@ fn exercise(target: &str, data: &[u8]) {
 
 /// Every target `rakc fuzz` accepts.
 pub const TARGETS: &[&str] = &[
-    "lex", "parse", "eval", "dns", "tls", "json", "websocket", "tunnel", "netraw", "csv", "gzip",
-    "zip", "all",
+    "lex",
+    "parse",
+    "eval",
+    "dns",
+    "tls",
+    "json",
+    "websocket",
+    "tunnel",
+    "netraw",
+    "csv",
+    "gzip",
+    "zip",
+    "all",
 ];
 
 /// Run one target for `runs` iterations. Returns the crashing input, if any.
@@ -312,10 +323,13 @@ pub fn run(args: &[String]) -> i32 {
             }
             "--seed" | "-s" => {
                 i += 1;
-                seed = args.get(i).and_then(|v| {
-                    let v = v.trim_start_matches("0x");
-                    u64::from_str_radix(v, 16).ok().or_else(|| v.parse().ok())
-                }).unwrap_or(seed);
+                seed = args
+                    .get(i)
+                    .and_then(|v| {
+                        let v = v.trim_start_matches("0x");
+                        u64::from_str_radix(v, 16).ok().or_else(|| v.parse().ok())
+                    })
+                    .unwrap_or(seed);
             }
             "--max-len" => {
                 i += 1;
@@ -335,7 +349,9 @@ pub fn run(args: &[String]) -> i32 {
 
     if target.is_empty() {
         eprintln!("fuzz: no target given");
-        eprintln!("Usage: rakc fuzz <target> [--runs N] [--seed HEX] [--max-len N] [--out FILE] [--list]");
+        eprintln!(
+            "Usage: rakc fuzz <target> [--runs N] [--seed HEX] [--max-len N] [--out FILE] [--list]"
+        );
         eprintln!("Targets: {}", TARGETS.join(", "));
         return 2;
     }
@@ -373,7 +389,10 @@ pub fn run(args: &[String]) -> i32 {
                     Ok(_) => eprintln!("  wrote {} bytes to {}", input.len(), path),
                     Err(e) => eprintln!("  could not write '{}': {}", path, e),
                 }
-                eprintln!("  replay: rakc fuzz {} --seed 0x{:X} --out {}", t, seed, path);
+                eprintln!(
+                    "  replay: rakc fuzz {} --seed 0x{:X} --out {}",
+                    t, seed, path
+                );
             }
         }
         // Vary the seed per target so `all` does not replay the same inputs
@@ -437,7 +456,11 @@ mod tests {
                 changed += 1;
             }
         }
-        assert!(changed > 150, "only {} of 200 mutations changed anything", changed);
+        assert!(
+            changed > 150,
+            "only {} of 200 mutations changed anything",
+            changed
+        );
     }
 
     #[test]
@@ -445,7 +468,11 @@ mod tests {
         // A cheap smoke run so a panic in any harness shows up in `cargo test`
         // rather than only under `rakc fuzz`.
         for t in TARGETS.iter().filter(|t| **t != "all") {
-            assert!(fuzz_target(t, 200, 0xC0FFEE, 512).is_none(), "target {} crashed", t);
+            assert!(
+                fuzz_target(t, 200, 0xC0FFEE, 512).is_none(),
+                "target {} crashed",
+                t
+            );
         }
     }
 

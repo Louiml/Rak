@@ -36,9 +36,17 @@ pub fn rtype_num(rtype: &str) -> u16 {
 
 fn rtype_name(t: u16) -> String {
     match t {
-        1 => "A", 2 => "NS", 5 => "CNAME", 6 => "SOA", 12 => "PTR",
-        15 => "MX", 16 => "TXT", 28 => "AAAA", _ => "OTHER",
-    }.to_string()
+        1 => "A",
+        2 => "NS",
+        5 => "CNAME",
+        6 => "SOA",
+        12 => "PTR",
+        15 => "MX",
+        16 => "TXT",
+        28 => "AAAA",
+        _ => "OTHER",
+    }
+    .to_string()
 }
 
 /// Encode a dotted name into DNS label format.
@@ -145,7 +153,13 @@ pub fn parse_response(msg: &[u8]) -> Result<DnsResponse, String> {
             1 => {
                 // A record: 4 bytes -> IPv4.
                 if rdlen == 4 {
-                    format!("{}.{}.{}.{}", msg[pos], msg[pos + 1], msg[pos + 2], msg[pos + 3])
+                    format!(
+                        "{}.{}.{}.{}",
+                        msg[pos],
+                        msg[pos + 1],
+                        msg[pos + 2],
+                        msg[pos + 3]
+                    )
                 } else {
                     String::from_utf8_lossy(&msg[pos..pos + rdlen]).to_string()
                 }
@@ -153,9 +167,9 @@ pub fn parse_response(msg: &[u8]) -> Result<DnsResponse, String> {
             28 => {
                 // AAAA: 16 bytes -> IPv6 (colon form, simple).
                 if rdlen == 16 {
-                    let segs: Vec<String> = (0..8).map(|i| {
-                        format!("{:02x}{:02x}", msg[pos + 2 * i], msg[pos + 2 * i + 1])
-                    }).collect();
+                    let segs: Vec<String> = (0..8)
+                        .map(|i| format!("{:02x}{:02x}", msg[pos + 2 * i], msg[pos + 2 * i + 1]))
+                        .collect();
                     segs.join(":")
                 } else {
                     String::from_utf8_lossy(&msg[pos..pos + rdlen]).to_string()
@@ -163,7 +177,10 @@ pub fn parse_response(msg: &[u8]) -> Result<DnsResponse, String> {
             }
             5 | 2 | 12 | 6 => {
                 // CNAME / NS / PTR / SOA-name: a domain name.
-                let (n, _) = decode_name(msg, pos).unwrap_or((String::from_utf8_lossy(&msg[pos..pos + rdlen]).to_string(), pos + rdlen));
+                let (n, _) = decode_name(msg, pos).unwrap_or((
+                    String::from_utf8_lossy(&msg[pos..pos + rdlen]).to_string(),
+                    pos + rdlen,
+                ));
                 n
             }
             15 => {
@@ -178,7 +195,12 @@ pub fn parse_response(msg: &[u8]) -> Result<DnsResponse, String> {
             }
             _ => String::from_utf8_lossy(&msg[pos..pos + rdlen]).to_string(),
         };
-        answers.push(DnsRecord { name, rtype: rtype_name(t), ttl, rdata });
+        answers.push(DnsRecord {
+            name,
+            rtype: rtype_name(t),
+            ttl,
+            rdata,
+        });
         pos += rdlen;
     }
     Ok(DnsResponse { answers, truncated })
@@ -189,10 +211,14 @@ pub fn query(name: &str, rtype: &str, server: Option<&str>) -> Result<DnsRespons
     let server = server.unwrap_or("8.8.8.8:53").to_string();
     let q = build_query(name, rtype);
     let sock = UdpSocket::bind("0.0.0.0:0").map_err(|e| format!("dns: bind: {}", e))?;
-    sock.set_read_timeout(Some(std::time::Duration::from_secs(5))).ok();
-    sock.send_to(&q, &server).map_err(|e| format!("dns: send: {}", e))?;
+    sock.set_read_timeout(Some(std::time::Duration::from_secs(5)))
+        .ok();
+    sock.send_to(&q, &server)
+        .map_err(|e| format!("dns: send: {}", e))?;
     let mut buf = vec![0u8; 4096];
-    let (n, _) = sock.recv_from(&mut buf).map_err(|e| format!("dns: recv: {}", e))?;
+    let (n, _) = sock
+        .recv_from(&mut buf)
+        .map_err(|e| format!("dns: recv: {}", e))?;
     parse_response(&buf[..n])
 }
 
@@ -216,7 +242,12 @@ pub fn resolve(name: &str, server: Option<&str>) -> Result<Vec<String>, String> 
 pub fn reverse(ip: &str, server: Option<&str>) -> Result<Vec<String>, String> {
     let ptr_name = ptr_for(ip)?;
     let resp = query(&ptr_name, "PTR", server)?;
-    Ok(resp.answers.into_iter().map(|r| r.rdata).filter(|s| !s.is_empty()).collect())
+    Ok(resp
+        .answers
+        .into_iter()
+        .map(|r| r.rdata)
+        .filter(|s| !s.is_empty())
+        .collect())
 }
 
 fn ptr_for(ip: &str) -> Result<String, String> {
@@ -227,8 +258,16 @@ fn ptr_for(ip: &str) -> Result<String, String> {
             Some(i) => (&ip[..i], &ip[i + 2..]),
             None => (ip, ""),
         };
-        let head_groups: Vec<&str> = if head.is_empty() { Vec::new() } else { head.split(':').collect() };
-        let tail_groups: Vec<&str> = if tail.is_empty() { Vec::new() } else { tail.split(':').collect() };
+        let head_groups: Vec<&str> = if head.is_empty() {
+            Vec::new()
+        } else {
+            head.split(':').collect()
+        };
+        let tail_groups: Vec<&str> = if tail.is_empty() {
+            Vec::new()
+        } else {
+            tail.split(':').collect()
+        };
         let missing = 8usize.saturating_sub(head_groups.len() + tail_groups.len());
         let mut groups: Vec<String> = Vec::with_capacity(8);
         for g in &head_groups {
@@ -248,7 +287,11 @@ fn ptr_for(ip: &str) -> Result<String, String> {
             nibbles.push_str(&g.to_lowercase());
         }
         let rev: String = nibbles.chars().rev().collect();
-        let dotted = rev.chars().map(|c| c.to_string()).collect::<Vec<_>>().join(".");
+        let dotted = rev
+            .chars()
+            .map(|c| c.to_string())
+            .collect::<Vec<_>>()
+            .join(".");
         Ok(format!("{}.ip6.arpa", dotted))
     } else {
         let parts: Vec<&str> = ip.split('.').collect();
@@ -278,7 +321,10 @@ pub fn walk(domain: &str, prefixes: &[String], server: Option<&str>) -> Vec<Stri
     let mut out = Vec::new();
     for p in prefixes {
         let sub = format!("{}.{}", p, domain);
-        if query(&sub, "A", server).map(|r| !r.answers.is_empty()).unwrap_or(false) {
+        if query(&sub, "A", server)
+            .map(|r| !r.answers.is_empty())
+            .unwrap_or(false)
+        {
             out.push(sub);
         }
     }
@@ -294,7 +340,7 @@ mod tests {
         let q = build_query("example.com", "A");
         assert_eq!(&q[..2], &[0x12, 0x34]); // id
         assert_eq!(q[2], 0x01); // RD flag
-        // Name starts at offset 12: 7example3com0 (13 bytes) -> type at 25.
+                                // Name starts at offset 12: 7example3com0 (13 bytes) -> type at 25.
         assert_eq!(q[12], 7);
         assert_eq!(&q[25..27], &[0, 1]); // type A = 1 (big-endian)
         assert_eq!(&q[27..29], &[0, 1]); // class IN
@@ -306,9 +352,10 @@ mod tests {
         // (example.com A 60 1.2.3.4).
         let mut msg = build_query("example.com", "A");
         // Set ancount=1.
-        msg[6] = 0; msg[7] = 1;
+        msg[6] = 0;
+        msg[7] = 1;
         // Answer: name pointer to offset 12, type A, class IN, ttl 60, rdlen 4, rdata 1.2.3.4.
-        let mut ans = vec![0xC0, 0x0C];          // pointer to offset 12
+        let mut ans = vec![0xC0, 0x0C]; // pointer to offset 12
         ans.extend_from_slice(&1u16.to_be_bytes()); // type A
         ans.extend_from_slice(&1u16.to_be_bytes()); // class IN
         ans.extend_from_slice(&60u32.to_be_bytes()); // ttl

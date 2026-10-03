@@ -25,14 +25,20 @@ fn vv_ok(v: VV) -> VV {
     VV::Result(Some(Box::new(v)), None)
 }
 fn vv_err(msg: impl Into<String>) -> VV {
-    VV::Result(None, Some(Box::new(VV::String(Arc::from(msg.into().as_str())))))
+    VV::Result(
+        None,
+        Some(Box::new(VV::String(Arc::from(msg.into().as_str())))),
+    )
 }
 
 fn as_bytes(v: Option<&IV>, what: &str) -> Result<Vec<u8>, crate::RakError> {
     match v {
         Some(IV::Bytes(b)) => Ok(b.clone()),
         Some(IV::String(s)) => Ok(s.as_bytes().to_vec()),
-        _ => Err(crate::RakError::Runtime(format!("{} expects string or bytes", what))),
+        _ => Err(crate::RakError::Runtime(format!(
+            "{} expects string or bytes",
+            what
+        ))),
     }
 }
 
@@ -136,7 +142,9 @@ fn iv_findings_to_markdown(map: &HashMap<String, IV>) -> Result<String, crate::R
             sections.push((heading.clone(), lines));
         }
     }
-    Ok(rak_stdlib::report::markdown_report(&title, &meta, &sections))
+    Ok(rak_stdlib::report::markdown_report(
+        &title, &meta, &sections,
+    ))
 }
 
 fn yara_scan_interp(rules_src: String, data: Vec<u8>) -> crate::Result<IV> {
@@ -298,7 +306,9 @@ fn vm_ct_subdomains(a: &[VV]) -> Result<VV, String> {
     };
     match rak_stdlib::ctlogs::subdomains(&domain) {
         Ok(list) => Ok(vv_ok(VV::Array(Arc::new(
-            list.into_iter().map(|s| VV::String(Arc::from(s.as_str()))).collect(),
+            list.into_iter()
+                .map(|s| VV::String(Arc::from(s.as_str())))
+                .collect(),
         )))),
         Err(e) => Ok(vv_err(e.to_string())),
     }
@@ -350,10 +360,13 @@ fn vm_report_markdown(a: &[VV]) -> Result<VV, String> {
         Some(VV::Map(m)) => {
             let mut b = BTreeMap::new();
             for (k, v) in m.iter() {
-                b.insert(k.clone(), match v {
-                    VV::String(s) => s.to_string(),
-                    other => other.to_string(),
-                });
+                b.insert(
+                    k.clone(),
+                    match v {
+                        VV::String(s) => s.to_string(),
+                        other => other.to_string(),
+                    },
+                );
             }
             b
         }
@@ -410,7 +423,8 @@ mod tests {
         vm.run(&chunk).unwrap()
     }
 
-    const RULES: &str = "rule pe {\n    strings:\n        $mz = { 4D 5A }\n    condition:\n        $mz at 0\n}\n";
+    const RULES: &str =
+        "rule pe {\n    strings:\n        $mz = { 4D 5A }\n    condition:\n        $mz at 0\n}\n";
 
     #[test]
     fn yara_scan_both_backends() {
@@ -422,8 +436,16 @@ mod tests {
         );
         for out in [run_interp(&src), run_vm(&src)] {
             assert!(out.iter().any(|l| l.contains("[DUMP] 1")), "got: {:?}", out);
-            assert!(out.iter().any(|l| l.contains("[DUMP] pe")), "got: {:?}", out);
-            assert!(out.iter().any(|l| l.contains("[DUMP] mz@0")), "got: {:?}", out);
+            assert!(
+                out.iter().any(|l| l.contains("[DUMP] pe")),
+                "got: {:?}",
+                out
+            );
+            assert!(
+                out.iter().any(|l| l.contains("[DUMP] mz@0")),
+                "got: {:?}",
+                out
+            );
         }
     }
 
@@ -431,8 +453,17 @@ mod tests {
     fn whois_parse_both_backends() {
         let src = "let w = whois_parse(\"Domain Name: X.COM\\nCreation Date: 2020-01-02T00:00:00Z\\nRegistrar: Acme\\n\")\ndump w[\"creation date\"]\ndump w[\"registrar\"]";
         for out in [run_interp(src), run_vm(src)] {
-            assert!(out.iter().any(|l| l.contains("[DUMP] 2020-01-02T00:00:00Z")), "got: {:?}", out);
-            assert!(out.iter().any(|l| l.contains("[DUMP] Acme")), "got: {:?}", out);
+            assert!(
+                out.iter()
+                    .any(|l| l.contains("[DUMP] 2020-01-02T00:00:00Z")),
+                "got: {:?}",
+                out
+            );
+            assert!(
+                out.iter().any(|l| l.contains("[DUMP] Acme")),
+                "got: {:?}",
+                out
+            );
         }
     }
 
@@ -440,8 +471,16 @@ mod tests {
     fn report_markdown_both_backends() {
         let src = "let rep = report_markdown({title: \"T\", meta: {target: \"x.com\"}, sections: {\"Recon\": [\"a\", \"b\"]}})\ndump rep[..10]\ndump \"## Recon\" in rep";
         for out in [run_interp(src), run_vm(src)] {
-            assert!(out.iter().any(|l| l.contains("[DUMP] # T")), "got: {:?}", out);
-            assert!(out.iter().any(|l| l.contains("[DUMP] true")), "got: {:?}", out);
+            assert!(
+                out.iter().any(|l| l.contains("[DUMP] # T")),
+                "got: {:?}",
+                out
+            );
+            assert!(
+                out.iter().any(|l| l.contains("[DUMP] true")),
+                "got: {:?}",
+                out
+            );
         }
     }
 
@@ -449,13 +488,19 @@ mod tests {
     fn yara_scan_invalid_rules_raise() {
         let src = "let hits = yara_scan(\"this is not yara\", b\"abc\")\ndump len(hits)";
         let err_interp = crate::eval(src).unwrap_err();
-        assert!(err_interp.to_string().contains("yara"), "got: {:?}", err_interp);
+        assert!(
+            err_interp.to_string().contains("yara"),
+            "got: {:?}",
+            err_interp
+        );
     }
 
     #[test]
     fn network_builtins_validate_args() {
         // Argument validation happens before any network I/O.
         let err = crate::eval("whois_lookup(123)").unwrap_err();
-        assert!(err.to_string().contains("whois_lookup(domain) expects a string"));
+        assert!(err
+            .to_string()
+            .contains("whois_lookup(domain) expects a string"));
     }
 }

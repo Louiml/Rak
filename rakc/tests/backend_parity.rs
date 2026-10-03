@@ -244,7 +244,11 @@ fn collect_name_lists(src: &str, names: &mut BTreeSet<String>) {
             continue;
         };
         for part in after[..end].split('"').skip(1).step_by(2) {
-            if !part.is_empty() && part.chars().all(|c| c.is_ascii_lowercase() || c == '_' || c.is_ascii_digit()) {
+            if !part.is_empty()
+                && part
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c == '_' || c.is_ascii_digit())
+            {
                 names.insert(part.to_string());
             }
         }
@@ -272,38 +276,47 @@ const VM_NATIVE_SOURCES: &[&str] = &[
 /// regression: the reason is part of the entry, and a failing gate prints both
 /// the name and the reason so a reader can disagree with it.
 const INTERP_ONLY: &[(&str, &str)] = &[
-        (
-            "asm",
-            "inline assembly has no VM counterpart by design: a bytecode VM has \
+    (
+        "asm",
+        "inline assembly has no VM counterpart by design: a bytecode VM has \
              no instructions to escape into, so a VM version could only be a \
              lookup table pretending to be one",
-        ),
-        // `exit` needs the process to end. A native can call
-        // `std::process::exit`, but doing so from inside the VM would skip the
-        // VM's frame teardown, its deferred calls, and the interpreter's
-        // buffered output — so the VM has no `exit` builtin and a script that
-        // uses it must be run under `rakc run`. This is a real limitation, not
-        // a scan artefact.
-        (
-            "exit",
-            "the VM has no exit builtin: exiting from a native would skip frame \
+    ),
+    // `exit` needs the process to end. A native can call
+    // `std::process::exit`, but doing so from inside the VM would skip the
+    // VM's frame teardown, its deferred calls, and the interpreter's
+    // buffered output — so the VM has no `exit` builtin and a script that
+    // uses it must be run under `rakc run`. This is a real limitation, not
+    // a scan artefact.
+    (
+        "exit",
+        "the VM has no exit builtin: exiting from a native would skip frame \
              teardown, deferred calls and buffered output",
-        ),
-    ];
-    const VM_ONLY: &[(&str, &str)] = &[
-        // `Ok`, `Some` and `Err` are variant constructors the VM bakes as
-        // natives; the interpreter special-cases them in `eval_call` rather
-        // than `eval_builtin`, which is why the scan does not see them.
-        ("Ok", "enum variant constructor, handled as a special form"),
-        ("Some", "enum variant constructor, handled as a special form"),
-        ("Err", "enum variant constructor, handled as a special form"),
-        // `fmt` is likewise a special form on the interpreter.
-        ("fmt", "format builtin, handled as a special form"),
-        // VM-internal: the provenance constructor, not a Rak-level builtin.
-        ("__evidence_from", "internal: builds an evidence value, not callable from Rak"),
-        // Real one-way builtin, kept here rather than left to fail the gate.
-        ("whois_parse", "ext_osint has a VM native with no interpreter counterpart"),
-    ];
+    ),
+];
+const VM_ONLY: &[(&str, &str)] = &[
+    // `Ok`, `Some` and `Err` are variant constructors the VM bakes as
+    // natives; the interpreter special-cases them in `eval_call` rather
+    // than `eval_builtin`, which is why the scan does not see them.
+    ("Ok", "enum variant constructor, handled as a special form"),
+    (
+        "Some",
+        "enum variant constructor, handled as a special form",
+    ),
+    ("Err", "enum variant constructor, handled as a special form"),
+    // `fmt` is likewise a special form on the interpreter.
+    ("fmt", "format builtin, handled as a special form"),
+    // VM-internal: the provenance constructor, not a Rak-level builtin.
+    (
+        "__evidence_from",
+        "internal: builds an evidence value, not callable from Rak",
+    ),
+    // Real one-way builtin, kept here rather than left to fail the gate.
+    (
+        "whois_parse",
+        "ext_osint has a VM native with no interpreter counterpart",
+    ),
+];
 
 /// The parity gate, as a ratchet rather than a pass/fail switch.
 ///
@@ -713,7 +726,9 @@ fn parity_stream_type_error() {
         }
         other => panic!(
             "the backends did not agree on the stream type error:\n{}",
-            other.divergence().unwrap_or_else(|| "agreed, but not on an error".into())
+            other
+                .divergence()
+                .unwrap_or_else(|| "agreed, but not on an error".into())
         ),
     }
 }
@@ -792,7 +807,10 @@ dump pkg.sub.twice(21)
 fn agree_in(label: &str, source: &str, base_dir: &str) -> Vec<String> {
     let parity = rakc::run_on_both(source, base_dir);
     if let Some(why) = parity.divergence() {
-        panic!("backend divergence in `{}`:\n{}\n--- source ---\n{}", label, why, source);
+        panic!(
+            "backend divergence in `{}`:\n{}\n--- source ---\n{}",
+            label, why, source
+        );
     }
     match parity {
         rakc::BackendParity::Agree(out) => out,

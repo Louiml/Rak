@@ -19,7 +19,9 @@ pub fn list() -> Result<i32> {
                 let s = match a {
                     Action::File { path } => format!("file {}", path.display()),
                     Action::Dir { path } => format!("dir  {}", path.display()),
-                    Action::PathLine { rc_file, .. } => format!("PATH line in {}", rc_file.display()),
+                    Action::PathLine { rc_file, .. } => {
+                        format!("PATH line in {}", rc_file.display())
+                    }
                     Action::EnvUser { key, value } | Action::EnvSystem { key, value } => {
                         format!("env {} = {}", key, value)
                     }
@@ -33,7 +35,10 @@ pub fn list() -> Result<i32> {
             Ok(0)
         }
         None => {
-            println!("No Rak install found (no manifest at {}).", platform::manifest_path(Scope::User)?.display());
+            println!(
+                "No Rak install found (no manifest at {}).",
+                platform::manifest_path(Scope::User)?.display()
+            );
             Ok(0)
         }
     }
@@ -47,7 +52,12 @@ pub fn run(yes: bool) -> Result<i32> {
             println!("No user-scope Rak install found to uninstall.");
             // also try system
             if let Some(m) = crate::manifest::Manifest::load(Scope::System)? {
-                if yes || confirm(&format!("Uninstall system-scope install (v{})?", m.version), false) {
+                if yes
+                    || confirm(
+                        &format!("Uninstall system-scope install (v{})?", m.version),
+                        false,
+                    )
+                {
                     return uninstall_manifest(&m, Scope::System);
                 }
             }
@@ -55,7 +65,14 @@ pub fn run(yes: bool) -> Result<i32> {
         }
     };
     if !yes {
-        if !confirm(&format!("Uninstall Rak v{} ({} actions)?", manifest.version, manifest.actions.len()), false) {
+        if !confirm(
+            &format!(
+                "Uninstall Rak v{} ({} actions)?",
+                manifest.version,
+                manifest.actions.len()
+            ),
+            false,
+        ) {
             return Err(anyhow::anyhow!("cancelled"));
         }
     }
@@ -74,7 +91,9 @@ fn uninstall_manifest(m: &crate::manifest::Manifest, scope: Scope) -> Result<i32
                 // Only recurse-delete directories that belong to Rak (inside
                 // ~/.rak or the recorded IDE dir); for anything else (e.g.
                 // /usr/local/bin) just try to remove it if empty.
-                let owned = platform::rak_root().map(|r| path.starts_with(&r)).unwrap_or(false)
+                let owned = platform::rak_root()
+                    .map(|r| path.starts_with(&r))
+                    .unwrap_or(false)
                     || m.ide_dir == *path;
                 let removed = if owned {
                     std::fs::remove_dir_all(path).is_ok()
@@ -84,7 +103,10 @@ fn uninstall_manifest(m: &crate::manifest::Manifest, scope: Scope) -> Result<i32
                 if removed {
                     status(&format!("removed dir {}", path.display()));
                 } else {
-                    status(&format!("left dir {} (not empty or not owned)", path.display()));
+                    status(&format!(
+                        "left dir {} (not empty or not owned)",
+                        path.display()
+                    ));
                 }
             }
             Action::PathLine { rc_file, line } => {

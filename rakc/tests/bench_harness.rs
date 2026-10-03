@@ -135,7 +135,10 @@ fn constant_folding_preserves_semantics() {
         // Written out here because the first version of this test expected 19 and
         // was wrong: it assumed `<<` bound tightest. The folding was right.
         ("dump 2 * 3 + 7 / 2 - 1 << 4\n", "[DUMP] 128"),
-        ("dump [(2 * 3), (7 / 2), (1 << 4), (2 * 3 + 1)]\n", "[DUMP] [6, 3, 16, 7]"),
+        (
+            "dump [(2 * 3), (7 / 2), (1 << 4), (2 * 3 + 1)]\n",
+            "[DUMP] [6, 3, 16, 7]",
+        ),
         ("dump 2147483647 * 2147483647 * 2147483647\n", "[DUMP]"),
         ("dump 5 % 0\n", "Division by zero"),
         ("dump 1 / 0\n", "Division by zero"),

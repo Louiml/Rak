@@ -20,9 +20,9 @@ use serde::{Deserialize, Serialize};
 use std::env;
 use std::path::PathBuf;
 
+mod install;
 mod manifest;
 mod platform;
-mod install;
 mod uninstall;
 mod wizard;
 
@@ -133,14 +133,22 @@ fn asset_suffix() -> Result<String> {
 /// The per-asset name on the GitHub release.
 fn asset_name(base: &str) -> Result<String> {
     let suffix = asset_suffix()?;
-    let ext = if cfg!(target_os = "windows") { ".exe" } else { "" };
+    let ext = if cfg!(target_os = "windows") {
+        ".exe"
+    } else {
+        ""
+    };
     Ok(format!("{}-{}{}", base, suffix, ext))
 }
 
 /// The IDE portable archive name (tar.gz on Linux, zip on Windows).
 fn ide_archive_name() -> Result<String> {
     let suffix = asset_suffix()?;
-    let ext = if cfg!(target_os = "windows") { "zip" } else { "tar.gz" };
+    let ext = if cfg!(target_os = "windows") {
+        "zip"
+    } else {
+        "tar.gz"
+    };
     Ok(format!("rak-ide-{}.{}", suffix, ext))
 }
 
@@ -179,7 +187,11 @@ fn run(args: &[String]) -> Result<i32> {
             "--version" | "-V" => version = true,
             "--install" => {
                 i += 1;
-                install_components = Some(args.get(i).map(|s| s.split(',').map(|x| x.trim().to_string()).collect()).unwrap_or_default());
+                install_components = Some(
+                    args.get(i)
+                        .map(|s| s.split(',').map(|x| x.trim().to_string()).collect())
+                        .unwrap_or_default(),
+                );
             }
             "--scope" => {
                 i += 1;
@@ -222,7 +234,14 @@ fn run(args: &[String]) -> Result<i32> {
     }
     // install
     let cfg = if yes {
-        wizard::config_from_flags(install_components, scope, bin_dir, ide_dir, ide_mode, offline)?
+        wizard::config_from_flags(
+            install_components,
+            scope,
+            bin_dir,
+            ide_dir,
+            ide_mode,
+            offline,
+        )?
     } else {
         wizard::interactive(offline.clone())?
     };
@@ -230,7 +249,10 @@ fn run(args: &[String]) -> Result<i32> {
 }
 
 fn print_help() {
-    println!("rak-setup {} — custom installer for the Rak language", SETUP_VERSION);
+    println!(
+        "rak-setup {} — custom installer for the Rak language",
+        SETUP_VERSION
+    );
     println!();
     println!("USAGE:");
     println!("  rak-setup                      # interactive wizard (multi-select components)");
@@ -256,7 +278,11 @@ fn print_help() {
 /// Read a yes/no confirmation. Returns true for yes.
 fn confirm(prompt: &str, default: bool) -> bool {
     use dialoguer::Confirm;
-    Confirm::new().with_prompt(prompt).default(default).interact().unwrap_or(default)
+    Confirm::new()
+        .with_prompt(prompt)
+        .default(default)
+        .interact()
+        .unwrap_or(default)
 }
 
 /// Print a status line.

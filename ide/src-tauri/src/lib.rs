@@ -22,20 +22,35 @@ static RUNNING: Mutex<Option<Child>> = Mutex::new(None);
 static SHELL: Mutex<Option<Child>> = Mutex::new(None);
 
 fn rakc_binary() -> Option<String> {
-    let ext = if cfg!(target_os = "windows") { ".exe" } else { "" };
+    let ext = if cfg!(target_os = "windows") {
+        ".exe"
+    } else {
+        ""
+    };
     let mut candidates = vec!["rakc".to_string()];
     if let Ok(exe) = std::env::current_exe() {
         if let Some(parent) = exe.parent() {
             candidates.push(parent.join("rakc").to_string_lossy().to_string());
-            candidates.push(parent.join(format!("rakc{}", ext)).to_string_lossy().to_string());
+            candidates.push(
+                parent
+                    .join(format!("rakc{}", ext))
+                    .to_string_lossy()
+                    .to_string(),
+            );
         }
     }
-    candidates.push(PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join(format!("../../target/release/rakc{}", ext))
-        .to_string_lossy().to_string());
-    candidates.push(PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join(format!("../../target/debug/rakc{}", ext))
-        .to_string_lossy().to_string());
+    candidates.push(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join(format!("../../target/release/rakc{}", ext))
+            .to_string_lossy()
+            .to_string(),
+    );
+    candidates.push(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join(format!("../../target/debug/rakc{}", ext))
+            .to_string_lossy()
+            .to_string(),
+    );
     for c in candidates {
         if Command::new(&c)
             .arg("--version")
@@ -97,7 +112,13 @@ fn run_rak(app: AppHandle, mode: String, source: String) -> Result<(), String> {
         let app2 = app.clone();
         std::thread::spawn(move || {
             for line in BufReader::new(out).lines().flatten() {
-                let _ = app2.emit("rak-output", RakLine { stream: "stdout".into(), text: line });
+                let _ = app2.emit(
+                    "rak-output",
+                    RakLine {
+                        stream: "stdout".into(),
+                        text: line,
+                    },
+                );
             }
         });
     }
@@ -105,7 +126,13 @@ fn run_rak(app: AppHandle, mode: String, source: String) -> Result<(), String> {
         let app2 = app.clone();
         std::thread::spawn(move || {
             for line in BufReader::new(err).lines().flatten() {
-                let _ = app2.emit("rak-output", RakLine { stream: "stderr".into(), text: line });
+                let _ = app2.emit(
+                    "rak-output",
+                    RakLine {
+                        stream: "stderr".into(),
+                        text: line,
+                    },
+                );
             }
         });
     }
@@ -117,9 +144,15 @@ fn run_rak(app: AppHandle, mode: String, source: String) -> Result<(), String> {
             let mut guard = RUNNING.lock().unwrap();
             match guard.as_mut() {
                 Some(child) => match child.try_wait() {
-                    Ok(Some(_)) => { *guard = None; true }
+                    Ok(Some(_)) => {
+                        *guard = None;
+                        true
+                    }
                     Ok(None) => false,
-                    Err(_) => { *guard = None; true }
+                    Err(_) => {
+                        *guard = None;
+                        true
+                    }
                 },
                 None => true,
             }
@@ -173,7 +206,13 @@ fn run_shell(app: AppHandle, cmd: String, cwd: String) -> Result<(), String> {
         let app2 = app.clone();
         std::thread::spawn(move || {
             for line in BufReader::new(out).lines().flatten() {
-                let _ = app2.emit("shell-output", RakLine { stream: "stdout".into(), text: line });
+                let _ = app2.emit(
+                    "shell-output",
+                    RakLine {
+                        stream: "stdout".into(),
+                        text: line,
+                    },
+                );
             }
         });
     }
@@ -181,7 +220,13 @@ fn run_shell(app: AppHandle, cmd: String, cwd: String) -> Result<(), String> {
         let app2 = app.clone();
         std::thread::spawn(move || {
             for line in BufReader::new(err).lines().flatten() {
-                let _ = app2.emit("shell-output", RakLine { stream: "stderr".into(), text: line });
+                let _ = app2.emit(
+                    "shell-output",
+                    RakLine {
+                        stream: "stderr".into(),
+                        text: line,
+                    },
+                );
             }
         });
     }
@@ -193,9 +238,15 @@ fn run_shell(app: AppHandle, cmd: String, cwd: String) -> Result<(), String> {
             let mut guard = SHELL.lock().unwrap();
             match guard.as_mut() {
                 Some(child) => match child.try_wait() {
-                    Ok(Some(_)) => { *guard = None; true }
+                    Ok(Some(_)) => {
+                        *guard = None;
+                        true
+                    }
                     Ok(None) => false,
-                    Err(_) => { *guard = None; true }
+                    Err(_) => {
+                        *guard = None;
+                        true
+                    }
                 },
                 None => true,
             }
@@ -268,7 +319,11 @@ fn list_files_recursive(path: String, ext: String) -> Result<Vec<FileEntry>, Str
             for entry in read_dir.flatten() {
                 if let Ok(metadata) = entry.metadata() {
                     let name = entry.file_name().to_string_lossy().to_string();
-                    if name.starts_with('.') || name == "node_modules" || name == "target" || name == "out" {
+                    if name.starts_with('.')
+                        || name == "node_modules"
+                        || name == "target"
+                        || name == "out"
+                    {
                         continue;
                     }
                     let path = entry.path();
@@ -325,9 +380,18 @@ fn rename_file(old_path: String, new_path: String) -> Result<(), String> {
 #[tauri::command]
 fn duplicate_file(src: String) -> Result<(), String> {
     let src_path = PathBuf::from(&src);
-    let stem = src_path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
-    let ext = src_path.extension().map(|s| format!(".{}", s.to_string_lossy())).unwrap_or_default();
-    let parent = src_path.parent().map(|p| p.to_path_buf()).unwrap_or_default();
+    let stem = src_path
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let ext = src_path
+        .extension()
+        .map(|s| format!(".{}", s.to_string_lossy()))
+        .unwrap_or_default();
+    let parent = src_path
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_default();
     let mut dst = parent.join(format!("{}_copy{}", stem, ext));
     let mut i = 2;
     while dst.exists() {
@@ -342,15 +406,24 @@ fn duplicate_file(src: String) -> Result<(), String> {
 fn open_in_explorer(path: String) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
-        Command::new("explorer.exe").arg(&path).spawn().map_err(|e| e.to_string())?;
+        Command::new("explorer.exe")
+            .arg(&path)
+            .spawn()
+            .map_err(|e| e.to_string())?;
     }
     #[cfg(target_os = "macos")]
     {
-        Command::new("open").arg(&path).spawn().map_err(|e| e.to_string())?;
+        Command::new("open")
+            .arg(&path)
+            .spawn()
+            .map_err(|e| e.to_string())?;
     }
     #[cfg(target_os = "linux")]
     {
-        Command::new("xdg-open").arg(&path).spawn().map_err(|e| e.to_string())?;
+        Command::new("xdg-open")
+            .arg(&path)
+            .spawn()
+            .map_err(|e| e.to_string())?;
     }
     Ok(())
 }
@@ -370,11 +443,22 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            run_rak, stop_rak, rakc_version,
-            run_shell, shell_stop,
-            save_file, read_file, list_dir, list_files_recursive, current_dir,
-            create_file, create_dir, delete_file,
-            rename_file, duplicate_file, open_in_explorer
+            run_rak,
+            stop_rak,
+            rakc_version,
+            run_shell,
+            shell_stop,
+            save_file,
+            read_file,
+            list_dir,
+            list_files_recursive,
+            current_dir,
+            create_file,
+            create_dir,
+            delete_file,
+            rename_file,
+            duplicate_file,
+            open_in_explorer
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -7,8 +7,8 @@ use std::io::{Read, Write};
 
 /// Gzip-compress `data`, returning the gzip bytes.
 pub fn gzip_compress(data: &[u8], level: u32) -> anyhow::Result<Vec<u8>> {
-    use flate2::Compression;
     use flate2::write::GzEncoder;
+    use flate2::Compression;
     let mut enc = GzEncoder::new(Vec::new(), Compression::new(level.min(9)));
     enc.write_all(data)?;
     Ok(enc.finish()?)
@@ -53,8 +53,8 @@ pub fn gzip_decompress(data: &[u8]) -> anyhow::Result<Vec<u8>> {
 
 /// Zip-compress (deflate) `data`, returning raw DEFLATE bytes (no zip container).
 pub fn deflate_compress(data: &[u8], level: u32) -> anyhow::Result<Vec<u8>> {
-    use flate2::Compression;
     use flate2::write::DeflateEncoder;
+    use flate2::Compression;
     let mut enc = DeflateEncoder::new(Vec::new(), Compression::new(level.min(9)));
     enc.write_all(data)?;
     Ok(enc.finish()?)
@@ -91,7 +91,8 @@ pub fn zip_archive(files: Vec<(String, Vec<u8>)>) -> anyhow::Result<Vec<u8>> {
     {
         let mut w = zip::ZipWriter::new(std::io::Cursor::new(&mut buf));
         for (name, bytes) in files {
-            let opts = zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+            let opts = zip::write::FileOptions::default()
+                .compression_method(zip::CompressionMethod::Deflated);
             w.start_file(name, opts)?;
             w.write_all(&bytes)?;
         }
@@ -105,7 +106,12 @@ pub fn zip_list(data: &[u8]) -> anyhow::Result<Vec<String>> {
     let reader = std::io::Cursor::new(data);
     let mut archive = zip::ZipArchive::new(reader)?;
     let names = (0..archive.len())
-        .map(|i| archive.by_index(i).map(|f| f.name().to_string()).unwrap_or_default())
+        .map(|i| {
+            archive
+                .by_index(i)
+                .map(|f| f.name().to_string())
+                .unwrap_or_default()
+        })
         .collect();
     Ok(names)
 }
@@ -177,7 +183,11 @@ mod tests {
 
     #[test]
     fn zip_round_trip() {
-        let zip = zip_archive(vec![("a.txt".to_string(), b"hello".to_vec()), ("b.txt".to_string(), b"world".to_vec())]).unwrap();
+        let zip = zip_archive(vec![
+            ("a.txt".to_string(), b"hello".to_vec()),
+            ("b.txt".to_string(), b"world".to_vec()),
+        ])
+        .unwrap();
         assert_eq!(zip_list(&zip).unwrap(), vec!["a.txt", "b.txt"]);
         assert_eq!(zip_extract(&zip, "a.txt").unwrap(), b"hello");
     }
@@ -188,7 +198,11 @@ mod tests {
     #[test]
     fn gunzip_is_bounded() {
         let bomb = gzip_compress(&vec![0u8; 8 * 1024 * 1024], 6).expect("compress");
-        assert!(bomb.len() < 64 * 1024, "bomb should be small, was {}", bomb.len());
+        assert!(
+            bomb.len() < 64 * 1024,
+            "bomb should be small, was {}",
+            bomb.len()
+        );
         assert_eq!(
             gzip_decompress_limited(&bomb, 32 * 1024 * 1024)
                 .expect("under the limit")
@@ -233,7 +247,10 @@ mod tests {
         // Compressing 200 MiB may itself fail on a constrained runner; only assert
         // when it succeeded, so this test cannot fail for an unrelated reason.
         if let Ok(huge) = huge {
-            assert!(gzip_decompress(&huge).is_err(), "a 200 MiB bomb must be refused");
+            assert!(
+                gzip_decompress(&huge).is_err(),
+                "a 200 MiB bomb must be refused"
+            );
         }
     }
 
@@ -252,5 +269,4 @@ mod tests {
         assert!(gzip_decompress(&[]).is_err());
         assert!(deflate_decompress(&[1, 2, 3, 4]).is_err());
     }
-
 }

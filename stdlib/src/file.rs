@@ -24,7 +24,10 @@ pub fn write_bytes(path: &str, content: &[u8]) -> anyhow::Result<()> {
 /// [`write_bytes`].
 pub fn append_bytes(path: &str, content: &[u8]) -> anyhow::Result<()> {
     use std::io::Write;
-    let mut file = fs::OpenOptions::new().append(true).create(true).open(path)?;
+    let mut file = fs::OpenOptions::new()
+        .append(true)
+        .create(true)
+        .open(path)?;
     file.write_all(content)?;
     Ok(())
 }
@@ -37,7 +40,10 @@ pub fn write(path: &str, content: &str) -> anyhow::Result<()> {
 /// Append content to a file
 pub fn append(path: &str, content: &str) -> anyhow::Result<()> {
     use std::io::Write;
-    let mut file = fs::OpenOptions::new().append(true).create(true).open(path)?;
+    let mut file = fs::OpenOptions::new()
+        .append(true)
+        .create(true)
+        .open(path)?;
     file.write_all(content.as_bytes())?;
     Ok(())
 }
@@ -55,7 +61,10 @@ pub fn size(path: &str) -> Option<u64> {
 /// List files in a directory (returns names)
 pub fn list(path: &str) -> Vec<String> {
     match fs::read_dir(path) {
-        Ok(entries) => entries.filter_map(|e| e.ok()).map(|e| e.file_name().to_string_lossy().to_string()).collect(),
+        Ok(entries) => entries
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .collect(),
         Err(_) => vec![],
     }
 }
@@ -82,24 +91,40 @@ pub fn rename(src: &str, dst: &str) -> bool {
 
 /// Get file extension
 pub fn ext(path: &str) -> Option<String> {
-    Path::new(path).extension().map(|e| e.to_string_lossy().to_string())
+    Path::new(path)
+        .extension()
+        .map(|e| e.to_string_lossy().to_string())
 }
 
 /// Get filename without extension
 pub fn basename(path: &str) -> String {
-    Path::new(path).file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default()
+    Path::new(path)
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default()
 }
 
 /// Get directory path of a file
 pub fn dirname(path: &str) -> String {
-    Path::new(path).parent().map(|p| p.to_string_lossy().to_string()).unwrap_or_default()
+    Path::new(path)
+        .parent()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_default()
 }
 
 /// Create a temporary file and return its path
 pub fn temp_file(prefix: &str) -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
-    let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
-    let path = format!("{}/{}{}", std::env::temp_dir().to_string_lossy(), prefix, timestamp);
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let path = format!(
+        "{}/{}{}",
+        std::env::temp_dir().to_string_lossy(),
+        prefix,
+        timestamp
+    );
     let _ = fs::write(&path, "");
     path
 }

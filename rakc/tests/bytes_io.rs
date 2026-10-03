@@ -81,10 +81,7 @@ fn agree_with_file(tag: &str, scratch: &Scratch, path: &str, source: &str) -> Ve
 fn agree(source: &str) -> Vec<String> {
     let parity = rakc::run_on_both(source, ".");
     if let Some(why) = parity.divergence() {
-        panic!(
-            "backend divergence:\n{}\n--- source ---\n{}",
-            why, source
-        );
+        panic!("backend divergence:\n{}\n--- source ---\n{}", why, source);
     }
     match parity {
         rakc::BackendParity::Agree(out) => out,
@@ -113,7 +110,13 @@ dump back == buf
     // have become U+0000 and U+FFFD.
     assert_eq!(
         out,
-        vec!["[DUMP] 00ff41420a0d", "[DUMP] true", "[DUMP] 6", "[DUMP] 00ff41420a0d", "[DUMP] true"]
+        vec![
+            "[DUMP] 00ff41420a0d",
+            "[DUMP] true",
+            "[DUMP] 6",
+            "[DUMP] 00ff41420a0d",
+            "[DUMP] true"
+        ]
     );
 }
 
@@ -319,7 +322,10 @@ try {{
         rakc::BackendParity::Agree(lines) => {
             assert_eq!(lines, vec!["[DUMP] read-as-text: no"]);
         }
-        other => panic!("the two backends disagreed about reading a binary file as text: {:?}", other),
+        other => panic!(
+            "the two backends disagreed about reading a binary file as text: {:?}",
+            other
+        ),
     }
 }
 
@@ -338,5 +344,12 @@ dump hex_encode(all[..2] + all[6..])
 dump hex_encode(all[0..8])
 "#,
     );
-    assert_eq!(out, vec!["[DUMP] 020304", "[DUMP] 00010607", "[DUMP] 0001020304050607"]);
+    assert_eq!(
+        out,
+        vec![
+            "[DUMP] 020304",
+            "[DUMP] 00010607",
+            "[DUMP] 0001020304050607"
+        ]
+    );
 }

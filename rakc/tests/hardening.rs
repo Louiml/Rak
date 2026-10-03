@@ -9,10 +9,7 @@
 fn agree(source: &str) -> Vec<String> {
     let parity = rakc::run_on_both(source, ".");
     if let Some(why) = parity.divergence() {
-        panic!(
-            "backend divergence:\n{}\n--- source ---\n{}",
-            why, source
-        );
+        panic!("backend divergence:\n{}\n--- source ---\n{}", why, source);
     }
     match parity {
         rakc::BackendParity::Agree(out) => out,
@@ -150,9 +147,16 @@ dump sql_escape(hostile)
 fn md5_warns_on_stderr_and_still_returns_the_digest() {
     let (out, err) = agree_with_stderr("dump md5(\"hello\")\n");
     // The digest is unchanged: this is a deprecation, not a removal.
-    assert_eq!(out, vec!["[DUMP] 5d41402abc4b2a76b9719d911017c592"], "got {out:?}");
+    assert_eq!(
+        out,
+        vec!["[DUMP] 5d41402abc4b2a76b9719d911017c592"],
+        "got {out:?}"
+    );
     let warning = err.join("\n");
-    assert!(warning.contains("md5"), "the warning must name the primitive: {warning}");
+    assert!(
+        warning.contains("md5"),
+        "the warning must name the primitive: {warning}"
+    );
     assert!(warning.contains("deprecated"), "{warning}");
     assert!(
         warning.contains("sha256"),
@@ -172,11 +176,7 @@ fn sha1_warns_too() {
 fn sha256_does_not_warn() {
     // The fix has to stay quiet, or the warning trains people to ignore it.
     let (_, err) = agree_with_stderr("dump sha256(\"hello\")\n");
-    assert!(
-        err.is_empty(),
-        "sha256 must not warn: {:?}",
-        err
-    );
+    assert!(err.is_empty(), "sha256 must not warn: {:?}", err);
 }
 
 #[test]
@@ -199,7 +199,10 @@ dump "done"
 "#,
     );
     let count = err.iter().filter(|l| l.contains("md5")).count();
-    assert_eq!(count, 1, "expected exactly one warning, got {count}: {err:?}");
+    assert_eq!(
+        count, 1,
+        "expected exactly one warning, got {count}: {err:?}"
+    );
 }
 
 #[test]

@@ -80,8 +80,14 @@ mod tests {
     #[test]
     fn renders_sections_with_bullets() {
         let sections: Vec<Section> = vec![
-            ("WHOIS".to_string(), vec!["registrar: Acme".to_string(), "created: 1995".to_string()]),
-            ("Subdomains".to_string(), vec!["www.example.com".to_string()]),
+            (
+                "WHOIS".to_string(),
+                vec!["registrar: Acme".to_string(), "created: 1995".to_string()],
+            ),
+            (
+                "Subdomains".to_string(),
+                vec!["www.example.com".to_string()],
+            ),
         ];
         let out = markdown_report("R", &BTreeMap::new(), &sections);
         assert!(out.contains("## WHOIS\n\n- registrar: Acme\n- created: 1995"));

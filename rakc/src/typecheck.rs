@@ -29,12 +29,26 @@ pub struct Diagnostic {
 
 impl Diagnostic {
     pub fn render(&self) -> String {
-        let mut out = format!("error[{}]: {}\n  --> {}:{}:{}", self.code, self.message, self.file, self.line, self.col);
+        let mut out = format!(
+            "error[{}]: {}\n  --> {}:{}:{}",
+            self.code, self.message, self.file, self.line, self.col
+        );
         if !self.source_line.is_empty() {
             out.push('\n');
             let digits = self.line.to_string().len();
-            out.push_str(&format!("{:>width$} | {}\n", self.line, self.source_line, width = digits));
-            out.push_str(&format!("{:>width$} | {}{}", "", " ".repeat(self.col.saturating_sub(1).min(self.source_line.len())), "^".repeat(1.max(1)), width = digits));
+            out.push_str(&format!(
+                "{:>width$} | {}\n",
+                self.line,
+                self.source_line,
+                width = digits
+            ));
+            out.push_str(&format!(
+                "{:>width$} | {}{}",
+                "",
+                " ".repeat(self.col.saturating_sub(1).min(self.source_line.len())),
+                "^".repeat(1.max(1)),
+                width = digits
+            ));
         }
         if let (Some(e), Some(f)) = (&self.expected, &self.found) {
             out.push_str(&format!("\n\nexpected: {}\nfound:    {}", e, f));
@@ -54,7 +68,9 @@ struct Scope {
 
 impl Scope {
     fn new() -> Self {
-        Scope { vars: HashMap::new() }
+        Scope {
+            vars: HashMap::new(),
+        }
     }
     fn get(&self, name: &str) -> Option<&Type> {
         self.vars.get(name)
@@ -123,7 +139,12 @@ impl<'a> TypeChecker<'a> {
     fn collect_fn_stmt(&mut self, stmt: &Stmt) {
         match stmt {
             Stmt::Let { name, value, .. } => {
-                if let Expr::Function { params, return_type, .. } = value.as_ref() {
+                if let Expr::Function {
+                    params,
+                    return_type,
+                    ..
+                } = value.as_ref()
+                {
                     let params_t: Vec<Type> = params
                         .iter()
                         .map(|p| p.type_hint.clone().unwrap_or(Type::Int))
@@ -217,8 +238,10 @@ impl<'a> TypeChecker<'a> {
             // Exact matches.
             (a, b) if a == b => true,
             // Numeric compatibility: any int/float/hex form is mutually ok.
-            (Int | I8 | I16 | I32 | I64 | U8 | U16 | U32 | U64 | F32 | F64 | Hex(_),
-             Int | I8 | I16 | I32 | I64 | U8 | U16 | U32 | U64 | F32 | F64 | Hex(_)) => true,
+            (
+                Int | I8 | I16 | I32 | I64 | U8 | U16 | U32 | U64 | F32 | F64 | Hex(_),
+                Int | I8 | I16 | I32 | I64 | U8 | U16 | U32 | U64 | F32 | F64 | Hex(_),
+            ) => true,
             // nil/void interop.
             (Void, Nil) | (Nil, Nil) => true,
             // Generics / unknown accept anything.
@@ -239,10 +262,22 @@ impl<'a> TypeChecker<'a> {
 
     fn exec_stmt(&mut self, stmt: &Stmt) {
         match stmt {
-            Stmt::Let { name, value, type_hint, mutable, .. } => {
+            Stmt::Let {
+                name,
+                value,
+                type_hint,
+                mutable,
+                ..
+            } => {
                 // Function definitions: record the signature; don't treat the
                 // function body as a runtime value assignment.
-                if let Expr::Function { params, return_type, body, .. } = value.as_ref() {
+                if let Expr::Function {
+                    params,
+                    return_type,
+                    body,
+                    ..
+                } = value.as_ref()
+                {
                     self.push_scope();
                     for p in params {
                         let pt = p.type_hint.clone().unwrap_or(Type::Int);
@@ -273,7 +308,10 @@ impl<'a> TypeChecker<'a> {
                             "type mismatch",
                             Some(exp),
                             Some(found),
-                            Some("an explicit `let x: T = value` requires `value` to have type `T`".to_string()),
+                            Some(
+                                "an explicit `let x: T = value` requires `value` to have type `T`"
+                                    .to_string(),
+                            ),
                             needle.as_deref(),
                         );
                     }
@@ -288,7 +326,12 @@ impl<'a> TypeChecker<'a> {
                     self.infer(e);
                 }
             }
-            Stmt::If { cond, then_branch, else_branch, .. } => {
+            Stmt::If {
+                cond,
+                then_branch,
+                else_branch,
+                ..
+            } => {
                 self.infer(cond);
                 self.push_scope();
                 for s in then_branch {
@@ -314,7 +357,12 @@ impl<'a> TypeChecker<'a> {
                 self.infer(cond);
                 self.block(body);
             }
-            Stmt::For { pattern, iterable, body, .. } => {
+            Stmt::For {
+                pattern,
+                iterable,
+                body,
+                ..
+            } => {
                 let it = self.infer(iterable);
                 self.push_scope();
                 self.bind_pattern(pattern, &it);
@@ -341,7 +389,9 @@ impl<'a> TypeChecker<'a> {
                 self.pop_scope();
             }
             Stmt::Export(inner) => self.exec_stmt(inner),
-            Stmt::Try { body, catch_name, .. } => {
+            Stmt::Try {
+                body, catch_name, ..
+            } => {
                 self.push_scope();
                 for s in body {
                     self.exec_stmt(s);
@@ -408,10 +458,17 @@ impl<'a> TypeChecker<'a> {
             Regex(_, _) => Type::Custom("regex".into()),
             Bool(_) => Type::Bool,
             Nil => Type::Nil,
-            Ident(name) => self.lookup(name).cloned().unwrap_or(Type::Generic("unknown".into())),
+            Ident(name) => self
+                .lookup(name)
+                .cloned()
+                .unwrap_or(Type::Generic("unknown".into())),
             Tuple(items) => Type::Tuple(items.iter().map(|e| self.infer(e)).collect()),
             Array(items) => {
-                let elem = items.iter().map(|e| self.infer(e)).next().unwrap_or(Type::Int);
+                let elem = items
+                    .iter()
+                    .map(|e| self.infer(e))
+                    .next()
+                    .unwrap_or(Type::Int);
                 Type::Array(Box::new(elem))
             }
             Map(pairs) => {
@@ -475,11 +532,18 @@ impl<'a> TypeChecker<'a> {
                 }
                 self.infer_call(callee, args)
             }
-            If { cond, then_branch, else_branch } => {
+            If {
+                cond,
+                then_branch,
+                else_branch,
+            } => {
                 self.infer(cond);
                 // Type of an if-expr is the type of the last statement (approx).
                 let tt = last_stmt_type(then_branch).unwrap_or(Type::Nil);
-                let et = else_branch.as_deref().and_then(last_stmt_type).unwrap_or(Type::Nil);
+                let et = else_branch
+                    .as_deref()
+                    .and_then(last_stmt_type)
+                    .unwrap_or(Type::Nil);
                 let _ = tt;
                 et
             }
@@ -504,7 +568,10 @@ impl<'a> TypeChecker<'a> {
                                     "unreachable pattern",
                                     None,
                                     None,
-                                    Some(format!("variant `{}::{}` is matched more than once", en, vn)),
+                                    Some(format!(
+                                        "variant `{}::{}` is matched more than once",
+                                        en, vn
+                                    )),
                                     Some(vn),
                                 );
                             }
@@ -631,11 +698,17 @@ impl<'a> TypeChecker<'a> {
         if let Expr::Ident(name) = callee {
             match name.as_str() {
                 "Some" => return Type::Option(Box::new(self.infer_first_arg(args))),
-                "Ok" => return Type::Result(Box::new(self.infer_first_arg(args)), Box::new(Type::Nil)),
-                "Err" => return Type::Result(Box::new(Type::Nil), Box::new(self.infer_first_arg(args))),
+                "Ok" => {
+                    return Type::Result(Box::new(self.infer_first_arg(args)), Box::new(Type::Nil))
+                }
+                "Err" => {
+                    return Type::Result(Box::new(Type::Nil), Box::new(self.infer_first_arg(args)))
+                }
                 "None" => return Type::Option(Box::new(Type::Nil)),
                 "array" => return Type::Array(Box::new(Type::Int)),
-                "map" => return Type::Map(Box::new(Type::String), Box::new(self.infer_first_arg(args))),
+                "map" => {
+                    return Type::Map(Box::new(Type::String), Box::new(self.infer_first_arg(args)))
+                }
                 _ => {}
             }
             // User function: check argument count and types.
@@ -646,7 +719,9 @@ impl<'a> TypeChecker<'a> {
                     // `Int`-typed params accept any numeric literal; skip clear
                     // generics and numeric widening, only flag obvious mismatches
                     // (e.g. a string passed where i32 is expected).
-                    if arg_t == &Type::Generic("unknown".into()) || &Type::Generic("arg".into()) == arg_t {
+                    if arg_t == &Type::Generic("unknown".into())
+                        || &Type::Generic("arg".into()) == arg_t
+                    {
                         continue;
                     }
                     if param_t != &Type::Int && !self.compatible(param_t, arg_t) {
@@ -657,7 +732,10 @@ impl<'a> TypeChecker<'a> {
                             "function argument type mismatch",
                             Some(exp),
                             Some(found),
-                            Some("the argument type must match the declared parameter type".to_string()),
+                            Some(
+                                "the argument type must match the declared parameter type"
+                                    .to_string(),
+                            ),
                             None,
                         );
                     }
@@ -749,12 +827,20 @@ mod tests {
         let diags = check("let count: i32 = \"hello\"");
         assert_eq!(diags.len(), 1);
         assert_eq!(diags[0].code, "E0308");
-        assert!(diags[0].found.as_deref() == Some("string"), "got: {:?}", diags[0]);
+        assert!(
+            diags[0].found.as_deref() == Some("string"),
+            "got: {:?}",
+            diags[0]
+        );
     }
 
     #[test]
     fn accepts_char_hint_with_char_literal() {
-        assert!(check("let c: char = 'א'").is_empty(), "got: {:?}", check("let c: char = 'א'"));
+        assert!(
+            check("let c: char = 'א'").is_empty(),
+            "got: {:?}",
+            check("let c: char = 'א'")
+        );
     }
 
     #[test]
@@ -768,7 +854,11 @@ mod tests {
             "enum State { Ready, Running, Finished }\nlet s: State = State::Ready\nmatch s {\n    State::Ready => { dump 1 }\n    State::Running => { dump 2 }\n}",
         );
         let missing = diags.iter().find(|d| d.code == "W0001");
-        assert!(missing.is_some(), "got: {:?}", diags.iter().map(|d| &d.code).collect::<Vec<_>>());
+        assert!(
+            missing.is_some(),
+            "got: {:?}",
+            diags.iter().map(|d| &d.code).collect::<Vec<_>>()
+        );
     }
 
     #[test]
@@ -776,7 +866,11 @@ mod tests {
         let diags = check(
             "enum State { Ready, Running, Finished }\nlet s: State = State::Ready\nmatch s {\n    State::Ready => { dump 1 }\n    State::Running => { dump 2 }\n    State::Finished => { dump 3 }\n}",
         );
-        assert!(diags.is_empty(), "got: {:?}", diags.iter().map(|d| d.render()).collect::<Vec<_>>());
+        assert!(
+            diags.is_empty(),
+            "got: {:?}",
+            diags.iter().map(|d| d.render()).collect::<Vec<_>>()
+        );
     }
 
     #[test]
@@ -785,6 +879,10 @@ mod tests {
             "enum E { A, B }\nlet e: E = E::A\nmatch e {\n    E::A => { dump 1 }\n    E::A => { dump 2 }\n    E::B => { dump 3 }\n}",
         );
         let un = diags.iter().find(|d| d.code == "E0223");
-        assert!(un.is_some(), "got: {:?}", diags.iter().map(|d| d.code).collect::<Vec<_>>());
+        assert!(
+            un.is_some(),
+            "got: {:?}",
+            diags.iter().map(|d| d.code).collect::<Vec<_>>()
+        );
     }
 }

@@ -17,15 +17,23 @@ use crate::{asset_name, ide_archive_name, status, Component, Config, Scope};
 pub fn run(cfg: &Config, _yes: bool) -> Result<i32> {
     let mut manifest = Manifest {
         version: crate::SETUP_VERSION.to_string(),
-        scope: if cfg.scope == Scope::System { "system" } else { "user" }.to_string(),
+        scope: if cfg.scope == Scope::System {
+            "system"
+        } else {
+            "user"
+        }
+        .to_string(),
         bin_dir: cfg.bin_dir.clone(),
         ide_dir: cfg.ide_dir.clone(),
         packages_dir: cfg.packages_dir.clone(),
         actions: vec![],
     };
 
-    fs::create_dir_all(&cfg.bin_dir).with_context(|| format!("creating bin dir {}", cfg.bin_dir.display()))?;
-    manifest.record(Action::Dir { path: cfg.bin_dir.clone() });
+    fs::create_dir_all(&cfg.bin_dir)
+        .with_context(|| format!("creating bin dir {}", cfg.bin_dir.display()))?;
+    manifest.record(Action::Dir {
+        path: cfg.bin_dir.clone(),
+    });
 
     // rakc + rakpkg -> bin + PATH
     if cfg.components.contains(&Component::Rakc) {
@@ -56,7 +64,10 @@ pub fn run(cfg: &Config, _yes: bool) -> Result<i32> {
     }
 
     manifest.save(cfg.scope)?;
-    status(&format!("install complete. {} actions recorded.", manifest.actions.len()));
+    status(&format!(
+        "install complete. {} actions recorded.",
+        manifest.actions.len()
+    ));
     if cfg.components.contains(&Component::Rakc) {
         println!("\nNext: open a new shell and run `rakc --version`.");
     } else if cfg.components.contains(&Component::Rakpkg) {
@@ -70,7 +81,11 @@ pub fn run(cfg: &Config, _yes: bool) -> Result<i32> {
 
 /// Install a single binary (rakc or rakpkg) into the bin dir.
 fn install_binary(cfg: &Config, name: &str, manifest: &mut Manifest) -> Result<()> {
-    let dst = cfg.bin_dir.join(if platform::is_windows() { format!("{}.exe", name) } else { name.to_string() });
+    let dst = cfg.bin_dir.join(if platform::is_windows() {
+        format!("{}.exe", name)
+    } else {
+        name.to_string()
+    });
     status(&format!("installing {} -> {}", name, dst.display()));
     let bytes = fetch_or_bundle(cfg, name)?;
     fs::write(&dst, &bytes)?;
@@ -108,7 +123,9 @@ use std::io::Read;
 fn install_ide(cfg: &Config, manifest: &mut Manifest) -> Result<()> {
     status(&format!("installing IDE -> {}", cfg.ide_dir.display()));
     fs::create_dir_all(&cfg.ide_dir)?;
-    manifest.record(Action::Dir { path: cfg.ide_dir.clone() });
+    manifest.record(Action::Dir {
+        path: cfg.ide_dir.clone(),
+    });
 
     if let Some(bundle) = &cfg.offline_bundle {
         extract_ide_from_bundle(bundle, &cfg.ide_dir)?;
@@ -128,7 +145,11 @@ fn install_ide(cfg: &Config, manifest: &mut Manifest) -> Result<()> {
 
 /// Extract a single named binary from a tar.gz bundle (Linux) or zip (Windows).
 fn extract_from_bundle(bundle: &Path, name: &str) -> Result<Vec<u8>> {
-    let target = if platform::is_windows() { format!("{}.exe", name) } else { name.to_string() };
+    let target = if platform::is_windows() {
+        format!("{}.exe", name)
+    } else {
+        name.to_string()
+    };
     #[cfg(target_os = "windows")]
     {
         let f = fs::File::open(bundle)?;
@@ -194,7 +215,9 @@ fn extract_ide_from_bundle(bundle: &Path, dst: &Path) -> Result<()> {
                 if name.ends_with('/') {
                     fs::create_dir_all(&out)?;
                 } else {
-                    if let Some(p) = out.parent() { fs::create_dir_all(p)?; }
+                    if let Some(p) = out.parent() {
+                        fs::create_dir_all(p)?;
+                    }
                     let mut buf = Vec::new();
                     zf.read_to_end(&mut buf)?;
                     fs::write(&out, &buf)?;
@@ -237,8 +260,14 @@ fn add_to_path(cfg: &Config, manifest: &mut Manifest) -> Result<()> {
         status(&format!("adding {} to PATH ({}, append-only)", bin, hive));
         if platform::win::path_add(key, &bin)? {
             match cfg.scope {
-                Scope::User => manifest.record(Action::EnvUser { key: "PATH".to_string(), value: bin }),
-                Scope::System => manifest.record(Action::EnvSystem { key: "PATH".to_string(), value: bin }),
+                Scope::User => manifest.record(Action::EnvUser {
+                    key: "PATH".to_string(),
+                    value: bin,
+                }),
+                Scope::System => manifest.record(Action::EnvSystem {
+                    key: "PATH".to_string(),
+                    value: bin,
+                }),
             }
             platform::win::broadcast_env_change();
         }
@@ -255,7 +284,10 @@ fn add_to_path(cfg: &Config, manifest: &mut Manifest) -> Result<()> {
                         status(&format!("appending PATH export to {}", rc.display()));
                         let mut f = fs::OpenOptions::new().append(true).create(true).open(&rc)?;
                         writeln!(f, "\n# added by rak-setup\n{}\n", line)?;
-                        manifest.record(Action::PathLine { rc_file: rc, line: line.clone() });
+                        manifest.record(Action::PathLine {
+                            rc_file: rc,
+                            line: line.clone(),
+                        });
                     }
                 }
                 Ok(())
@@ -283,12 +315,23 @@ fn set_rak_path(cfg: &Config, manifest: &mut Manifest) -> Result<()> {
             Scope::User => {
                 status(&format!("setting RAK_PATH={}", pkgs));
                 platform::win::set_value(platform::win::USER_ENV_KEY, "RAK_PATH", "REG_SZ", &pkgs)?;
-                manifest.record(Action::EnvUser { key: "RAK_PATH".to_string(), value: pkgs });
+                manifest.record(Action::EnvUser {
+                    key: "RAK_PATH".to_string(),
+                    value: pkgs,
+                });
             }
             Scope::System => {
                 status(&format!("setting RAK_PATH={} (system)", pkgs));
-                platform::win::set_value(platform::win::SYSTEM_ENV_KEY, "RAK_PATH", "REG_SZ", &pkgs)?;
-                manifest.record(Action::EnvSystem { key: "RAK_PATH".to_string(), value: pkgs });
+                platform::win::set_value(
+                    platform::win::SYSTEM_ENV_KEY,
+                    "RAK_PATH",
+                    "REG_SZ",
+                    &pkgs,
+                )?;
+                manifest.record(Action::EnvSystem {
+                    key: "RAK_PATH".to_string(),
+                    value: pkgs,
+                });
             }
         }
         platform::win::broadcast_env_change();
@@ -302,7 +345,10 @@ fn set_rak_path(cfg: &Config, manifest: &mut Manifest) -> Result<()> {
             if !contents.contains(&line) {
                 let mut f = fs::OpenOptions::new().append(true).create(true).open(&rc)?;
                 writeln!(f, "\n# added by rak-setup\n{}\n", line)?;
-                manifest.record(Action::PathLine { rc_file: rc, line: line.clone() });
+                manifest.record(Action::PathLine {
+                    rc_file: rc,
+                    line: line.clone(),
+                });
             }
         }
         Ok(())
@@ -311,7 +357,11 @@ fn set_rak_path(cfg: &Config, manifest: &mut Manifest) -> Result<()> {
 
 /// Create desktop/start-menu shortcuts and .rak file association.
 fn create_shortcuts(cfg: &Config, manifest: &mut Manifest) -> Result<()> {
-    let ide_exe = cfg.ide_dir.join(if platform::is_windows() { "rak-ide.exe" } else { "rak-ide" });
+    let ide_exe = cfg.ide_dir.join(if platform::is_windows() {
+        "rak-ide.exe"
+    } else {
+        "rak-ide"
+    });
     #[cfg(not(target_os = "windows"))]
     {
         let desktop_dir = match cfg.scope {
@@ -331,13 +381,17 @@ fn create_shortcuts(cfg: &Config, manifest: &mut Manifest) -> Result<()> {
     }
     #[cfg(target_os = "windows")]
     {
-        let startmenu = platform::home()?.join("AppData/Roaming/Microsoft/Windows/Start Menu/Programs");
+        let startmenu =
+            platform::home()?.join("AppData/Roaming/Microsoft/Windows/Start Menu/Programs");
         if startmenu.exists() {
             let lnk = startmenu.join("Rak IDE.lnk");
             // Best-effort: create a simple .url-style stub. A real .lnk needs
             // COM; we write a launcher .bat alongside as a reliable fallback.
             let bat = startmenu.join("Rak IDE.bat");
-            fs::write(&bat, format!("@echo off\nstart \"\" \"{}\"\n", ide_exe.display()))?;
+            fs::write(
+                &bat,
+                format!("@echo off\nstart \"\" \"{}\"\n", ide_exe.display()),
+            )?;
             manifest.record(Action::StartMenuShortcut { path: bat });
             let _ = lnk;
         }
@@ -362,16 +416,22 @@ fn install_man_and_completions(cfg: &Config, manifest: &mut Manifest) -> Result<
     };
     fs::create_dir_all(&man_dir)?;
     fs::write(man_dir.join("rakc.1"), man1)?;
-    manifest.record(Action::File { path: man_dir.join("rakc.1") });
+    manifest.record(Action::File {
+        path: man_dir.join("rakc.1"),
+    });
     fs::write(man_dir.join("rakpkg.1"), man2)?;
-    manifest.record(Action::File { path: man_dir.join("rakpkg.1") });
+    manifest.record(Action::File {
+        path: man_dir.join("rakpkg.1"),
+    });
 
     #[cfg(not(target_os = "windows"))]
     {
         fs::create_dir_all(&comp_dir)?;
         let bash = include_str!("../../dist/completions/rakc.bash");
         fs::write(comp_dir.join("rakc"), bash)?;
-        manifest.record(Action::File { path: comp_dir.join("rakc") });
+        manifest.record(Action::File {
+            path: comp_dir.join("rakc"),
+        });
         let zsh = include_str!("../../dist/completions/rakc.zsh");
         let zsh_dir = match cfg.scope {
             Scope::User => platform::home()?.join(".local/share/zsh/site-functions"),
@@ -379,7 +439,9 @@ fn install_man_and_completions(cfg: &Config, manifest: &mut Manifest) -> Result<
         };
         fs::create_dir_all(&zsh_dir)?;
         fs::write(zsh_dir.join("_rakc"), zsh)?;
-        manifest.record(Action::File { path: zsh_dir.join("_rakc") });
+        manifest.record(Action::File {
+            path: zsh_dir.join("_rakc"),
+        });
     }
     #[cfg(target_os = "windows")]
     {

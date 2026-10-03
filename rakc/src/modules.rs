@@ -41,11 +41,17 @@ pub fn resolve_dotted(importer_dir: &Path, parts: &[String]) -> Option<DottedRes
         if parts.len() == 1 {
             let f = d.join(format!("{}.rak", parts[0]));
             if f.is_file() {
-                return Some(DottedResolve { init: None, leaf: f });
+                return Some(DottedResolve {
+                    init: None,
+                    leaf: f,
+                });
             }
             let init = d.join(parts[0].as_str()).join("init.rak");
             if init.is_file() {
-                return Some(DottedResolve { init: None, leaf: init });
+                return Some(DottedResolve {
+                    init: None,
+                    leaf: init,
+                });
             }
         } else {
             let pkg_dir = d.join(parts[0].as_str());
@@ -111,7 +117,10 @@ mod tests {
         fs::write(d.join("pkg").join("sub.rak"), "dump 2").unwrap();
         let r = resolve_dotted(&d, &["pkg".to_string(), "sub".to_string()]).unwrap();
         assert_eq!(r.leaf, d.join("pkg").join("sub.rak"));
-        assert_eq!(r.init.as_deref().unwrap(), d.join("pkg").join("init.rak").as_path());
+        assert_eq!(
+            r.init.as_deref().unwrap(),
+            d.join("pkg").join("init.rak").as_path()
+        );
         let _ = fs::remove_dir_all(&d);
     }
 

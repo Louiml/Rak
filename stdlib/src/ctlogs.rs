@@ -56,7 +56,10 @@ pub fn subdomains(domain: &str) -> anyhow::Result<Vec<String>> {
         anyhow::bail!("ct: '{}' is not a qualified domain name", domain);
     }
     let query = format!("%.{}", domain);
-    let url = format!("https://crt.sh/?q={}&output=json", urlencoding::encode(&query));
+    let url = format!(
+        "https://crt.sh/?q={}&output=json",
+        urlencoding::encode(&query)
+    );
     let resp = crate::net::http_get(&url, None)?;
     if resp.status >= 400 {
         anyhow::bail!("crt.sh returned HTTP {}", resp.status);
@@ -83,7 +86,10 @@ mod tests {
         assert!(subs.contains(&"mail.example.com".to_string()));
         assert!(subs.contains(&"api.example.com".to_string()));
         // "example.com" appears twice in name_value; must be deduped.
-        assert_eq!(subs.iter().filter(|s| s.as_str() == "example.com").count(), 1);
+        assert_eq!(
+            subs.iter().filter(|s| s.as_str() == "example.com").count(),
+            1
+        );
         // The parser is generic; the caller filters to the queried tree.
         let within = filter_within(subs, "example.com");
         assert!(within.contains(&"www.example.com".to_string()));

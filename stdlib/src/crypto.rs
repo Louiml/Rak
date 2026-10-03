@@ -1,4 +1,4 @@
-use md5::{Md5, Digest};
+use md5::{Digest, Md5};
 use zeroize::Zeroizing;
 
 /// Calculate MD5 hash of input bytes
@@ -10,7 +10,7 @@ pub fn md5(data: &[u8]) -> String {
 
 /// Calculate SHA256 hash of input bytes
 pub fn sha256(data: &[u8]) -> String {
-    use sha2::{Sha256, Digest};
+    use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     hasher.update(data);
     format!("{:x}", hasher.finalize())
@@ -18,7 +18,7 @@ pub fn sha256(data: &[u8]) -> String {
 
 /// Calculate SHA1 hash of input bytes
 pub fn sha1(data: &[u8]) -> String {
-    use sha1::{Sha1, Digest};
+    use sha1::{Digest, Sha1};
     let mut hasher = Sha1::new();
     hasher.update(data);
     format!("{:x}", hasher.finalize())
@@ -51,7 +51,7 @@ pub fn rot13(input: &str) -> String {
 pub fn file_hash(path: &str, algorithm: &str) -> anyhow::Result<String> {
     use std::fs;
     let data = fs::read(path)?;
-    
+
     match algorithm {
         "md5" => Ok(md5(&data)),
         "sha1" => Ok(sha1(&data)),
@@ -75,8 +75,11 @@ pub fn hmac_sha256(key: &[u8], data: &[u8]) -> String {
 pub fn aes_gcm_encrypt(key: &[u8], nonce: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, String> {
     use aes_gcm::aead::{Aead, KeyInit};
     use aes_gcm::{Aes256Gcm, Nonce};
-    let cipher = Aes256Gcm::new_from_slice(key).map_err(|_| "aes_gcm_encrypt: key must be 32 bytes".to_string())?;
-    let nonce_arr: &[u8; 12] = nonce.try_into().map_err(|_| "aes_gcm_encrypt: nonce must be 12 bytes".to_string())?;
+    let cipher = Aes256Gcm::new_from_slice(key)
+        .map_err(|_| "aes_gcm_encrypt: key must be 32 bytes".to_string())?;
+    let nonce_arr: &[u8; 12] = nonce
+        .try_into()
+        .map_err(|_| "aes_gcm_encrypt: nonce must be 12 bytes".to_string())?;
     cipher
         .encrypt(Nonce::from_slice(nonce_arr), plaintext)
         .map_err(|e| format!("aes_gcm_encrypt: {}", e))
@@ -87,8 +90,11 @@ pub fn aes_gcm_encrypt(key: &[u8], nonce: &[u8], plaintext: &[u8]) -> Result<Vec
 pub fn aes_gcm_decrypt(key: &[u8], nonce: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>, String> {
     use aes_gcm::aead::{Aead, KeyInit};
     use aes_gcm::{Aes256Gcm, Nonce};
-    let cipher = Aes256Gcm::new_from_slice(key).map_err(|_| "aes_gcm_decrypt: key must be 32 bytes".to_string())?;
-    let nonce_arr: &[u8; 12] = nonce.try_into().map_err(|_| "aes_gcm_decrypt: nonce must be 12 bytes".to_string())?;
+    let cipher = Aes256Gcm::new_from_slice(key)
+        .map_err(|_| "aes_gcm_decrypt: key must be 32 bytes".to_string())?;
+    let nonce_arr: &[u8; 12] = nonce
+        .try_into()
+        .map_err(|_| "aes_gcm_decrypt: nonce must be 12 bytes".to_string())?;
     cipher
         .decrypt(Nonce::from_slice(nonce_arr), ciphertext)
         .map_err(|_| "aes_gcm_decrypt: authentication failed or bad key/nonce".to_string())
@@ -97,7 +103,9 @@ pub fn aes_gcm_decrypt(key: &[u8], nonce: &[u8], ciphertext: &[u8]) -> Result<Ve
 /// Generate an Ed25519 keypair from a 32-byte seed. Returns (public_key, secret_key).
 pub fn ed25519_keypair(seed: &[u8]) -> Result<(Vec<u8>, Vec<u8>), String> {
     use ed25519_dalek::SigningKey;
-    let seed_arr: &[u8; 32] = seed.try_into().map_err(|_| "ed25519_keypair: seed must be 32 bytes".to_string())?;
+    let seed_arr: &[u8; 32] = seed
+        .try_into()
+        .map_err(|_| "ed25519_keypair: seed must be 32 bytes".to_string())?;
     let signing = SigningKey::from_bytes(seed_arr);
     let verifying = signing.verifying_key();
     Ok((verifying.to_bytes().to_vec(), signing.to_bytes().to_vec()))
@@ -107,7 +115,9 @@ pub fn ed25519_keypair(seed: &[u8]) -> Result<(Vec<u8>, Vec<u8>), String> {
 pub fn ed25519_sign(secret: &[u8], message: &[u8]) -> Result<Vec<u8>, String> {
     use ed25519_dalek::Signer;
     use ed25519_dalek::SigningKey;
-    let sk_arr: &[u8; 32] = secret.try_into().map_err(|_| "ed25519_sign: secret must be 32 bytes".to_string())?;
+    let sk_arr: &[u8; 32] = secret
+        .try_into()
+        .map_err(|_| "ed25519_sign: secret must be 32 bytes".to_string())?;
     let signing = SigningKey::from_bytes(sk_arr);
     use ed25519_dalek::Signature;
     let sig: Signature = signing.sign(message);
@@ -117,9 +127,14 @@ pub fn ed25519_sign(secret: &[u8], message: &[u8]) -> Result<Vec<u8>, String> {
 /// Verify an Ed25519 signature against a public key and message.
 pub fn ed25519_verify(public: &[u8], signature: &[u8], message: &[u8]) -> Result<bool, String> {
     use ed25519_dalek::{Signature, Verifier, VerifyingKey};
-    let pk_arr: &[u8; 32] = public.try_into().map_err(|_| "ed25519_verify: public key must be 32 bytes".to_string())?;
-    let sig_arr: &[u8; 64] = signature.try_into().map_err(|_| "ed25519_verify: signature must be 64 bytes".to_string())?;
-    let pk = VerifyingKey::from_bytes(pk_arr).map_err(|_| "ed25519_verify: invalid public key".to_string())?;
+    let pk_arr: &[u8; 32] = public
+        .try_into()
+        .map_err(|_| "ed25519_verify: public key must be 32 bytes".to_string())?;
+    let sig_arr: &[u8; 64] = signature
+        .try_into()
+        .map_err(|_| "ed25519_verify: signature must be 64 bytes".to_string())?;
+    let pk = VerifyingKey::from_bytes(pk_arr)
+        .map_err(|_| "ed25519_verify: invalid public key".to_string())?;
     let sig = Signature::from_bytes(sig_arr);
     Ok(pk.verify(message, &sig).is_ok())
 }
@@ -177,7 +192,10 @@ pub fn ct_select(choice: u8, a: &[u8], b: &[u8]) -> Result<Vec<u8>, String> {
     // Mask is 0xFF when `choice` is truthy, 0x00 otherwise.
     let mask = (choice != 0) as u8;
     let mask = 0u8.wrapping_sub(mask);
-    Ok(a.iter().zip(b.iter()).map(|(x, y)| (x & mask) | (y & !mask)).collect())
+    Ok(a.iter()
+        .zip(b.iter())
+        .map(|(x, y)| (x & mask) | (y & !mask))
+        .collect())
 }
 
 // ---------------------------------------------------------------------------
@@ -265,8 +283,7 @@ pub fn rsa_sign(private_der: &[u8], message: &[u8]) -> Result<Vec<u8>, String> {
     use rsa::pkcs8::DecodePrivateKey;
     use rsa::signature::{SignatureEncoding, Signer};
     use rsa::RsaPrivateKey;
-    let key = RsaPrivateKey::from_pkcs8_der(private_der)
-        .map_err(|e| format!("rsa_sign: {}", e))?;
+    let key = RsaPrivateKey::from_pkcs8_der(private_der).map_err(|e| format!("rsa_sign: {}", e))?;
     let signing = SigningKey::<sha2::Sha256>::new(key);
     Ok(signing.sign(message).to_vec())
 }
@@ -278,8 +295,8 @@ pub fn rsa_verify(public_der: &[u8], signature: &[u8], message: &[u8]) -> Result
     use rsa::signature::Verifier;
     use rsa::RsaPublicKey;
     use sha2::Sha256;
-    let key = RsaPublicKey::from_public_key_der(public_der)
-        .map_err(|e| format!("rsa_verify: {}", e))?;
+    let key =
+        RsaPublicKey::from_public_key_der(public_der).map_err(|e| format!("rsa_verify: {}", e))?;
     let vk = VerifyingKey::<Sha256>::new(key);
     let sig = Signature::try_from(signature).map_err(|e| format!("rsa_verify: {}", e))?;
     Ok(vk.verify(message, &sig).is_ok())
@@ -289,8 +306,8 @@ pub fn rsa_verify(public_der: &[u8], signature: &[u8], message: &[u8]) -> Result
 pub fn rsa_encrypt(public_der: &[u8], plaintext: &[u8], label: &[u8]) -> Result<Vec<u8>, String> {
     use rsa::pkcs8::DecodePublicKey;
     use rsa::RsaPublicKey;
-    let key = RsaPublicKey::from_public_key_der(public_der)
-        .map_err(|e| format!("rsa_encrypt: {}", e))?;
+    let key =
+        RsaPublicKey::from_public_key_der(public_der).map_err(|e| format!("rsa_encrypt: {}", e))?;
     let mut rng = rand::thread_rng();
     let oaep = oaep_sha256(label);
     key.encrypt(&mut rng, oaep, plaintext)
@@ -301,8 +318,8 @@ pub fn rsa_encrypt(public_der: &[u8], plaintext: &[u8], label: &[u8]) -> Result<
 pub fn rsa_decrypt(private_der: &[u8], ciphertext: &[u8], label: &[u8]) -> Result<Vec<u8>, String> {
     use rsa::pkcs8::DecodePrivateKey;
     use rsa::RsaPrivateKey;
-    let key = RsaPrivateKey::from_pkcs8_der(private_der)
-        .map_err(|e| format!("rsa_decrypt: {}", e))?;
+    let key =
+        RsaPrivateKey::from_pkcs8_der(private_der).map_err(|e| format!("rsa_decrypt: {}", e))?;
     key.decrypt(oaep_sha256(label), ciphertext)
         .map_err(|e| format!("rsa_decrypt: {}", e))
 }
@@ -348,8 +365,7 @@ pub fn ecdsa_sign(private_der: &[u8], message: &[u8]) -> Result<Vec<u8>, String>
     use p256::ecdsa::signature::Signer;
     use p256::ecdsa::{Signature, SigningKey};
     use p256::pkcs8::DecodePrivateKey;
-    let key = SigningKey::from_pkcs8_der(private_der)
-        .map_err(|e| format!("ecdsa_sign: {}", e))?;
+    let key = SigningKey::from_pkcs8_der(private_der).map_err(|e| format!("ecdsa_sign: {}", e))?;
     let sig: Signature = key.sign(message);
     Ok(sig.to_bytes().to_vec())
 }
@@ -361,8 +377,7 @@ pub fn ecdsa_verify(public_der: &[u8], signature: &[u8], message: &[u8]) -> Resu
     use p256::pkcs8::DecodePublicKey;
     let key = VerifyingKey::from_public_key_der(public_der)
         .map_err(|e| format!("ecdsa_verify: {}", e))?;
-    let sig = Signature::from_slice(signature)
-        .map_err(|e| format!("ecdsa_verify: {}", e))?;
+    let sig = Signature::from_slice(signature).map_err(|e| format!("ecdsa_verify: {}", e))?;
     Ok(key.verify(message, &sig).is_ok())
 }
 

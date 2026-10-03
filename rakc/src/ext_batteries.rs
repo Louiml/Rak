@@ -30,7 +30,12 @@ fn vv_ok(v: VV) -> VV {
     VV::Result(Some(Box::new(v)), None)
 }
 fn vv_err(msg: impl Into<String>) -> VV {
-    VV::Result(None, Some(Box::new(VV::String(std::sync::Arc::from(msg.into().as_str())))))
+    VV::Result(
+        None,
+        Some(Box::new(VV::String(std::sync::Arc::from(
+            msg.into().as_str(),
+        )))),
+    )
 }
 
 fn arg_count(name: &str, args: &[IV], min: usize, max: usize) -> Option<crate::Result<IV>> {
@@ -38,7 +43,11 @@ fn arg_count(name: &str, args: &[IV], min: usize, max: usize) -> Option<crate::R
         return Some(iv_err_res(format!(
             "{}() expects {} argument(s), got {}",
             name,
-            if min == max { format!("{}", min) } else { format!("{}..{}", min, max) },
+            if min == max {
+                format!("{}", min)
+            } else {
+                format!("{}..{}", min, max)
+            },
             args.len()
         )));
     }
@@ -50,7 +59,10 @@ fn as_str<'a>(v: Option<&'a IV>, what: &str) -> Result<&'a str, crate::RakError>
         Some(IV::String(s)) => Ok(s),
         Some(IV::Bytes(b)) => std::str::from_utf8(b)
             .map_err(|_| crate::RakError::Runtime(format!("{}: invalid utf-8 bytes", what))),
-        _ => Err(crate::RakError::Runtime(format!("{} expects a string", what))),
+        _ => Err(crate::RakError::Runtime(format!(
+            "{} expects a string",
+            what
+        ))),
     }
 }
 
@@ -67,7 +79,10 @@ fn as_bytes(v: Option<&IV>, what: &str) -> Result<Vec<u8>, crate::RakError> {
     match v {
         Some(IV::Bytes(b)) => Ok(b.clone()),
         Some(IV::String(s)) => Ok(s.as_bytes().to_vec()),
-        _ => Err(crate::RakError::Runtime(format!("{} expects string or bytes", what))),
+        _ => Err(crate::RakError::Runtime(format!(
+            "{} expects string or bytes",
+            what
+        ))),
     }
 }
 
@@ -79,7 +94,9 @@ fn time_interp(name: &str, args: &[IV]) -> Option<crate::Result<IV>> {
         "time_now" => Some(Ok(iv_int(timekit::now_unix()))),
         "time_now_millis" => Some(Ok(iv_int(timekit::now_millis()))),
         "time_fmt" => {
-            if let Some(e) = arg_count(name, args, 2, 2) { return Some(e); }
+            if let Some(e) = arg_count(name, args, 2, 2) {
+                return Some(e);
+            }
             Some((|| {
                 let ts = as_i64(args.first(), "time_fmt(ts, fmt)")?;
                 let f = as_str(args.get(1), "time_fmt(ts, fmt)")?;
@@ -87,7 +104,9 @@ fn time_interp(name: &str, args: &[IV]) -> Option<crate::Result<IV>> {
             })())
         }
         "time_parse" => {
-            if let Some(e) = arg_count(name, args, 1, 1) { return Some(e); }
+            if let Some(e) = arg_count(name, args, 1, 1) {
+                return Some(e);
+            }
             Some((|| {
                 let s = as_str(args.first(), "time_parse(s)")?;
                 Ok(match timekit::parse(s) {
@@ -97,7 +116,9 @@ fn time_interp(name: &str, args: &[IV]) -> Option<crate::Result<IV>> {
             })())
         }
         "time_parts" => {
-            if let Some(e) = arg_count(name, args, 1, 1) { return Some(e); }
+            if let Some(e) = arg_count(name, args, 1, 1) {
+                return Some(e);
+            }
             Some((|| {
                 let ts = as_i64(args.first(), "time_parts(ts)")?;
                 let c = timekit::tm_from_unix(ts);
@@ -114,7 +135,9 @@ fn time_interp(name: &str, args: &[IV]) -> Option<crate::Result<IV>> {
             })())
         }
         "time_add" => {
-            if let Some(e) = arg_count(name, args, 2, 2) { return Some(e); }
+            if let Some(e) = arg_count(name, args, 2, 2) {
+                return Some(e);
+            }
             Some((|| {
                 let ts = as_i64(args.first(), "time_add(ts, secs)")?;
                 let secs = as_i64(args.get(1), "time_add(ts, secs)")?;
@@ -122,24 +145,30 @@ fn time_interp(name: &str, args: &[IV]) -> Option<crate::Result<IV>> {
             })())
         }
         "time_diff" => {
-            if let Some(e) = arg_count(name, args, 2, 2) { return Some(e); }
+            if let Some(e) = arg_count(name, args, 2, 2) {
+                return Some(e);
+            }
             Some((|| {
                 let a = as_i64(args.first(), "time_diff(a, b)")?;
                 let b = as_i64(args.get(1), "time_diff(a, b)")?;
                 Ok(iv_int(a - b))
             })())
         }
-        "date_today" => Some(Ok(IV::String(timekit::fmt(timekit::now_unix(), "%Y-%m-%d")))),
+        "date_today" => Some(Ok(IV::String(timekit::fmt(
+            timekit::now_unix(),
+            "%Y-%m-%d",
+        )))),
         _ => None,
     }
 }
-
 
 fn rand_interp(name: &str, args: &[IV]) -> Option<crate::Result<IV>> {
     use rak_stdlib::randkit;
     match name {
         "rand_seed" => {
-            if let Some(e) = arg_count(name, args, 1, 1) { return Some(e); }
+            if let Some(e) = arg_count(name, args, 1, 1) {
+                return Some(e);
+            }
             Some((|| {
                 let n = as_i64(args.first(), "rand_seed(n)")?;
                 randkit::reseed(n);
@@ -147,10 +176,15 @@ fn rand_interp(name: &str, args: &[IV]) -> Option<crate::Result<IV>> {
             })())
         }
         "rand_int" => {
-            if let Some(e) = arg_count(name, args, 1, 2) { return Some(e); }
+            if let Some(e) = arg_count(name, args, 1, 2) {
+                return Some(e);
+            }
             Some((|| {
                 let (lo, hi) = if args.len() == 2 {
-                    (as_i64(args.first(), "rand_int(lo, hi)")?, as_i64(args.get(1), "rand_int(lo, hi)")?)
+                    (
+                        as_i64(args.first(), "rand_int(lo, hi)")?,
+                        as_i64(args.get(1), "rand_int(lo, hi)")?,
+                    )
                 } else {
                     (0, as_i64(args.first(), "rand_int(hi)")?)
                 };
@@ -164,25 +198,35 @@ fn rand_interp(name: &str, args: &[IV]) -> Option<crate::Result<IV>> {
         }
         "rand_float" => Some(Ok(IV::Float(randkit::gen_float()))),
         "rand_bytes" => {
-            if let Some(e) = arg_count(name, args, 1, 1) { return Some(e); }
+            if let Some(e) = arg_count(name, args, 1, 1) {
+                return Some(e);
+            }
             Some((|| {
                 let n = as_i64(args.first(), "rand_bytes(n)")?.max(0) as usize;
                 Ok(IV::Bytes(randkit::gen_bytes(n)))
             })())
         }
         "rand_hex" => {
-            if let Some(e) = arg_count(name, args, 1, 1) { return Some(e); }
+            if let Some(e) = arg_count(name, args, 1, 1) {
+                return Some(e);
+            }
             Some((|| {
                 let n = as_i64(args.first(), "rand_hex(n)")?.max(0) as usize;
                 Ok(IV::String(randkit::gen_hex(n)))
             })())
         }
         "rand_choice" => {
-            if let Some(e) = arg_count(name, args, 1, 1) { return Some(e); }
+            if let Some(e) = arg_count(name, args, 1, 1) {
+                return Some(e);
+            }
             Some((|| {
                 let arr = match args.first() {
                     Some(IV::Array(a)) => a.clone(),
-                    _ => return Err(crate::RakError::Runtime("rand_choice(arr) requires an array".to_string())),
+                    _ => {
+                        return Err(crate::RakError::Runtime(
+                            "rand_choice(arr) requires an array".to_string(),
+                        ))
+                    }
                 };
                 Ok(match randkit::gen_index(arr.len()) {
                     Some(i) => iv_ok(arr[i].clone()),
@@ -191,11 +235,17 @@ fn rand_interp(name: &str, args: &[IV]) -> Option<crate::Result<IV>> {
             })())
         }
         "rand_shuffle" => {
-            if let Some(e) = arg_count(name, args, 1, 1) { return Some(e); }
+            if let Some(e) = arg_count(name, args, 1, 1) {
+                return Some(e);
+            }
             Some((|| {
                 let mut arr = match args.first() {
                     Some(IV::Array(a)) => a.clone(),
-                    _ => return Err(crate::RakError::Runtime("rand_shuffle(arr) requires an array".to_string())),
+                    _ => {
+                        return Err(crate::RakError::Runtime(
+                            "rand_shuffle(arr) requires an array".to_string(),
+                        ))
+                    }
                 };
                 randkit::gen_shuffle(&mut arr);
                 Ok(IV::Array(arr))
@@ -237,7 +287,9 @@ fn data_archive_interp(name: &str, args: &[IV]) -> Option<crate::Result<IV>> {
     use rak_stdlib::{archive, datafmt};
     match name {
         "csv_parse" => {
-            if let Some(e) = arg_count(name, args, 1, 2) { return Some(e); }
+            if let Some(e) = arg_count(name, args, 1, 2) {
+                return Some(e);
+            }
             Some((|| {
                 let text = as_str(args.first(), "csv_parse(text)")?.to_string();
                 let header = match args.get(1) {
@@ -248,7 +300,9 @@ fn data_archive_interp(name: &str, args: &[IV]) -> Option<crate::Result<IV>> {
                 let rows = datafmt::parse_csv(&text).map_err(crate::RakError::Runtime)?;
                 if header {
                     return Ok(IV::Array(
-                        rows.into_iter().map(|r| IV::Array(r.into_iter().map(IV::String).collect())).collect(),
+                        rows.into_iter()
+                            .map(|r| IV::Array(r.into_iter().map(IV::String).collect()))
+                            .collect(),
                     ));
                 }
                 if rows.is_empty() {
@@ -268,11 +322,17 @@ fn data_archive_interp(name: &str, args: &[IV]) -> Option<crate::Result<IV>> {
             })())
         }
         "csv_stringify" => {
-            if let Some(e) = arg_count(name, args, 1, 1) { return Some(e); }
+            if let Some(e) = arg_count(name, args, 1, 1) {
+                return Some(e);
+            }
             Some((|| {
                 let rows = match args.first() {
                     Some(IV::Array(items)) => items.clone(),
-                    _ => return Err(crate::RakError::Runtime("csv_stringify(rows) requires an array".to_string())),
+                    _ => {
+                        return Err(crate::RakError::Runtime(
+                            "csv_stringify(rows) requires an array".to_string(),
+                        ))
+                    }
                 };
                 if rows.iter().all(|r| matches!(r, IV::Map(_))) {
                     // array of maps: columns from the first row's keys.
@@ -284,7 +344,11 @@ fn data_archive_interp(name: &str, args: &[IV]) -> Option<crate::Result<IV>> {
                     let mut lines = vec![cols.clone()];
                     for r in &rows {
                         if let IV::Map(m) = r {
-                            lines.push(cols.iter().map(|c| m.get(c).map(iv_cell).unwrap_or_default()).collect());
+                            lines.push(
+                                cols.iter()
+                                    .map(|c| m.get(c).map(iv_cell).unwrap_or_default())
+                                    .collect(),
+                            );
                         }
                     }
                     Ok(IV::String(datafmt::write_csv(&lines)))
@@ -303,7 +367,9 @@ fn data_archive_interp(name: &str, args: &[IV]) -> Option<crate::Result<IV>> {
         }
 
         "yaml_parse" => {
-            if let Some(e) = arg_count(name, args, 1, 1) { return Some(e); }
+            if let Some(e) = arg_count(name, args, 1, 1) {
+                return Some(e);
+            }
             Some((|| {
                 let text = as_str(args.first(), "yaml_parse(text)")?.to_string();
                 // Unsupported constructs raise with the offending line.
@@ -312,14 +378,18 @@ fn data_archive_interp(name: &str, args: &[IV]) -> Option<crate::Result<IV>> {
             })())
         }
         "gzip_compress" => {
-            if let Some(e) = arg_count(name, args, 1, 1) { return Some(e); }
+            if let Some(e) = arg_count(name, args, 1, 1) {
+                return Some(e);
+            }
             Some((|| {
                 let data = as_bytes(args.first(), "gzip_compress(data)")?;
                 Ok(IV::Bytes(archive::gzip_compress(&data)))
             })())
         }
         "gzip_decompress" => {
-            if let Some(e) = arg_count(name, args, 1, 1) { return Some(e); }
+            if let Some(e) = arg_count(name, args, 1, 1) {
+                return Some(e);
+            }
             Some((|| {
                 let data = as_bytes(args.first(), "gzip_decompress(bytes)")?;
                 Ok(match archive::gzip_decompress(&data) {
@@ -329,7 +399,9 @@ fn data_archive_interp(name: &str, args: &[IV]) -> Option<crate::Result<IV>> {
             })())
         }
         "zip_list" => {
-            if let Some(e) = arg_count(name, args, 1, 1) { return Some(e); }
+            if let Some(e) = arg_count(name, args, 1, 1) {
+                return Some(e);
+            }
             Some((|| {
                 let path = as_str(args.first(), "zip_list(path)")?.to_string();
                 Ok(match archive::zip_list(&path) {
@@ -350,7 +422,9 @@ fn data_archive_interp(name: &str, args: &[IV]) -> Option<crate::Result<IV>> {
             })())
         }
         "zip_read" => {
-            if let Some(e) = arg_count(name, args, 2, 2) { return Some(e); }
+            if let Some(e) = arg_count(name, args, 2, 2) {
+                return Some(e);
+            }
             Some((|| {
                 let path = as_str(args.first(), "zip_read(path, name)")?.to_string();
                 let entry = as_str(args.get(1), "zip_read(path, name)")?.to_string();
@@ -361,7 +435,9 @@ fn data_archive_interp(name: &str, args: &[IV]) -> Option<crate::Result<IV>> {
             })())
         }
         "zip_write" => {
-            if let Some(e) = arg_count(name, args, 2, 2) { return Some(e); }
+            if let Some(e) = arg_count(name, args, 2, 2) {
+                return Some(e);
+            }
             Some((|| {
                 let path = as_str(args.first(), "zip_write(path, entries)")?.to_string();
                 let entries = zip_entries_iv(args.get(1))?;
@@ -383,7 +459,6 @@ pub fn try_interp(name: &str, args: &[IV]) -> Option<crate::Result<IV>> {
         .or_else(|| data_archive_interp(name, args))
 }
 
-
 /// Extract `entries` for zip_write: array of [name, content] pairs/tuples,
 /// or a map name -> content.
 fn zip_entries_iv(v: Option<&IV>) -> Result<Vec<(String, Vec<u8>)>, crate::RakError> {
@@ -393,12 +468,22 @@ fn zip_entries_iv(v: Option<&IV>) -> Result<Vec<(String, Vec<u8>)>, crate::RakEr
             for it in items {
                 match it {
                     IV::Array(pair) if pair.len() == 2 => {
-                        out.push((iv_cell(&pair[0]), as_bytes(Some(&pair[1]), "zip_write entry content")?));
+                        out.push((
+                            iv_cell(&pair[0]),
+                            as_bytes(Some(&pair[1]), "zip_write entry content")?,
+                        ));
                     }
                     IV::Tuple(pair) if pair.len() == 2 => {
-                        out.push((iv_cell(&pair[0]), as_bytes(Some(&pair[1]), "zip_write entry content")?));
+                        out.push((
+                            iv_cell(&pair[0]),
+                            as_bytes(Some(&pair[1]), "zip_write entry content")?,
+                        ));
                     }
-                    _ => return Err(crate::RakError::Runtime("zip_write entries must be [name, content] pairs".to_string())),
+                    _ => {
+                        return Err(crate::RakError::Runtime(
+                            "zip_write entries must be [name, content] pairs".to_string(),
+                        ))
+                    }
                 }
             }
         }
@@ -407,11 +492,14 @@ fn zip_entries_iv(v: Option<&IV>) -> Result<Vec<(String, Vec<u8>)>, crate::RakEr
                 out.push((k.clone(), as_bytes(Some(val), "zip_write entry content")?));
             }
         }
-        _ => return Err(crate::RakError::Runtime("zip_write(path, entries) expects an array or map of entries".to_string())),
+        _ => {
+            return Err(crate::RakError::Runtime(
+                "zip_write(path, entries) expects an array or map of entries".to_string(),
+            ))
+        }
     }
     Ok(out)
 }
-
 
 // ------------------------------------------------------------- VM glue ----
 
@@ -437,7 +525,9 @@ fn varr(items: Vec<VV>) -> VV {
 fn vs_str<'a>(v: Option<&'a VV>, what: &str) -> Result<&'a str, String> {
     match v {
         Some(VV::String(s)) => Ok(s),
-        Some(VV::Bytes(b)) => std::str::from_utf8(b).map_err(|_| format!("{}: invalid utf-8 bytes", what)),
+        Some(VV::Bytes(b)) => {
+            std::str::from_utf8(b).map_err(|_| format!("{}: invalid utf-8 bytes", what))
+        }
         _ => Err(format!("{} expects a string", what)),
     }
 }
@@ -463,7 +553,11 @@ fn need(name: &str, args: &[VV], min: usize, max: usize) -> Result<(), String> {
         Err(format!(
             "{}() expects {} argument(s), got {}",
             name,
-            if min == max { format!("{}", min) } else { format!("{}..{}", min, max) },
+            if min == max {
+                format!("{}", min)
+            } else {
+                format!("{}..{}", min, max)
+            },
             args.len()
         ))
     } else {
@@ -495,8 +589,12 @@ fn vv_cell(v: &VV) -> String {
     v.to_string()
 }
 
-fn vm_time_now(_a: &[VV]) -> Result<VV, String> { Ok(vi(rak_stdlib::timekit::now_unix())) }
-fn vm_time_now_millis(_a: &[VV]) -> Result<VV, String> { Ok(vi(rak_stdlib::timekit::now_millis())) }
+fn vm_time_now(_a: &[VV]) -> Result<VV, String> {
+    Ok(vi(rak_stdlib::timekit::now_unix()))
+}
+fn vm_time_now_millis(_a: &[VV]) -> Result<VV, String> {
+    Ok(vi(rak_stdlib::timekit::now_millis()))
+}
 fn vm_time_fmt(a: &[VV]) -> Result<VV, String> {
     need("time_fmt", a, 2, 2)?;
     let ts = vs_i64(a.first(), "time_fmt(ts, fmt)")?;
@@ -515,21 +613,33 @@ fn vm_time_parts(a: &[VV]) -> Result<VV, String> {
     need("time_parts", a, 1, 1)?;
     let c = rak_stdlib::timekit::tm_from_unix(vs_i64(a.first(), "time_parts(ts)")?);
     Ok(vmap(vec![
-        ("year", vi(c.year)), ("month", vi(c.month)), ("day", vi(c.day)),
-        ("hour", vi(c.hour)), ("minute", vi(c.minute)), ("second", vi(c.second)),
-        ("weekday", vi(c.weekday)), ("yday", vi(c.yday)),
+        ("year", vi(c.year)),
+        ("month", vi(c.month)),
+        ("day", vi(c.day)),
+        ("hour", vi(c.hour)),
+        ("minute", vi(c.minute)),
+        ("second", vi(c.second)),
+        ("weekday", vi(c.weekday)),
+        ("yday", vi(c.yday)),
     ]))
 }
 fn vm_time_add(a: &[VV]) -> Result<VV, String> {
     need("time_add", a, 2, 2)?;
-    Ok(vi(vs_i64(a.first(), "time_add")? + vs_i64(a.get(1), "time_add")?))
+    Ok(vi(
+        vs_i64(a.first(), "time_add")? + vs_i64(a.get(1), "time_add")?
+    ))
 }
 fn vm_time_diff(a: &[VV]) -> Result<VV, String> {
     need("time_diff", a, 2, 2)?;
-    Ok(vi(vs_i64(a.first(), "time_diff")? - vs_i64(a.get(1), "time_diff")?))
+    Ok(vi(
+        vs_i64(a.first(), "time_diff")? - vs_i64(a.get(1), "time_diff")?
+    ))
 }
 fn vm_date_today(_a: &[VV]) -> Result<VV, String> {
-    Ok(vs(rak_stdlib::timekit::fmt(rak_stdlib::timekit::now_unix(), "%Y-%m-%d")))
+    Ok(vs(rak_stdlib::timekit::fmt(
+        rak_stdlib::timekit::now_unix(),
+        "%Y-%m-%d",
+    )))
 }
 fn vm_rand_seed(a: &[VV]) -> Result<VV, String> {
     need("rand_seed", a, 1, 1)?;
@@ -539,14 +649,19 @@ fn vm_rand_seed(a: &[VV]) -> Result<VV, String> {
 fn vm_rand_int(a: &[VV]) -> Result<VV, String> {
     need("rand_int", a, 1, 2)?;
     let (lo, hi) = if a.len() == 2 {
-        (vs_i64(a.first(), "rand_int")?, vs_i64(a.get(1), "rand_int")?)
+        (
+            vs_i64(a.first(), "rand_int")?,
+            vs_i64(a.get(1), "rand_int")?,
+        )
     } else {
         (0, vs_i64(a.first(), "rand_int")?)
     };
     // An empty range is a programming error — raise, don't return Err.
     rak_stdlib::randkit::gen_int(lo, hi).map(vi)
 }
-fn vm_rand_float(_a: &[VV]) -> Result<VV, String> { Ok(VV::F64(rak_stdlib::randkit::gen_float())) }
+fn vm_rand_float(_a: &[VV]) -> Result<VV, String> {
+    Ok(VV::F64(rak_stdlib::randkit::gen_float()))
+}
 fn vm_rand_bytes(a: &[VV]) -> Result<VV, String> {
     need("rand_bytes", a, 1, 1)?;
     let n = vs_i64(a.first(), "rand_bytes(n)")?.max(0) as usize;
@@ -588,7 +703,11 @@ fn vm_csv_parse(a: &[VV]) -> Result<VV, String> {
     };
     let rows = datafmt::parse_csv(&text)?;
     if header {
-        return Ok(varr(rows.into_iter().map(|r| varr(r.into_iter().map(vs).collect())).collect()));
+        return Ok(varr(
+            rows.into_iter()
+                .map(|r| varr(r.into_iter().map(vs).collect()))
+                .collect(),
+        ));
     }
     if rows.is_empty() {
         return Ok(varr(vec![]));
@@ -621,7 +740,11 @@ fn vm_csv_stringify(a: &[VV]) -> Result<VV, String> {
         let mut lines = vec![cols.clone()];
         for r in &rows {
             if let VV::Map(m) = r {
-                lines.push(cols.iter().map(|c| m.get(c).map(vv_cell).unwrap_or_default()).collect());
+                lines.push(
+                    cols.iter()
+                        .map(|c| m.get(c).map(vv_cell).unwrap_or_default())
+                        .collect(),
+                );
             }
         }
         Ok(vs(datafmt::write_csv(&lines)))
@@ -645,7 +768,9 @@ fn vm_yaml_parse(a: &[VV]) -> Result<VV, String> {
 fn vm_gzip_compress(a: &[VV]) -> Result<VV, String> {
     need("gzip_compress", a, 1, 1)?;
     let data = vs_bytes(a.first(), "gzip_compress(data)")?;
-    Ok(VV::Bytes(Arc::from(rak_stdlib::archive::gzip_compress(&data))))
+    Ok(VV::Bytes(Arc::from(rak_stdlib::archive::gzip_compress(
+        &data,
+    ))))
 }
 fn vm_gzip_decompress(a: &[VV]) -> Result<VV, String> {
     need("gzip_decompress", a, 1, 1)?;
@@ -664,7 +789,11 @@ fn vm_zip_list(a: &[VV]) -> Result<VV, String> {
             items
                 .into_iter()
                 .map(|(name, size, compressed)| {
-                    vmap(vec![("name", vs(name)), ("size", vi(size as i64)), ("compressed", vi(compressed as i64))])
+                    vmap(vec![
+                        ("name", vs(name)),
+                        ("size", vi(size as i64)),
+                        ("compressed", vi(compressed as i64)),
+                    ])
                 })
                 .collect(),
         )),
@@ -764,30 +893,48 @@ mod tests {
 
     #[test]
     fn battery_time_parse_fmt_roundtrip() {
-        for out in [run_interp(&format!(
-            "let ts = time_parse(\"2023-11-14 22:13:20\")?\n\
+        for out in [
+            run_interp(&format!(
+                "let ts = time_parse(\"2023-11-14 22:13:20\")?\n\
              dump time_fmt(ts, \"%Y-%m-%d %H:%M:%S\")"
-        )), run_vm(&format!(
-            "let ts = time_parse(\"2023-11-14 22:13:20\")?\n\
+            )),
+            run_vm(&format!(
+                "let ts = time_parse(\"2023-11-14 22:13:20\")?\n\
              dump time_fmt(ts, \"%Y-%m-%d %H:%M:%S\")"
-        ))] {
-            assert!(out.iter().any(|l| l.contains("[DUMP] 2023-11-14 22:13:20")), "got: {:?}", out);
+            )),
+        ] {
+            assert!(
+                out.iter().any(|l| l.contains("[DUMP] 2023-11-14 22:13:20")),
+                "got: {:?}",
+                out
+            );
         }
     }
 
     #[test]
     fn battery_time_parts_and_epoch() {
-        for out in [run_interp("let p = time_parts(1700000000)\ndump p.year\ndump p.month\ndump p.weekday"),
-                    run_vm("let p = time_parts(1700000000)\ndump p.year\ndump p.month\ndump p.weekday")] {
-            assert!(out.iter().any(|l| l.contains("[DUMP] 2023")), "got: {:?}", out);
-            assert!(out.iter().any(|l| l.contains("[DUMP] 11")), "got: {:?}", out);
+        for out in [
+            run_interp("let p = time_parts(1700000000)\ndump p.year\ndump p.month\ndump p.weekday"),
+            run_vm("let p = time_parts(1700000000)\ndump p.year\ndump p.month\ndump p.weekday"),
+        ] {
+            assert!(
+                out.iter().any(|l| l.contains("[DUMP] 2023")),
+                "got: {:?}",
+                out
+            );
+            assert!(
+                out.iter().any(|l| l.contains("[DUMP] 11")),
+                "got: {:?}",
+                out
+            );
             assert!(out.iter().any(|l| l.contains("[DUMP] 2")), "got: {:?}", out);
         }
     }
 
     #[test]
     fn battery_time_epoch_zero() {
-        assert!(run_interp("dump time_fmt(0, \"%Y-%m-%d\")").iter()
+        assert!(run_interp("dump time_fmt(0, \"%Y-%m-%d\")")
+            .iter()
             .any(|l| l.contains("[DUMP] 1970-01-01")));
     }
 
@@ -795,7 +942,11 @@ mod tests {
     fn battery_rand_int_range_and_real_range() {
         let src = "rand_seed(33)\nlet mut ok = true\nfor i in 0..200 {\n let v = rand_int(-5, 5)\n if v < -5 || v >= 5 { ok = false }\n}\nlet f1 = rand_float()\nlet f2 = rand_float()\nif f1 >= 0.0 && f2 < 1.0 { ok = true }\ndump ok";
         for out in [run_interp(src), run_vm(src)] {
-            assert!(out.iter().any(|l| l.contains("[DUMP] true")), "got: {:?}", out);
+            assert!(
+                out.iter().any(|l| l.contains("[DUMP] true")),
+                "got: {:?}",
+                out
+            );
         }
     }
 
@@ -811,9 +962,16 @@ mod tests {
 
     #[test]
     fn battery_rand_choice_result() {
-        for out in [run_interp("rand_seed(4)\nlet c = rand_choice([\"x\", \"y\"])?\ndump c"),
-                    run_vm("rand_seed(4)\nlet c = rand_choice([\"x\", \"y\"])?\ndump c")] {
-            assert!(out.iter().any(|l| l.contains("[DUMP] x") || l.contains("[DUMP] y")), "got: {:?}", out);
+        for out in [
+            run_interp("rand_seed(4)\nlet c = rand_choice([\"x\", \"y\"])?\ndump c"),
+            run_vm("rand_seed(4)\nlet c = rand_choice([\"x\", \"y\"])?\ndump c"),
+        ] {
+            assert!(
+                out.iter()
+                    .any(|l| l.contains("[DUMP] x") || l.contains("[DUMP] y")),
+                "got: {:?}",
+                out
+            );
         }
     }
 
@@ -822,8 +980,16 @@ mod tests {
         let src = "let rows = csv_parse(\"host,port\\nwin.example,443\\n10.0.0.5,0x1F\\n\")\n\
                    dump rows[1].host\ndump rows[1].port\ndump len(rows)";
         for out in [run_interp(src), run_vm(src)] {
-            assert!(out.iter().any(|l| l.contains("[DUMP] 10.0.0.5")), "got: {:?}", out);
-            assert!(out.iter().any(|l| l.contains("[DUMP] 0x1F")), "got: {:?}", out);
+            assert!(
+                out.iter().any(|l| l.contains("[DUMP] 10.0.0.5")),
+                "got: {:?}",
+                out
+            );
+            assert!(
+                out.iter().any(|l| l.contains("[DUMP] 0x1F")),
+                "got: {:?}",
+                out
+            );
             assert!(out.iter().any(|l| l.contains("[DUMP] 2")), "got: {:?}", out);
         }
     }
@@ -838,9 +1004,14 @@ mod tests {
 
     #[test]
     fn battery_csv_stringify_roundtrip() {
-        let src = "let rows = csv_parse(\"x,y\\n\\\"\\\"quoted\\\"\\\",3\\n\")\ndump csv_stringify(rows)";
+        let src =
+            "let rows = csv_parse(\"x,y\\n\\\"\\\"quoted\\\"\\\",3\\n\")\ndump csv_stringify(rows)";
         for out in [run_interp(src), run_vm(src)] {
-            assert!(out.iter().any(|l| l.contains("[DUMP] x,y")), "got: {:?}", out);
+            assert!(
+                out.iter().any(|l| l.contains("[DUMP] x,y")),
+                "got: {:?}",
+                out
+            );
             assert!(out.iter().any(|l| l.contains("quoted,3")), "got: {:?}", out);
         }
     }
@@ -850,9 +1021,21 @@ mod tests {
         let src = "let cfg = yaml_parse(\"target: 10.0.0.1\\nports:\\n  - 80\\n  - 443\\nstealth: true\\n\")?\n\
                    dump cfg.target\ndump cfg.ports[1]\ndump cfg.stealth";
         for out in [run_interp(src), run_vm(src)] {
-            assert!(out.iter().any(|l| l.contains("[DUMP] 10.0.0.1")), "got: {:?}", out);
-            assert!(out.iter().any(|l| l.contains("[DUMP] 443")), "got: {:?}", out);
-            assert!(out.iter().any(|l| l.contains("[DUMP] true")), "got: {:?}", out);
+            assert!(
+                out.iter().any(|l| l.contains("[DUMP] 10.0.0.1")),
+                "got: {:?}",
+                out
+            );
+            assert!(
+                out.iter().any(|l| l.contains("[DUMP] 443")),
+                "got: {:?}",
+                out
+            );
+            assert!(
+                out.iter().any(|l| l.contains("[DUMP] true")),
+                "got: {:?}",
+                out
+            );
         }
     }
 
@@ -865,13 +1048,21 @@ mod tests {
             FUZZ, FUZZ
         );
         for out in [run_interp(&src), run_vm(&src)] {
-            assert!(out.iter().any(|l| l.contains("[DUMP] true")), "got: {:?}", out);
+            assert!(
+                out.iter().any(|l| l.contains("[DUMP] true")),
+                "got: {:?}",
+                out
+            );
         }
     }
 
     #[test]
     fn battery_gzip_corrupt_input_errors() {
         let out = run_interp("let r = gzip_decompress(b\"not gzip data\")\ndump match r { Err => \"bad\", Ok => \"ok\" }");
-        assert!(out.iter().any(|l| l.contains("[DUMP] bad")), "got: {:?}", out);
+        assert!(
+            out.iter().any(|l| l.contains("[DUMP] bad")),
+            "got: {:?}",
+            out
+        );
     }
 }

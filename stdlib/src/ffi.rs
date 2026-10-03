@@ -39,8 +39,8 @@
 
 use libloading::Library;
 use std::collections::HashMap;
-use std::sync::Mutex;
 use std::os::raw::c_void;
+use std::sync::Mutex;
 
 /// A loaded shared library handle. Dropping it calls `dlclose`/`FreeLibrary`.
 pub struct LibHandle {
@@ -152,9 +152,13 @@ mod tests {
     fn sym_addr_resolves_a_known_symbol() {
         let h = load_default().expect("default libc");
         // `strlen`/`rand`/`abs` exist on all three platforms' C runtimes.
-        let resolved =
-            sym_addr(&h, "strlen").or_else(|_| sym_addr(&h, "rand")).or_else(|_| sym_addr(&h, "abs"));
-        assert!(resolved.is_ok(), "expected at least one common C symbol to resolve");
+        let resolved = sym_addr(&h, "strlen")
+            .or_else(|_| sym_addr(&h, "rand"))
+            .or_else(|_| sym_addr(&h, "abs"));
+        assert!(
+            resolved.is_ok(),
+            "expected at least one common C symbol to resolve"
+        );
     }
 }
 
@@ -247,7 +251,11 @@ mod provenance_tests {
         let a = Allocations::new();
         let err = a.check(0x1000, 0, 1).unwrap_err();
         assert!(err.contains("not a region Rak owns"), "{}", err);
-        assert!(err.contains("ffi_trust"), "it should say what to do: {}", err);
+        assert!(
+            err.contains("ffi_trust"),
+            "it should say what to do: {}",
+            err
+        );
     }
 
     #[test]
@@ -293,7 +301,10 @@ mod provenance_tests {
         a.record(0x3000, 8);
         assert_eq!(a.release(0x3000), Some(8));
         assert_eq!(a.release(0x3000), None, "a double free is not silently ok");
-        assert!(a.check(0x3000, 0, 1).is_err(), "freed memory is not ours again");
+        assert!(
+            a.check(0x3000, 0, 1).is_err(),
+            "freed memory is not ours again"
+        );
     }
 
     #[test]
@@ -301,8 +312,15 @@ mod provenance_tests {
         let a = Allocations::new();
         a.record(0x4000, 8);
         assert_eq!(a.cstr_cap(0x4000, 0).unwrap(), 8, "at most the allocation");
-        assert_eq!(a.cstr_cap(0x4000, 4).unwrap(), 4, "offset reduces the budget");
-        assert!(a.cstr_cap(0x9999, 0).is_err(), "an unknown pointer is refused");
+        assert_eq!(
+            a.cstr_cap(0x4000, 4).unwrap(),
+            4,
+            "offset reduces the budget"
+        );
+        assert!(
+            a.cstr_cap(0x9999, 0).is_err(),
+            "an unknown pointer is refused"
+        );
     }
 
     #[test]

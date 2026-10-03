@@ -51,7 +51,11 @@ pub fn udp_bind_ephemeral() -> Result<(Mutex<UdpTransport>, SocketAddr), String>
 }
 
 /// Send `data` to `target` (ip:port). Returns the number of bytes written.
-pub fn udp_send(transport: &Mutex<UdpTransport>, data: &[u8], target: &str) -> Result<usize, String> {
+pub fn udp_send(
+    transport: &Mutex<UdpTransport>,
+    data: &[u8],
+    target: &str,
+) -> Result<usize, String> {
     let target: SocketAddr = target
         .parse()
         .map_err(|_| format!("udp_send: bad target '{}'", target))?;
@@ -215,8 +219,14 @@ pub fn chacha20_decrypt(
         .map_err(|_| "chacha20_decrypt: authentication failed or bad key/nonce".to_string())
 }
 
-fn aead_payload<'a, 'b>(aad: &'a [u8], plaintext: &'b [u8]) -> chacha20poly1305::aead::Payload<'b, 'a> {
-    chacha20poly1305::aead::Payload { msg: plaintext, aad }
+fn aead_payload<'a, 'b>(
+    aad: &'a [u8],
+    plaintext: &'b [u8],
+) -> chacha20poly1305::aead::Payload<'b, 'a> {
+    chacha20poly1305::aead::Payload {
+        msg: plaintext,
+        aad,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -226,7 +236,12 @@ fn aead_payload<'a, 'b>(aad: &'a [u8], plaintext: &'b [u8]) -> chacha20poly1305:
 /// Derive `length` bytes from a shared secret via HKDF-SHA256, using an
 /// optional `salt` and `info` context. This turns X25519 output into a
 /// uniformly random session key for the AEAD phase.
-pub fn hkdf_derive(secret: &[u8], salt: &[u8], info: &[u8], length: u32) -> Result<Vec<u8>, String> {
+pub fn hkdf_derive(
+    secret: &[u8],
+    salt: &[u8],
+    info: &[u8],
+    length: u32,
+) -> Result<Vec<u8>, String> {
     use hkdf::Hkdf;
     use sha2::Sha256;
     let hk = if salt.is_empty() {
@@ -264,7 +279,12 @@ fn pbkdf2_hmac_sha256(password: &[u8], salt: &[u8], iterations: u32, out: &mut [
     for block_index in 1..=blocks {
         let mut mac = HmacSha256::new_from_slice(password).unwrap();
         mac.update(salt);
-        mac.update(&[(block_index >> 24) as u8, (block_index >> 16) as u8, (block_index >> 8) as u8, block_index as u8]);
+        mac.update(&[
+            (block_index >> 24) as u8,
+            (block_index >> 16) as u8,
+            (block_index >> 8) as u8,
+            block_index as u8,
+        ]);
         let mut u = mac.finalize().into_bytes().to_vec();
         let mut t = u.clone();
         for _ in 1..iterations {
@@ -304,12 +324,14 @@ mod tests {
     use super::*;
 
     const SEED_A: [u8; 32] = [
-        0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
-        0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f,
+        0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e,
+        0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d,
+        0x1e, 0x1f,
     ];
     const SEED_B: [u8; 32] = [
-        0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2a, 0x2b, 0x2c, 0x2d, 0x2e, 0x2f,
-        0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x3a, 0x3b, 0x3c, 0x3d, 0x3e, 0x3f,
+        0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2a, 0x2b, 0x2c, 0x2d, 0x2e,
+        0x2f, 0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x3a, 0x3b, 0x3c, 0x3d,
+        0x3e, 0x3f,
     ];
 
     #[test]
@@ -358,7 +380,9 @@ mod tests {
     fn udp_loopback_round_trip() {
         let (a, _addr_a) = udp_bind("127.0.0.1:0").expect("bind a");
         let (b, addr_b) = udp_bind("127.0.0.1:0").expect("bind b");
-        let addr_a = udp_local_addr(&a).parse::<SocketAddr>().expect("a is bound");
+        let addr_a = udp_local_addr(&a)
+            .parse::<SocketAddr>()
+            .expect("a is bound");
         assert_ne!(addr_a, addr_b, "the two sockets need distinct ports");
 
         // Send from `a` to `b`'s address — sending to `a` would deliver to

@@ -1,4 +1,4 @@
-﻿//! Data-format builtins for Rak: CSV (RFC-4180-style) and a documented
+//! Data-format builtins for Rak: CSV (RFC-4180-style) and a documented
 //! YAML subset ג€” pure Rust, no new dependencies.
 
 // ---------------------------------------------------------------- CSV ----
@@ -377,10 +377,8 @@ mod tests {
 
     #[test]
     fn yaml_list_of_maps() {
-        let y = parse_yaml(
-            "findings:\n  - title: a\n    sev: high\n  - title: b\n    sev: low\n",
-        )
-        .unwrap();
+        let y = parse_yaml("findings:\n  - title: a\n    sev: high\n  - title: b\n    sev: low\n")
+            .unwrap();
         match y {
             YamlV::Map(m) => match &m[0].1 {
                 YamlV::List(items) => {
@@ -414,7 +412,11 @@ pub fn parse_yaml(text: &str) -> Result<YamlV, String> {
         if content.is_empty() {
             continue;
         }
-        if content.contains('{') || content.contains('}') || content.contains('&') || content.starts_with('*') {
+        if content.contains('{')
+            || content.contains('}')
+            || content.contains('&')
+            || content.starts_with('*')
+        {
             return Err(format!(
                 "yaml_parse: line {}: flow style, anchors and aliases are not supported in the YAML subset",
                 i + 1
@@ -435,4 +437,3 @@ pub fn parse_yaml(text: &str) -> Result<YamlV, String> {
     }
     Ok(v)
 }
-

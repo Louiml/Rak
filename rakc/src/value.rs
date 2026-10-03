@@ -72,7 +72,10 @@ pub enum Value {
         body: Arc<[Stmt]>,
         captures: Arc<Env>,
     },
-    NativeFn(Arc<str>, Arc<dyn Fn(&[Value]) -> Result<Value, String> + Send + Sync>),
+    NativeFn(
+        Arc<str>,
+        Arc<dyn Fn(&[Value]) -> Result<Value, String> + Send + Sync>,
+    ),
     Closure {
         code: Arc<crate::bytecode::Chunk>,
         nparams: usize,
@@ -368,10 +371,17 @@ impl fmt::Display for Value {
                 write!(f, "{{{}}}", parts.join(", "))
             }
             Value::Struct { name, fields } => {
-                let parts: Vec<String> = fields.iter().map(|(k, v)| format!("{}: {}", k, v)).collect();
+                let parts: Vec<String> = fields
+                    .iter()
+                    .map(|(k, v)| format!("{}: {}", k, v))
+                    .collect();
                 write!(f, "{} {{{}}}", name, parts.join(", "))
             }
-            Value::Enum { name, variant, data } => {
+            Value::Enum {
+                name,
+                variant,
+                data,
+            } => {
                 if data.is_empty() {
                     write!(f, "{}::{}", name, variant)
                 } else {
@@ -411,7 +421,9 @@ pub struct Env {
 
 impl std::fmt::Debug for Env {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Env").field("scopes", &self.scopes.len()).finish()
+        f.debug_struct("Env")
+            .field("scopes", &self.scopes.len())
+            .finish()
     }
 }
 
@@ -423,7 +435,9 @@ impl fmt::Debug for Value {
 
 impl Env {
     pub fn new() -> Self {
-        Env { scopes: vec![HashMap::new()] }
+        Env {
+            scopes: vec![HashMap::new()],
+        }
     }
 
     pub fn push_scope(&mut self) {
@@ -437,7 +451,10 @@ impl Env {
     }
 
     pub fn define(&mut self, name: &str, value: Value) {
-        self.scopes.last_mut().unwrap().insert(name.to_string(), value);
+        self.scopes
+            .last_mut()
+            .unwrap()
+            .insert(name.to_string(), value);
     }
 
     pub fn get(&self, name: &str) -> Option<Value> {

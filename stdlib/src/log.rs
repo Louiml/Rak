@@ -126,7 +126,10 @@ fn now_rfc3339() -> String {
     // RFC3339-ish timestamp. We avoid pulling a date crate: emit epoch
     // milliseconds alongside a simple UTC string via `date` is overkill, so we
     // just expose epoch_ms (unambiguous, jq-friendly).
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis().to_string()).unwrap_or_else(|_| "0".to_string())
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis().to_string())
+        .unwrap_or_else(|_| "0".to_string())
 }
 
 /// Set the minimum log level ("debug" | "info" | "warn" | "error").
@@ -140,7 +143,11 @@ pub fn init_file(path: &str) -> Result<(), String> {
     if path.is_empty() {
         *guard = None;
     } else {
-        let f = OpenOptions::new().create(true).append(true).open(path).map_err(|e| format!("log_init: {}: {}", path, e))?;
+        let f = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .map_err(|e| format!("log_init: {}: {}", path, e))?;
         *guard = Some(f);
     }
     Ok(())
@@ -163,11 +170,13 @@ pub fn log(level: Level, key: &str, fields: &HashMap<String, Json>) -> Result<()
     let line = Json::Obj(obj).to_json() + "\n";
     let mut guard = FILE.lock().map_err(|e| format!("log: lock: {}", e))?;
     if let Some(f) = guard.as_mut() {
-        f.write_all(line.as_bytes()).map_err(|e| format!("log: write: {}", e))?;
+        f.write_all(line.as_bytes())
+            .map_err(|e| format!("log: write: {}", e))?;
         let _ = f.flush();
     } else {
         let mut out = std::io::stdout();
-        out.write_all(line.as_bytes()).map_err(|e| format!("log: write: {}", e))?;
+        out.write_all(line.as_bytes())
+            .map_err(|e| format!("log: write: {}", e))?;
         let _ = out.flush();
     }
     Ok(())

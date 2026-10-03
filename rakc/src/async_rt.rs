@@ -6,8 +6,8 @@
 //! logical operations share a handful of OS threads instead of spawning one
 //! thread each), plus helpers the interpreter uses to drive deferred futures.
 
-use std::sync::{Arc, Mutex, OnceLock};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 
 static ASYNC_RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
 static NEXT_GROUP: AtomicU64 = AtomicU64::new(1);
@@ -24,7 +24,10 @@ pub fn runtime() -> &'static tokio::runtime::Runtime {
 }
 
 fn num_cpus_hint() -> usize {
-    std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).max(2)
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+        .max(2)
 }
 
 /// A simple non-Tokio counting semaphore used to bound how many concurrent

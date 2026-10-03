@@ -88,7 +88,11 @@ fn agree(source: &str) -> (Vec<String>, Vec<String>) {
         );
     }
     let _ = std::fs::remove_file(&path);
-    assert_eq!(outs[0], outs[1], "stdout differs:\n{:?}\n{:?}", outs[0], outs[1]);
+    assert_eq!(
+        outs[0], outs[1],
+        "stdout differs:\n{:?}\n{:?}",
+        outs[0], outs[1]
+    );
     // stderr is deliberately *not* compared for equality. The two backends wrap a
     // failure differently -- "Error: Runtime error: <msg>" against "VM error:
     // <builtin>: <msg>" -- and the pointer in the message differs between processes.
@@ -180,14 +184,23 @@ ffi_write(p, 0, 65)
     );
     let text = err.join("\n");
     assert!(text.contains("not a region Rak owns"), "got: {text}");
-    assert!(text.contains("ffi_trust"), "it should name the way out: {text}");
+    assert!(
+        text.contains("ffi_trust"),
+        "it should name the way out: {text}"
+    );
 }
 
 #[test]
 fn a_forged_pointer_cannot_be_read_through() {
-    let (_, err) = agree("dump ffi_read(ffi_ptr(140737488355328), 0)
-");
-    assert!(err.join("\n").contains("not a region Rak owns"), "{:?}", err);
+    let (_, err) = agree(
+        "dump ffi_read(ffi_ptr(140737488355328), 0)
+",
+    );
+    assert!(
+        err.join("\n").contains("not a region Rak owns"),
+        "{:?}",
+        err
+    );
 }
 
 #[test]
@@ -223,7 +236,10 @@ ffi_read(q, 4)
     );
     let text = err.join("\n");
     assert!(text.contains("runs past the end"), "got: {text}");
-    assert!(text.contains("4-byte"), "it should state the narrowed size: {text}");
+    assert!(
+        text.contains("4-byte"),
+        "it should state the narrowed size: {text}"
+    );
 }
 
 #[test]
@@ -271,9 +287,15 @@ dump ffi_cstr_to_string(p)
 
 #[test]
 fn a_cstr_scan_of_a_forged_pointer_is_refused_rather_than_walked() {
-    let (_, err) = agree("dump ffi_cstr_to_string(ffi_ptr(140737488355328))
-");
-    assert!(err.join("\n").contains("not a region Rak owns"), "{:?}", err);
+    let (_, err) = agree(
+        "dump ffi_cstr_to_string(ffi_ptr(140737488355328))
+",
+    );
+    assert!(
+        err.join("\n").contains("not a region Rak owns"),
+        "{:?}",
+        err
+    );
 }
 
 #[test]

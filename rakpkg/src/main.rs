@@ -1,8 +1,8 @@
+use rakpkg::{parse_dep_spec, parse_manifest, version_satisfies, Manifest};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use rakpkg::{Manifest, parse_dep_spec, parse_manifest, version_satisfies};
 
 const VERSION: &str = "8.0.0";
 const PACKAGES_DIR: &str = ".rak";
@@ -19,7 +19,9 @@ fn print_usage() {
     eprintln!("Commands:");
     eprintln!("  init [name]          Create a new package (package.rak + lib.rak)");
     eprintln!("  add <user/repo>[@vX|#rev]   Add a package from Git with a version/rev constraint");
-    eprintln!("  install              Install all dependencies per package.rak (honours rakpkg.lock)");
+    eprintln!(
+        "  install              Install all dependencies per package.rak (honours rakpkg.lock)"
+    );
     eprintln!("  update               Re-resolve dependencies and rewrite rakpkg.lock");
     eprintln!("  lock                 Write rakpkg.lock for current deps without reinstalling");
     eprintln!("  tree                 Print the resolved dependency tree");
@@ -88,7 +90,11 @@ fn save_lock(lock: &LockFile) {
 
 /// Resolve the concrete git rev (HEAD) for an installed package dir.
 fn git_head_rev(dir: &Path) -> Option<String> {
-    let out = Command::new("git").args(["rev-parse", "HEAD"]).current_dir(dir).output().ok()?;
+    let out = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(dir)
+        .output()
+        .ok()?;
     if out.status.success() {
         Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
     } else {
@@ -98,7 +104,11 @@ fn git_head_rev(dir: &Path) -> Option<String> {
 
 /// Resolve the nearest version tag for a constraint (or the current tag).
 fn git_resolve_tag(dir: &Path, constraint: Option<&str>) -> Option<String> {
-    let out = Command::new("git").args(["tag", "--list", "v*", "--sort=-v:refname"]).current_dir(dir).output().ok()?;
+    let out = Command::new("git")
+        .args(["tag", "--list", "v*", "--sort=-v:refname"])
+        .current_dir(dir)
+        .output()
+        .ok()?;
     if !out.status.success() {
         return None;
     }
@@ -107,7 +117,10 @@ fn git_resolve_tag(dir: &Path, constraint: Option<&str>) -> Option<String> {
         .map(|s| s.to_string())
         .collect();
     match constraint {
-        Some(c) => tags.iter().find(|t| version_satisfies(&t.trim_start_matches('v'), c)).cloned(),
+        Some(c) => tags
+            .iter()
+            .find(|t| version_satisfies(&t.trim_start_matches('v'), c))
+            .cloned(),
         None => tags.first().cloned(),
     }
 }
@@ -146,16 +159,24 @@ fn install_dep(name: &str, spec: &str, existing: &mut LockFile) {
     }
     if dest.exists() {
         println!("  {} already installed; refreshing", name);
-        let _ = Command::new("git").args(["fetch", "--tags", "--force"]).current_dir(&dest).status();
+        let _ = Command::new("git")
+            .args(["fetch", "--tags", "--force"])
+            .current_dir(&dest)
+            .status();
     } else {
         fs::create_dir_all(packages_dir()).unwrap();
         let url = format!("https://github.com/{}.git", repo);
         println!("  cloning {}...", url);
-        let out = Command::new("git").args(["clone", &url, dest.to_str().unwrap()]).output();
+        let out = Command::new("git")
+            .args(["clone", &url, dest.to_str().unwrap()])
+            .output();
         match out {
             Ok(o) => {
                 if !o.status.success() {
-                    eprintln!("    git clone failed: {}", String::from_utf8_lossy(&o.stderr));
+                    eprintln!(
+                        "    git clone failed: {}",
+                        String::from_utf8_lossy(&o.stderr)
+                    );
                     return;
                 }
             }
@@ -167,15 +188,26 @@ fn install_dep(name: &str, spec: &str, existing: &mut LockFile) {
     }
     // Apply pinned rev if requested.
     if let Some(r) = pinned_rev.as_ref() {
-        let _ = Command::new("git").args(["checkout", r]).current_dir(&dest).status();
+        let _ = Command::new("git")
+            .args(["checkout", r])
+            .current_dir(&dest)
+            .status();
     }
     // Resolve version/tag against constraint.
     let tag = git_resolve_tag(&dest, version.as_deref());
     if let Some(t) = &tag {
-        let _ = Command::new("git").args(["checkout", t]).current_dir(&dest).status();
+        let _ = Command::new("git")
+            .args(["checkout", t])
+            .current_dir(&dest)
+            .status();
     }
-    let rev = pinned_rev.or_else(|| git_head_rev(&dest)).unwrap_or_else(|| "unknown".to_string());
-    let resolved_version = tag.unwrap_or_else(|| "0.0.0".to_string()).trim_start_matches('v').to_string();
+    let rev = pinned_rev
+        .or_else(|| git_head_rev(&dest))
+        .unwrap_or_else(|| "unknown".to_string());
+    let resolved_version = tag
+        .unwrap_or_else(|| "0.0.0".to_string())
+        .trim_start_matches('v')
+        .to_string();
     let constraint = version; // original version constraint (Option<String>)
     let manifest_path = dest.join(MANIFEST_FILE);
     let checksum = sha256_file(&manifest_path);
@@ -195,7 +227,11 @@ fn install_dep(name: &str, spec: &str, existing: &mut LockFile) {
 }
 
 fn cmd_add(spec: &str) {
-    let pkg_name = spec.split(['@', '#', '/']).next().unwrap_or(spec).to_string();
+    let pkg_name = spec
+        .split(['@', '#', '/'])
+        .next()
+        .unwrap_or(spec)
+        .to_string();
     let manifest_path = Path::new(MANIFEST_FILE);
     if !manifest_path.exists() {
         eprintln!("No package.rak found in the current directory");
@@ -266,14 +302,29 @@ fn cmd_update() {
 }
 
 /// Recursively print the dependency tree.
-fn print_tree(name: &str, manifest: &Manifest, depth: usize, seen: &mut std::collections::HashSet<String>) {
-    println!("{}{}@{}", "  ".repeat(depth), manifest.name, manifest.version);
+fn print_tree(
+    name: &str,
+    manifest: &Manifest,
+    depth: usize,
+    seen: &mut std::collections::HashSet<String>,
+) {
+    println!(
+        "{}{}@{}",
+        "  ".repeat(depth),
+        manifest.name,
+        manifest.version
+    );
     for (dep_name, _spec) in &manifest.deps {
         let dep_dir = packages_dir().join(dep_name);
         if dep_dir.join(MANIFEST_FILE).exists() {
             if let Ok(sub) = parse_manifest(&dep_dir.join(MANIFEST_FILE)) {
                 if !seen.insert(dep_name.clone()) {
-                    println!("{}{}@{} (cyclic)", "  ".repeat(depth + 1), sub.name, sub.version);
+                    println!(
+                        "{}{}@{} (cyclic)",
+                        "  ".repeat(depth + 1),
+                        sub.name,
+                        sub.version
+                    );
                     continue;
                 }
                 print_tree(dep_name, &sub, depth + 1, seen);
@@ -349,7 +400,9 @@ fn cmd_publish() {
         }
     };
     let tag = format!("v{}", manifest.version);
-    let status = Command::new("git").args(["tag", "-a", &tag, "-m", &format!("release {}", tag)]).status();
+    let status = Command::new("git")
+        .args(["tag", "-a", &tag, "-m", &format!("release {}", tag)])
+        .status();
     match status {
         Ok(s) if s.success() => {
             let _ = Command::new("git").args(["push", "origin", &tag]).status();
@@ -406,7 +459,9 @@ fn cmd_remove(name: &str) {
         std::process::exit(1);
     }
     if dest.is_dir() {
-        fs::remove_dir_all(&dest).map_err(|e| e.to_string()).unwrap();
+        fs::remove_dir_all(&dest)
+            .map_err(|e| e.to_string())
+            .unwrap();
     } else {
         fs::remove_file(&dest).map_err(|e| e.to_string()).unwrap();
     }
@@ -476,12 +531,21 @@ fn cmd_build() {
 }
 
 fn find_rakc() -> String {
-    let ext = if cfg!(target_os = "windows") { ".exe" } else { "" };
+    let ext = if cfg!(target_os = "windows") {
+        ".exe"
+    } else {
+        ""
+    };
     let mut candidates = vec!["rakc".to_string()];
     if let Ok(exe) = env::current_exe() {
         if let Some(parent) = exe.parent() {
             candidates.push(parent.join("rakc").to_string_lossy().to_string());
-            candidates.push(parent.join(format!("rakc{}", ext)).to_string_lossy().to_string());
+            candidates.push(
+                parent
+                    .join(format!("rakc{}", ext))
+                    .to_string_lossy()
+                    .to_string(),
+            );
         }
     }
     candidates.push(format!("target/release/rakc{}", ext));

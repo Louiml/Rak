@@ -56,7 +56,15 @@ pub fn generate(header: &str, output: &str) -> Result<(), String> {
             cargs.push_str(pname);
         }
         rak.push_str(&format!("fn {}({}) -> {} {{\n", name, args, rak_ret));
-        rak.push_str(&format!("    return extern_call(\"{}\"{})\n", name, if cargs.is_empty() { String::new() } else { format!(", {}", cargs) }));
+        rak.push_str(&format!(
+            "    return extern_call(\"{}\"{})\n",
+            name,
+            if cargs.is_empty() {
+                String::new()
+            } else {
+                format!(", {}", cargs)
+            }
+        ));
         rak.push_str("}\n\n");
     }
 
@@ -72,7 +80,12 @@ pub fn generate(header: &str, output: &str) -> Result<(), String> {
         println!("{}", rak);
     } else {
         fs::write(output, &rak).map_err(|e| e.to_string())?;
-        println!("Generated {} ({} functions, {} structs)", output, funcs.len(), structs.len());
+        println!(
+            "Generated {} ({} functions, {} structs)",
+            output,
+            funcs.len(),
+            structs.len()
+        );
     }
     Ok(())
 }
@@ -105,7 +118,12 @@ fn parse_functions(source: &str) -> Vec<(String, Vec<(String, String)>, String)>
         in_decl.push(' ');
         in_decl.push_str(line);
         let decl = in_decl.trim();
-        if decl.ends_with(';') && decl.contains('(') && !decl.starts_with("typedef") && !decl.starts_with("struct") && !decl.starts_with("enum") {
+        if decl.ends_with(';')
+            && decl.contains('(')
+            && !decl.starts_with("typedef")
+            && !decl.starts_with("struct")
+            && !decl.starts_with("enum")
+        {
             let decl = decl.trim_end_matches(';').trim();
             if let Some((name, params, ret)) = parse_decl(decl) {
                 funcs.push((name, params, ret));
@@ -125,8 +143,14 @@ fn parse_decl(decl: &str) -> Option<(String, Vec<(String, String)>, String)> {
     let args = &decl[open + 1..close];
 
     let head = head.trim();
-    let name_end = head.rfind(|c: char| c.is_alphanumeric() || c == '_').map(|i| i + 1).unwrap_or(head.len());
-    let name_start = head[..name_end].rfind(|c: char| !(c.is_alphanumeric() || c == '_')).map(|i| i + 1).unwrap_or(0);
+    let name_end = head
+        .rfind(|c: char| c.is_alphanumeric() || c == '_')
+        .map(|i| i + 1)
+        .unwrap_or(head.len());
+    let name_start = head[..name_end]
+        .rfind(|c: char| !(c.is_alphanumeric() || c == '_'))
+        .map(|i| i + 1)
+        .unwrap_or(0);
     let name = head[name_start..name_end].to_string();
     if name.is_empty() {
         return None;
@@ -150,7 +174,15 @@ fn parse_decl(decl: &str) -> Option<(String, Vec<(String, String)>, String)> {
         }
     }
 
-    Some((name, params, if ret.is_empty() { "void".to_string() } else { ret }))
+    Some((
+        name,
+        params,
+        if ret.is_empty() {
+            "void".to_string()
+        } else {
+            ret
+        },
+    ))
 }
 
 fn split_param_type_name(arg: &str) -> (String, String) {
@@ -162,7 +194,11 @@ fn split_param_type_name(arg: &str) -> (String, String) {
         return ("int".to_string(), "_arg".to_string());
     }
     let name = parts.last().unwrap().trim().to_string();
-    let ty_parts = if parts.len() > 1 { &parts[..parts.len() - 1] } else { &[] };
+    let ty_parts = if parts.len() > 1 {
+        &parts[..parts.len() - 1]
+    } else {
+        &[]
+    };
     let ty = ty_parts.join(" ");
     let ty = if ty.is_empty() { "int".to_string() } else { ty };
     let ty = if stars > 0 { "u64".to_string() } else { ty };

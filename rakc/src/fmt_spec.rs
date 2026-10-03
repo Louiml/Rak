@@ -66,7 +66,11 @@ pub fn parse_spec(body: &str) -> Spec {
         i += 1;
     }
     if i > width_start {
-        spec.width = chars[width_start..i].iter().collect::<String>().parse().ok();
+        spec.width = chars[width_start..i]
+            .iter()
+            .collect::<String>()
+            .parse()
+            .ok();
     }
     if i < chars.len() && chars[i] == '.' {
         i += 1;

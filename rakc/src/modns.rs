@@ -160,7 +160,10 @@ impl<V> ModuleNamespace<V> {
 
     pub fn refusal(&self, name: &str) -> String {
         if !self.is_public(name) {
-            return format!("'{}' is not exported from this module, so it cannot be assigned", name);
+            return format!(
+                "'{}' is not exported from this module, so it cannot be assigned",
+                name
+            );
         }
         format!(
             "'{}' is declared `let` in its module, so it is immutable; the module must \
@@ -273,14 +276,21 @@ mod tests {
 
         assert_eq!(ns.get("open"), Some(2));
         assert_eq!(ns.get("fixed"), Some(3));
-        assert_eq!(ns.get("hidden"), None, "a private name must not read through");
+        assert_eq!(
+            ns.get("hidden"),
+            None,
+            "a private name must not read through"
+        );
         assert_eq!(ns.get("nosuch"), None);
 
         // `pub let mut` is writable through the handle.
         assert!(ns.set("open", 9));
         assert_eq!(ns.get("open"), Some(9));
 
-        assert!(!ns.set("hidden", 9), "a private name must not be writable through");
+        assert!(
+            !ns.set("hidden", 9),
+            "a private name must not be writable through"
+        );
     }
 
     #[test]

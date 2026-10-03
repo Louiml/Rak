@@ -1,34 +1,34 @@
-pub mod lexer;
-pub mod parser;
 pub mod ast;
-pub mod typecheck;
-pub mod interpreter;
-pub mod value;
+pub mod async_rt;
 pub mod bytecode;
 pub mod compiler;
-pub mod vm;
-pub mod async_rt;
+pub mod interpreter;
+pub mod lexer;
 pub mod modules;
+pub mod parser;
 pub mod repl;
+pub mod typecheck;
+pub mod value;
+pub mod vm;
 
-#[cfg(feature = "gui")]
-pub mod gui;
-#[cfg(feature = "lsp")]
-pub mod lsp;
 #[cfg(feature = "bindgen")]
 pub mod bindgen;
-pub mod fmt;
-pub mod fmt_spec;
-pub mod lint;
 pub mod caps;
-pub mod fuzz;
+pub mod dap;
 pub mod ext_batteries;
 pub mod ext_osint;
 pub mod ext_stdlib;
 pub mod ext_streams;
-pub mod setrepr;
+pub mod fmt;
+pub mod fmt_spec;
+pub mod fuzz;
+#[cfg(feature = "gui")]
+pub mod gui;
+pub mod lint;
+#[cfg(feature = "lsp")]
+pub mod lsp;
 pub mod modns;
-pub mod dap;
+pub mod setrepr;
 
 use thiserror::Error;
 
@@ -44,7 +44,7 @@ pub enum ErrorKind {
     Type,
     Package,
     Permission,
-    User,   // from `raise`/`throw` with a string
+    User, // from `raise`/`throw` with a string
     Timeout,
     Cancel,
 }
@@ -288,8 +288,7 @@ pub fn eval_vm_in(source: &str, base_dir: &str) -> std::result::Result<Vec<Strin
     run_on_big_stack(move || {
         let tokens = lexer::tokenize(&src).map_err(|e| e.to_string())?;
         let ast = parser::parse(&tokens, &src).map_err(|e| e.to_string())?;
-        let chunk =
-            compiler::compile_module_in(&ast, &dir).map_err(|e| e.to_string())?;
+        let chunk = compiler::compile_module_in(&ast, &dir).map_err(|e| e.to_string())?;
         let mut vm = vm::Vm::new();
         vm.run(&chunk)
     })
@@ -342,21 +341,33 @@ impl BackendParity {
     pub fn divergence(&self) -> Option<String> {
         match self {
             Self::Agree(_) | Self::AgreeOnError(_) => None,
-            Self::InterpOnly { interp_output, vm_error } => Some(format!(
+            Self::InterpOnly {
+                interp_output,
+                vm_error,
+            } => Some(format!(
                 "interpreter produced {} line(s), VM failed: {}",
                 interp_output.len(),
                 vm_error
             )),
-            Self::VmOnly { interp_error, vm_output } => Some(format!(
+            Self::VmOnly {
+                interp_error,
+                vm_output,
+            } => Some(format!(
                 "VM produced {} line(s), interpreter failed: {}",
                 vm_output.len(),
                 interp_error
             )),
-            Self::DisagreeOnError { interp_error, vm_error } => Some(format!(
+            Self::DisagreeOnError {
+                interp_error,
+                vm_error,
+            } => Some(format!(
                 "different errors:\n  interpreter: {}\n  VM:           {}",
                 interp_error, vm_error
             )),
-            Self::DisagreeOnOutput { interp_output, vm_output } => Some(format!(
+            Self::DisagreeOnOutput {
+                interp_output,
+                vm_output,
+            } => Some(format!(
                 "different output:\n  interpreter: {:?}\n  VM:           {:?}",
                 interp_output, vm_output
             )),
@@ -382,7 +393,10 @@ pub fn run_on_both(source: &str, base_dir: &str) -> BackendParity {
             if i == v {
                 BackendParity::Agree(i)
             } else {
-                BackendParity::DisagreeOnOutput { interp_output: i, vm_output: v }
+                BackendParity::DisagreeOnOutput {
+                    interp_output: i,
+                    vm_output: v,
+                }
             }
         }
         (Err(i), Err(v)) => {
@@ -393,11 +407,20 @@ pub fn run_on_both(source: &str, base_dir: &str) -> BackendParity {
             if a == b || strip_first_segment(&a) == b || strip_first_segment(&b) == a {
                 BackendParity::AgreeOnError(a)
             } else {
-                BackendParity::DisagreeOnError { interp_error: a, vm_error: b }
+                BackendParity::DisagreeOnError {
+                    interp_error: a,
+                    vm_error: b,
+                }
             }
         }
-        (Ok(i), Err(v)) => BackendParity::InterpOnly { interp_output: i, vm_error: v },
-        (Err(i), Ok(v)) => BackendParity::VmOnly { interp_error: i.to_string(), vm_output: v },
+        (Ok(i), Err(v)) => BackendParity::InterpOnly {
+            interp_output: i,
+            vm_error: v,
+        },
+        (Err(i), Ok(v)) => BackendParity::VmOnly {
+            interp_error: i.to_string(),
+            vm_output: v,
+        },
     }
 }
 
@@ -510,7 +533,11 @@ pub enum VerifyOutcome {
     Completed { steps: u64, output: Vec<String> },
     /// The program itself failed: a contract was violated, an assert tripped, or
     /// a runtime error was raised. This is a real finding.
-    Failed { message: String, steps: u64, output: Vec<String> },
+    Failed {
+        message: String,
+        steps: u64,
+        output: Vec<String>,
+    },
     /// A resource limit was reached, so the run proved nothing either way.
     /// Retry with a larger budget before drawing any conclusion.
     Inconclusive { reason: String, steps: u64 },
@@ -521,7 +548,12 @@ pub enum VerifyOutcome {
 ///
 /// The limits are deliberately finite by default. A verification run that is
 /// allowed to run forever is just a normal run.
-pub fn verify_bounded(source: &str, max_steps: u64, max_depth: u32, max_iterations: u64) -> VerifyOutcome {
+pub fn verify_bounded(
+    source: &str,
+    max_steps: u64,
+    max_depth: u32,
+    max_iterations: u64,
+) -> VerifyOutcome {
     let src = source.to_string();
     // Same large-stack treatment as every other entry point. Without it the
     // depth cap would never get a chance to fire, because the native stack
@@ -567,4 +599,3 @@ pub fn verify_bounded(source: &str, max_steps: u64, max_depth: u32, max_iteratio
 fn is_limit_message(msg: &str) -> bool {
     msg.contains(interpreter::LIMIT_PREFIX)
 }
-

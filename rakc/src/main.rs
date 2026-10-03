@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 use rakc::verify_bounded;
 
-const VERSION: &str = "0.8.3";
+const VERSION: &str = "0.8.4";
 const PAYLOAD_MAGIC: u64 = 0x52414B5F50434B; // "RAK_PCK" as u64
 
 fn print_usage() {
@@ -29,13 +29,17 @@ fn print_usage() {
     eprintln!("  fmt <file>     Format source (--write, --check)");
     eprintln!("  lint <file>    Advisory lint checks (--deny)");
     eprintln!("  fuzz <target>  Property-based fuzz a parser (--runs, --seed, --list)");
-    eprintln!("  verify <file>  Run under resource limits, check contracts (--steps, --depth, --iters)");
+    eprintln!(
+        "  verify <file>  Run under resource limits, check contracts (--steps, --depth, --iters)"
+    );
     eprintln!("  lex <file>     Tokenize and print tokens");
     eprintln!("  parse <file>   Parse and print AST");
     eprintln!("  test [file]    Run Rak tests (--filter NAME, --verbose)");
     eprintln!("  version        Print version");
-    eprintln!("
-Limits (run/vm): --max-depth N   cap function-call recursion (default 256)");
+    eprintln!(
+        "
+Limits (run/vm): --max-depth N   cap function-call recursion (default 256)"
+    );
     eprintln!();
     eprintln!("Use - for file to read from stdin");
     eprintln!();
@@ -66,15 +70,24 @@ fn cmd_verify(args: &[String]) -> i32 {
         match args[i].as_str() {
             "--steps" | "-s" => {
                 i += 1;
-                max_steps = args.get(i).and_then(|v| v.parse().ok()).unwrap_or(max_steps);
+                max_steps = args
+                    .get(i)
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(max_steps);
             }
             "--depth" | "-d" => {
                 i += 1;
-                max_depth = args.get(i).and_then(|v| v.parse().ok()).unwrap_or(max_depth);
+                max_depth = args
+                    .get(i)
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(max_depth);
             }
             "--iters" | "-n" => {
                 i += 1;
-                max_iters = args.get(i).and_then(|v| v.parse().ok()).unwrap_or(max_iters);
+                max_iters = args
+                    .get(i)
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(max_iters);
             }
             "--quiet" | "-q" => quiet = true,
             other if !other.starts_with('-') && file.is_none() => file = Some(other.to_string()),
@@ -108,7 +121,11 @@ fn cmd_verify(args: &[String]) -> i32 {
             println!("PASS  completed in {} steps, all contracts held", steps);
             0
         }
-        rakc::VerifyOutcome::Failed { message, steps, output } => {
+        rakc::VerifyOutcome::Failed {
+            message,
+            steps,
+            output,
+        } => {
             if !quiet {
                 for line in &output {
                     println!("{}", line);
@@ -120,10 +137,7 @@ fn cmd_verify(args: &[String]) -> i32 {
             1
         }
         rakc::VerifyOutcome::Inconclusive { reason, steps } => {
-            eprintln!(
-                "SKIP  inconclusive after {} steps: {}",
-                steps, reason
-            );
+            eprintln!("SKIP  inconclusive after {} steps: {}", steps, reason);
             eprintln!(
                 "      nothing was proved. raise the budget, e.g. --steps {} or --depth {}",
                 max_steps.saturating_mul(4),
@@ -172,7 +186,14 @@ fn cmd_test(args: &[String]) {
 
     if sandbox {
         rakc::caps::enable(&sandbox_allow);
-        println!("sandbox: active (allow: {})", if sandbox_allow.is_empty() { "none".to_string() } else { sandbox_allow.clone() });
+        println!(
+            "sandbox: active (allow: {})",
+            if sandbox_allow.is_empty() {
+                "none".to_string()
+            } else {
+                sandbox_allow.clone()
+            }
+        );
     }
 
     // Discover test files.
@@ -183,12 +204,7 @@ fn cmd_test(args: &[String]) {
         if let Ok(entries) = fs::read_dir("tests") {
             let mut raks: Vec<String> = entries
                 .filter_map(|e| e.ok())
-                .filter(|e| {
-                    e.path()
-                        .extension()
-                        .map(|x| x == "rak")
-                        .unwrap_or(false)
-                })
+                .filter(|e| e.path().extension().map(|x| x == "rak").unwrap_or(false))
                 .map(|e| e.path().to_string_lossy().to_string())
                 .collect();
             raks.sort();
@@ -262,7 +278,9 @@ fn cmd_test(args: &[String]) {
 fn read_source(arg: &str) -> String {
     if arg == "-" {
         let mut buf = String::new();
-        io::stdin().read_to_string(&mut buf).expect("Failed to read from stdin");
+        io::stdin()
+            .read_to_string(&mut buf)
+            .expect("Failed to read from stdin");
         buf
     } else {
         fs::read_to_string(arg).expect("Failed to read file")
@@ -327,31 +345,48 @@ fn build_exe(source_path: &str) {
         let perms = fs::Permissions::from_mode(0o755);
         let _ = output.set_permissions(perms);
     }
-    println!("Built: {} ({} bytes)", output_name, exe_data.len() + source_bytes.len() + 16);
+    println!(
+        "Built: {} ({} bytes)",
+        output_name,
+        exe_data.len() + source_bytes.len() + 16
+    );
     println!("  Source embedded: {} bytes", source_bytes.len());
 }
 
 fn cmd_run_debug(file: &str, source: &str) {
     use rakc::vm::{Vm, VmDebugAction};
-    let base_dir = std::path::Path::new(file).parent().map(|p| p.to_string_lossy().to_string()).unwrap_or_else(|| ".".to_string());
+    let base_dir = std::path::Path::new(file)
+        .parent()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|| ".".to_string());
 
     let tokens = match rakc::lexer::tokenize(source) {
         Ok(t) => t,
-        Err(e) => { eprintln!("Lexer error: {}", e); std::process::exit(1); }
+        Err(e) => {
+            eprintln!("Lexer error: {}", e);
+            std::process::exit(1);
+        }
     };
     let ast = match rakc::parser::parse(&tokens, source) {
         Ok(a) => a,
-        Err(e) => { eprintln!("Parser error: {}", e); std::process::exit(1); }
+        Err(e) => {
+            eprintln!("Parser error: {}", e);
+            std::process::exit(1);
+        }
     };
     let chunk = match rakc::compiler::compile_module_in(&ast, &base_dir) {
         Ok(c) => c,
-        Err(e) => { eprintln!("Compile error: {}", e); std::process::exit(1); }
+        Err(e) => {
+            eprintln!("Compile error: {}", e);
+            std::process::exit(1);
+        }
     };
 
     // Shared breakpoint set / stepping state consulted by the handler.
     let breakpoints: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<u32>>> =
         std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
-    let stepping: std::sync::Arc<std::sync::Mutex<bool>> = std::sync::Arc::new(std::sync::Mutex::new(true));
+    let stepping: std::sync::Arc<std::sync::Mutex<bool>> =
+        std::sync::Arc::new(std::sync::Mutex::new(true));
 
     // The disassembler needs the compiled chunk; share it via Arc.
     let chunk_arc = std::sync::Arc::new(chunk);
@@ -669,38 +704,47 @@ fn main() {
         .collect();
 
     // Sandbox flags: --sandbox [--allow csv]. Stripped from script argv.
-    let (sandbox_on, sandbox_allow, parsed_depth, clean_args) =
-            rakc::caps::parse_cli(&script_args);
+    let (sandbox_on, sandbox_allow, parsed_depth, clean_args) = rakc::caps::parse_cli(&script_args);
     let max_depth = max_depth_override.or(parsed_depth);
     if sandbox_on {
         rakc::caps::enable(&sandbox_allow);
-        eprintln!("sandbox: active (allow: {})", if sandbox_allow.is_empty() { "none".to_string() } else { sandbox_allow.clone() });
+        eprintln!(
+            "sandbox: active (allow: {})",
+            if sandbox_allow.is_empty() {
+                "none".to_string()
+            } else {
+                sandbox_allow.clone()
+            }
+        );
     }
 
     match cmd.as_str() {
-            "run" => {
-                let base_dir = std::path::Path::new(file).parent().map(|p| p.to_string_lossy().to_string()).unwrap_or_else(|| ".".to_string());
-                // argv for a `fn main(args)` entry = everything after the file.
-                let script_args: Vec<String> = clean_args;
-                #[cfg(feature = "gui")]
-                let result = rakc::gui::eval_in_cli_with_gui(&source, &base_dir, &script_args);
-                #[cfg(not(feature = "gui"))]
-                let result = rakc::eval_in_cli(&source, &base_dir, &script_args, max_depth);
-                match result {
-                    Ok((output, code)) => {
-                        for line in &output {
-                            println!("{}", line);
-                        }
-                        if code != 0 {
-                            std::process::exit(code);
-                        }
+        "run" => {
+            let base_dir = std::path::Path::new(file)
+                .parent()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_else(|| ".".to_string());
+            // argv for a `fn main(args)` entry = everything after the file.
+            let script_args: Vec<String> = clean_args;
+            #[cfg(feature = "gui")]
+            let result = rakc::gui::eval_in_cli_with_gui(&source, &base_dir, &script_args);
+            #[cfg(not(feature = "gui"))]
+            let result = rakc::eval_in_cli(&source, &base_dir, &script_args, max_depth);
+            match result {
+                Ok((output, code)) => {
+                    for line in &output {
+                        println!("{}", line);
                     }
-                    Err(e) => {
-                        eprintln!("Error: {}", e);
-                        std::process::exit(1);
+                    if code != 0 {
+                        std::process::exit(code);
                     }
                 }
+                Err(e) => {
+                    eprintln!("Error: {}", e);
+                    std::process::exit(1);
+                }
             }
+        }
         "debug" => {
             cmd_run_debug(file, &source);
         }
@@ -710,53 +754,45 @@ fn main() {
         "build" => {
             build_exe(file);
         }
-        "check" => {
-            match rakc::lexer::tokenize(&source) {
-                Ok(tokens) => match rakc::parser::parse(&tokens, &source) {
-                    Ok(ast) => {
-                        let mut tc = rakc::typecheck::TypeChecker::new(&source, file);
-                        let diagnostics = tc.check_module(&ast);
-                        if diagnostics.is_empty() {
-                            println!("{}: no errors", file);
-                        } else {
-                            for d in &diagnostics {
-                                eprintln!("{}", d.render());
-                            }
-                            std::process::exit(1);
+        "check" => match rakc::lexer::tokenize(&source) {
+            Ok(tokens) => match rakc::parser::parse(&tokens, &source) {
+                Ok(ast) => {
+                    let mut tc = rakc::typecheck::TypeChecker::new(&source, file);
+                    let diagnostics = tc.check_module(&ast);
+                    if diagnostics.is_empty() {
+                        println!("{}: no errors", file);
+                    } else {
+                        for d in &diagnostics {
+                            eprintln!("{}", d.render());
                         }
-                    }
-                    Err(e) => {
-                        eprintln!("{}", e);
                         std::process::exit(1);
                     }
-                },
+                }
                 Err(e) => {
                     eprintln!("{}", e);
                     std::process::exit(1);
                 }
+            },
+            Err(e) => {
+                eprintln!("{}", e);
+                std::process::exit(1);
             }
-        }
-        "lex" => {
-            match rakc::lexer::tokenize(&source) {
-                Ok(tokens) => {
-                    for tok in tokens {
-                        println!("{:?}", tok);
-                    }
+        },
+        "lex" => match rakc::lexer::tokenize(&source) {
+            Ok(tokens) => {
+                for tok in tokens {
+                    println!("{:?}", tok);
                 }
-                Err(e) => eprintln!("Lexer error: {}", e),
             }
-        }
-        "parse" => {
-            match rakc::lexer::tokenize(&source) {
-                Ok(tokens) => {
-                    match rakc::parser::parse(&tokens, &source) {
-                        Ok(ast) => println!("{:#?}", ast),
-                        Err(e) => eprintln!("Parser error: {}", e),
-                    }
-                }
-                Err(e) => eprintln!("Lexer error: {}", e),
-            }
-        }
+            Err(e) => eprintln!("Lexer error: {}", e),
+        },
+        "parse" => match rakc::lexer::tokenize(&source) {
+            Ok(tokens) => match rakc::parser::parse(&tokens, &source) {
+                Ok(ast) => println!("{:#?}", ast),
+                Err(e) => eprintln!("Parser error: {}", e),
+            },
+            Err(e) => eprintln!("Lexer error: {}", e),
+        },
         "fmt" => {
             // `rakc fmt file [--write|--check]`
             // Flags may sit before or after the file, so collect every one of them.
@@ -766,8 +802,12 @@ fn main() {
                 .filter(|(i, _)| flag_slots.contains(i))
                 .map(|(_, a)| a)
                 .collect();
-            let write = flags.iter().any(|f| f.as_str() == "--write" || f.as_str() == "-w");
-            let check = flags.iter().any(|f| f.as_str() == "--check" || f.as_str() == "-c");
+            let write = flags
+                .iter()
+                .any(|f| f.as_str() == "--write" || f.as_str() == "-w");
+            let check = flags
+                .iter()
+                .any(|f| f.as_str() == "--check" || f.as_str() == "-c");
             match rakc::fmt::format_source(&source) {
                 Ok(formatted) => {
                     if check {
@@ -779,7 +819,9 @@ fn main() {
                         }
                     } else if write {
                         if formatted != source {
-                            std::fs::write(file, &formatted).map_err(|e| format!("fmt: cannot write '{}': {}", file, e)).unwrap();
+                            std::fs::write(file, &formatted)
+                                .map_err(|e| format!("fmt: cannot write '{}': {}", file, e))
+                                .unwrap();
                             println!("{}: formatted", file);
                         } else {
                             println!("{}: already formatted", file);
@@ -803,8 +845,12 @@ fn main() {
                 .filter(|(i, _)| flag_slots.contains(i))
                 .map(|(_, a)| a)
                 .collect();
-            let deny = flags.iter().any(|f| f.as_str() == "--deny" || f.as_str() == "-d");
-            let audit = flags.iter().any(|f| f.as_str() == "--audit" || f.as_str() == "-a");
+            let deny = flags
+                .iter()
+                .any(|f| f.as_str() == "--deny" || f.as_str() == "-d");
+            let audit = flags
+                .iter()
+                .any(|f| f.as_str() == "--audit" || f.as_str() == "-a");
             match rakc::lint::lint_source_full(&source) {
                 Ok(report) => {
                     // --audit answers "which safety exemptions does this
@@ -833,7 +879,10 @@ fn main() {
             }
         }
         "vm" => {
-            let base_dir = std::path::Path::new(file).parent().map(|p| p.to_string_lossy().to_string()).unwrap_or_else(|| ".".to_string());
+            let base_dir = std::path::Path::new(file)
+                .parent()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_else(|| ".".to_string());
             match rakc::lexer::tokenize(&source) {
                 Ok(tokens) => {
                     match rakc::parser::parse(&tokens, &source) {

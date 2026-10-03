@@ -25,13 +25,23 @@ fn next_pid() -> u64 {
     COUNTER.fetch_add(1, Ordering::SeqCst)
 }
 
-fn table_mut() -> Result<std::sync::MutexGuard<'static, Option<HashMap<u64, ChildInfo>>>, std::sync::PoisonError<std::sync::MutexGuard<'static, Option<HashMap<u64, ChildInfo>>>>> {
+fn table_mut() -> Result<
+    std::sync::MutexGuard<'static, Option<HashMap<u64, ChildInfo>>>,
+    std::sync::PoisonError<std::sync::MutexGuard<'static, Option<HashMap<u64, ChildInfo>>>>,
+> {
     TABLE.lock()
 }
 
 fn insert(pid: u64, child: Child) {
     if let Ok(mut g) = table_mut() {
-        g.get_or_insert_with(HashMap::new).insert(pid, ChildInfo { child: Some(child), exit: None, reaped: false });
+        g.get_or_insert_with(HashMap::new).insert(
+            pid,
+            ChildInfo {
+                child: Some(child),
+                exit: None,
+                reaped: false,
+            },
+        );
     }
 }
 

@@ -26,7 +26,8 @@ pub fn csum16(data: &[u8]) -> u16 {
 }
 
 fn parse_ipv4(s: &str) -> Result<Ipv4Addr, String> {
-    s.parse::<Ipv4Addr>().map_err(|_| format!("net_raw: bad IPv4 address '{}'", s))
+    s.parse::<Ipv4Addr>()
+        .map_err(|_| format!("net_raw: bad IPv4 address '{}'", s))
 }
 
 /// Build an IPv4 header (20 bytes) carrying `payload` with the given protocol
@@ -37,12 +38,14 @@ pub fn ipv4(src: &str, dst: &str, proto: u8, payload: &[u8]) -> Result<Vec<u8>, 
     let total_len = 20 + payload.len();
     let mut hdr = vec![0u8; 20];
     hdr[0] = 0x45; // version 4, IHL 5 (20 bytes)
-    hdr[1] = 0;    // DSCP/ECN
+    hdr[1] = 0; // DSCP/ECN
     hdr[2] = (total_len >> 8) as u8;
     hdr[3] = (total_len & 0xFF) as u8;
-    hdr[4] = 0; hdr[5] = 0;   // identification
-    hdr[6] = 0x40; hdr[7] = 0; // flags: Don't Fragment, offset 0
-    hdr[8] = 64;              // TTL
+    hdr[4] = 0;
+    hdr[5] = 0; // identification
+    hdr[6] = 0x40;
+    hdr[7] = 0; // flags: Don't Fragment, offset 0
+    hdr[8] = 64; // TTL
     hdr[9] = proto;
     // checksum at [10..12] left 0
     hdr[12..16].copy_from_slice(&src.octets());
@@ -76,7 +79,16 @@ fn parse_flags(s: &str) -> u8 {
 /// Build a TCP segment (20-byte header) with the given flags, sequence,
 /// acknowledgement, and payload. The checksum is computed over the IPv4
 /// pseudo-header (src/dst from `src_ip`/`dst_ip`).
-pub fn tcp(src_ip: &str, dst_ip: &str, src_port: u16, dst_port: u16, flags: &str, seq: u32, ack: u32, payload: &[u8]) -> Result<Vec<u8>, String> {
+pub fn tcp(
+    src_ip: &str,
+    dst_ip: &str,
+    src_port: u16,
+    dst_port: u16,
+    flags: &str,
+    seq: u32,
+    ack: u32,
+    payload: &[u8],
+) -> Result<Vec<u8>, String> {
     let src = parse_ipv4(src_ip)?;
     let dst = parse_ipv4(dst_ip)?;
     let data_len = payload.len();
@@ -89,9 +101,11 @@ pub fn tcp(src_ip: &str, dst_ip: &str, src_port: u16, dst_port: u16, flags: &str
     hdr[8..12].copy_from_slice(&ack.to_be_bytes());
     hdr[12] = 0x50; // data offset 5 (20 bytes)
     hdr[13] = parse_flags(flags);
-    hdr[14] = 0xFF; hdr[15] = 0xFF; // window
-    // checksum [16..18] left 0
-    hdr[18] = 0; hdr[19] = 0; // urgent pointer
+    hdr[14] = 0xFF;
+    hdr[15] = 0xFF; // window
+                    // checksum [16..18] left 0
+    hdr[18] = 0;
+    hdr[19] = 0; // urgent pointer
 
     // Pseudo-header for the TCP checksum.
     let mut pseudo = Vec::with_capacity(12 + 20 + data_len);
@@ -115,7 +129,13 @@ pub fn tcp(src_ip: &str, dst_ip: &str, src_port: u16, dst_port: u16, flags: &str
 
 /// Build a UDP datagram (8-byte header) with the given payload. The checksum
 /// is computed over the IPv4 pseudo-header.
-pub fn udp(src_ip: &str, dst_ip: &str, src_port: u16, dst_port: u16, payload: &[u8]) -> Result<Vec<u8>, String> {
+pub fn udp(
+    src_ip: &str,
+    dst_ip: &str,
+    src_port: u16,
+    dst_port: u16,
+    payload: &[u8],
+) -> Result<Vec<u8>, String> {
     let src = parse_ipv4(src_ip)?;
     let dst = parse_ipv4(dst_ip)?;
     let data_len = payload.len();
@@ -160,7 +180,10 @@ pub fn tcp_syn(src: &str, dst: &str, src_port: u16, dport: u16) -> Result<Vec<u8
 fn ipv4_octets(s: &str) -> Result<[u8; 4], String> {
     let parts: Vec<&str> = s.trim().split('.').collect();
     if parts.len() != 4 {
-        return Err(format!("net_raw: '{}' is not a dotted-quad IPv4 address", s));
+        return Err(format!(
+            "net_raw: '{}' is not a dotted-quad IPv4 address",
+            s
+        ));
     }
     let mut out = [0u8; 4];
     for (i, p) in parts.iter().enumerate() {
@@ -194,7 +217,13 @@ fn mac_bytes(s: &str) -> Result<[u8; 6], String> {
 /// header. `id` and `seq` are echoed back in the reply, so a caller can match
 /// a response to its request. `payload` is the data to echo (16 bytes is the
 /// conventional size).
-pub fn icmp_echo(src: &str, dst: &str, id: u16, seq: u16, payload: &[u8]) -> Result<Vec<u8>, String> {
+pub fn icmp_echo(
+    src: &str,
+    dst: &str,
+    id: u16,
+    seq: u16,
+    payload: &[u8],
+) -> Result<Vec<u8>, String> {
     let mut msg = Vec::with_capacity(8 + payload.len());
     msg.push(8); // type: echo request
     msg.push(0); // code: no error
@@ -210,7 +239,13 @@ pub fn icmp_echo(src: &str, dst: &str, id: u16, seq: u16, payload: &[u8]) -> Res
 
 /// Build an ICMP echo reply (type 0) for `dst`, for hosts that answer on
 /// someone else's behalf (RFC 1122 / RFC 1812).
-pub fn icmp_echo_reply(src: &str, dst: &str, id: u16, seq: u16, payload: &[u8]) -> Result<Vec<u8>, String> {
+pub fn icmp_echo_reply(
+    src: &str,
+    dst: &str,
+    id: u16,
+    seq: u16,
+    payload: &[u8],
+) -> Result<Vec<u8>, String> {
     let mut msg = Vec::with_capacity(8 + payload.len());
     msg.push(0); // type: echo reply
     msg.push(0); // code
@@ -235,7 +270,12 @@ pub fn arp_request(src_mac: &str, src_ip: &str, target_ip: &str) -> Result<Vec<u
 }
 
 /// Build an ARP reply telling `target_ip` that `src_ip` lives at `src_mac`.
-pub fn arp_reply(src_mac: &str, src_ip: &str, target_mac: &str, target_ip: &str) -> Result<Vec<u8>, String> {
+pub fn arp_reply(
+    src_mac: &str,
+    src_ip: &str,
+    target_mac: &str,
+    target_ip: &str,
+) -> Result<Vec<u8>, String> {
     let sha = mac_bytes(src_mac)?;
     let spa = ipv4_octets(src_ip)?;
     let tha = mac_bytes(target_mac)?;
@@ -247,10 +287,10 @@ pub fn arp_reply(src_mac: &str, src_ip: &str, target_mac: &str, target_ip: &str)
 /// 0x0800 is IPv4, `hlen`/`plen` are 6 and 4.
 fn arp_frame(sha: &[u8; 6], spa: &[u8; 4], tha: &[u8; 6], tpa: &[u8; 4], opcode: u16) -> Vec<u8> {
     let mut f = Vec::with_capacity(42);
-    f.extend_from_slice(tha);          // destination MAC
-    f.extend_from_slice(sha);          // source MAC
+    f.extend_from_slice(tha); // destination MAC
+    f.extend_from_slice(sha); // source MAC
     f.extend_from_slice(&[0x08, 0x06]); // EtherType: ARP
-    f.extend_from_slice(&1u16.to_be_bytes());   // hardware type: Ethernet
+    f.extend_from_slice(&1u16.to_be_bytes()); // hardware type: Ethernet
     f.extend_from_slice(&0x0800u16.to_be_bytes()); // protocol type: IPv4
     f.push(6); // hardware length
     f.push(4); // protocol length
@@ -280,9 +320,17 @@ pub fn arp_parse(frame: &[u8]) -> Option<Vec<(String, String)>> {
     }
     let opcode = u16::from_be_bytes([body[6], body[7]]);
     let fmt_mac = |b: &[u8]| {
-        b.iter().map(|x| format!("{:02x}", x)).collect::<Vec<_>>().join(":")
+        b.iter()
+            .map(|x| format!("{:02x}", x))
+            .collect::<Vec<_>>()
+            .join(":")
     };
-    let fmt_ip = |b: &[u8]| b.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(".");
+    let fmt_ip = |b: &[u8]| {
+        b.iter()
+            .map(|x| x.to_string())
+            .collect::<Vec<_>>()
+            .join(".")
+    };
     let mut out = Vec::new();
     out.push(("opcode".to_string(), opcode.to_string()));
     out.push(("sender_mac".to_string(), fmt_mac(&body[8..14])));
@@ -307,8 +355,17 @@ pub fn send(pkt: &[u8]) -> Result<usize, String> {
     use socket2::{Domain, Protocol, SockAddr, Socket, Type};
     use std::net::{Ipv4Addr, SocketAddrV4};
     use std::os::fd::AsRawFd;
-    let sock = Socket::new(Domain::IPV4, Type::from(libc::SOCK_RAW), Some(Protocol::from(libc::IPPROTO_RAW)))
-        .map_err(|e| format!("net_raw: open raw socket failed (need CAP_NET_RAW/Administrator): {}", e))?;
+    let sock = Socket::new(
+        Domain::IPV4,
+        Type::from(libc::SOCK_RAW),
+        Some(Protocol::from(libc::IPPROTO_RAW)),
+    )
+    .map_err(|e| {
+        format!(
+            "net_raw: open raw socket failed (need CAP_NET_RAW/Administrator): {}",
+            e
+        )
+    })?;
     unsafe {
         let one: libc::c_int = 1;
         let _ = libc::setsockopt(
@@ -320,12 +377,16 @@ pub fn send(pkt: &[u8]) -> Result<usize, String> {
         );
     }
     let addr = SockAddr::from(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0));
-    sock.send_to(pkt, &addr).map_err(|e| format!("net_raw: send failed: {}", e))
+    sock.send_to(pkt, &addr)
+        .map_err(|e| format!("net_raw: send failed: {}", e))
 }
 
 #[cfg(not(unix))]
 pub fn send(_pkt: &[u8]) -> Result<usize, String> {
-    Err("net_raw: send/recv requires unix CAP_NET_RAW (Windows raw-socket I/O not in this build)".to_string())
+    Err(
+        "net_raw: send/recv requires unix CAP_NET_RAW (Windows raw-socket I/O not in this build)"
+            .to_string(),
+    )
 }
 
 /// Receive up to `max` bytes from a raw socket. Requires `CAP_NET_RAW` /
@@ -333,10 +394,22 @@ pub fn send(_pkt: &[u8]) -> Result<usize, String> {
 #[cfg(unix)]
 pub fn recv(max: usize) -> Result<Vec<u8>, String> {
     use socket2::{Domain, Protocol, Socket, Type};
-    let sock = Socket::new(Domain::IPV4, Type::from(libc::SOCK_RAW), Some(Protocol::from(libc::IPPROTO_RAW)))
-        .map_err(|e| format!("net_raw: open raw socket failed (need CAP_NET_RAW/Administrator): {}", e))?;
+    let sock = Socket::new(
+        Domain::IPV4,
+        Type::from(libc::SOCK_RAW),
+        Some(Protocol::from(libc::IPPROTO_RAW)),
+    )
+    .map_err(|e| {
+        format!(
+            "net_raw: open raw socket failed (need CAP_NET_RAW/Administrator): {}",
+            e
+        )
+    })?;
     let mut buf = vec![0u8; max];
-    let (n, _addr) = sock.recv_from(unsafe { std::slice::from_raw_parts_mut(buf.as_mut_ptr() as *mut std::mem::MaybeUninit<u8>, max) })
+    let (n, _addr) = sock
+        .recv_from(unsafe {
+            std::slice::from_raw_parts_mut(buf.as_mut_ptr() as *mut std::mem::MaybeUninit<u8>, max)
+        })
         .map_err(|e| format!("net_raw: recv failed: {}", e))?;
     buf.truncate(n);
     Ok(buf)
@@ -344,7 +417,10 @@ pub fn recv(max: usize) -> Result<Vec<u8>, String> {
 
 #[cfg(not(unix))]
 pub fn recv(_max: usize) -> Result<Vec<u8>, String> {
-    Err("net_raw: send/recv requires unix CAP_NET_RAW (Windows raw-socket I/O not in this build)".to_string())
+    Err(
+        "net_raw: send/recv requires unix CAP_NET_RAW (Windows raw-socket I/O not in this build)"
+            .to_string(),
+    )
 }
 
 #[cfg(test)]
@@ -374,9 +450,9 @@ mod tests {
     fn tcp_syn_packet_shape() {
         let pkt = tcp_syn("10.0.0.5", "10.0.0.10", 12345, 80).unwrap();
         assert_eq!(pkt.len(), 20 + 20); // IPv4 header + TCP header (no payload)
-        assert_eq!(pkt[0], 0x45);       // IPv4
-        assert_eq!(pkt[9], 6);          // proto TCP
-        // TCP flags byte is at offset 20 + 13 = 33; SYN = 0x02.
+        assert_eq!(pkt[0], 0x45); // IPv4
+        assert_eq!(pkt[9], 6); // proto TCP
+                               // TCP flags byte is at offset 20 + 13 = 33; SYN = 0x02.
         assert_eq!(pkt[33] & 0x02, 0x02);
     }
 
@@ -394,7 +470,7 @@ mod tests {
         assert_eq!(pkt[9], 1); // protocol ICMP
         assert_eq!(pkt[20], 8); // type = echo request
         assert_eq!(pkt[21], 0); // code
-        // id/seq are echoed at ICMP offset 4 and 6.
+                                // id/seq are echoed at ICMP offset 4 and 6.
         assert_eq!(&pkt[24..26], &[0x12, 0x34]);
         assert_eq!(&pkt[26..28], &[0x00, 0x01]);
         // The ICMP message is self-checking once the checksum is stored.
@@ -420,7 +496,7 @@ mod tests {
     fn arp_request_frame_layout() {
         let f = arp_request("aa:bb:cc:dd:ee:ff", "10.0.0.5", "10.0.0.10").unwrap();
         assert_eq!(f.len(), 42); // 14 Ethernet + 28 ARP
-        // Broadcast destination, then our own MAC as source.
+                                 // Broadcast destination, then our own MAC as source.
         assert_eq!(&f[0..6], &[0, 0, 0, 0, 0, 0]);
         assert_eq!(&f[6..12], &[0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]);
         assert_eq!(&f[12..14], &[0x08, 0x06]); // EtherType: ARP
@@ -437,7 +513,13 @@ mod tests {
 
     #[test]
     fn arp_reply_uses_the_target_mac() {
-        let f = arp_reply("aa:bb:cc:dd:ee:ff", "10.0.0.10", "11:22:33:44:55:66", "10.0.0.5").unwrap();
+        let f = arp_reply(
+            "aa:bb:cc:dd:ee:ff",
+            "10.0.0.10",
+            "11:22:33:44:55:66",
+            "10.0.0.5",
+        )
+        .unwrap();
         assert_eq!(&f[0..6], &[0x11, 0x22, 0x33, 0x44, 0x55, 0x66]);
         assert_eq!(&f[32..38], &[0x11, 0x22, 0x33, 0x44, 0x55, 0x66]);
         assert_eq!(&f[20..22], &[0x00, 0x02]);
@@ -447,7 +529,12 @@ mod tests {
     fn arp_parse_roundtrips_a_request() {
         let f = arp_request("aa:bb:cc:dd:ee:ff", "10.0.0.5", "10.0.0.10").unwrap();
         let kv = arp_parse(&f).unwrap();
-        let get = |k: &str| kv.iter().find(|(a, _)| a == k).map(|(_, v)| v.clone()).unwrap();
+        let get = |k: &str| {
+            kv.iter()
+                .find(|(a, _)| a == k)
+                .map(|(_, v)| v.clone())
+                .unwrap()
+        };
         assert_eq!(get("opcode"), "1");
         assert_eq!(get("sender_mac"), "aa:bb:cc:dd:ee:ff");
         assert_eq!(get("sender_ip"), "10.0.0.5");

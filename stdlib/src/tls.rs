@@ -24,7 +24,10 @@ pub fn parse_client_hello(bytes: &[u8]) -> Result<ClientHelloInfo, String> {
     }
     let rec_type = bytes[0];
     if rec_type != 0x16 {
-        return Err(format!("tls: not a handshake record (type 0x{:02X})", rec_type));
+        return Err(format!(
+            "tls: not a handshake record (type 0x{:02X})",
+            rec_type
+        ));
     }
     let frag_len = u16::from_be_bytes([bytes[3], bytes[4]]) as usize;
     let frag = bytes.get(5..5 + frag_len).ok_or("tls: short record")?;
@@ -64,12 +67,18 @@ pub fn parse_client_hello(bytes: &[u8]) -> Result<ClientHelloInfo, String> {
     p = ciphers_end;
     // compression methods: len(1) + list.
     if body.len() < p + 1 {
-        return Ok(ClientHelloInfo { sni: String::new(), ciphers });
+        return Ok(ClientHelloInfo {
+            sni: String::new(),
+            ciphers,
+        });
     }
     let cm_len = body[p] as usize;
     p += 1 + cm_len;
     if body.len() < p + 2 {
-        return Ok(ClientHelloInfo { sni: String::new(), ciphers });
+        return Ok(ClientHelloInfo {
+            sni: String::new(),
+            ciphers,
+        });
     }
     let ext_len = u16::from_be_bytes([body[p], body[p + 1]]) as usize;
     p += 2;
@@ -125,12 +134,13 @@ mod tests {
         // Craft a minimal ClientHello with one cipher and SNI = "example.com".
         let mut body = Vec::new();
         body.extend_from_slice(&[0x03, 0x03]); // version TLS 1.2
-        body.extend_from_slice(&[0u8; 32]);   // random
-        body.push(0);                          // session id len 0
+        body.extend_from_slice(&[0u8; 32]); // random
+        body.push(0); // session id len 0
         body.extend_from_slice(&[0x00, 0x02]); // cipher list len 2
         body.extend_from_slice(&[0x13, 0x01]); // cipher TLS_AES_128_GCM_SHA256
-        body.push(1); body.push(0);             // compression: 1 method (null)
-        // Extensions: SNI.
+        body.push(1);
+        body.push(0); // compression: 1 method (null)
+                      // Extensions: SNI.
         let name = b"example.com";
         let mut sni_ext = Vec::new();
         sni_ext.extend_from_slice(&((name.len() + 5) as u16).to_be_bytes()); // list len

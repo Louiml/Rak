@@ -55,7 +55,8 @@ fn marshal_vm_args(args: &[Value]) -> Result<(Vec<u64>, Vec<MarshalGuardVm>), St
 
 /// Cache of loaded foreign libraries keyed by path (or `"<default>"`), so
 /// repeated `extern "C"` calls don't `dlopen` on every invocation.
-static FFI_LIB_CACHE: Mutex<Option<HashMap<String, Arc<Mutex<rak_stdlib::ffi::LibHandle>>>>> = Mutex::new(None);
+static FFI_LIB_CACHE: Mutex<Option<HashMap<String, Arc<Mutex<rak_stdlib::ffi::LibHandle>>>>> =
+    Mutex::new(None);
 
 /// Resolve (and cache) a foreign library handle for an `extern` block.
 fn ffi_get_lib(path: &Option<String>) -> Result<Arc<Mutex<rak_stdlib::ffi::LibHandle>>, String> {
@@ -75,7 +76,11 @@ fn ffi_get_lib(path: &Option<String>) -> Result<Arc<Mutex<rak_stdlib::ffi::LibHa
 
 /// Marshal Rak `Value`s to `u64` bit patterns using declared `Param` types
 /// (so float args land in the right register class).
-fn marshal_vm_args_typed(args: &[Value], params: &[crate::ast::Param], varargs: bool) -> Result<(Vec<u64>, Vec<MarshalGuardVm>), String> {
+fn marshal_vm_args_typed(
+    args: &[Value],
+    params: &[crate::ast::Param],
+    varargs: bool,
+) -> Result<(Vec<u64>, Vec<MarshalGuardVm>), String> {
     let mut out = Vec::with_capacity(args.len());
     let mut guards = Vec::with_capacity(args.len());
     for (i, a) in args.iter().enumerate() {
@@ -116,7 +121,12 @@ fn marshal_vm_args_typed(args: &[Value], params: &[crate::ast::Param], varargs: 
                         Value::ForeignPtr(p) => out.push(*p),
                         Value::Bool(b) => out.push(if *b { 1 } else { 0 }),
                         Value::Nil => out.push(0),
-                        _ => return Err(format!("ffi: cannot marshal {} as vararg", other.type_name())),
+                        _ => {
+                            return Err(format!(
+                                "ffi: cannot marshal {} as vararg",
+                                other.type_name()
+                            ))
+                        }
                     }
                 } else {
                     return Err(format!("ffi: cannot marshal {} to C", other.type_name()));
@@ -145,7 +155,11 @@ fn unmarshal_vm_ret(ret: &Option<crate::ast::Type>, bits: u64, is_float: bool) -
         Some(Type::Ptr(_)) => Value::ForeignPtr(bits),
         Some(Type::Custom(_)) => Value::ForeignPtr(bits),
         Some(_) => {
-            if is_float { Value::F64(f64::from_bits(bits)) } else { Value::ForeignPtr(bits) }
+            if is_float {
+                Value::F64(f64::from_bits(bits))
+            } else {
+                Value::ForeignPtr(bits)
+            }
         }
     }
 }
@@ -158,8 +172,14 @@ pub fn make_foreign_native(decl: crate::ast::ForeignFn, lib_path: Option<String>
     let native = move |args: &[Value]| -> Result<Value, String> {
         let lib = ffi_get_lib(&lib_path)?;
         let (marshalled, _g) = marshal_vm_args_typed(args, &decl.params, decl.varargs)?;
-        let addr = { let h = lib.lock().unwrap(); rak_stdlib::ffi::sym_addr(&h, &decl.name)? };
-        let is_float_ret = matches!(decl.return_type, Some(crate::ast::Type::F32) | Some(crate::ast::Type::F64));
+        let addr = {
+            let h = lib.lock().unwrap();
+            rak_stdlib::ffi::sym_addr(&h, &decl.name)?
+        };
+        let is_float_ret = matches!(
+            decl.return_type,
+            Some(crate::ast::Type::F32) | Some(crate::ast::Type::F64)
+        );
         let bits = if is_float_ret {
             unsafe { rak_stdlib::ffi::call_float(addr, &marshalled).to_bits() }
         } else {
@@ -210,7 +230,17 @@ pub struct Vm {
     debug_enabled: bool,
     debug_breakpoints: std::collections::HashSet<u32>,
     debug_step: bool,
-    debug_handler: Option<Box<dyn FnMut(u32, Vec<(String, Value)>, std::collections::HashMap<String, Value>, Vec<String>) -> VmDebugAction + Send>>,
+    debug_handler: Option<
+        Box<
+            dyn FnMut(
+                    u32,
+                    Vec<(String, Value)>,
+                    std::collections::HashMap<String, Value>,
+                    Vec<String>,
+                ) -> VmDebugAction
+                + Send,
+        >,
+    >,
     /// Current call stack of frame names (pushed on function entry, popped on return).
     debug_callstack: Vec<String>,
     /// Which chunk globals each imported module namespace republishes.
@@ -327,7 +357,11 @@ fn iter_pure_native(name: &str, args: &[Value]) -> Result<Value, String> {
     fn items_of(args: &[Value], name: &str) -> Result<Vec<Value>, String> {
         match args.first() {
             Some(Value::Array(a)) => Ok(a.to_vec()),
-            Some(other) => Err(format!("{}() requires an array, got {}", name, other.type_name())),
+            Some(other) => Err(format!(
+                "{}() requires an array, got {}",
+                name,
+                other.type_name()
+            )),
             None => Err(format!("{}() requires an array", name)),
         }
     }
@@ -337,7 +371,9 @@ fn iter_pure_native(name: &str, args: &[Value]) -> Result<Value, String> {
             let b = items_of(&args[1..], "zip")?;
             let n = a.len().min(b.len());
             Ok(Value::Array(Arc::from(
-                (0..n).map(|i| Value::Tuple(Arc::from(vec![a[i].clone(), b[i].clone()]))).collect::<Vec<_>>(),
+                (0..n)
+                    .map(|i| Value::Tuple(Arc::from(vec![a[i].clone(), b[i].clone()])))
+                    .collect::<Vec<_>>(),
             )))
         }
         "enumerate" => {
@@ -352,7 +388,9 @@ fn iter_pure_native(name: &str, args: &[Value]) -> Result<Value, String> {
         "skip" => {
             let a = items_of(args, "skip")?;
             let n = args.get(1).and_then(|v| v.as_i64()).unwrap_or(0).max(0) as usize;
-            Ok(Value::Array(Arc::from(a.into_iter().skip(n).collect::<Vec<_>>())))
+            Ok(Value::Array(Arc::from(
+                a.into_iter().skip(n).collect::<Vec<_>>(),
+            )))
         }
         _ => Err(format!(
             "{}() needs VM access to call its function argument (unreachable)",
@@ -390,15 +428,23 @@ fn contains_vm(coll: &Value, item: &Value) -> Result<bool, String> {
 /// `[start, end)` bounds for the `slice` native / `xs[a..b]`: nil or absent
 /// bounds are open, negatives count from the end, bounds clamp; errors when
 /// start > end after clamping. Mirrors the interpreter's `slice_bounds`.
-fn slice_bounds_vm(len: usize, start: Option<&Value>, end: Option<&Value>) -> Result<(usize, usize), String> {
+fn slice_bounds_vm(
+    len: usize,
+    start: Option<&Value>,
+    end: Option<&Value>,
+) -> Result<(usize, usize), String> {
     let len_i = len as i64;
     let mut s = match start {
         Some(Value::Nil) | None => 0,
-        Some(v) => v.as_i64().ok_or_else(|| "slice: start must be an int or nil".to_string())?,
+        Some(v) => v
+            .as_i64()
+            .ok_or_else(|| "slice: start must be an int or nil".to_string())?,
     };
     let mut e = match end {
         Some(Value::Nil) | None => len_i,
-        Some(v) => v.as_i64().ok_or_else(|| "slice: end must be an int or nil".to_string())?,
+        Some(v) => v
+            .as_i64()
+            .ok_or_else(|| "slice: end must be an int or nil".to_string())?,
     };
     if s < 0 {
         s += len_i;
@@ -468,8 +514,8 @@ impl Vm {
             debug_handler: None,
             debug_callstack: Vec::new(),
             call_depth: 0,
-        max_call_depth: crate::interpreter::DEFAULT_MAX_DEPTH,
-        module_publish: HashMap::new(),
+            max_call_depth: crate::interpreter::DEFAULT_MAX_DEPTH,
+            module_publish: HashMap::new(),
         };
         vm.register_natives();
         vm
@@ -503,7 +549,14 @@ impl Vm {
     /// globals, and the current call stack, and returns a `VmDebugAction`.
     pub fn debugger<H>(&mut self, breakpoints: std::collections::HashSet<u32>, handler: H)
     where
-        H: FnMut(u32, Vec<(String, Value)>, std::collections::HashMap<String, Value>, Vec<String>) -> VmDebugAction + Send + 'static,
+        H: FnMut(
+                u32,
+                Vec<(String, Value)>,
+                std::collections::HashMap<String, Value>,
+                Vec<String>,
+            ) -> VmDebugAction
+            + Send
+            + 'static,
     {
         self.debug_enabled = true;
         self.debug_breakpoints = breakpoints;
@@ -536,13 +589,21 @@ impl Vm {
         // Result/Option constructors (the interpreter special-cases these in
         // `eval_call`; the VM registers them as natives so `Ok(42)?` works).
         self.insert_native("Ok", |args| {
-            Ok(Value::Result(Some(Box::new(args.first().cloned().unwrap_or(Value::Nil))), None))
+            Ok(Value::Result(
+                Some(Box::new(args.first().cloned().unwrap_or(Value::Nil))),
+                None,
+            ))
         });
         self.insert_native("Err", |args| {
-            Ok(Value::Result(None, Some(Box::new(args.first().cloned().unwrap_or(Value::Nil)))))
+            Ok(Value::Result(
+                None,
+                Some(Box::new(args.first().cloned().unwrap_or(Value::Nil))),
+            ))
         });
         self.insert_native("Some", |args| {
-            Ok(Value::Option(Some(Box::new(args.first().cloned().unwrap_or(Value::Nil)))))
+            Ok(Value::Option(Some(Box::new(
+                args.first().cloned().unwrap_or(Value::Nil),
+            ))))
         });
         self.globals.insert("None".to_string(), Value::Option(None));
         // Membership + slicing (`in` desugars to `contains`, `xs[a..b]` to
@@ -575,7 +636,12 @@ impl Vm {
         // a window opened from bytecode is a real window and not a stub.
         #[cfg(feature = "gui")]
         for name in [
-            "gui_open", "gui_update", "gui_title", "gui_close", "gui_wait", "gui_quit",
+            "gui_open",
+            "gui_update",
+            "gui_title",
+            "gui_close",
+            "gui_wait",
+            "gui_quit",
         ] {
             self.insert_native(name, |args| crate::gui::vm_native(name, args));
         }
@@ -585,11 +651,18 @@ impl Vm {
         self.insert_native("enumerate", |args| iter_pure_native("enumerate", args));
         self.insert_native("skip", |args| iter_pure_native("skip", args));
         self.insert_native("keys", |args| match args.first() {
-            Some(Value::Map(m)) => Ok(Value::Array(Arc::from(m.keys().cloned().map(|k| Value::String(Arc::from(k.as_str()))).collect::<Vec<_>>()))),
+            Some(Value::Map(m)) => Ok(Value::Array(Arc::from(
+                m.keys()
+                    .cloned()
+                    .map(|k| Value::String(Arc::from(k.as_str())))
+                    .collect::<Vec<_>>(),
+            ))),
             _ => Err("keys() requires a map".to_string()),
         });
         self.insert_native("values", |args| match args.first() {
-            Some(Value::Map(m)) => Ok(Value::Array(Arc::from(m.values().cloned().collect::<Vec<_>>()))),
+            Some(Value::Map(m)) => Ok(Value::Array(Arc::from(
+                m.values().cloned().collect::<Vec<_>>(),
+            ))),
             _ => Err("values() requires a map".to_string()),
         });
         self.insert_native("has", |args| {
@@ -602,7 +675,10 @@ impl Vm {
         self.insert_native("get", |args| {
             let k = native_str(args.get(1));
             match args.first() {
-                Some(Value::Map(m)) => Ok(m.get(&k).cloned().unwrap_or_else(|| args.get(2).cloned().unwrap_or(Value::Nil))),
+                Some(Value::Map(m)) => Ok(m
+                    .get(&k)
+                    .cloned()
+                    .unwrap_or_else(|| args.get(2).cloned().unwrap_or(Value::Nil))),
                 _ => Ok(args.get(2).cloned().unwrap_or(Value::Nil)),
             }
         });
@@ -620,22 +696,39 @@ impl Vm {
             Some(Value::I64(i)) => Ok(Value::I64(*i)),
             Some(Value::Hex(h)) => Ok(Value::I64(*h as i64)),
             Some(Value::F64(f)) => Ok(Value::I64(*f as i64)),
-            Some(Value::String(s)) => s.parse::<i64>().map(Value::I64).map_err(|_| "int() parse error".to_string()),
+            Some(Value::String(s)) => s
+                .parse::<i64>()
+                .map(Value::I64)
+                .map_err(|_| "int() parse error".to_string()),
             Some(Value::Bool(b)) => Ok(Value::I64(if *b { 1 } else { 0 })),
             _ => Ok(Value::I64(0)),
         });
-        self.insert_native("float", |args| Ok(Value::F64(args.first().and_then(|v| v.as_f64()).unwrap_or(0.0))));
+        self.insert_native("float", |args| {
+            Ok(Value::F64(
+                args.first().and_then(|v| v.as_f64()).unwrap_or(0.0),
+            ))
+        });
         self.insert_native("string", |args| {
             let s = match args.first() {
-                Some(Value::MmapSlice(h, off, n)) => String::from_utf8_lossy(&h.as_slice()[*off..off + n]).into_owned(),
+                Some(Value::MmapSlice(h, off, n)) => {
+                    String::from_utf8_lossy(&h.as_slice()[*off..off + n]).into_owned()
+                }
                 Some(Value::Mmap(h)) => String::from_utf8_lossy(h.as_slice()).into_owned(),
                 Some(v) => v.to_string(),
                 None => String::new(),
             };
             Ok(Value::String(Arc::from(s.as_str())))
         });
-        self.insert_native("upper", |args| Ok(Value::String(Arc::from(native_str(args.first()).to_uppercase().as_str()))));
-        self.insert_native("lower", |args| Ok(Value::String(Arc::from(native_str(args.first()).to_lowercase().as_str()))));
+        self.insert_native("upper", |args| {
+            Ok(Value::String(Arc::from(
+                native_str(args.first()).to_uppercase().as_str(),
+            )))
+        });
+        self.insert_native("lower", |args| {
+            Ok(Value::String(Arc::from(
+                native_str(args.first()).to_lowercase().as_str(),
+            )))
+        });
         self.insert_native("md5", |args| {
             rak_stdlib::escape::warn_weak_crypto(
                 "md5",
@@ -683,36 +776,51 @@ impl Vm {
         self.insert_native("hmac_sha256", |args| {
             let key = native_bytes(args.first());
             let data = native_bytes(args.get(1));
-            Ok(Value::String(Arc::from(rak_stdlib::hmac_sha256(&key, &data).as_str())))
+            Ok(Value::String(Arc::from(
+                rak_stdlib::hmac_sha256(&key, &data).as_str(),
+            )))
         });
         self.insert_native("aes_gcm_encrypt", |args| {
             let key = native_bytes(args.first());
             let nonce = native_bytes(args.get(1));
             let pt = native_bytes(args.get(2));
-            rak_stdlib::aes_gcm_encrypt(&key, &nonce, &pt).map(|b| Value::Bytes(Arc::from(b.as_slice()))).map_err(|e| e)
+            rak_stdlib::aes_gcm_encrypt(&key, &nonce, &pt)
+                .map(|b| Value::Bytes(Arc::from(b.as_slice())))
+                .map_err(|e| e)
         });
         self.insert_native("aes_gcm_decrypt", |args| {
             let key = native_bytes(args.first());
             let nonce = native_bytes(args.get(1));
             let ct = native_bytes(args.get(2));
-            rak_stdlib::aes_gcm_decrypt(&key, &nonce, &ct).map(|b| Value::Bytes(Arc::from(b.as_slice()))).map_err(|e| e)
+            rak_stdlib::aes_gcm_decrypt(&key, &nonce, &ct)
+                .map(|b| Value::Bytes(Arc::from(b.as_slice())))
+                .map_err(|e| e)
         });
         self.insert_native("ed25519_keypair", |args| {
             let seed = native_bytes(args.first());
-            rak_stdlib::ed25519_keypair(&seed).map(|(pk, sk)| {
-                Value::Tuple(Arc::from([Value::Bytes(Arc::from(pk.as_slice())), Value::Bytes(Arc::from(sk.as_slice()))]))
-            }).map_err(|e| e)
+            rak_stdlib::ed25519_keypair(&seed)
+                .map(|(pk, sk)| {
+                    Value::Tuple(Arc::from([
+                        Value::Bytes(Arc::from(pk.as_slice())),
+                        Value::Bytes(Arc::from(sk.as_slice())),
+                    ]))
+                })
+                .map_err(|e| e)
         });
         self.insert_native("ed25519_sign", |args| {
             let sk = native_bytes(args.first());
             let msg = native_bytes(args.get(1));
-            rak_stdlib::ed25519_sign(&sk, &msg).map(|s| Value::Bytes(Arc::from(s.as_slice()))).map_err(|e| e)
+            rak_stdlib::ed25519_sign(&sk, &msg)
+                .map(|s| Value::Bytes(Arc::from(s.as_slice())))
+                .map_err(|e| e)
         });
         self.insert_native("ed25519_verify", |args| {
             let pk = native_bytes(args.first());
             let sig = native_bytes(args.get(1));
             let msg = native_bytes(args.get(2));
-            rak_stdlib::ed25519_verify(&pk, &sig, &msg).map(Value::Bool).map_err(|e| e)
+            rak_stdlib::ed25519_verify(&pk, &sig, &msg)
+                .map(Value::Bool)
+                .map_err(|e| e)
         });
         self.insert_native("ct_eq", |args| {
             let a = native_bytes(args.first());
@@ -732,71 +840,102 @@ impl Vm {
                 .map(|v| Value::Bytes(Arc::from(v.as_slice())))
                 .map_err(|e| e)
         });
-        self.insert_native("zeroize", |args| {
-            match args.first() {
-                Some(Value::Bytes(b)) => {
-                    let mut v = b.to_vec();
-                    rak_stdlib::zeroize_bytes(&mut v);
-                    Ok(Value::Bytes(Arc::from(v.as_slice())))
-                }
-                Some(Value::String(s)) => {
-                    let mut v = s.as_bytes().to_vec();
-                    rak_stdlib::zeroize_bytes(&mut v);
-                    Ok(Value::Bytes(Arc::from(v.as_slice())))
-                }
-                _ => Err("zeroize: expected a string or bytes".to_string()),
+        self.insert_native("zeroize", |args| match args.first() {
+            Some(Value::Bytes(b)) => {
+                let mut v = b.to_vec();
+                rak_stdlib::zeroize_bytes(&mut v);
+                Ok(Value::Bytes(Arc::from(v.as_slice())))
             }
+            Some(Value::String(s)) => {
+                let mut v = s.as_bytes().to_vec();
+                rak_stdlib::zeroize_bytes(&mut v);
+                Ok(Value::Bytes(Arc::from(v.as_slice())))
+            }
+            _ => Err("zeroize: expected a string or bytes".to_string()),
         });
         self.insert_native("rsa_keypair", |args| {
             let bits = args.first().and_then(|v| v.as_u64()).unwrap_or(2048) as u32;
-            rak_stdlib::rsa_keypair(bits).map(|(pk, sk)| {
-                Value::Tuple(Arc::from([Value::Bytes(Arc::from(pk.as_slice())), Value::Bytes(Arc::from(sk.as_slice()))]))
-            }).map_err(|e| e)
+            rak_stdlib::rsa_keypair(bits)
+                .map(|(pk, sk)| {
+                    Value::Tuple(Arc::from([
+                        Value::Bytes(Arc::from(pk.as_slice())),
+                        Value::Bytes(Arc::from(sk.as_slice())),
+                    ]))
+                })
+                .map_err(|e| e)
         });
         self.insert_native("rsa_sign", |args| {
             let sk = native_bytes(args.first());
             let msg = native_bytes(args.get(1));
-            rak_stdlib::rsa_sign(&sk, &msg).map(|s| Value::Bytes(Arc::from(s.as_slice()))).map_err(|e| e)
+            rak_stdlib::rsa_sign(&sk, &msg)
+                .map(|s| Value::Bytes(Arc::from(s.as_slice())))
+                .map_err(|e| e)
         });
         self.insert_native("rsa_verify", |args| {
             let pk = native_bytes(args.first());
             let sig = native_bytes(args.get(1));
             let msg = native_bytes(args.get(2));
-            rak_stdlib::rsa_verify(&pk, &sig, &msg).map(Value::Bool).map_err(|e| e)
+            rak_stdlib::rsa_verify(&pk, &sig, &msg)
+                .map(Value::Bool)
+                .map_err(|e| e)
         });
         self.insert_native("rsa_encrypt", |args| {
             let pk = native_bytes(args.first());
             let pt = native_bytes(args.get(1));
-            let label = args.get(2).map(|v| native_bytes(Some(v))).unwrap_or_default();
-            rak_stdlib::rsa_encrypt(&pk, &pt, &label).map(|s| Value::Bytes(Arc::from(s.as_slice()))).map_err(|e| e)
+            let label = args
+                .get(2)
+                .map(|v| native_bytes(Some(v)))
+                .unwrap_or_default();
+            rak_stdlib::rsa_encrypt(&pk, &pt, &label)
+                .map(|s| Value::Bytes(Arc::from(s.as_slice())))
+                .map_err(|e| e)
         });
         self.insert_native("rsa_decrypt", |args| {
             let sk = native_bytes(args.first());
             let ct = native_bytes(args.get(1));
-            let label = args.get(2).map(|v| native_bytes(Some(v))).unwrap_or_default();
-            rak_stdlib::rsa_decrypt(&sk, &ct, &label).map(|s| Value::Bytes(Arc::from(s.as_slice()))).map_err(|e| e)
+            let label = args
+                .get(2)
+                .map(|v| native_bytes(Some(v)))
+                .unwrap_or_default();
+            rak_stdlib::rsa_decrypt(&sk, &ct, &label)
+                .map(|s| Value::Bytes(Arc::from(s.as_slice())))
+                .map_err(|e| e)
         });
         self.insert_native("ecdsa_keypair", |_args| {
-            rak_stdlib::ecdsa_keypair().map(|(pk, sk)| {
-                Value::Tuple(Arc::from([Value::Bytes(Arc::from(pk.as_slice())), Value::Bytes(Arc::from(sk.as_slice()))]))
-            }).map_err(|e| e)
+            rak_stdlib::ecdsa_keypair()
+                .map(|(pk, sk)| {
+                    Value::Tuple(Arc::from([
+                        Value::Bytes(Arc::from(pk.as_slice())),
+                        Value::Bytes(Arc::from(sk.as_slice())),
+                    ]))
+                })
+                .map_err(|e| e)
         });
         self.insert_native("ecdsa_sign", |args| {
             let sk = native_bytes(args.first());
             let msg = native_bytes(args.get(1));
-            rak_stdlib::ecdsa_sign(&sk, &msg).map(|s| Value::Bytes(Arc::from(s.as_slice()))).map_err(|e| e)
+            rak_stdlib::ecdsa_sign(&sk, &msg)
+                .map(|s| Value::Bytes(Arc::from(s.as_slice())))
+                .map_err(|e| e)
         });
         self.insert_native("ecdsa_verify", |args| {
             let pk = native_bytes(args.first());
             let sig = native_bytes(args.get(1));
             let msg = native_bytes(args.get(2));
-            rak_stdlib::ecdsa_verify(&pk, &sig, &msg).map(Value::Bool).map_err(|e| e)
+            rak_stdlib::ecdsa_verify(&pk, &sig, &msg)
+                .map(Value::Bool)
+                .map_err(|e| e)
         });
         self.insert_native("x25519_keypair", |args| {
             let seed = native_bytes(args.first());
-            rak_stdlib::tunnel::x25519_keypair(&seed).map(|(pk, sk)| {
-                Value::Tuple(Arc::from([Value::Bytes(Arc::from(pk.as_slice())), Value::Bytes(Arc::from(sk.as_slice()))]))
-            }).map_err(|e| e)
+            rak_stdlib::tunnel::x25519_keypair(&seed)
+                .map(|(pk, sk)| {
+                    Value::Tuple(Arc::from([
+                        Value::Bytes(Arc::from(pk.as_slice())),
+                        Value::Bytes(Arc::from(sk.as_slice())),
+                    ]))
+                })
+                .map_err(|e| e)
         });
         self.insert_native("x25519_shared", |args| {
             let secret = native_bytes(args.first());
@@ -843,17 +982,26 @@ impl Vm {
         self.insert_native("tunnel_frame", |args| {
             let seq = args.first().and_then(|v| v.as_u64()).unwrap_or(0);
             let payload = native_bytes(args.get(1));
-            Ok(Value::Bytes(Arc::from(rak_stdlib::tunnel::tunnel_frame(seq, &payload).as_slice())))
+            Ok(Value::Bytes(Arc::from(
+                rak_stdlib::tunnel::tunnel_frame(seq, &payload).as_slice(),
+            )))
         });
         self.insert_native("tunnel_unframe", |args| {
             let frame = native_bytes(args.first());
-            rak_stdlib::tunnel::tunnel_unframe(&frame).map(|(seq, payload)| {
-                Value::Tuple(Arc::from([Value::I64(seq as i64), Value::Bytes(Arc::from(payload.as_slice()))]))
-            }).map_err(|e| e)
+            rak_stdlib::tunnel::tunnel_unframe(&frame)
+                .map(|(seq, payload)| {
+                    Value::Tuple(Arc::from([
+                        Value::I64(seq as i64),
+                        Value::Bytes(Arc::from(payload.as_slice())),
+                    ]))
+                })
+                .map_err(|e| e)
         });
         self.insert_native("tunnel_nonce", |args| {
             let seq = args.first().and_then(|v| v.as_u64()).unwrap_or(0);
-            Ok(Value::Bytes(Arc::from(rak_stdlib::tunnel::nonce_for(seq).as_slice())))
+            Ok(Value::Bytes(Arc::from(
+                rak_stdlib::tunnel::nonce_for(seq).as_slice(),
+            )))
         });
         // --- Structured errors ---
         self.insert_native("error", |args| {
@@ -872,77 +1020,71 @@ impl Vm {
                 "cancel" => crate::ErrorKind::Cancel,
                 _ => crate::ErrorKind::Runtime,
             };
-            Ok(Value::Error(Arc::new(crate::ErrorInfo::new(message.clone()).with_kind(k))))
+            Ok(Value::Error(Arc::new(
+                crate::ErrorInfo::new(message.clone()).with_kind(k),
+            )))
         });
-        self.insert_native("err_message", |args| {
-            match args.first() {
-                Some(Value::Error(e)) => Ok(Value::String(Arc::from(e.message.as_str()))),
-                _ => Err("err_message: expected an error".to_string()),
-            }
+        self.insert_native("err_message", |args| match args.first() {
+            Some(Value::Error(e)) => Ok(Value::String(Arc::from(e.message.as_str()))),
+            _ => Err("err_message: expected an error".to_string()),
         });
-        self.insert_native("err_kind", |args| {
-            match args.first() {
-                Some(Value::Error(e)) => Ok(Value::String(Arc::from(e.kind.as_str()))),
-                _ => Err("err_kind: expected an error".to_string()),
-            }
+        self.insert_native("err_kind", |args| match args.first() {
+            Some(Value::Error(e)) => Ok(Value::String(Arc::from(e.kind.as_str()))),
+            _ => Err("err_kind: expected an error".to_string()),
         });
-        self.insert_native("err_line", |args| {
-            match args.first() {
-                Some(Value::Error(e)) => Ok(Value::I64(e.line.unwrap_or(0) as i64)),
-                _ => Err("err_line: expected an error".to_string()),
-            }
+        self.insert_native("err_line", |args| match args.first() {
+            Some(Value::Error(e)) => Ok(Value::I64(e.line.unwrap_or(0) as i64)),
+            _ => Err("err_line: expected an error".to_string()),
         });
-        self.insert_native("err_col", |args| {
-            match args.first() {
-                Some(Value::Error(e)) => Ok(Value::I64(e.col.unwrap_or(0) as i64)),
-                _ => Err("err_col: expected an error".to_string()),
-            }
+        self.insert_native("err_col", |args| match args.first() {
+            Some(Value::Error(e)) => Ok(Value::I64(e.col.unwrap_or(0) as i64)),
+            _ => Err("err_col: expected an error".to_string()),
         });
-        self.insert_native("err_file", |args| {
-            match args.first() {
-                Some(Value::Error(e)) => Ok(Value::String(Arc::from(e.file.clone().unwrap_or_default().as_str()))),
-                _ => Err("err_file: expected an error".to_string()),
-            }
+        self.insert_native("err_file", |args| match args.first() {
+            Some(Value::Error(e)) => Ok(Value::String(Arc::from(
+                e.file.clone().unwrap_or_default().as_str(),
+            ))),
+            _ => Err("err_file: expected an error".to_string()),
         });
-        self.insert_native("err_cause", |args| {
-            match args.first() {
-                Some(Value::Error(e)) => match &e.cause {
-                    Some(c) => Ok(Value::String(Arc::from(c.clone().as_str()))),
-                    None => Ok(Value::Nil),
-                },
-                _ => Err("err_cause: expected an error".to_string()),
-            }
+        self.insert_native("err_cause", |args| match args.first() {
+            Some(Value::Error(e)) => match &e.cause {
+                Some(c) => Ok(Value::String(Arc::from(c.clone().as_str()))),
+                None => Ok(Value::Nil),
+            },
+            _ => Err("err_cause: expected an error".to_string()),
         });
-        self.insert_native("err_context", |args| {
-            match args.first() {
-                Some(Value::Error(e)) => {
-                    let m: std::collections::HashMap<String, Value> = e.context.iter()
-                        .map(|(k, v)| (k.clone(), Value::String(Arc::from(v.clone().as_str()))))
-                        .collect();
-                    Ok(Value::Map(Arc::new(m)))
-                }
-                _ => Err("err_context: expected an error".to_string()),
+        self.insert_native("err_context", |args| match args.first() {
+            Some(Value::Error(e)) => {
+                let m: std::collections::HashMap<String, Value> = e
+                    .context
+                    .iter()
+                    .map(|(k, v)| (k.clone(), Value::String(Arc::from(v.clone().as_str()))))
+                    .collect();
+                Ok(Value::Map(Arc::new(m)))
             }
+            _ => Err("err_context: expected an error".to_string()),
         });
-        self.insert_native("err_with_context", |args| {
-            match args.first() {
-                Some(Value::Error(e)) => {
-                    let k = native_str(args.get(1));
-                    let v = native_str(args.get(2));
-                    let mut new = e.as_ref().clone();
-                    new.context.push((k, v));
-                    Ok(Value::Error(Arc::new(new)))
-                }
-                _ => Err("err_with_context: expected an error".to_string()),
+        self.insert_native("err_with_context", |args| match args.first() {
+            Some(Value::Error(e)) => {
+                let k = native_str(args.get(1));
+                let v = native_str(args.get(2));
+                let mut new = e.as_ref().clone();
+                new.context.push((k, v));
+                Ok(Value::Error(Arc::new(new)))
             }
+            _ => Err("err_with_context: expected an error".to_string()),
         });
         self.insert_native("hex_encode", |args| {
             let data = native_bytes(args.first());
-            Ok(Value::String(Arc::from(rak_stdlib::hex_encode(&data).as_str())))
+            Ok(Value::String(Arc::from(
+                rak_stdlib::hex_encode(&data).as_str(),
+            )))
         });
         self.insert_native("base64_encode", |args| {
             let data = native_bytes(args.first());
-            Ok(Value::String(Arc::from(rak_stdlib::base64_encode(&data).as_str())))
+            Ok(Value::String(Arc::from(
+                rak_stdlib::base64_encode(&data).as_str(),
+            )))
         });
         self.insert_native("fmt", |args| {
             let fmt = native_str(args.first());
@@ -950,7 +1092,9 @@ impl Vm {
             Ok(Value::String(Arc::from(format_rak(&fmt, &rest).as_str())))
         });
         self.insert_native("to_hex", |args| {
-            Ok(Value::String(Arc::from(format!("0x{:X}", args.first().and_then(|v| v.as_u64()).unwrap_or(0)).as_str())))
+            Ok(Value::String(Arc::from(
+                format!("0x{:X}", args.first().and_then(|v| v.as_u64()).unwrap_or(0)).as_str(),
+            )))
         });
         // --- Regex ---
         self.insert_native("regex_new", |args| {
@@ -958,39 +1102,44 @@ impl Vm {
             let flags = native_str(args.get(1));
             build_vm_regex(&pattern, &flags).map(Value::Regex)
         });
-          // `regex_is_match` is an alias of `regex_match`, matching the
-          // interpreter's `"regex_match" | "regex_is_match"` arm. Registered
-          // through the same closure so the two cannot drift.
-          for name in ["regex_match", "regex_is_match"] {
-              self.insert_native(name, |args| {
-                  let re = vm_regex(args.first())?;
-                  let hay = native_str(args.get(1));
-                  Ok(Value::Bool(re.is_match(&hay)))
-              });
-          }
+        // `regex_is_match` is an alias of `regex_match`, matching the
+        // interpreter's `"regex_match" | "regex_is_match"` arm. Registered
+        // through the same closure so the two cannot drift.
+        for name in ["regex_match", "regex_is_match"] {
+            self.insert_native(name, |args| {
+                let re = vm_regex(args.first())?;
+                let hay = native_str(args.get(1));
+                Ok(Value::Bool(re.is_match(&hay)))
+            });
+        }
         self.insert_native("regex_find", |args| {
             let re = vm_regex(args.first())?;
             let hay = native_str(args.get(1));
-            Ok(re.find(&hay).map(|m| Value::String(Arc::from(m.as_str()))).unwrap_or(Value::Nil))
+            Ok(re
+                .find(&hay)
+                .map(|m| Value::String(Arc::from(m.as_str())))
+                .unwrap_or(Value::Nil))
         });
         self.insert_native("regex_find_all", |args| {
             let re = vm_regex(args.first())?;
             let hay = native_str(args.get(1));
             Ok(Value::Array(Arc::from(
-                re.find_iter(&hay).map(|m| Value::String(Arc::from(m.as_str()))).collect::<Vec<_>>(),
+                re.find_iter(&hay)
+                    .map(|m| Value::String(Arc::from(m.as_str())))
+                    .collect::<Vec<_>>(),
             )))
         });
-          // `regex_replace_all` is an alias of `regex_replace`, matching the
-          // interpreter's `"regex_replace" | "regex_replace_all"` arm.
-          for name in ["regex_replace", "regex_replace_all"] {
-              self.insert_native(name, |args| {
-                  let re = vm_regex(args.first())?;
-                  let hay = native_str(args.get(1));
-                  let rep = native_str(args.get(2));
-                  let cow = re.replace_all(&hay, rep.as_str());
-                  Ok(Value::String(Arc::from(&*cow)))
-              });
-          }
+        // `regex_replace_all` is an alias of `regex_replace`, matching the
+        // interpreter's `"regex_replace" | "regex_replace_all"` arm.
+        for name in ["regex_replace", "regex_replace_all"] {
+            self.insert_native(name, |args| {
+                let re = vm_regex(args.first())?;
+                let hay = native_str(args.get(1));
+                let rep = native_str(args.get(2));
+                let cow = re.replace_all(&hay, rep.as_str());
+                Ok(Value::String(Arc::from(&*cow)))
+            });
+        }
         // --- FFI ---
         self.insert_native("ffi_load", |args| {
             let path = native_str(args.first());
@@ -1000,7 +1149,9 @@ impl Vm {
             }
         });
         self.insert_native("ffi_ptr", |args| {
-            Ok(Value::ForeignPtr(args.first().and_then(|v| v.as_u64()).unwrap_or(0)))
+            Ok(Value::ForeignPtr(
+                args.first().and_then(|v| v.as_u64()).unwrap_or(0),
+            ))
         });
         // The escape hatch: declare a library-owned region before touching it.
         self.insert_native("ffi_trust", |args| {
@@ -1033,7 +1184,9 @@ impl Vm {
             };
             match ffi_regions().release(ptr) {
                 Some(n) => {
-                    unsafe { let _ = Vec::from_raw_parts(ptr as *mut u8, n, n); }
+                    unsafe {
+                        let _ = Vec::from_raw_parts(ptr as *mut u8, n, n);
+                    }
                     Ok(Value::Nil)
                 }
                 None => Err(
@@ -1054,7 +1207,9 @@ impl Vm {
             // because `ffi_ptr` builds a pointer from any integer and nothing tied
             // `off` to an allocation.
             ffi_regions().check(ptr as u64, off, 1)?;
-            unsafe { *((ptr as usize).wrapping_add(off as usize) as *mut u8) = byte; }
+            unsafe {
+                *((ptr as usize).wrapping_add(off as usize) as *mut u8) = byte;
+            }
             Ok(Value::Nil)
         });
         self.insert_native("ffi_read", |args| {
@@ -1067,6 +1222,28 @@ impl Vm {
             let b = unsafe { *((ptr as usize).wrapping_add(off as usize) as *const u8) };
             Ok(Value::I64(b as i64))
         });
+        // Present on the interpreter but was missing here, which is the same class of
+        // gap that `backend_parity.rs` exists to catch: a builtin that exists on one
+        // backend and not the other.
+        //
+        // Reads four bytes little-endian. The length check is on all four, not just on
+        // `off`: `off` being in range while the read runs three bytes past the end is
+        // still a read past the end, which is exactly the bug this function exists to
+        // stop being easy to write.
+        self.insert_native("ffi_read_i32", |args| {
+            let ptr = match args.first() {
+                Some(Value::ForeignPtr(p)) => *p as usize,
+                _ => return Err("ffi_read_i32(ptr, off)".to_string()),
+            };
+            let off = args.get(1).and_then(|v| v.as_u64()).unwrap_or(0);
+            ffi_regions().check(ptr as u64, off, 4)?;
+            let base = (ptr as u64).wrapping_add(off) as usize;
+            let mut buf = [0u8; 4];
+            unsafe {
+                std::ptr::copy_nonoverlapping(base as *const u8, buf.as_mut_ptr(), 4);
+            }
+            Ok(Value::I64(i32::from_le_bytes(buf) as i64))
+        });
         self.insert_native("ffi_cstr_to_string", |args| {
             let ptr = match args.first() {
                 Some(Value::ForeignPtr(p)) => *p as usize,
@@ -1078,7 +1255,9 @@ impl Vm {
             let s = unsafe {
                 let base = ptr as usize;
                 let mut len = 0usize;
-                while len < cap && *((base + len) as *const u8) != 0 { len += 1; }
+                while len < cap && *((base + len) as *const u8) != 0 {
+                    len += 1;
+                }
                 if len == cap {
                     return Err(format!(
                         "ffi_cstr_to_string: no NUL terminator within the {} bytes Rak \
@@ -1111,23 +1290,34 @@ impl Vm {
             let c_args: Vec<Value> = match args.get(2) {
                 Some(Value::Array(a)) => a.to_vec(),
                 Some(Value::Nil) | None => Vec::new(),
-                Some(other) => return Err(format!("ffi_call: args must be an array, got {}", other.type_name())),
+                Some(other) => {
+                    return Err(format!(
+                        "ffi_call: args must be an array, got {}",
+                        other.type_name()
+                    ))
+                }
             };
             let (marshalled, _g) = marshal_vm_args(&c_args)?;
-            let addr = { let h = lib.lock().unwrap(); rak_stdlib::ffi::sym_addr(&h, &symbol)? };
+            let addr = {
+                let h = lib.lock().unwrap();
+                rak_stdlib::ffi::sym_addr(&h, &symbol)?
+            };
             let ret = unsafe { rak_stdlib::ffi::call_int(addr, &marshalled) };
             Ok(Value::I64(ret as i64))
         });
         // --- Async I/O (Tokio-backed futures) ---
         self.insert_native("http_get_async", |args| {
             let url = native_str(args.first());
-            let jh = crate::async_rt::runtime().spawn_blocking(move || {
-                match rak_stdlib::net::http_get(&url, None) {
+            let jh =
+                crate::async_rt::runtime().spawn_blocking(move || match rak_stdlib::net::http_get(
+                    &url, None,
+                ) {
                     Ok(r) => Value::String(Arc::from(r.body.as_str())),
                     Err(e) => Value::String(Arc::from(format!("error: {}", e).as_str())),
-                }
-            });
-            Ok(Value::Future(Arc::new(FutureHandle { state: Mutex::new(VmFutureState::Pending(jh)) })))
+                });
+            Ok(Value::Future(Arc::new(FutureHandle {
+                state: Mutex::new(VmFutureState::Pending(jh)),
+            })))
         });
         self.insert_native("tcp_probe", |args| {
             let host = native_str(args.first());
@@ -1136,7 +1326,9 @@ impl Vm {
             let jh = crate::async_rt::runtime().spawn_blocking(move || {
                 Value::Bool(rak_stdlib::net::tcp_scan(&host, port, timeout_ms))
             });
-            Ok(Value::Future(Arc::new(FutureHandle { state: Mutex::new(VmFutureState::Pending(jh)) })))
+            Ok(Value::Future(Arc::new(FutureHandle {
+                state: Mutex::new(VmFutureState::Pending(jh)),
+            })))
         });
         self.insert_native("async_sleep", |args| {
             let ms = args.first().and_then(|v| v.as_u64()).unwrap_or(0);
@@ -1144,36 +1336,56 @@ impl Vm {
                 tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
                 Value::Nil
             });
-            Ok(Value::Future(Arc::new(FutureHandle { state: Mutex::new(VmFutureState::Pending(jh)) })))
+            Ok(Value::Future(Arc::new(FutureHandle {
+                state: Mutex::new(VmFutureState::Pending(jh)),
+            })))
         });
         self.insert_native("async_yield", |args| {
             let jh = crate::async_rt::runtime().spawn(async move {
                 tokio::task::yield_now().await;
                 Value::Nil
             });
-            Ok(Value::Future(Arc::new(FutureHandle { state: Mutex::new(VmFutureState::Pending(jh)) })))
+            Ok(Value::Future(Arc::new(FutureHandle {
+                state: Mutex::new(VmFutureState::Pending(jh)),
+            })))
         });
         // --- Raw sockets / packet forging ---
         self.insert_native("net_raw_csum", |args| {
-            Ok(Value::I64(rak_stdlib::net_raw::csum16(&native_bytes(args.first())) as i64))
+            Ok(Value::I64(
+                rak_stdlib::net_raw::csum16(&native_bytes(args.first())) as i64,
+            ))
         });
         self.insert_native("net_raw_ipv4", |args| {
             let src = native_str(args.first());
             let dst = native_str(args.get(1));
             let proto = args.get(2).and_then(|v| v.as_u64()).unwrap_or(6) as u8;
             let payload = native_bytes(args.get(3));
-            Ok(Value::Bytes(Arc::from(rak_stdlib::net_raw::ipv4(&src, &dst, proto, &payload)?.as_slice())))
+            Ok(Value::Bytes(Arc::from(
+                rak_stdlib::net_raw::ipv4(&src, &dst, proto, &payload)?.as_slice(),
+            )))
         });
         self.insert_native("net_raw_tcp", |args| {
             let src_ip = native_str(args.first());
             let dst_ip = native_str(args.get(1));
             let src_port = args.get(2).and_then(|v| v.as_u64()).unwrap_or(0) as u16;
             let dst_port = args.get(3).and_then(|v| v.as_u64()).unwrap_or(0) as u16;
-            let flags = { let f = native_str(args.get(4)); if f.is_empty() { "S".to_string() } else { f } };
+            let flags = {
+                let f = native_str(args.get(4));
+                if f.is_empty() {
+                    "S".to_string()
+                } else {
+                    f
+                }
+            };
             let seq = args.get(5).and_then(|v| v.as_u64()).unwrap_or(0) as u32;
             let ack = args.get(6).and_then(|v| v.as_u64()).unwrap_or(0) as u32;
             let payload = native_bytes(args.get(7));
-            Ok(Value::Bytes(Arc::from(rak_stdlib::net_raw::tcp(&src_ip, &dst_ip, src_port, dst_port, &flags, seq, ack, &payload)?.as_slice())))
+            Ok(Value::Bytes(Arc::from(
+                rak_stdlib::net_raw::tcp(
+                    &src_ip, &dst_ip, src_port, dst_port, &flags, seq, ack, &payload,
+                )?
+                .as_slice(),
+            )))
         });
         self.insert_native("net_raw_udp", |args| {
             let src_ip = native_str(args.first());
@@ -1181,56 +1393,79 @@ impl Vm {
             let src_port = args.get(2).and_then(|v| v.as_u64()).unwrap_or(0) as u16;
             let dst_port = args.get(3).and_then(|v| v.as_u64()).unwrap_or(0) as u16;
             let payload = native_bytes(args.get(4));
-            Ok(Value::Bytes(Arc::from(rak_stdlib::net_raw::udp(&src_ip, &dst_ip, src_port, dst_port, &payload)?.as_slice())))
+            Ok(Value::Bytes(Arc::from(
+                rak_stdlib::net_raw::udp(&src_ip, &dst_ip, src_port, dst_port, &payload)?
+                    .as_slice(),
+            )))
         });
         self.insert_native("net_raw_tcp_syn", |args| {
             let src = native_str(args.first());
             let dst = native_str(args.get(1));
             let src_port = args.get(2).and_then(|v| v.as_u64()).unwrap_or(12345) as u16;
             let dport = args.get(3).and_then(|v| v.as_u64()).unwrap_or(80) as u16;
-            Ok(Value::Bytes(Arc::from(rak_stdlib::net_raw::tcp_syn(&src, &dst, src_port, dport)?.as_slice())))
+            Ok(Value::Bytes(Arc::from(
+                rak_stdlib::net_raw::tcp_syn(&src, &dst, src_port, dport)?.as_slice(),
+            )))
         });
         self.insert_native("net_raw_icmp", |args| {
             let src = native_str(args.first());
             let dst = native_str(args.get(1));
             let id = args.get(2).and_then(|v| v.as_u64()).unwrap_or(0) as u16;
             let seq = args.get(3).and_then(|v| v.as_u64()).unwrap_or(0) as u16;
-            let payload = args.get(4).map(|v| native_bytes(Some(v))).unwrap_or_default();
-            Ok(Value::Bytes(Arc::from(rak_stdlib::net_raw::icmp_echo(&src, &dst, id, seq, &payload)?.as_slice())))
+            let payload = args
+                .get(4)
+                .map(|v| native_bytes(Some(v)))
+                .unwrap_or_default();
+            Ok(Value::Bytes(Arc::from(
+                rak_stdlib::net_raw::icmp_echo(&src, &dst, id, seq, &payload)?.as_slice(),
+            )))
         });
         self.insert_native("net_raw_icmp_ping", |args| {
             let src = native_str(args.first());
             let dst = native_str(args.get(1));
             let id = args.get(2).and_then(|v| v.as_u64()).unwrap_or(0) as u16;
             let seq = args.get(3).and_then(|v| v.as_u64()).unwrap_or(0) as u16;
-            Ok(Value::Bytes(Arc::from(rak_stdlib::net_raw::icmp_ping(&src, &dst, id, seq)?.as_slice())))
+            Ok(Value::Bytes(Arc::from(
+                rak_stdlib::net_raw::icmp_ping(&src, &dst, id, seq)?.as_slice(),
+            )))
         });
         self.insert_native("net_raw_icmp_echo_reply", |args| {
             let src = native_str(args.first());
             let dst = native_str(args.get(1));
             let id = args.get(2).and_then(|v| v.as_u64()).unwrap_or(0) as u16;
             let seq = args.get(3).and_then(|v| v.as_u64()).unwrap_or(0) as u16;
-            let payload = args.get(4).map(|v| native_bytes(Some(v))).unwrap_or_default();
-            Ok(Value::Bytes(Arc::from(rak_stdlib::net_raw::icmp_echo_reply(&src, &dst, id, seq, &payload)?.as_slice())))
+            let payload = args
+                .get(4)
+                .map(|v| native_bytes(Some(v)))
+                .unwrap_or_default();
+            Ok(Value::Bytes(Arc::from(
+                rak_stdlib::net_raw::icmp_echo_reply(&src, &dst, id, seq, &payload)?.as_slice(),
+            )))
         });
         self.insert_native("net_raw_arp_request", |args| {
             let src_mac = native_str(args.first());
             let src_ip = native_str(args.get(1));
             let target_ip = native_str(args.get(2));
-            Ok(Value::Bytes(Arc::from(rak_stdlib::net_raw::arp_request(&src_mac, &src_ip, &target_ip)?.as_slice())))
+            Ok(Value::Bytes(Arc::from(
+                rak_stdlib::net_raw::arp_request(&src_mac, &src_ip, &target_ip)?.as_slice(),
+            )))
         });
         self.insert_native("net_raw_arp_reply", |args| {
             let src_mac = native_str(args.first());
             let src_ip = native_str(args.get(1));
             let target_mac = native_str(args.get(2));
             let target_ip = native_str(args.get(3));
-            Ok(Value::Bytes(Arc::from(rak_stdlib::net_raw::arp_reply(&src_mac, &src_ip, &target_mac, &target_ip)?.as_slice())))
+            Ok(Value::Bytes(Arc::from(
+                rak_stdlib::net_raw::arp_reply(&src_mac, &src_ip, &target_mac, &target_ip)?
+                    .as_slice(),
+            )))
         });
         self.insert_native("net_raw_arp_parse", |args| {
             let frame = native_bytes(args.first());
             match rak_stdlib::net_raw::arp_parse(&frame) {
                 Some(kv) => {
-                    let mut m: std::collections::HashMap<String, Value> = std::collections::HashMap::new();
+                    let mut m: std::collections::HashMap<String, Value> =
+                        std::collections::HashMap::new();
                     for (k, v) in kv {
                         m.insert(k, Value::String(Arc::from(v.as_str())));
                     }
@@ -1243,55 +1478,112 @@ impl Vm {
             let pkt = native_bytes(args.first());
             match rak_stdlib::net_raw::send(&pkt) {
                 Ok(n) => Ok(Value::Result(Some(Box::new(Value::I64(n as i64))), None)),
-                Err(e) => Ok(Value::Result(None, Some(Box::new(Value::String(Arc::from(e.as_str())))))),
+                Err(e) => Ok(Value::Result(
+                    None,
+                    Some(Box::new(Value::String(Arc::from(e.as_str())))),
+                )),
             }
         });
         self.insert_native("net_raw_recv", |args| {
             let max = args.first().and_then(|v| v.as_u64()).unwrap_or(4096) as usize;
             match rak_stdlib::net_raw::recv(max) {
-                Ok(b) => Ok(Value::Result(Some(Box::new(Value::Bytes(Arc::from(b.as_slice())))), None)),
-                Err(e) => Ok(Value::Result(None, Some(Box::new(Value::String(Arc::from(e.as_str())))))),
+                Ok(b) => Ok(Value::Result(
+                    Some(Box::new(Value::Bytes(Arc::from(b.as_slice())))),
+                    None,
+                )),
+                Err(e) => Ok(Value::Result(
+                    None,
+                    Some(Box::new(Value::String(Arc::from(e.as_str())))),
+                )),
             }
         });
         // --- DNS ---
         self.insert_native("dns_query", |args| {
             let name = native_str(args.first());
-            let rtype = { let r = native_str(args.get(1)); if r.is_empty() { "A".to_string() } else { r } };
+            let rtype = {
+                let r = native_str(args.get(1));
+                if r.is_empty() {
+                    "A".to_string()
+                } else {
+                    r
+                }
+            };
             let server = args.get(2).map(|v| native_str(Some(v)));
             match rak_stdlib::dns::query(&name, &rtype, server.as_deref()) {
                 Ok(resp) => {
-                    let answers: Vec<Value> = resp.answers.into_iter().map(|r| {
-                        let mut m = HashMap::new();
-                        m.insert("name".to_string(), Value::String(Arc::from(r.name.as_str())));
-                        m.insert("type".to_string(), Value::String(Arc::from(r.rtype.as_str())));
-                        m.insert("ttl".to_string(), Value::I64(r.ttl as i64));
-                        m.insert("rdata".to_string(), Value::String(Arc::from(r.rdata.as_str())));
-                        Value::Map(Arc::from(m))
-                    }).collect();
+                    let answers: Vec<Value> = resp
+                        .answers
+                        .into_iter()
+                        .map(|r| {
+                            let mut m = HashMap::new();
+                            m.insert(
+                                "name".to_string(),
+                                Value::String(Arc::from(r.name.as_str())),
+                            );
+                            m.insert(
+                                "type".to_string(),
+                                Value::String(Arc::from(r.rtype.as_str())),
+                            );
+                            m.insert("ttl".to_string(), Value::I64(r.ttl as i64));
+                            m.insert(
+                                "rdata".to_string(),
+                                Value::String(Arc::from(r.rdata.as_str())),
+                            );
+                            Value::Map(Arc::from(m))
+                        })
+                        .collect();
                     let mut out = HashMap::new();
                     out.insert("answers".to_string(), Value::Array(Arc::from(answers)));
                     out.insert("truncated".to_string(), Value::Bool(resp.truncated));
-                    Ok(Value::Result(Some(Box::new(Value::Map(Arc::from(out)))), None))
+                    Ok(Value::Result(
+                        Some(Box::new(Value::Map(Arc::from(out)))),
+                        None,
+                    ))
                 }
-                Err(e) => Ok(Value::Result(None, Some(Box::new(Value::String(Arc::from(e.as_str())))))),
+                Err(e) => Ok(Value::Result(
+                    None,
+                    Some(Box::new(Value::String(Arc::from(e.as_str())))),
+                )),
             }
         });
         self.insert_native("dns_build", |args| {
             let name = native_str(args.first());
-            let rtype = { let r = native_str(args.get(1)); if r.is_empty() { "A".to_string() } else { r } };
-            Ok(Value::Bytes(Arc::from(rak_stdlib::dns::build_query(&name, &rtype).as_slice())))
+            let rtype = {
+                let r = native_str(args.get(1));
+                if r.is_empty() {
+                    "A".to_string()
+                } else {
+                    r
+                }
+            };
+            Ok(Value::Bytes(Arc::from(
+                rak_stdlib::dns::build_query(&name, &rtype).as_slice(),
+            )))
         });
         self.insert_native("dns_parse", |args| {
             let msg = native_bytes(args.first());
             let resp = rak_stdlib::dns::parse_response(&msg)?;
-            let answers: Vec<Value> = resp.answers.into_iter().map(|r| {
-                let mut m = HashMap::new();
-                m.insert("name".to_string(), Value::String(Arc::from(r.name.as_str())));
-                m.insert("type".to_string(), Value::String(Arc::from(r.rtype.as_str())));
-                m.insert("ttl".to_string(), Value::I64(r.ttl as i64));
-                m.insert("rdata".to_string(), Value::String(Arc::from(r.rdata.as_str())));
-                Value::Map(Arc::from(m))
-            }).collect();
+            let answers: Vec<Value> = resp
+                .answers
+                .into_iter()
+                .map(|r| {
+                    let mut m = HashMap::new();
+                    m.insert(
+                        "name".to_string(),
+                        Value::String(Arc::from(r.name.as_str())),
+                    );
+                    m.insert(
+                        "type".to_string(),
+                        Value::String(Arc::from(r.rtype.as_str())),
+                    );
+                    m.insert("ttl".to_string(), Value::I64(r.ttl as i64));
+                    m.insert(
+                        "rdata".to_string(),
+                        Value::String(Arc::from(r.rdata.as_str())),
+                    );
+                    Value::Map(Arc::from(m))
+                })
+                .collect();
             let mut out = HashMap::new();
             out.insert("answers".to_string(), Value::Array(Arc::from(answers)));
             out.insert("truncated".to_string(), Value::Bool(resp.truncated));
@@ -1301,28 +1593,50 @@ impl Vm {
         self.insert_native("tls_parse_client_hello", |args| {
             let bytes = native_bytes(args.first());
             let info = rak_stdlib::tls::parse_client_hello(&bytes)?;
-            let ciphers: Vec<Value> = info.ciphers.into_iter().map(|c| Value::Hex(c as u64)).collect();
+            let ciphers: Vec<Value> = info
+                .ciphers
+                .into_iter()
+                .map(|c| Value::Hex(c as u64))
+                .collect();
             let mut out = HashMap::new();
-            out.insert("sni".to_string(), Value::String(Arc::from(info.sni.as_str())));
+            out.insert(
+                "sni".to_string(),
+                Value::String(Arc::from(info.sni.as_str())),
+            );
             out.insert("ciphers".to_string(), Value::Array(Arc::from(ciphers)));
             Ok(Value::Map(Arc::from(out)))
         });
         self.insert_native("tls_parse_cert_chain", |args| {
             let der = native_bytes(args.first());
-            let certs: Vec<Value> = rak_stdlib::tls::parse_cert_chain(&der).into_iter().map(|c| {
-                let mut m = HashMap::new();
-                m.insert("subject".to_string(), Value::String(Arc::from(c.subject.as_str())));
-                m.insert("issuer".to_string(), Value::String(Arc::from(c.issuer.as_str())));
-                Value::Map(Arc::from(m))
-            }).collect();
+            let certs: Vec<Value> = rak_stdlib::tls::parse_cert_chain(&der)
+                .into_iter()
+                .map(|c| {
+                    let mut m = HashMap::new();
+                    m.insert(
+                        "subject".to_string(),
+                        Value::String(Arc::from(c.subject.as_str())),
+                    );
+                    m.insert(
+                        "issuer".to_string(),
+                        Value::String(Arc::from(c.issuer.as_str())),
+                    );
+                    Value::Map(Arc::from(m))
+                })
+                .collect();
             Ok(Value::Array(Arc::from(certs)))
         });
         // --- PCAP ---
         self.insert_native("pcap_open", |args| {
             let path = native_str(args.first());
             match rak_stdlib::pcap::open(&path) {
-                Ok(h) => Ok(Value::Result(Some(Box::new(Value::Pcap(Arc::new(Mutex::new(h))))), None)),
-                Err(e) => Ok(Value::Result(None, Some(Box::new(Value::String(Arc::from(e.as_str())))))),
+                Ok(h) => Ok(Value::Result(
+                    Some(Box::new(Value::Pcap(Arc::new(Mutex::new(h))))),
+                    None,
+                )),
+                Err(e) => Ok(Value::Result(
+                    None,
+                    Some(Box::new(Value::String(Arc::from(e.as_str())))),
+                )),
             }
         });
         self.insert_native("pcap_next", |args| {
@@ -1336,7 +1650,10 @@ impl Vm {
                     let mut m = HashMap::new();
                     m.insert("timestamp".to_string(), Value::I64(p.timestamp));
                     m.insert("linktype".to_string(), Value::I64(p.linktype));
-                    m.insert("payload".to_string(), Value::Bytes(Arc::from(p.payload.as_slice())));
+                    m.insert(
+                        "payload".to_string(),
+                        Value::Bytes(Arc::from(p.payload.as_slice())),
+                    );
                     Ok(Value::Map(Arc::from(m)))
                 }
                 None => Ok(Value::Nil),
@@ -1345,7 +1662,14 @@ impl Vm {
         // --- Memory-mapped files ---
         self.insert_native("mmap_open", |args| {
             let path = native_str(args.first());
-            let mode = { let m = native_str(args.get(1)); if m.is_empty() { "r".to_string() } else { m } };
+            let mode = {
+                let m = native_str(args.get(1));
+                if m.is_empty() {
+                    "r".to_string()
+                } else {
+                    m
+                }
+            };
             match rak_stdlib::mmap::open(&path, &mode) {
                 Ok(h) => Ok(Value::Mmap(h)),
                 Err(e) => Err(e),
@@ -1353,12 +1677,21 @@ impl Vm {
         });
         self.insert_native("mmap_slice", |args| {
             let (h, off, len) = match (args.first(), args.get(1), args.get(2)) {
-                (Some(Value::Mmap(h)), Some(o), Some(l)) => (h.clone(), o.as_u64().unwrap_or(0) as usize, l.as_u64().unwrap_or(0) as usize),
+                (Some(Value::Mmap(h)), Some(o), Some(l)) => (
+                    h.clone(),
+                    o.as_u64().unwrap_or(0) as usize,
+                    l.as_u64().unwrap_or(0) as usize,
+                ),
                 _ => return Err("mmap_slice(mmap, off, len)".to_string()),
             };
             let total = h.len();
             if off.saturating_add(len) > total {
-                return Err(format!("mmap_slice: [off, off+len) = [{}, {}) out of range (len {})", off, off + len, total));
+                return Err(format!(
+                    "mmap_slice: [off, off+len) = [{}, {}) out of range (len {})",
+                    off,
+                    off + len,
+                    total
+                ));
             }
             Ok(Value::MmapSlice(h, off, len))
         });
@@ -1385,18 +1718,39 @@ impl Vm {
                 Some(Value::Mmap(h)) => h.clone(),
                 _ => return Err("mmap_lines(mmap, delim?)".to_string()),
             };
-            let delim = { let d = native_str(args.get(1)); if d.is_empty() { "\n".to_string() } else { d } };
+            let delim = {
+                let d = native_str(args.get(1));
+                if d.is_empty() {
+                    "\n".to_string()
+                } else {
+                    d
+                }
+            };
             let ls = rak_stdlib::mmap::lines(&h, delim.as_bytes());
-            Ok(Value::Array(Arc::from(ls.into_iter().map(|s| Value::String(Arc::from(s.as_str()))).collect::<Vec<_>>())))
+            Ok(Value::Array(Arc::from(
+                ls.into_iter()
+                    .map(|s| Value::String(Arc::from(s.as_str())))
+                    .collect::<Vec<_>>(),
+            )))
         });
         self.insert_native("mmap_lines_off", |args| {
             let h = match args.first() {
                 Some(Value::Mmap(h)) => h.clone(),
                 _ => return Err("mmap_lines_off(mmap, delim?)".to_string()),
             };
-            let delim = { let d = native_str(args.get(1)); if d.is_empty() { "\n".to_string() } else { d } };
+            let delim = {
+                let d = native_str(args.get(1));
+                if d.is_empty() {
+                    "\n".to_string()
+                } else {
+                    d
+                }
+            };
             let offs = rak_stdlib::mmap::lines_off(&h, delim.as_bytes());
-            let tup: Vec<Value> = offs.into_iter().map(|(o, l)| Value::Tuple(Arc::from([Value::I64(o as i64), Value::I64(l as i64)]))).collect();
+            let tup: Vec<Value> = offs
+                .into_iter()
+                .map(|(o, l)| Value::Tuple(Arc::from([Value::I64(o as i64), Value::I64(l as i64)])))
+                .collect();
             Ok(Value::Array(Arc::from(tup)))
         });
         // --- Forensic Structs / evidence provenance (VM) ---
@@ -1473,7 +1827,11 @@ impl Vm {
                         cur = p.parent.clone();
                     }
                     for p in chain.into_iter().rev() {
-                        let t = if p.target.is_empty() { String::new() } else { format!(" target={}", p.target) };
+                        let t = if p.target.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" target={}", p.target)
+                        };
                         out.push_str(&format!("[{}] tool={}{} ts={}\n", i + 1, p.tool, t, p.ts));
                     }
                 } else {
@@ -1493,10 +1851,18 @@ impl Vm {
             rak_stdlib::log::init_file(&path)?;
             Ok(Value::Nil)
         });
-        self.insert_native("log_info", |args| vm_log(&rak_stdlib::log::Level::Info, args));
-        self.insert_native("log_warn", |args| vm_log(&rak_stdlib::log::Level::Warn, args));
-        self.insert_native("log_error", |args| vm_log(&rak_stdlib::log::Level::Error, args));
-        self.insert_native("log_debug", |args| vm_log(&rak_stdlib::log::Level::Debug, args));
+        self.insert_native("log_info", |args| {
+            vm_log(&rak_stdlib::log::Level::Info, args)
+        });
+        self.insert_native("log_warn", |args| {
+            vm_log(&rak_stdlib::log::Level::Warn, args)
+        });
+        self.insert_native("log_error", |args| {
+            vm_log(&rak_stdlib::log::Level::Error, args)
+        });
+        self.insert_native("log_debug", |args| {
+            vm_log(&rak_stdlib::log::Level::Debug, args)
+        });
         // --- Process API (#6) ---
         self.insert_native("process_spawn", |args| {
             let cmd = native_str(args.first());
@@ -1534,26 +1900,48 @@ impl Vm {
             let name = native_str(args.first());
             let server = args.get(1).map(|v| native_str(Some(v)));
             let addrs = rak_stdlib::dns::resolve(&name, server.as_deref())?;
-            Ok(Value::Array(Arc::from(addrs.into_iter().map(|s| Value::String(Arc::from(s.as_str()))).collect::<Vec<_>>())))
+            Ok(Value::Array(Arc::from(
+                addrs
+                    .into_iter()
+                    .map(|s| Value::String(Arc::from(s.as_str())))
+                    .collect::<Vec<_>>(),
+            )))
         });
         self.insert_native("dns_reverse", |args| {
             let ip = native_str(args.first());
             let server = args.get(1).map(|v| native_str(Some(v)));
             let names = rak_stdlib::dns::reverse(&ip, server.as_deref())?;
-            Ok(Value::Array(Arc::from(names.into_iter().map(|s| Value::String(Arc::from(s.as_str()))).collect::<Vec<_>>())))
+            Ok(Value::Array(Arc::from(
+                names
+                    .into_iter()
+                    .map(|s| Value::String(Arc::from(s.as_str())))
+                    .collect::<Vec<_>>(),
+            )))
         });
         self.insert_native("dns_records", |args| {
             let name = native_str(args.first());
             let server = args.get(1).map(|v| native_str(Some(v)));
             let recs = rak_stdlib::dns::records(&name, server.as_deref())?;
-            let arr: Vec<Value> = recs.into_iter().map(|r| {
-                let mut m = HashMap::new();
-                m.insert("name".to_string(), Value::String(Arc::from(r.name.as_str())));
-                m.insert("type".to_string(), Value::String(Arc::from(r.rtype.as_str())));
-                m.insert("ttl".to_string(), Value::I64(r.ttl as i64));
-                m.insert("rdata".to_string(), Value::String(Arc::from(r.rdata.as_str())));
-                Value::Map(Arc::from(m))
-            }).collect();
+            let arr: Vec<Value> = recs
+                .into_iter()
+                .map(|r| {
+                    let mut m = HashMap::new();
+                    m.insert(
+                        "name".to_string(),
+                        Value::String(Arc::from(r.name.as_str())),
+                    );
+                    m.insert(
+                        "type".to_string(),
+                        Value::String(Arc::from(r.rtype.as_str())),
+                    );
+                    m.insert("ttl".to_string(), Value::I64(r.ttl as i64));
+                    m.insert(
+                        "rdata".to_string(),
+                        Value::String(Arc::from(r.rdata.as_str())),
+                    );
+                    Value::Map(Arc::from(m))
+                })
+                .collect();
             Ok(Value::Array(Arc::from(arr)))
         });
         self.insert_native("dns_walk", |args| {
@@ -1566,7 +1954,12 @@ impl Vm {
             }
             let server = args.get(2).map(|v| native_str(Some(v)));
             let found = rak_stdlib::dns::walk(&domain, &prefixes, server.as_deref());
-            Ok(Value::Array(Arc::from(found.into_iter().map(|s| Value::String(Arc::from(s.as_str()))).collect::<Vec<_>>())))
+            Ok(Value::Array(Arc::from(
+                found
+                    .into_iter()
+                    .map(|s| Value::String(Arc::from(s.as_str())))
+                    .collect::<Vec<_>>(),
+            )))
         });
         // --- Secrets API (#9) ---
         self.insert_native("secret_get", |args| {
@@ -1595,10 +1988,17 @@ impl Vm {
         });
         self.insert_native("secret_ls", |_args| {
             let names = rak_stdlib::secrets::list();
-            Ok(Value::Array(Arc::from(names.into_iter().map(|s| Value::String(Arc::from(s.as_str()))).collect::<Vec<_>>())))
+            Ok(Value::Array(Arc::from(
+                names
+                    .into_iter()
+                    .map(|s| Value::String(Arc::from(s.as_str())))
+                    .collect::<Vec<_>>(),
+            )))
         });
         self.insert_native("secret_delete_all", |_args| {
-            rak_stdlib::secrets::delete_all().map(|_| Value::Bool(true)).map_err(|e| e)
+            rak_stdlib::secrets::delete_all()
+                .map(|_| Value::Bool(true))
+                .map_err(|e| e)
         });
         // --- HTTP server framework (#4) ---
         self.insert_native("http_server_start", |args| {
@@ -1607,21 +2007,31 @@ impl Vm {
             let bound = rak_stdlib::http_server::server_start(&addr, port)?;
             Ok(Value::I64(bound as i64))
         });
-        self.insert_native("http_server_poll", |_args| {
-            match rak_stdlib::http_server::poll() {
+        self.insert_native(
+            "http_server_poll",
+            |_args| match rak_stdlib::http_server::poll() {
                 Some(req) => {
                     let mut m = HashMap::new();
                     m.insert("id".to_string(), Value::I64(req.id as i64));
-                    m.insert("method".to_string(), Value::String(Arc::from(req.method.as_str())));
-                    m.insert("path".to_string(), Value::String(Arc::from(req.path.as_str())));
+                    m.insert(
+                        "method".to_string(),
+                        Value::String(Arc::from(req.method.as_str())),
+                    );
+                    m.insert(
+                        "path".to_string(),
+                        Value::String(Arc::from(req.path.as_str())),
+                    );
                     m.insert("query".to_string(), vm_map(req.query));
                     m.insert("headers".to_string(), vm_map(req.headers));
-                    m.insert("body".to_string(), Value::String(Arc::from(req.body.as_str())));
+                    m.insert(
+                        "body".to_string(),
+                        Value::String(Arc::from(req.body.as_str())),
+                    );
                     Ok(Value::Map(Arc::from(m)))
                 }
                 None => Ok(Value::Nil),
-            }
-        });
+            },
+        );
         self.insert_native("http_server_respond", |args| {
             let id = args.first().and_then(|v| v.as_u64()).unwrap_or(0);
             let status = args.get(1).and_then(|v| v.as_u64()).unwrap_or(200) as u16;
@@ -1643,18 +2053,35 @@ impl Vm {
             Ok(Value::Nil)
         });
         self.insert_native("now_ms", |_args| {
-            let ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0);
+            let ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or(0);
             Ok(Value::I64(ms))
         });
     }
 
-    fn insert_native(&mut self, name: &str, f: impl Fn(&[Value]) -> Result<Value, String> + Send + Sync + 'static) {
-        self.globals.insert(name.to_string(), Value::NativeFn(Arc::from(name), Arc::new(f)));
+    fn insert_native(
+        &mut self,
+        name: &str,
+        f: impl Fn(&[Value]) -> Result<Value, String> + Send + Sync + 'static,
+    ) {
+        self.globals.insert(
+            name.to_string(),
+            Value::NativeFn(Arc::from(name), Arc::new(f)),
+        );
     }
 
     pub fn run(&mut self, chunk: &Chunk) -> Result<Vec<String>, String> {
         self.index_module_cells(chunk);
-        let mut frame = Frame { code: chunk, ip: 0, stack: Vec::new(), locals: Vec::new(), defers: Vec::new(), catches: Vec::new() };
+        let mut frame = Frame {
+            code: chunk,
+            ip: 0,
+            stack: Vec::new(),
+            locals: Vec::new(),
+            defers: Vec::new(),
+            catches: Vec::new(),
+        };
         self.exec_frame(&mut frame)?;
         Ok(std::mem::take(&mut self.output))
     }
@@ -1679,7 +2106,10 @@ impl Vm {
                         frame.stack.truncate(c.stack_len);
                         frame.locals.truncate(c.locals_len);
                         let errv = self.pending_error.take().unwrap_or_else(|| {
-                            Value::Error(Arc::new(crate::ErrorInfo::new(e.clone()).with_kind(crate::ErrorKind::Runtime)))
+                            Value::Error(Arc::new(
+                                crate::ErrorInfo::new(e.clone())
+                                    .with_kind(crate::ErrorKind::Runtime),
+                            ))
                         });
                         frame.ip = c.handler_offset;
                         frame.push(errv);
@@ -1694,11 +2124,17 @@ impl Vm {
 
     fn exec_frame_inner(&mut self, frame: &mut Frame) -> Result<(), String> {
         while frame.ip < frame.code.code.len() {
-            let op = Op::from_u8(frame.code.code[frame.ip]).ok_or_else(|| format!("bad opcode at {}", frame.ip))?;
+            let op = Op::from_u8(frame.code.code[frame.ip])
+                .ok_or_else(|| format!("bad opcode at {}", frame.ip))?;
             frame.ip += 1;
             // Debugger: pause at source-line boundaries (breakpoints/step/continue).
             if self.debug_enabled && !matches!(op, Op::LoopEnd | Op::LoopBegin) {
-                let cur_line = frame.code.lines.get(frame.ip.saturating_sub(1)).copied().unwrap_or(0);
+                let cur_line = frame
+                    .code
+                    .lines
+                    .get(frame.ip.saturating_sub(1))
+                    .copied()
+                    .unwrap_or(0);
                 let action = self.debug_pause(frame, cur_line);
                 match action {
                     VmDebugAction::Quit => return Ok(()),
@@ -1791,8 +2227,13 @@ impl Vm {
                     // Deliberately no republishing — see `Op::BindModule`.
                     self.globals.insert(name, v);
                 }
-                Op::Pop => { frame.pop(); }
-                Op::Dup => { let v = frame.peek().clone(); frame.push(v); }
+                Op::Pop => {
+                    frame.pop();
+                }
+                Op::Dup => {
+                    let v = frame.peek().clone();
+                    frame.push(v);
+                }
                 Op::AddI => self.binop_arith(frame, BinArith::Add)?,
                 Op::SubI => self.binop_arith(frame, BinArith::Sub)?,
                 Op::MulI => self.binop_arith(frame, BinArith::Mul)?,
@@ -1803,11 +2244,17 @@ impl Vm {
                 Op::SubF => bin_float(frame, |a, b| a - b),
                 Op::MulF => bin_float(frame, |a, b| a * b),
                 Op::DivF => bin_float(frame, |a, b| if b == 0.0 { 0.0 } else { a / b }),
-                Op::NegF => { let v = frame.pop(); frame.push(Value::F64(-(v.as_f64().unwrap_or(0.0)))); }
+                Op::NegF => {
+                    let v = frame.pop();
+                    frame.push(Value::F64(-(v.as_f64().unwrap_or(0.0))));
+                }
                 Op::BitAnd => bin_int(frame, |a, b| a & b, |_, _| 0.0),
                 Op::BitOr => bin_int(frame, |a, b| a | b, |_, _| 0.0),
                 Op::BitXor => bin_int(frame, |a, b| a ^ b, |_, _| 0.0),
-                Op::BitNot => { let v = frame.pop(); frame.push(Value::I64(!(v.as_i64().unwrap_or(0)))); }
+                Op::BitNot => {
+                    let v = frame.pop();
+                    frame.push(Value::I64(!(v.as_i64().unwrap_or(0))));
+                }
                 Op::Shl => bin_int(frame, |a, b| a << b, |_, _| 0.0),
                 Op::Shr => bin_int(frame, |a, b| a >> b, |_, _| 0.0),
                 Op::Eq => self.binop_compare(frame, CompareOp::Eq)?,
@@ -1816,7 +2263,10 @@ impl Vm {
                 Op::Gt => self.binop_compare(frame, CompareOp::Gt)?,
                 Op::LtEq => self.binop_compare(frame, CompareOp::LtEq)?,
                 Op::GtEq => self.binop_compare(frame, CompareOp::GtEq)?,
-                Op::Not => { let v = frame.pop(); frame.push(Value::Bool(!v.is_truthy())); }
+                Op::Not => {
+                    let v = frame.pop();
+                    frame.push(Value::Bool(!v.is_truthy()));
+                }
                 Op::True => frame.push(Value::Bool(true)),
                 Op::False => frame.push(Value::Bool(false)),
                 Op::Nil => frame.push(Value::Nil),
@@ -1888,21 +2338,34 @@ impl Vm {
                     self.output.push(format!("[TRACE] {:?}", v));
                 }
                 Op::NewArray => {
-                    let n = match frame.pop() { Value::I64(n) => n as usize, _ => 0 };
+                    let n = match frame.pop() {
+                        Value::I64(n) => n as usize,
+                        _ => 0,
+                    };
                     let mut items = Vec::with_capacity(n);
-                    for _ in 0..n { items.push(frame.pop()); }
+                    for _ in 0..n {
+                        items.push(frame.pop());
+                    }
                     items.reverse();
                     frame.push(Value::Array(Arc::from(items)));
                 }
                 Op::NewTuple => {
-                    let n = match frame.pop() { Value::I64(n) => n as usize, _ => 0 };
+                    let n = match frame.pop() {
+                        Value::I64(n) => n as usize,
+                        _ => 0,
+                    };
                     let mut items = Vec::with_capacity(n);
-                    for _ in 0..n { items.push(frame.pop()); }
+                    for _ in 0..n {
+                        items.push(frame.pop());
+                    }
                     items.reverse();
                     frame.push(Value::Tuple(Arc::from(items)));
                 }
                 Op::NewMap => {
-                    let n = match frame.pop() { Value::I64(n) => n as usize, _ => 0 };
+                    let n = match frame.pop() {
+                        Value::I64(n) => n as usize,
+                        _ => 0,
+                    };
                     let mut m = HashMap::new();
                     for _ in 0..n {
                         let v = frame.pop();
@@ -1933,7 +2396,11 @@ impl Vm {
                         }
                         (Value::String(s), Value::I64(i)) => {
                             let k = normalize_index_vm(s.chars().count(), *i);
-                            frame.push(k.and_then(|k| s.chars().nth(k)).map(|c| Value::String(Arc::from(c.to_string().as_str()))).unwrap_or(Value::Nil));
+                            frame.push(
+                                k.and_then(|k| s.chars().nth(k))
+                                    .map(|c| Value::String(Arc::from(c.to_string().as_str())))
+                                    .unwrap_or(Value::Nil),
+                            );
                         }
                         (Value::Map(m), Value::String(k)) => {
                             frame.push(m.get(k.as_ref()).cloned().unwrap_or(Value::Nil));
@@ -1941,7 +2408,10 @@ impl Vm {
                         (Value::Mmap(h), Value::I64(i)) => {
                             let data = h.as_slice();
                             let k = normalize_index_vm(data.len(), *i);
-                            frame.push(k.map(|k| Value::I64(data[k] as i64)).unwrap_or(Value::I64(0)));
+                            frame.push(
+                                k.map(|k| Value::I64(data[k] as i64))
+                                    .unwrap_or(Value::I64(0)),
+                            );
                         }
                         (Value::MmapSlice(h, off, n), Value::I64(i)) => {
                             let k = normalize_index_vm(*n, *i);
@@ -1952,7 +2422,9 @@ impl Vm {
                             let k = normalize_index_vm(b.len(), *i);
                             frame.push(k.map(|k| Value::I64(b[k] as i64)).unwrap_or(Value::I64(0)));
                         }
-                        _ => { frame.push(Value::Nil); }
+                        _ => {
+                            frame.push(Value::Nil);
+                        }
                     }
                 }
                 Op::FieldGet => {
@@ -1974,16 +2446,16 @@ impl Vm {
                         // nil-for-a-missing-key convention for maps, because a silent nil
                         // from `m.COUNT` is a bad way to learn that `COUTN` was misspelled.
                         (Value::Module(ns), Value::String(k)) => {
-                              let guard = ns.lock().unwrap();
-                              match guard.get(k.as_ref()) {
-                                  Some(v) => frame.push(v),
-                                  None => {
-                                      let message = guard.read_refusal(k.as_ref());
-                                      drop(guard);
-                                      return Err(message);
-                                  }
-                              }
-                          }
+                            let guard = ns.lock().unwrap();
+                            match guard.get(k.as_ref()) {
+                                Some(v) => frame.push(v),
+                                None => {
+                                    let message = guard.read_refusal(k.as_ref());
+                                    drop(guard);
+                                    return Err(message);
+                                }
+                            }
+                        }
                         (Value::Struct { fields, .. }, Value::String(k)) => {
                             frame.push(fields.get(k.as_ref()).cloned().unwrap_or(Value::Nil));
                         }
@@ -1994,7 +2466,9 @@ impl Vm {
                                 frame.push(Value::Nil);
                             }
                         }
-                        _ => { frame.push(Value::Nil); }
+                        _ => {
+                            frame.push(Value::Nil);
+                        }
                     }
                 }
                 Op::Closure => {}
@@ -2004,7 +2478,12 @@ impl Vm {
                     let args_val = frame.pop();
                     let symbol = match frame.pop() {
                         Value::String(s) => s.to_string(),
-                        other => return Err(format!("ffi: symbol must be a string, got {}", other.type_name())),
+                        other => {
+                            return Err(format!(
+                                "ffi: symbol must be a string, got {}",
+                                other.type_name()
+                            ))
+                        }
                     };
                     let lib = match frame.pop() {
                         Value::ForeignLib(h) => h,
@@ -2013,10 +2492,18 @@ impl Vm {
                     let c_args: Vec<Value> = match args_val {
                         Value::Array(a) => a.to_vec(),
                         Value::Nil => Vec::new(),
-                        other => return Err(format!("ffi: args must be an array, got {}", other.type_name())),
+                        other => {
+                            return Err(format!(
+                                "ffi: args must be an array, got {}",
+                                other.type_name()
+                            ))
+                        }
                     };
                     let (marshalled, _g) = marshal_vm_args(&c_args)?;
-                    let addr = { let h = lib.lock().unwrap(); rak_stdlib::ffi::sym_addr(&h, &symbol)? };
+                    let addr = {
+                        let h = lib.lock().unwrap();
+                        rak_stdlib::ffi::sym_addr(&h, &symbol)?
+                    };
                     let ret = unsafe { rak_stdlib::ffi::call_int(addr, &marshalled) };
                     frame.push(Value::I64(ret as i64));
                 }
@@ -2028,16 +2515,22 @@ impl Vm {
                     let v = frame.pop();
                     let resolved = match v {
                         Value::Future(h) => {
-                            let state = std::mem::replace(&mut *h.state.lock().unwrap(), VmFutureState::Polled);
+                            let state = std::mem::replace(
+                                &mut *h.state.lock().unwrap(),
+                                VmFutureState::Polled,
+                            );
                             match state {
                                 VmFutureState::Ready(v) => v,
                                 VmFutureState::Pending(jh) => {
-                                    let joined = crate::async_rt::runtime().block_on(async { jh.await })
+                                    let joined = crate::async_rt::runtime()
+                                        .block_on(async { jh.await })
                                         .map_err(|e| format!("await: task failed: {}", e))?;
                                     *h.state.lock().unwrap() = VmFutureState::Ready(joined.clone());
                                     joined
                                 }
-                                VmFutureState::Polled => return Err("await: future already polled".to_string()),
+                                VmFutureState::Polled => {
+                                    return Err("await: future already polled".to_string())
+                                }
                             }
                         }
                         other => other,
@@ -2057,7 +2550,11 @@ impl Vm {
                     // Tell the namespace which chunk global backs each of its
                     // exports, so `m.X = v` can be written through to the real
                     // binding instead of into the projection.
-                    let cell = frame.code.module_cells.iter().find(|c| c.global == cell_global);
+                    let cell = frame
+                        .code
+                        .module_cells
+                        .iter()
+                        .find(|c| c.global == cell_global);
                     let backing: std::collections::HashMap<String, String> = cell
                         .map(|c| c.exports.iter())
                         .unwrap_or_default()
@@ -2254,7 +2751,10 @@ impl Vm {
                         };
                         fields.insert(k, v);
                     }
-                    frame.push(Value::Struct { name: Arc::from(name.as_str()), fields: Arc::from(fields) });
+                    frame.push(Value::Struct {
+                        name: Arc::from(name.as_str()),
+                        fields: Arc::from(fields),
+                    });
                 }
                 Op::MatchPat => {
                     let di = frame.code.read_u16(frame.ip) as usize;
@@ -2283,7 +2783,11 @@ impl Vm {
                                 .iter()
                                 .map(|n| {
                                     let nm = n.to_string();
-                                    bounds.iter().find(|(k, _)| *k == nm).map(|(_, v)| v.clone()).unwrap_or(Value::Nil)
+                                    bounds
+                                        .iter()
+                                        .find(|(k, _)| *k == nm)
+                                        .map(|(_, v)| v.clone())
+                                        .unwrap_or(Value::Nil)
                                 })
                                 .collect();
                             // A truthy indicator: a bare `true` when there are no
@@ -2349,7 +2853,9 @@ impl Vm {
                             // the one the importer is holding.
                             if let Some(publishers) = self.module_publish.get(&global) {
                                 for (cell_global, export) in publishers {
-                                    if let Some(Value::Module(other)) = self.globals.get(cell_global) {
+                                    if let Some(Value::Module(other)) =
+                                        self.globals.get(cell_global)
+                                    {
                                         other.lock().unwrap().store(export, val.clone());
                                     }
                                 }
@@ -2373,28 +2879,60 @@ impl Vm {
                     let items: Vec<Value> = match &obj {
                         Value::Array(a) => {
                             if indexed {
-                                a.iter().enumerate().map(|(i, v)| Value::Tuple(Arc::from(vec![Value::I64(i as i64), v.clone()]))).collect()
+                                a.iter()
+                                    .enumerate()
+                                    .map(|(i, v)| {
+                                        Value::Tuple(Arc::from(vec![
+                                            Value::I64(i as i64),
+                                            v.clone(),
+                                        ]))
+                                    })
+                                    .collect()
                             } else {
                                 a.to_vec()
                             }
                         }
                         Value::Tuple(t) => t.to_vec(),
-                        Value::Map(m) => {
-                            m.iter().map(|(k, v)| Value::Tuple(Arc::from(vec![Value::String(Arc::from(k.as_str())), v.clone()]))).collect()
-                        }
+                        Value::Map(m) => m
+                            .iter()
+                            .map(|(k, v)| {
+                                Value::Tuple(Arc::from(vec![
+                                    Value::String(Arc::from(k.as_str())),
+                                    v.clone(),
+                                ]))
+                            })
+                            .collect(),
                         Value::String(s) => {
                             if indexed {
-                                s.chars().enumerate().map(|(i, c)| Value::Tuple(Arc::from(vec![Value::I64(i as i64), Value::String(Arc::from(c.to_string().as_str()))]))).collect()
+                                s.chars()
+                                    .enumerate()
+                                    .map(|(i, c)| {
+                                        Value::Tuple(Arc::from(vec![
+                                            Value::I64(i as i64),
+                                            Value::String(Arc::from(c.to_string().as_str())),
+                                        ]))
+                                    })
+                                    .collect()
                             } else {
-                                s.chars().map(|c| Value::String(Arc::from(c.to_string().as_str()))).collect()
+                                s.chars()
+                                    .map(|c| Value::String(Arc::from(c.to_string().as_str())))
+                                    .collect()
                             }
                         }
-                          Value::Bytes(b) => b.iter().map(|b| Value::I64(*b as i64)).collect(),
-                          // Sets iterate in insertion order, which is the
-                          // reason `SetRepr` keeps one — see `setrepr`.
-                          Value::Set(s) => s.lock().unwrap().to_vec(),
-                          Value::MmapSlice(h, off, n) => h.as_slice()[*off..off + n].iter().map(|b| Value::I64(*b as i64)).collect(),
-                          _ => return Err(format!("cannot iterate over this value ({})", obj.type_name())),
+                        Value::Bytes(b) => b.iter().map(|b| Value::I64(*b as i64)).collect(),
+                        // Sets iterate in insertion order, which is the
+                        // reason `SetRepr` keeps one — see `setrepr`.
+                        Value::Set(s) => s.lock().unwrap().to_vec(),
+                        Value::MmapSlice(h, off, n) => h.as_slice()[*off..off + n]
+                            .iter()
+                            .map(|b| Value::I64(*b as i64))
+                            .collect(),
+                        _ => {
+                            return Err(format!(
+                                "cannot iterate over this value ({})",
+                                obj.type_name()
+                            ))
+                        }
                     };
                     frame.push(Value::Array(Arc::from(items)));
                 }
@@ -2410,7 +2948,8 @@ impl Vm {
                     self.pending_error = Some(match v {
                         Value::Error(_) => v,
                         other => Value::Error(Arc::new(
-                            crate::ErrorInfo::new(other.to_string()).with_kind(crate::ErrorKind::User),
+                            crate::ErrorInfo::new(other.to_string())
+                                .with_kind(crate::ErrorKind::User),
                         )),
                     });
                     return Err(msg);
@@ -2439,7 +2978,11 @@ impl Vm {
                     match unwrapped {
                         Some(inner) => frame.push(inner),
                         None => {
-                            let msg = self.pending_error.as_ref().map(|v| v.to_string()).unwrap_or_else(|| "None".to_string());
+                            let msg = self
+                                .pending_error
+                                .as_ref()
+                                .map(|v| v.to_string())
+                                .unwrap_or_else(|| "None".to_string());
                             return Err(msg);
                         }
                     }
@@ -2461,7 +3004,12 @@ impl Vm {
     /// `VmStreamCtx` carries the machine, and the callback it is given is the
     /// same `call_value` path every other call takes, so a stream element that
     /// calls a Rak function behaves exactly like one called from source.
-    fn vm_stream_call(&mut self, frame: &mut Frame, name: &str, args: &[Value]) -> Result<(), String> {
+    fn vm_stream_call(
+        &mut self,
+        frame: &mut Frame,
+        name: &str,
+        args: &[Value],
+    ) -> Result<(), String> {
         let handle = match args.first() {
             Some(Value::Stream(s)) => s.clone(),
             Some(other) => {
@@ -2538,7 +3086,12 @@ impl Vm {
 
     /// Invoke a function value (native fn or closure) with the given args and
     /// push the result onto `frame.stack`. Shared by `Op::Call` and defer.
-    fn call_value(&mut self, frame: &mut Frame, callee: Value, mut args: Vec<Value>) -> Result<(), String> {
+    fn call_value(
+        &mut self,
+        frame: &mut Frame,
+        callee: Value,
+        mut args: Vec<Value>,
+    ) -> Result<(), String> {
         match callee {
             Value::NativeFn(name, f) => {
                 // Sandbox gate (`rakc vm --sandbox`).
@@ -2573,24 +3126,28 @@ impl Vm {
                 let result = f(&args).map_err(|e| format!("{}: {}", name, e))?;
                 frame.push(result);
             }
-            Value::Closure { code, nparams, name } => {
-                    // The VM had no depth accounting, so recursive Rak exhausted the
-                    // native Rust stack exactly as the interpreter did --
-                    // `exec_frame` recurses through `call_value` -- and the release
-                    // profile's `panic = "abort"` left no diagnostic. Counting here
-                    // and decrementing on both exit paths turns a process that
-                    // vanishes into an error naming the limit.
-                    self.call_depth += 1;
-                    if self.call_depth > self.max_call_depth {
-                        self.call_depth -= 1;
-                        return Err(format!(
-                            "call depth exceeded {}; recursion is deeper than the limit. \
+            Value::Closure {
+                code,
+                nparams,
+                name,
+            } => {
+                // The VM had no depth accounting, so recursive Rak exhausted the
+                // native Rust stack exactly as the interpreter did --
+                // `exec_frame` recurses through `call_value` -- and the release
+                // profile's `panic = "abort"` left no diagnostic. Counting here
+                // and decrementing on both exit paths turns a process that
+                // vanishes into an error naming the limit.
+                self.call_depth += 1;
+                if self.call_depth > self.max_call_depth {
+                    self.call_depth -= 1;
+                    return Err(format!(
+                        "call depth exceeded {}; recursion is deeper than the limit. \
                              raise it with --max-depth if that is intentional -- but note \
                              the stack is finite, so a limit far above {} will exhaust it \
                              rather than report this.",
-                            self.max_call_depth, self.max_call_depth
-                        ));
-                    }
+                        self.max_call_depth, self.max_call_depth
+                    ));
+                }
                 if self.debug_enabled {
                     self.debug_callstack.push(name.to_string());
                 }
@@ -2631,21 +3188,38 @@ impl Vm {
     /// Run an iterator builtin whose per-element step calls a Rak function
     /// (`fold`/`reduce`/`any`/`all`/`flat_map`/`take_while`). The function is
     /// invoked with `call_value` (which has VM access), so closures work.
-    fn vm_iter_call(&mut self, frame: &mut Frame, name: &str, args: Vec<Value>) -> Result<(), String> {
+    fn vm_iter_call(
+        &mut self,
+        frame: &mut Frame,
+        name: &str,
+        args: Vec<Value>,
+    ) -> Result<(), String> {
         let items: Vec<Value> = match args.first() {
             Some(Value::Array(a)) => a.to_vec(),
-            Some(other) => return Err(format!("{}() requires an array, got {}", name, other.type_name())),
+            Some(other) => {
+                return Err(format!(
+                    "{}() requires an array, got {}",
+                    name,
+                    other.type_name()
+                ))
+            }
             None => return Err(format!("{}() requires an array", name)),
         };
         let arity_err = || format!("{}() expects (xs, init, f) / (xs, f)", name);
-        let call2 = |vm: &mut Vm, frame: &mut Frame, f: &Value, a: Value, b: Value| -> Result<Value, String> {
+        let call2 = |vm: &mut Vm,
+                     frame: &mut Frame,
+                     f: &Value,
+                     a: Value,
+                     b: Value|
+         -> Result<Value, String> {
             vm.call_value(frame, f.clone(), vec![a, b])?;
             Ok(frame.pop())
         };
-        let call1 = |vm: &mut Vm, frame: &mut Frame, f: &Value, a: Value| -> Result<Value, String> {
-            vm.call_value(frame, f.clone(), vec![a])?;
-            Ok(frame.pop())
-        };
+        let call1 =
+            |vm: &mut Vm, frame: &mut Frame, f: &Value, a: Value| -> Result<Value, String> {
+                vm.call_value(frame, f.clone(), vec![a])?;
+                Ok(frame.pop())
+            };
         match name {
             "fold" => {
                 let f = args.get(2).cloned().ok_or_else(arity_err)?;
@@ -2717,7 +3291,13 @@ impl Vm {
     /// Dispatch `receiver.method(args...)` (mirrors the interpreter's
     /// `eval_call` method branch): regex natives, baked `impl` methods
     /// (`__method_<type>_<name>` globals), then a field holding a callable.
-    fn call_method(&mut self, frame: &mut Frame, receiver: Value, method: String, args: Vec<Value>) -> Result<(), String> {
+    fn call_method(
+        &mut self,
+        frame: &mut Frame,
+        receiver: Value,
+        method: String,
+        args: Vec<Value>,
+    ) -> Result<(), String> {
         let recv = unwrap_vm_evidence(&receiver);
         if let Value::Regex(_) = &recv {
             return self.call_regex_method_vm(frame, &recv, &method, args);
@@ -2756,7 +3336,13 @@ impl Vm {
 
     /// Regex method dispatch on the VM (`re.match/hay`, `find`, `find_all`,
     /// `replace`) — mirrors the interpreter's `call_regex_method`.
-    fn call_regex_method_vm(&mut self, frame: &mut Frame, re_val: &Value, method: &str, args: Vec<Value>) -> Result<(), String> {
+    fn call_regex_method_vm(
+        &mut self,
+        frame: &mut Frame,
+        re_val: &Value,
+        method: &str,
+        args: Vec<Value>,
+    ) -> Result<(), String> {
         let re = match re_val {
             Value::Regex(r) => r.clone(),
             _ => return Err("not a regex".to_string()),
@@ -2764,13 +3350,22 @@ impl Vm {
         let hay = native_str(args.first());
         let result = match method {
             "match" | "is_match" => Value::Bool(re.re.is_match(&hay)),
-            "find" => re.re.find(&hay).map(|m| Value::String(Arc::from(m.as_str()))).unwrap_or(Value::Nil),
+            "find" => re
+                .re
+                .find(&hay)
+                .map(|m| Value::String(Arc::from(m.as_str())))
+                .unwrap_or(Value::Nil),
             "find_all" => Value::Array(Arc::from(
-                re.re.find_iter(&hay).map(|m| Value::String(Arc::from(m.as_str()))).collect::<Vec<_>>(),
+                re.re
+                    .find_iter(&hay)
+                    .map(|m| Value::String(Arc::from(m.as_str())))
+                    .collect::<Vec<_>>(),
             )),
             "replace" | "replace_all" => {
                 let rep = native_str(args.get(1));
-                Value::String(Arc::from(re.re.replace_all(&hay, rep.as_str()).into_owned().as_str()))
+                Value::String(Arc::from(
+                    re.re.replace_all(&hay, rep.as_str()).into_owned().as_str(),
+                ))
             }
             _ => return Err(format!("regex has no method '{}'", method)),
         };
@@ -2814,18 +3409,18 @@ impl Vm {
                     BinArith::Div => {
                         if b == 0 {
                             // Same wording as the interpreter. "div by zero" was Rust's phrasing leaking
-        // through a hand-written error string; the interpreter said "Division by zero".
-        return Err("Division by zero".to_string());
+                            // through a hand-written error string; the interpreter said "Division by zero".
+                            return Err("Division by zero".to_string());
                         }
                         push(frame, I64(a / b))
                     }
                     BinArith::Rem => {
                         if b == 0 {
                             // Same wording as the interpreter, for the same reason: `x % 0` is a division by
-        // zero and a user should not have to know which backend they are on to find
-        // out. It previously said "rem by zero" on the VM and "Division by zero" on
-        // the interpreter.
-        return Err("Division by zero".to_string());
+                            // zero and a user should not have to know which backend they are on to find
+                            // out. It previously said "rem by zero" on the VM and "Division by zero" on
+                            // the interpreter.
+                            return Err("Division by zero".to_string());
                         }
                         push(frame, I64(a % b))
                     }
@@ -2833,13 +3428,16 @@ impl Vm {
                     BinArith::Sub => push(frame, I64(a.wrapping_sub(b))),
                     BinArith::Mul => push(frame, I64(a.wrapping_mul(b))),
                 },
-                (F64(a), F64(b)) => push(frame, F64(match op {
-                    BinArith::Add => a + b,
-                    BinArith::Sub => a - b,
-                    BinArith::Mul => a * b,
-                    BinArith::Div => a / b,
-                    BinArith::Rem => a % b,
-                })),
+                (F64(a), F64(b)) => push(
+                    frame,
+                    F64(match op {
+                        BinArith::Add => a + b,
+                        BinArith::Sub => a - b,
+                        BinArith::Mul => a * b,
+                        BinArith::Div => a / b,
+                        BinArith::Rem => a % b,
+                    }),
+                ),
                 (a, b) => self.numeric_fallback(frame, &a, &b, op)?,
             }
             Ok(())
@@ -2856,7 +3454,13 @@ impl Vm {
     /// Lenient numeric coercion for mixed/unknown operands (matches the original
     /// `bin_int` `(a, b)` arm).
     #[allow(clippy::float_cmp)]
-    fn numeric_fallback(&mut self, frame: &mut Frame, l: &Value, r: &Value, op: BinArith) -> Result<(), String> {
+    fn numeric_fallback(
+        &mut self,
+        frame: &mut Frame,
+        l: &Value,
+        r: &Value,
+        op: BinArith,
+    ) -> Result<(), String> {
         let av = l.as_f64().unwrap_or(0.0);
         let bv = r.as_f64().unwrap_or(0.0);
         frame.push(Value::F64(match op {
@@ -2931,7 +3535,7 @@ impl Vm {
         Ok(())
     }
 
-/// Run a frame's registered deferred calls in LIFO order (innermost
+    /// Run a frame's registered deferred calls in LIFO order (innermost
     /// `defer` runs last), invoking each with its captured args. Results are
     /// discarded as in the interpreter.
     fn run_frame_defers(&mut self, frame: &mut Frame) -> Result<(), String> {
@@ -2955,9 +3559,15 @@ struct Frame<'a> {
 }
 
 impl<'a> Frame<'a> {
-    fn push(&mut self, v: Value) { self.stack.push(v); }
-    fn pop(&mut self) -> Value { self.stack.pop().unwrap_or(Value::Nil) }
-    fn peek(&self) -> &Value { self.stack.last().unwrap_or(&Value::Nil) }
+    fn push(&mut self, v: Value) {
+        self.stack.push(v);
+    }
+    fn pop(&mut self) -> Value {
+        self.stack.pop().unwrap_or(Value::Nil)
+    }
+    fn peek(&self) -> &Value {
+        self.stack.last().unwrap_or(&Value::Nil)
+    }
 }
 
 fn bin_int(frame: &mut Frame, fi: impl Fn(i64, i64) -> i64, ff: impl Fn(f64, f64) -> f64) {
@@ -2977,7 +3587,10 @@ fn bin_int(frame: &mut Frame, fi: impl Fn(i64, i64) -> i64, ff: impl Fn(f64, f64
 fn bin_float(frame: &mut Frame, f: impl Fn(f64, f64) -> f64) {
     let r = frame.pop();
     let l = frame.pop();
-    frame.push(Value::F64(f(l.as_f64().unwrap_or(0.0), r.as_f64().unwrap_or(0.0))));
+    frame.push(Value::F64(f(
+        l.as_f64().unwrap_or(0.0),
+        r.as_f64().unwrap_or(0.0),
+    )));
 }
 
 fn native_str(v: Option<&Value>) -> String {
@@ -3085,7 +3698,11 @@ fn pat_arg<'a>(d: &'a [Value], i: usize) -> Option<&'a Value> {
 /// Structural pattern match against a descriptor (mirrors the interpreter's
 /// `pattern_matches`). Returns whether the value matched; on success, `bounds`
 /// is filled with `(name, value)` pairs from `["bind", name, sub]` nodes.
-fn vm_pattern_match(v: &Value, d: &Value, bounds: &mut Vec<(String, Value)>) -> Result<bool, String> {
+fn vm_pattern_match(
+    v: &Value,
+    d: &Value,
+    bounds: &mut Vec<(String, Value)>,
+) -> Result<bool, String> {
     let d = match d {
         Value::Array(a) => a,
         _ => return Err("MatchPat: descriptor must be an array".to_string()),
@@ -3097,7 +3714,9 @@ fn vm_pattern_match(v: &Value, d: &Value, bounds: &mut Vec<(String, Value)>) -> 
                 Some(Value::String(s)) => s.to_string(),
                 _ => return Err("MatchPat: bind name must be a string".to_string()),
             };
-            let sub = pat_arg(d, 1).cloned().unwrap_or_else(|| Value::Array(Arc::from(vec![Value::String(Arc::from("wild"))])));
+            let sub = pat_arg(d, 1)
+                .cloned()
+                .unwrap_or_else(|| Value::Array(Arc::from(vec![Value::String(Arc::from("wild"))])));
             if vm_pattern_match(v, &sub, bounds)? {
                 bounds.push((name, v.clone()));
                 Ok(true)
@@ -3263,8 +3882,15 @@ fn vm_pattern_match(v: &Value, d: &Value, bounds: &mut Vec<(String, Value)>) -> 
                 _ => return Err("MatchPat: enum subs not an array".to_string()),
             };
             match v {
-                Value::Enum { name, variant, data } => {
-                    if name.as_ref() != want_enum || variant.as_ref() != want_var || data.len() != subs.len() {
+                Value::Enum {
+                    name,
+                    variant,
+                    data,
+                } => {
+                    if name.as_ref() != want_enum
+                        || variant.as_ref() != want_var
+                        || data.len() != subs.len()
+                    {
                         return Ok(false);
                     }
                     for (i, sub) in subs.iter().enumerate() {
@@ -3300,16 +3926,28 @@ fn vm_pattern_match(v: &Value, d: &Value, bounds: &mut Vec<(String, Value)>) -> 
             Ok(false)
         }
         "some" => match v {
-            Value::Option(Some(inner)) => vm_pattern_match(inner, pat_arg(d, 0).ok_or("MatchPat: some needs sub")?, bounds),
+            Value::Option(Some(inner)) => vm_pattern_match(
+                inner,
+                pat_arg(d, 0).ok_or("MatchPat: some needs sub")?,
+                bounds,
+            ),
             _ => Ok(false),
         },
         "none" => Ok(matches!(v, Value::Option(None))),
         "ok" => match v {
-            Value::Result(Some(inner), _) => vm_pattern_match(inner, pat_arg(d, 0).ok_or("MatchPat: ok needs sub")?, bounds),
+            Value::Result(Some(inner), _) => vm_pattern_match(
+                inner,
+                pat_arg(d, 0).ok_or("MatchPat: ok needs sub")?,
+                bounds,
+            ),
             _ => Ok(false),
         },
         "err" => match v {
-            Value::Result(_, Some(inner)) => vm_pattern_match(inner, pat_arg(d, 0).ok_or("MatchPat: err needs sub")?, bounds),
+            Value::Result(_, Some(inner)) => vm_pattern_match(
+                inner,
+                pat_arg(d, 0).ok_or("MatchPat: err needs sub")?,
+                bounds,
+            ),
             _ => Ok(false),
         },
         _ => Err(format!("MatchPat: unknown pattern tag '{}'", pat_tag(d))),
@@ -3349,9 +3987,16 @@ fn has_byte_literal(e: &[Value], byte: u8) -> bool {
 fn vm_index_set(obj: &mut Value, idx: &Value, val: Value) -> Result<(), String> {
     match obj {
         Value::Array(a) => {
-            let raw = idx.as_i64().ok_or_else(|| "index-assign: index must be an int".to_string())?;
-            let i = normalize_index_vm(a.len(), raw)
-                .ok_or_else(|| format!("index-assign: index {} out of bounds (len {})", raw, a.len()))?;
+            let raw = idx
+                .as_i64()
+                .ok_or_else(|| "index-assign: index must be an int".to_string())?;
+            let i = normalize_index_vm(a.len(), raw).ok_or_else(|| {
+                format!(
+                    "index-assign: index {} out of bounds (len {})",
+                    raw,
+                    a.len()
+                )
+            })?;
             let m = Arc::make_mut(a);
             m[i] = val;
             Ok(())
@@ -3362,9 +4007,16 @@ fn vm_index_set(obj: &mut Value, idx: &Value, val: Value) -> Result<(), String> 
             Ok(())
         }
         Value::Bytes(b) => {
-            let raw = idx.as_i64().ok_or_else(|| "index-assign: index must be an int".to_string())?;
-            let i = normalize_index_vm(b.len(), raw)
-                .ok_or_else(|| format!("index-assign: index {} out of bounds (len {})", raw, b.len()))?;
+            let raw = idx
+                .as_i64()
+                .ok_or_else(|| "index-assign: index must be an int".to_string())?;
+            let i = normalize_index_vm(b.len(), raw).ok_or_else(|| {
+                format!(
+                    "index-assign: index {} out of bounds (len {})",
+                    raw,
+                    b.len()
+                )
+            })?;
             // `0xFF`, `255` and `'A'` are the same byte. `as_i64` alone rejected
             // the first and the third, so the same edit spelled three ways behaved
             // three ways.
@@ -3373,7 +4025,10 @@ fn vm_index_set(obj: &mut Value, idx: &Value, val: Value) -> Result<(), String> 
             m[i] = byte;
             Ok(())
         }
-        other => Err(format!("cannot index-assign this value ({})", other.type_name())),
+        other => Err(format!(
+            "cannot index-assign this value ({})",
+            other.type_name()
+        )),
     }
 }
 
@@ -3410,7 +4065,10 @@ fn vm_field_set(obj: &mut Value, field: &str, val: Value) -> Result<(), String> 
                 ))
             }
         }
-        other => Err(format!("cannot field-assign this value ({})", other.type_name())),
+        other => Err(format!(
+            "cannot field-assign this value ({})",
+            other.type_name()
+        )),
     }
 }
 
@@ -3420,8 +4078,14 @@ fn provenance_to_vm_value(v: &Value) -> Result<Value, String> {
     match v {
         Value::Evidence { provenance, .. } => {
             let mut m: HashMap<String, Value> = HashMap::new();
-            m.insert("tool".to_string(), Value::String(Arc::from(provenance.tool.as_str())));
-            m.insert("target".to_string(), Value::String(Arc::from(provenance.target.as_str())));
+            m.insert(
+                "tool".to_string(),
+                Value::String(Arc::from(provenance.tool.as_str())),
+            );
+            m.insert(
+                "target".to_string(),
+                Value::String(Arc::from(provenance.target.as_str())),
+            );
             m.insert("ts".to_string(), Value::I64(provenance.ts as i64));
             if let Some(o) = provenance.raw_offset {
                 m.insert("raw_offset".to_string(), Value::I64(o as i64));
@@ -3430,10 +4094,13 @@ fn provenance_to_vm_value(v: &Value) -> Result<Value, String> {
                 m.insert("raw_len".to_string(), Value::I64(l as i64));
             }
             if let Some(p) = &provenance.parent {
-                m.insert("parent".to_string(), provenance_to_vm_value(&Value::Evidence {
-                    inner: Box::new(Value::Nil),
-                    provenance: p.clone(),
-                })?);
+                m.insert(
+                    "parent".to_string(),
+                    provenance_to_vm_value(&Value::Evidence {
+                        inner: Box::new(Value::Nil),
+                        provenance: p.clone(),
+                    })?,
+                );
             }
             Ok(Value::Map(Arc::from(m)))
         }
@@ -3454,7 +4121,9 @@ fn build_vm_regex(pattern: &str, flags: &str) -> Result<Arc<crate::value::RegexV
             _ => return Err(format!("unknown regex flag '{}'", f)),
         };
     }
-    let re = b.build().map_err(|e| format!("invalid regex /{}/{}: {}", pattern, flags, e))?;
+    let re = b
+        .build()
+        .map_err(|e| format!("invalid regex /{}/{}: {}", pattern, flags, e))?;
     Ok(Arc::new(crate::value::RegexValue {
         pattern: pattern.to_string(),
         flags: flags.to_string(),
@@ -3507,9 +4176,18 @@ fn format_rak(fmt: &str, args: &[Value]) -> String {
     let mut chars = fmt.chars().peekable();
     while let Some(c) = chars.next() {
         if c == '{' {
-            if chars.peek() == Some(&'{') { chars.next(); result.push('{'); continue; }
+            if chars.peek() == Some(&'{') {
+                chars.next();
+                result.push('{');
+                continue;
+            }
             let mut spec = String::new();
-            while let Some(c2) = chars.next() { if c2 == '}' { break; } spec.push(c2); }
+            while let Some(c2) = chars.next() {
+                if c2 == '}' {
+                    break;
+                }
+                spec.push(c2);
+            }
             if idx < args.len() {
                 let a = &args[idx];
                 // The same parser the interpreter uses. It previously had no
@@ -3524,7 +4202,10 @@ fn format_rak(fmt: &str, args: &[Value]) -> String {
                 idx += 1;
             }
         } else if c == '}' {
-            if chars.peek() == Some(&'}') { chars.next(); result.push('}'); }
+            if chars.peek() == Some(&'}') {
+                chars.next();
+                result.push('}');
+            }
         } else {
             result.push(c);
         }
@@ -3566,14 +4247,26 @@ mod tests {
     #[test]
     fn test_vm_mutability_allows_mut_assign() {
         let out = run("let mut x = 10\nx = 20\ndump x");
-        assert!(out.iter().any(|l| l.contains("[DUMP] 20")), "got: {:?}", out);
+        assert!(
+            out.iter().any(|l| l.contains("[DUMP] 20")),
+            "got: {:?}",
+            out
+        );
     }
 
     #[test]
     fn test_vm_char_literal() {
         let out = run("dump 'A'\ndump '\\u{03B1}'");
-        assert!(out.iter().any(|l| l.contains("[DUMP] 'A'")), "got: {:?}", out);
-        assert!(out.iter().any(|l| l.contains("[DUMP] 'α'")), "got: {:?}", out);
+        assert!(
+            out.iter().any(|l| l.contains("[DUMP] 'A'")),
+            "got: {:?}",
+            out
+        );
+        assert!(
+            out.iter().any(|l| l.contains("[DUMP] 'α'")),
+            "got: {:?}",
+            out
+        );
     }
 
     #[test]
@@ -3588,16 +4281,36 @@ mod tests {
     #[test]
     fn test_vm_defer_preserves_return_value() {
         let out = run("fn cleanup() { dump \"clean\" }\nfn f(x: int) -> int { defer cleanup()\nreturn x * 2 } dump f(21)");
-        assert!(out.iter().any(|l| l.contains("[DUMP] clean")), "got: {:?}", out);
-        assert!(out.iter().any(|l| l.contains("[DUMP] 42")), "got: {:?}", out);
+        assert!(
+            out.iter().any(|l| l.contains("[DUMP] clean")),
+            "got: {:?}",
+            out
+        );
+        assert!(
+            out.iter().any(|l| l.contains("[DUMP] 42")),
+            "got: {:?}",
+            out
+        );
     }
 
     #[test]
     fn test_vm_generic_function_identity() {
         let out = run("fn identity<T>(value: T) -> T { return value }\ndump identity<int>(42)\ndump identity<string>(\"hello\")\ndump identity(99)");
-        assert!(out.iter().any(|l| l.contains("[DUMP] 42")), "got: {:?}", out);
-        assert!(out.iter().any(|l| l.contains("[DUMP] hello")), "got: {:?}", out);
-        assert!(out.iter().any(|l| l.contains("[DUMP] 99")), "got: {:?}", out);
+        assert!(
+            out.iter().any(|l| l.contains("[DUMP] 42")),
+            "got: {:?}",
+            out
+        );
+        assert!(
+            out.iter().any(|l| l.contains("[DUMP] hello")),
+            "got: {:?}",
+            out
+        );
+        assert!(
+            out.iter().any(|l| l.contains("[DUMP] 99")),
+            "got: {:?}",
+            out
+        );
     }
 
     #[test]
@@ -3631,12 +4344,17 @@ mod tests {
     #[test]
     fn test_vm_for_array() {
         let out = run("let mut s = 0; for x in [10, 20, 30] { s = s + x } dump s");
-        assert!(out.iter().any(|l| l.contains("[DUMP] 60")), "got: {:?}", out);
+        assert!(
+            out.iter().any(|l| l.contains("[DUMP] 60")),
+            "got: {:?}",
+            out
+        );
     }
 
     #[test]
     fn test_vm_fib() {
-        let out = run("fn fib(n) { if n < 2 { return n } return fib(n - 1) + fib(n - 2) } dump fib(20)");
+        let out =
+            run("fn fib(n) { if n < 2 { return n } return fib(n - 1) + fib(n - 2) } dump fib(20)");
         assert!(out.iter().any(|l| l.contains("[DUMP] 6765")));
     }
 
@@ -3695,39 +4413,62 @@ mod tests {
     #[test]
     fn test_vm_ffi_extern_abs() {
         let out = run("extern \"C\" { fn abs(n: i32) -> i32 } dump abs(-42)");
-        assert!(out.iter().any(|l| l.contains("[DUMP] 42")), "got: {:?}", out);
+        assert!(
+            out.iter().any(|l| l.contains("[DUMP] 42")),
+            "got: {:?}",
+            out
+        );
     }
 
     #[test]
     fn test_vm_ffi_alloc_write_read() {
         let out = run("let buf = ffi_alloc(4); ffi_write(buf, 0, 0x41); ffi_write(buf, 1, 0x00); dump ffi_read(buf, 0); dump ffi_cstr_to_string(buf)");
-        assert!(out.iter().any(|l| l.contains("[DUMP] 65")), "got: {:?}", out);
+        assert!(
+            out.iter().any(|l| l.contains("[DUMP] 65")),
+            "got: {:?}",
+            out
+        );
         assert!(out.iter().any(|l| l.contains("[DUMP] A")), "got: {:?}", out);
     }
 
     #[test]
     fn test_vm_ffi_string_to_cstr_roundtrip() {
         let out = run("let cs = ffi_string_to_cstr(\"hello ffi\"); dump ffi_cstr_to_string(cs)");
-        assert!(out.iter().any(|l| l.contains("[DUMP] hello ffi")), "got: {:?}", out);
+        assert!(
+            out.iter().any(|l| l.contains("[DUMP] hello ffi")),
+            "got: {:?}",
+            out
+        );
     }
 
     #[test]
     fn test_vm_ffi_ptr() {
         let out = run("let p = ffi_ptr(0xDEADBEEF); dump fmt(\"0x{:08X}\", p)");
-        assert!(out.iter().any(|l| l.contains("0xDEADBEEF")), "got: {:?}", out);
+        assert!(
+            out.iter().any(|l| l.contains("0xDEADBEEF")),
+            "got: {:?}",
+            out
+        );
     }
 
     #[test]
     fn test_vm_ffi_void_return_is_nil() {
         let out = run("extern \"C\" { fn abs(n: i32) } let r = abs(0); dump r");
-        assert!(out.iter().any(|l| l.contains("[DUMP] nil")), "got: {:?}", out);
+        assert!(
+            out.iter().any(|l| l.contains("[DUMP] nil")),
+            "got: {:?}",
+            out
+        );
     }
 
     // --- Memory-mapped files ---
 
     fn write_vm_mmap_sample(name: &str) -> std::path::PathBuf {
         let path = std::env::temp_dir().join(format!("rak_mmap_vm_{}.bin", name));
-        let bytes: [u8; 15] = [0xD4, 0xC3, 0xB2, 0xA1, 0x0A, b'G', b'E', b'T', b' ', 0x31, 0x0A, b'x', b'y', b'z', 0x0A];
+        let bytes: [u8; 15] = [
+            0xD4, 0xC3, 0xB2, 0xA1, 0x0A, b'G', b'E', b'T', b' ', 0x31, 0x0A, b'x', b'y', b'z',
+            0x0A,
+        ];
         std::fs::write(&path, bytes).unwrap();
         path
     }
@@ -3740,9 +4481,21 @@ mod tests {
             path.to_str().unwrap().replace('\\', "\\\\")
         );
         let out = run(&src);
-        assert!(out.iter().any(|l| l.contains("[DUMP] 15")), "got: {:?}", out);
-        assert!(out.iter().any(|l| l.contains("[DUMP] 212")), "got: {:?}", out);
-        assert!(out.iter().any(|l| l.contains("[DUMP] 161")), "got: {:?}", out);
+        assert!(
+            out.iter().any(|l| l.contains("[DUMP] 15")),
+            "got: {:?}",
+            out
+        );
+        assert!(
+            out.iter().any(|l| l.contains("[DUMP] 212")),
+            "got: {:?}",
+            out
+        );
+        assert!(
+            out.iter().any(|l| l.contains("[DUMP] 161")),
+            "got: {:?}",
+            out
+        );
         let _ = std::fs::remove_file(&path);
     }
 
@@ -3764,13 +4517,21 @@ mod tests {
     #[test]
     fn test_vm_async_fn_await() {
         let out = run("async fn double(x) { return x * 2 } dump await double(21)");
-        assert!(out.iter().any(|l| l.contains("[DUMP] 42")), "got: {:?}", out);
+        assert!(
+            out.iter().any(|l| l.contains("[DUMP] 42")),
+            "got: {:?}",
+            out
+        );
     }
 
     #[test]
     fn test_vm_async_tcp_probe() {
         let out = run("dump await tcp_probe(\"127.0.0.1\", 9999, 100)");
-        assert!(out.iter().any(|l| l.contains("[DUMP] false")), "got: {:?}", out);
+        assert!(
+            out.iter().any(|l| l.contains("[DUMP] false")),
+            "got: {:?}",
+            out
+        );
     }
 
     // --- Raw sockets / packet forging ---
@@ -3778,21 +4539,34 @@ mod tests {
     #[test]
     fn test_vm_net_raw_syn() {
         let out = run("let pkt = net_raw_tcp_syn(\"10.0.0.5\", \"10.0.0.10\", 12345, 80); dump len(pkt); dump pkt[0]; dump pkt[9]");
-        assert!(out.iter().any(|l| l.contains("[DUMP] 40")), "got: {:?}", out);
-        assert!(out.iter().any(|l| l.contains("[DUMP] 69")), "got: {:?}", out); // 0x45
+        assert!(
+            out.iter().any(|l| l.contains("[DUMP] 40")),
+            "got: {:?}",
+            out
+        );
+        assert!(
+            out.iter().any(|l| l.contains("[DUMP] 69")),
+            "got: {:?}",
+            out
+        ); // 0x45
         assert!(out.iter().any(|l| l.contains("[DUMP] 6")), "got: {:?}", out);
     }
 
     #[test]
     fn test_vm_net_raw_udp() {
-        let out = run("let u = net_raw_udp(\"10.0.0.5\", \"10.0.0.10\", 1234, 53, b\"\"); dump len(u)");
+        let out =
+            run("let u = net_raw_udp(\"10.0.0.5\", \"10.0.0.10\", 1234, 53, b\"\"); dump len(u)");
         assert!(out.iter().any(|l| l.contains("[DUMP] 8")), "got: {:?}", out);
     }
 
     #[test]
     fn test_vm_net_raw_send_returns_result() {
         let out = run("let pkt = net_raw_tcp_syn(\"10.0.0.5\", \"10.0.0.10\", 12345, 80); dump net_raw_send(pkt)");
-        assert!(out.iter().any(|l| l.contains("Ok(") || l.contains("Err(")), "got: {:?}", out);
+        assert!(
+            out.iter().any(|l| l.contains("Ok(") || l.contains("Err(")),
+            "got: {:?}",
+            out
+        );
     }
 
     // --- DNS ---
@@ -3800,7 +4574,11 @@ mod tests {
     #[test]
     fn test_vm_dns_build() {
         let out = run("let q = dns_build(\"example.com\", \"A\"); dump len(q); dump q[12]");
-        assert!(out.iter().any(|l| l.contains("[DUMP] 29")), "got: {:?}", out);
+        assert!(
+            out.iter().any(|l| l.contains("[DUMP] 29")),
+            "got: {:?}",
+            out
+        );
         assert!(out.iter().any(|l| l.contains("[DUMP] 7")), "got: {:?}", out);
     }
 
@@ -3815,25 +4593,42 @@ mod tests {
     #[test]
     fn test_vm_macro_expr() {
         let out = run("macro add1(x: expr) { $x + 1 } dump add1!(41)");
-        assert!(out.iter().any(|l| l.contains("[DUMP] 42")), "got: {:?}", out);
+        assert!(
+            out.iter().any(|l| l.contains("[DUMP] 42")),
+            "got: {:?}",
+            out
+        );
     }
 
     #[test]
     fn test_vm_macro_multi_arg_splice() {
-        let out = run("macro add3(a: expr, b: expr, c: expr) { $a + $b + $c } dump add3!(10, 20, 30)");
-        assert!(out.iter().any(|l| l.contains("[DUMP] 60")), "got: {:?}", out);
+        let out =
+            run("macro add3(a: expr, b: expr, c: expr) { $a + $b + $c } dump add3!(10, 20, 30)");
+        assert!(
+            out.iter().any(|l| l.contains("[DUMP] 60")),
+            "got: {:?}",
+            out
+        );
     }
 
     #[test]
     fn test_vm_macro_array_build() {
         let out = run("macro pair(a: expr, b: expr) { [$a, $b] } dump pair!(1, 2)");
-        assert!(out.iter().any(|l| l.contains("[DUMP] [1, 2]")), "got: {:?}", out);
+        assert!(
+            out.iter().any(|l| l.contains("[DUMP] [1, 2]")),
+            "got: {:?}",
+            out
+        );
     }
 
     #[test]
     fn test_vm_const_binding() {
         let out = run("const MAX = 256; dump MAX");
-        assert!(out.iter().any(|l| l.contains("[DUMP] 256")), "got: {:?}", out);
+        assert!(
+            out.iter().any(|l| l.contains("[DUMP] 256")),
+            "got: {:?}",
+            out
+        );
     }
 
     // --- Imports & exports (VM) ---
@@ -3843,16 +4638,30 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("rak_vm_import_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("m.rak"), "pub let PI = 3.14\npub fn add(a, b) { return a + b }").unwrap();
-        let src = "import m\ndump m.PI\ndump m.add(2, 3)\nfrom m import add as plus\ndump plus(10, 20)";
+        std::fs::write(
+            dir.join("m.rak"),
+            "pub let PI = 3.14\npub fn add(a, b) { return a + b }",
+        )
+        .unwrap();
+        let src =
+            "import m\ndump m.PI\ndump m.add(2, 3)\nfrom m import add as plus\ndump plus(10, 20)";
         let tokens = crate::lexer::tokenize(src).unwrap();
         let module = crate::parser::parse(&tokens, src).unwrap();
-        let chunk = crate::compiler::compile_module_in(&module, dir.to_string_lossy().as_ref()).unwrap();
+        let chunk =
+            crate::compiler::compile_module_in(&module, dir.to_string_lossy().as_ref()).unwrap();
         let mut vm = Vm::new();
         let out = vm.run(&chunk).unwrap();
-        assert!(out.iter().any(|l| l.contains("[DUMP] 3.14")), "got: {:?}", out);
+        assert!(
+            out.iter().any(|l| l.contains("[DUMP] 3.14")),
+            "got: {:?}",
+            out
+        );
         assert!(out.iter().any(|l| l.contains("[DUMP] 5")), "got: {:?}", out);
-        assert!(out.iter().any(|l| l.contains("[DUMP] 30")), "got: {:?}", out);
+        assert!(
+            out.iter().any(|l| l.contains("[DUMP] 30")),
+            "got: {:?}",
+            out
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -3865,10 +4674,15 @@ mod tests {
         let src = "let X = 99\nfrom m import *\ndump X\ndump Y";
         let tokens = crate::lexer::tokenize(src).unwrap();
         let module = crate::parser::parse(&tokens, src).unwrap();
-        let chunk = crate::compiler::compile_module_in(&module, dir.to_string_lossy().as_ref()).unwrap();
+        let chunk =
+            crate::compiler::compile_module_in(&module, dir.to_string_lossy().as_ref()).unwrap();
         let mut vm = Vm::new();
         let out = vm.run(&chunk).unwrap();
-        assert!(out.iter().any(|l| l.contains("[DUMP] 99")), "got: {:?}", out);
+        assert!(
+            out.iter().any(|l| l.contains("[DUMP] 99")),
+            "got: {:?}",
+            out
+        );
         assert!(out.iter().any(|l| l.contains("[DUMP] 2")), "got: {:?}", out);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -3877,17 +4691,27 @@ mod tests {
 
     #[test]
     fn test_vm_binstruct_decode() {
-        let out = run(r#"binstruct Hdr { id: u16be, ver: u8, kind: u8, rest: rest }
+        let out = run(
+            r#"binstruct Hdr { id: u16be, ver: u8, kind: u8, rest: rest }
 let raw = b"\x12\x34\x01\x02hello"
 let h = Hdr.decode(raw)
 dump h.id
 dump h.ver
 dump h.kind
-dump len(h.rest)"#);
-        assert!(out.iter().any(|l| l == "[DUMP] 0x1234"), "id got: {:?}", out);
+dump len(h.rest)"#,
+        );
+        assert!(
+            out.iter().any(|l| l == "[DUMP] 0x1234"),
+            "id got: {:?}",
+            out
+        );
         assert!(out.iter().any(|l| l == "[DUMP] 0x1"), "ver got: {:?}", out);
         assert!(out.iter().any(|l| l == "[DUMP] 0x2"), "kind got: {:?}", out);
-        assert!(out.iter().any(|l| l == "[DUMP] 5"), "rest len got: {:?}", out);
+        assert!(
+            out.iter().any(|l| l == "[DUMP] 5"),
+            "rest len got: {:?}",
+            out
+        );
     }
 
     #[test]
@@ -3901,9 +4725,21 @@ dump back[2]
 let h2 = Hdr.decode(back)
 dump h2.id"#);
         // back[0] = 0x12 (bytes index -> Int) ; back[2] = 5
-        assert!(out.iter().any(|l| l == "[DUMP] 18"), "back[0] got: {:?}", out);
-        assert!(out.iter().any(|l| l == "[DUMP] 5"), "back[2] got: {:?}", out);
-        assert!(out.iter().any(|l| l == "[DUMP] 0x1234"), "h2.id got: {:?}", out);
+        assert!(
+            out.iter().any(|l| l == "[DUMP] 18"),
+            "back[0] got: {:?}",
+            out
+        );
+        assert!(
+            out.iter().any(|l| l == "[DUMP] 5"),
+            "back[2] got: {:?}",
+            out
+        );
+        assert!(
+            out.iter().any(|l| l == "[DUMP] 0x1234"),
+            "h2.id got: {:?}",
+            out
+        );
     }
 
     #[test]
@@ -3913,9 +4749,21 @@ dump ip
 dump strip_evidence(ip)
 let r = report(ip)
 dump r"#);
-        assert!(out.iter().any(|l| l.contains("[DUMP] 93.184.216.34")), "ip got: {:?}", out);
-        assert!(out.iter().any(|l| l.contains("tool=manual")), "report got: {:?}", out);
-        assert!(out.iter().any(|l| l.contains("Sources")), "report got: {:?}", out);
+        assert!(
+            out.iter().any(|l| l.contains("[DUMP] 93.184.216.34")),
+            "ip got: {:?}",
+            out
+        );
+        assert!(
+            out.iter().any(|l| l.contains("tool=manual")),
+            "report got: {:?}",
+            out
+        );
+        assert!(
+            out.iter().any(|l| l.contains("Sources")),
+            "report got: {:?}",
+            out
+        );
     }
 
     // --- try/catch + `?` on the VM (Part 7A.1) ---
@@ -3928,8 +4776,16 @@ dump r"#);
     dump e
 }
 dump "after""#);
-        assert!(out.iter().any(|l| l.contains("[DUMP] boom")), "got: {:?}", out);
-        assert!(out.iter().any(|l| l.contains("[DUMP] after")), "got: {:?}", out);
+        assert!(
+            out.iter().any(|l| l.contains("[DUMP] boom")),
+            "got: {:?}",
+            out
+        );
+        assert!(
+            out.iter().any(|l| l.contains("[DUMP] after")),
+            "got: {:?}",
+            out
+        );
     }
 
     #[test]
@@ -3940,8 +4796,16 @@ dump "after""#);
     dump err_kind(e)
     dump err_message(e)
 }"#);
-        assert!(out.iter().any(|l| l.contains("[DUMP] user")), "kind got: {:?}", out);
-        assert!(out.iter().any(|l| l.contains("[DUMP] boom")), "message got: {:?}", out);
+        assert!(
+            out.iter().any(|l| l.contains("[DUMP] user")),
+            "kind got: {:?}",
+            out
+        );
+        assert!(
+            out.iter().any(|l| l.contains("[DUMP] boom")),
+            "message got: {:?}",
+            out
+        );
     }
 
     #[test]
@@ -3953,8 +4817,16 @@ dump "after""#);
     dump "caught"
 }
 dump "done""#);
-        assert!(out.iter().any(|l| l.contains("[DUMP] caught")), "got: {:?}", out);
-        assert!(out.iter().any(|l| l.contains("[DUMP] done")), "got: {:?}", out);
+        assert!(
+            out.iter().any(|l| l.contains("[DUMP] caught")),
+            "got: {:?}",
+            out
+        );
+        assert!(
+            out.iter().any(|l| l.contains("[DUMP] done")),
+            "got: {:?}",
+            out
+        );
     }
 
     #[test]
@@ -3965,9 +4837,21 @@ dump "done""#);
     dump "should-not-run"
 }
 dump "ok""#);
-        assert!(out.iter().any(|l| l.contains("[DUMP] no-raise")), "got: {:?}", out);
-        assert!(!out.iter().any(|l| l.contains("should-not-run")), "got: {:?}", out);
-        assert!(out.iter().any(|l| l.contains("[DUMP] ok")), "got: {:?}", out);
+        assert!(
+            out.iter().any(|l| l.contains("[DUMP] no-raise")),
+            "got: {:?}",
+            out
+        );
+        assert!(
+            !out.iter().any(|l| l.contains("should-not-run")),
+            "got: {:?}",
+            out
+        );
+        assert!(
+            out.iter().any(|l| l.contains("[DUMP] ok")),
+            "got: {:?}",
+            out
+        );
     }
 
     #[test]
@@ -3980,7 +4864,11 @@ try {
 } catch e {
     dump e
 }"#);
-        assert!(out.iter().any(|l| l.contains("[DUMP] deep")), "got: {:?}", out);
+        assert!(
+            out.iter().any(|l| l.contains("[DUMP] deep")),
+            "got: {:?}",
+            out
+        );
     }
 
     #[test]
@@ -3993,8 +4881,15 @@ try {
     dump "caught"
 }"#);
         let clean = out.iter().position(|l| l.contains("[DUMP] clean")).unwrap();
-        let caught = out.iter().position(|l| l.contains("[DUMP] caught")).unwrap();
-        assert!(clean < caught, "defers must run before the handler: {:?}", out);
+        let caught = out
+            .iter()
+            .position(|l| l.contains("[DUMP] caught"))
+            .unwrap();
+        assert!(
+            clean < caught,
+            "defers must run before the handler: {:?}",
+            out
+        );
     }
 
     #[test]
@@ -4019,7 +4914,11 @@ try {
 }
 dump risky(5)
 dump risky(-1)"#);
-        assert!(out.iter().any(|l| l.contains("[DUMP] -1")), "got: {:?}", out);
+        assert!(
+            out.iter().any(|l| l.contains("[DUMP] -1")),
+            "got: {:?}",
+            out
+        );
         assert!(out.iter().any(|l| l.contains("[DUMP] 1")), "got: {:?}", out);
     }
 
@@ -4036,8 +4935,16 @@ try {
 } catch e {
     dump e
 }"#);
-        assert!(out.iter().any(|l| l.contains("[DUMP] 42")), "got: {:?}", out);
-        assert!(out.iter().any(|l| l.contains("[DUMP] bad")), "got: {:?}", out);
+        assert!(
+            out.iter().any(|l| l.contains("[DUMP] 42")),
+            "got: {:?}",
+            out
+        );
+        assert!(
+            out.iter().any(|l| l.contains("[DUMP] bad")),
+            "got: {:?}",
+            out
+        );
     }
 
     #[test]
@@ -4051,7 +4958,11 @@ try {
     dump "caught-none"
 }"#);
         assert!(out.iter().any(|l| l.contains("[DUMP] 7")), "got: {:?}", out);
-        assert!(out.iter().any(|l| l.contains("[DUMP] caught-none")), "got: {:?}", out);
+        assert!(
+            out.iter().any(|l| l.contains("[DUMP] caught-none")),
+            "got: {:?}",
+            out
+        );
     }
 
     // --- Method dispatch, struct literals, enum ctors on the VM (7A.2) ---
@@ -4085,7 +4996,11 @@ impl Display for Point {
 }
 let p = Point { x: 3, y: 4 }
 dump p.fmt()"#);
-        assert!(out.iter().any(|l| l.contains("[DUMP] (3, 4)")), "got: {:?}", out);
+        assert!(
+            out.iter().any(|l| l.contains("[DUMP] (3, 4)")),
+            "got: {:?}",
+            out
+        );
     }
 
     #[test]
@@ -4094,8 +5009,16 @@ dump p.fmt()"#);
 dump re.is_match("abc123")
 dump re.find_all("a1 b22 c333")
 dump (/\s+/g).replace("a  b", "_")"#);
-        assert!(out.iter().any(|l| l.contains("[DUMP] true")), "got: {:?}", out);
-        assert!(out.iter().any(|l| l.contains("[1, 22, 333]")), "got: {:?}", out);
+        assert!(
+            out.iter().any(|l| l.contains("[DUMP] true")),
+            "got: {:?}",
+            out
+        );
+        assert!(
+            out.iter().any(|l| l.contains("[1, 22, 333]")),
+            "got: {:?}",
+            out
+        );
         assert!(out.iter().any(|l| l.contains("a_b")), "got: {:?}", out);
     }
 
@@ -4108,8 +5031,16 @@ match e {
     Event::Connect(h) => { dump h },
     _ => { dump "other" },
 }"#);
-        assert!(out.iter().any(|l| l.contains("Event")), "ctor got: {:?}", out);
-        assert!(out.iter().any(|l| l.contains("host1")), "match got: {:?}", out);
+        assert!(
+            out.iter().any(|l| l.contains("Event")),
+            "ctor got: {:?}",
+            out
+        );
+        assert!(
+            out.iter().any(|l| l.contains("host1")),
+            "match got: {:?}",
+            out
+        );
     }
 
     // --- Structural pattern matching on the VM (7A.3) ---
@@ -4137,9 +5068,21 @@ match p {
 dump sniff(b"\x89PNG\x0d\x0a")
 dump sniff(b"\xff\xd8\xff\xe0")
 dump sniff(b"nope")"#);
-        assert!(out.iter().any(|l| l.contains("[DUMP] png")), "got: {:?}", out);
-        assert!(out.iter().any(|l| l.contains("[DUMP] jpeg")), "got: {:?}", out);
-        assert!(out.iter().any(|l| l.contains("[DUMP] unknown")), "got: {:?}", out);
+        assert!(
+            out.iter().any(|l| l.contains("[DUMP] png")),
+            "got: {:?}",
+            out
+        );
+        assert!(
+            out.iter().any(|l| l.contains("[DUMP] jpeg")),
+            "got: {:?}",
+            out
+        );
+        assert!(
+            out.iter().any(|l| l.contains("[DUMP] unknown")),
+            "got: {:?}",
+            out
+        );
     }
 
     #[test]
@@ -4158,8 +5101,16 @@ match 7 {
     Some(x) => { dump "some" },
     None => { dump "none" },
 }"#);
-        assert!(out.iter().any(|l| l.contains("[DUMP] 2")), "tuple got: {:?}", out);
-        assert!(out.iter().any(|l| l.contains("[DUMP] mid")), "range got: {:?}", out);
+        assert!(
+            out.iter().any(|l| l.contains("[DUMP] 2")),
+            "tuple got: {:?}",
+            out
+        );
+        assert!(
+            out.iter().any(|l| l.contains("[DUMP] mid")),
+            "range got: {:?}",
+            out
+        );
     }
 
     #[test]
@@ -4178,9 +5129,21 @@ try {
         Err(e) => { dump e },
     }
 }"#);
-        assert!(out.iter().any(|l| l.contains("[DUMP] 42")), "ok got: {:?}", out);
-        assert!(out.iter().any(|l| l.contains("[DUMP] none")), "none got: {:?}", out);
-        assert!(out.iter().any(|l| l.contains("[DUMP] bad")), "err got: {:?}", out);
+        assert!(
+            out.iter().any(|l| l.contains("[DUMP] 42")),
+            "ok got: {:?}",
+            out
+        );
+        assert!(
+            out.iter().any(|l| l.contains("[DUMP] none")),
+            "none got: {:?}",
+            out
+        );
+        assert!(
+            out.iter().any(|l| l.contains("[DUMP] bad")),
+            "err got: {:?}",
+            out
+        );
     }
 
     #[test]
@@ -4195,9 +5158,21 @@ try {
 dump classify(3)
 dump classify(10)
 dump classify(50)"#);
-        assert!(out.iter().any(|l| l.contains("[DUMP] small")), "got: {:?}", out);
-        assert!(out.iter().any(|l| l.contains("[DUMP] ten")), "got: {:?}", out);
-        assert!(out.iter().any(|l| l.contains("[DUMP] big")), "got: {:?}", out);
+        assert!(
+            out.iter().any(|l| l.contains("[DUMP] small")),
+            "got: {:?}",
+            out
+        );
+        assert!(
+            out.iter().any(|l| l.contains("[DUMP] ten")),
+            "got: {:?}",
+            out
+        );
+        assert!(
+            out.iter().any(|l| l.contains("[DUMP] big")),
+            "got: {:?}",
+            out
+        );
     }
 
     // --- Iterator builtins + map/string for on the VM (7A.10) ---
@@ -4216,14 +5191,46 @@ dump skip([1, 2, 3, 4], 2)
 let m = {a: 1, b: 2}
 dump keys(m)
 dump values(m)"#);
-        assert!(out.iter().any(|l| l.contains("[(1, a), (2, b)]")), "zip got: {:?}", out);
-        assert!(out.iter().any(|l| l.contains("[(0, 10), (1, 20)]")), "enumerate got: {:?}", out);
-        assert!(out.iter().any(|l| l.contains("[DUMP] 10")), "fold got: {:?}", out);
-        assert!(out.iter().any(|l| l.contains("[DUMP] Some(6)")), "reduce got: {:?}", out);
-        assert!(out.iter().any(|l| l.contains("[DUMP] true")), "got: {:?}", out);
-        assert!(out.iter().any(|l| l.contains("[1, 10, 2, 20]")), "flat_map got: {:?}", out);
-        assert!(out.iter().any(|l| l.contains("[1, 2, 3]")), "take_while got: {:?}", out);
-        assert!(out.iter().any(|l| l.contains("[3, 4]")), "skip got: {:?}", out);
+        assert!(
+            out.iter().any(|l| l.contains("[(1, a), (2, b)]")),
+            "zip got: {:?}",
+            out
+        );
+        assert!(
+            out.iter().any(|l| l.contains("[(0, 10), (1, 20)]")),
+            "enumerate got: {:?}",
+            out
+        );
+        assert!(
+            out.iter().any(|l| l.contains("[DUMP] 10")),
+            "fold got: {:?}",
+            out
+        );
+        assert!(
+            out.iter().any(|l| l.contains("[DUMP] Some(6)")),
+            "reduce got: {:?}",
+            out
+        );
+        assert!(
+            out.iter().any(|l| l.contains("[DUMP] true")),
+            "got: {:?}",
+            out
+        );
+        assert!(
+            out.iter().any(|l| l.contains("[1, 10, 2, 20]")),
+            "flat_map got: {:?}",
+            out
+        );
+        assert!(
+            out.iter().any(|l| l.contains("[1, 2, 3]")),
+            "take_while got: {:?}",
+            out
+        );
+        assert!(
+            out.iter().any(|l| l.contains("[3, 4]")),
+            "skip got: {:?}",
+            out
+        );
     }
 
     #[test]
@@ -4240,9 +5247,21 @@ dump t
 let mut cs = 0
 for (i, c) in "hi" { cs = cs + i }
 dump cs"#);
-        assert!(out.iter().any(|l| l.contains("[DUMP] 3")), "map-for got: {:?}", out);
-        assert!(out.iter().any(|l| l.contains("[DUMP] abc")), "string-for got: {:?}", out);
-        assert!(out.iter().any(|l| l.contains("[DUMP] 1")), "indexed-string got: {:?}", out);
+        assert!(
+            out.iter().any(|l| l.contains("[DUMP] 3")),
+            "map-for got: {:?}",
+            out
+        );
+        assert!(
+            out.iter().any(|l| l.contains("[DUMP] abc")),
+            "string-for got: {:?}",
+            out
+        );
+        assert!(
+            out.iter().any(|l| l.contains("[DUMP] 1")),
+            "indexed-string got: {:?}",
+            out
+        );
     }
 
     // --- Operator overloading on the VM (7A.7) ---
@@ -4265,12 +5284,33 @@ dump len(back)
 let h2 = TcpFlags.decode(back)
 dump h2.ver_ihl
 dump h2.tos"#);
-        assert!(out.iter().any(|l| l.contains("[DUMP] 0x5")), "ver_ihl got: {:?}", out);
-        assert!(out.iter().any(|l| l.contains("[DUMP] 0x4")), "tos got: {:?}", out);
+        assert!(
+            out.iter().any(|l| l.contains("[DUMP] 0x5")),
+            "ver_ihl got: {:?}",
+            out
+        );
+        assert!(
+            out.iter().any(|l| l.contains("[DUMP] 0x4")),
+            "tos got: {:?}",
+            out
+        );
         assert!(out.iter().any(|l| l == "[DUMP] 0x1"), "len got: {:?}", out);
-        assert!(out.iter().any(|l| l.contains("[DUMP] 69")), "roundtrip byte got: {:?}", out);
-        assert!(out.iter().any(|l| l.contains("[DUMP] 3")), "roundtrip len got: {:?}", out);
-        assert_eq!(out.last().unwrap(), "[DUMP] 0x4", "re-decode tos got: {:?}", out);
+        assert!(
+            out.iter().any(|l| l.contains("[DUMP] 69")),
+            "roundtrip byte got: {:?}",
+            out
+        );
+        assert!(
+            out.iter().any(|l| l.contains("[DUMP] 3")),
+            "roundtrip len got: {:?}",
+            out
+        );
+        assert_eq!(
+            out.last().unwrap(),
+            "[DUMP] 0x4",
+            "re-decode tos got: {:?}",
+            out
+        );
     }
 
     #[test]
@@ -4289,10 +5329,26 @@ dump c.x
 dump c.y
 dump a == b
 dump a == Vec3 { x: 1, y: 2 }"#);
-        assert!(out.iter().any(|l| l.contains("[DUMP] 11")), "got: {:?}", out);
-        assert!(out.iter().any(|l| l.contains("[DUMP] 22")), "got: {:?}", out);
-        assert!(out.iter().any(|l| l.contains("[DUMP] false")), "got: {:?}", out);
-        assert!(out.iter().any(|l| l.contains("[DUMP] true")), "got: {:?}", out);
+        assert!(
+            out.iter().any(|l| l.contains("[DUMP] 11")),
+            "got: {:?}",
+            out
+        );
+        assert!(
+            out.iter().any(|l| l.contains("[DUMP] 22")),
+            "got: {:?}",
+            out
+        );
+        assert!(
+            out.iter().any(|l| l.contains("[DUMP] false")),
+            "got: {:?}",
+            out
+        );
+        assert!(
+            out.iter().any(|l| l.contains("[DUMP] true")),
+            "got: {:?}",
+            out
+        );
     }
 
     #[test]
@@ -4305,8 +5361,16 @@ let a = Box { w: 3 }
 let b = Box { w: 9 }
 dump a < b
 dump b < a"#);
-        assert!(out.iter().any(|l| l.contains("[DUMP] true")), "got: {:?}", out);
-        assert!(out.iter().any(|l| l.contains("[DUMP] false")), "got: {:?}", out);
+        assert!(
+            out.iter().any(|l| l.contains("[DUMP] true")),
+            "got: {:?}",
+            out
+        );
+        assert!(
+            out.iter().any(|l| l.contains("[DUMP] false")),
+            "got: {:?}",
+            out
+        );
     }
 
     #[test]
@@ -4322,7 +5386,11 @@ dump z.c
 let m = {}
 let n = 1
 dump (m + n)"#);
-        assert!(out.iter().any(|l| l.contains("[DUMP] -5")), "got: {:?}", out);
+        assert!(
+            out.iter().any(|l| l.contains("[DUMP] -5")),
+            "got: {:?}",
+            out
+        );
     }
 
     // --- Assignment + coalescing expressions on the VM ---
@@ -4345,8 +5413,16 @@ n *= 2
 dump n"#);
         assert!(out.iter().any(|l| l.contains("[DUMP] 9")), "got: {:?}", out);
         assert!(out.iter().any(|l| l.contains("[DUMP] v")), "got: {:?}", out);
-        assert!(out.iter().any(|l| l.contains("[DUMP] 42")), "got: {:?}", out);
-        assert!(out.iter().any(|l| l.contains("[DUMP] 16")), "got: {:?}", out);
+        assert!(
+            out.iter().any(|l| l.contains("[DUMP] 42")),
+            "got: {:?}",
+            out
+        );
+        assert!(
+            out.iter().any(|l| l.contains("[DUMP] 16")),
+            "got: {:?}",
+            out
+        );
     }
 
     #[test]
@@ -4360,12 +5436,36 @@ dump m?.port
 dump (nil?.field ?? "missing")
 let a = [10, 20]
 dump (a?[1] ?? "no")"#);
-        assert!(out.iter().any(|l| l.contains("[DUMP] big")), "got: {:?}", out);
-        assert!(out.iter().any(|l| l.contains("[DUMP] fallback")), "got: {:?}", out);
-        assert!(out.iter().any(|l| l.contains("[DUMP] Some(1)")), "got: {:?}", out);
-        assert!(out.iter().any(|l| l.contains("[DUMP] 80")), "got: {:?}", out);
-        assert!(out.iter().any(|l| l.contains("[DUMP] missing")), "got: {:?}", out);
-        assert!(out.iter().any(|l| l.contains("[DUMP] 20")), "got: {:?}", out);
+        assert!(
+            out.iter().any(|l| l.contains("[DUMP] big")),
+            "got: {:?}",
+            out
+        );
+        assert!(
+            out.iter().any(|l| l.contains("[DUMP] fallback")),
+            "got: {:?}",
+            out
+        );
+        assert!(
+            out.iter().any(|l| l.contains("[DUMP] Some(1)")),
+            "got: {:?}",
+            out
+        );
+        assert!(
+            out.iter().any(|l| l.contains("[DUMP] 80")),
+            "got: {:?}",
+            out
+        );
+        assert!(
+            out.iter().any(|l| l.contains("[DUMP] missing")),
+            "got: {:?}",
+            out
+        );
+        assert!(
+            out.iter().any(|l| l.contains("[DUMP] 20")),
+            "got: {:?}",
+            out
+        );
     }
 
     #[test]
@@ -4391,7 +5491,11 @@ dump x"#);
         let out = run(r#"if let Some(v) = Some(9) { dump v } else { dump "no" }
 if let Some(w) = None { dump "yes" } else { dump "none" }"#);
         assert!(out.iter().any(|l| l.contains("[DUMP] 9")), "got: {:?}", out);
-        assert!(out.iter().any(|l| l.contains("[DUMP] none")), "got: {:?}", out);
+        assert!(
+            out.iter().any(|l| l.contains("[DUMP] none")),
+            "got: {:?}",
+            out
+        );
     }
 
     #[test]
@@ -4462,7 +5566,11 @@ while i < 10 {
     s = s + i
 }
 dump s"#);
-        assert!(out.iter().any(|l| l.contains("[DUMP] 25")), "got: {:?}", out);
+        assert!(
+            out.iter().any(|l| l.contains("[DUMP] 25")),
+            "got: {:?}",
+            out
+        );
     }
 
     #[test]
@@ -4480,49 +5588,60 @@ dump s"#);
     #[test]
     fn debug_vm_pattern_match_direct() {
         use crate::ast::Pattern;
-        let p = Pattern::Struct("Point".into(), vec![
-            ("x".into(), Pattern::Ident("x".into())),
-            ("y".into(), Pattern::Ident("y".into())),
-        ]);
+        let p = Pattern::Struct(
+            "Point".into(),
+            vec![
+                ("x".into(), Pattern::Ident("x".into())),
+                ("y".into(), Pattern::Ident("y".into())),
+            ],
+        );
         let mut c = crate::compiler::Compiler::new();
-        let src = Value::Struct { name: Arc::from("Point"), fields: Arc::from({
-            let mut m = std::collections::HashMap::new();
-            m.insert("x".to_string(), Value::I64(3));
-            m.insert("y".to_string(), Value::I64(4));
-            m
-        }) };
+        let src = Value::Struct {
+            name: Arc::from("Point"),
+            fields: Arc::from({
+                let mut m = std::collections::HashMap::new();
+                m.insert("x".to_string(), Value::I64(3));
+                m.insert("y".to_string(), Value::I64(4));
+                m
+            }),
+        };
         let desc = c.pattern_descriptor(&p).unwrap();
         let mut bounds = Vec::new();
         let ok = vm_pattern_match(&src, &desc, &mut bounds).unwrap();
         assert!(ok, "structure match failed; desc={:?}", desc);
-        assert_eq!(bounds.iter().map(|(n, _)| n.clone()).collect::<Vec<_>>(), vec!["x".to_string(), "y".to_string()]);
+        assert_eq!(
+            bounds.iter().map(|(n, _)| n.clone()).collect::<Vec<_>>(),
+            vec!["x".to_string(), "y".to_string()]
+        );
     }
 
     // ---- 0.8 core pack: `in`, destructuring let, slices (VM) ----
 
     #[test]
     fn test_vm_in_operator() {
-        let out = run(
-            "dump \"ell\" in \"hello\";\
+        let out = run("dump \"ell\" in \"hello\";\
              dump 3 in [1, 2, 3];\
              dump 4 in [1, 2, 3];\
              dump \"k\" in { k: 1 };\
-             dump 0x4D in b\"MZ\";",
-        );
+             dump 0x4D in b\"MZ\";");
         assert_eq!(
             out,
-            vec!["[DUMP] true", "[DUMP] true", "[DUMP] false", "[DUMP] true", "[DUMP] true"]
+            vec![
+                "[DUMP] true",
+                "[DUMP] true",
+                "[DUMP] false",
+                "[DUMP] true",
+                "[DUMP] true"
+            ]
         );
     }
 
     #[test]
     fn test_vm_destructuring_let() {
-        let out = run(
-            "let (h, p) = (\"example.com\", 443);\
+        let out = run("let (h, p) = (\"example.com\", 443);\
              dump f\"{h}:{p}\";\
              let [a, b] = [10, 20];\
-             dump a + b;",
-        );
+             dump a + b;");
         assert_eq!(out, vec!["[DUMP] example.com:443", "[DUMP] 30"]);
     }
 
@@ -4538,28 +5657,29 @@ dump s"#);
 
     #[test]
     fn test_vm_slice_index() {
-        let out = run(
-            "let d = [10, 20, 30, 40, 50];\
+        let out = run("let d = [10, 20, 30, 40, 50];\
              dump d[1..3];\
              dump d[..2];\
              dump d[-2..];\
              dump \"hello\"[1..3];\
-             dump d[-1];",
-        );
+             dump d[-1];");
         assert_eq!(
             out,
-            vec!["[DUMP] [20, 30]", "[DUMP] [10, 20]", "[DUMP] [40, 50]", "[DUMP] el", "[DUMP] 50"]
+            vec![
+                "[DUMP] [20, 30]",
+                "[DUMP] [10, 20]",
+                "[DUMP] [40, 50]",
+                "[DUMP] el",
+                "[DUMP] 50"
+            ]
         );
     }
 
     #[test]
     fn test_vm_slice_and_contains_natives() {
-        let out = run(
-            "dump slice(\"hello\", 1, 4);\
+        let out = run("dump slice(\"hello\", 1, 4);\
              dump slice([1, 2, 3, 4], 2);\
-             dump contains([5, 6], 6);",
-        );
+             dump contains([5, 6], 6);");
         assert_eq!(out, vec!["[DUMP] ell", "[DUMP] [3, 4]", "[DUMP] true"]);
     }
-
 }

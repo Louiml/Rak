@@ -113,7 +113,10 @@ pub fn to_byte(v: Option<&Value>) -> Result<u8, String> {
         }
         Some(other) => match other.as_i64() {
             Some(i) if (0..=255).contains(&i) => Ok(i as u8),
-            _ => Err(format!("expected a byte value (0..255 or a char), got {}", other)),
+            _ => Err(format!(
+                "expected a byte value (0..255 or a char), got {}",
+                other
+            )),
         },
         None => Err("expected a byte argument".to_string()),
     }
@@ -244,14 +247,19 @@ fn vm_to_string(args: &Args) -> R {
 fn vm_split(args: &Args) -> R {
     let subject = to_str(args.first());
     let delim = to_str(args.get(1));
-    Ok(strings(subject.split(&delim).map(|p| p.to_string()).collect()))
+    Ok(strings(
+        subject.split(&delim).map(|p| p.to_string()).collect(),
+    ))
 }
 
 fn vm_join(args: &Args) -> R {
     let delim = to_str(args.first());
     match args.get(1) {
         Some(Value::Array(a)) => Ok(s_owned(
-            a.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(&delim),
+            a.iter()
+                .map(|v| v.to_string())
+                .collect::<Vec<_>>()
+                .join(&delim),
         )),
         _ => Err("join() requires an array".to_string()),
     }
@@ -259,8 +267,7 @@ fn vm_join(args: &Args) -> R {
 
 fn vm_replace(args: &Args) -> R {
     Ok(s_owned(
-        to_str(args.first())
-            .replace(&to_str(args.get(1)), &to_str(args.get(2))),
+        to_str(args.first()).replace(&to_str(args.get(1)), &to_str(args.get(2))),
     ))
 }
 
@@ -567,8 +574,7 @@ fn vm_udp_bind(args: &Args) -> R {
         Some(v) => to_str(Some(v)),
         None => "127.0.0.1:0".to_string(),
     };
-    let (transport, local) =
-        rak_stdlib::tunnel::udp_bind(&addr).map_err(|e| e.to_string())?;
+    let (transport, local) = rak_stdlib::tunnel::udp_bind(&addr).map_err(|e| e.to_string())?;
     Ok(Value::Tuple(Arc::from(vec![
         Value::UdpTransport(Arc::new(transport)),
         s_owned(local.to_string()),
@@ -660,9 +666,7 @@ fn vm_parse_csv_line(args: &Args) -> R {
         None => ",".to_string(),
     };
     let delim = sep.chars().next().unwrap_or(',');
-    Ok(strings(rak_stdlib::stream_io::parse_csv_line(
-        &line, delim,
-    )))
+    Ok(strings(rak_stdlib::stream_io::parse_csv_line(&line, delim)))
 }
 
 // ---------------------------------------------------------------------------
@@ -691,7 +695,9 @@ pub(crate) fn json_to_value(v: &serde_json::Value) -> Value {
         serde_json::Value::String(x) => s_owned(x.clone()),
         serde_json::Value::Array(a) => arr(a.iter().map(json_to_value).collect()),
         serde_json::Value::Object(o) => Value::Map(Arc::new(
-            o.iter().map(|(k, v)| (k.clone(), json_to_value(v))).collect(),
+            o.iter()
+                .map(|(k, v)| (k.clone(), json_to_value(v)))
+                .collect(),
         )),
     }
 }
@@ -786,9 +792,7 @@ fn vm_json_find_all(args: &Args) -> R {
 // ---------------------------------------------------------------------------
 
 fn vm_html_title(args: &Args) -> R {
-    Ok(opt_str(rak_stdlib::web::html_title(&to_str(
-        args.first(),
-    ))))
+    Ok(opt_str(rak_stdlib::web::html_title(&to_str(args.first()))))
 }
 
 fn vm_html_select(args: &Args) -> R {
@@ -814,15 +818,11 @@ fn vm_html_attr(args: &Args) -> R {
 }
 
 fn vm_html_links(args: &Args) -> R {
-    Ok(strings(rak_stdlib::web::html_links(&to_str(
-        args.first(),
-    ))))
+    Ok(strings(rak_stdlib::web::html_links(&to_str(args.first()))))
 }
 
 fn vm_html_images(args: &Args) -> R {
-    Ok(strings(rak_stdlib::web::html_images(&to_str(
-        args.first(),
-    ))))
+    Ok(strings(rak_stdlib::web::html_images(&to_str(args.first()))))
 }
 
 fn vm_html_scripts(args: &Args) -> R {
@@ -854,8 +854,7 @@ fn vm_html_meta(args: &Args) -> R {
 
 fn vm_html_count(args: &Args) -> R {
     Ok(Value::I64(
-        rak_stdlib::web::html_count(&to_str(args.first()), &to_str(args.get(1)))
-            as i64,
+        rak_stdlib::web::html_count(&to_str(args.first()), &to_str(args.get(1))) as i64,
     ))
 }
 
@@ -959,9 +958,7 @@ fn vm_file_append(args: &Args) -> R {
 }
 
 fn vm_file_exists(args: &Args) -> R {
-    Ok(Value::Bool(rak_stdlib::file::exists(&to_str(
-        args.first(),
-    ))))
+    Ok(Value::Bool(rak_stdlib::file::exists(&to_str(args.first()))))
 }
 
 fn vm_file_size(args: &Args) -> R {
@@ -975,9 +972,7 @@ fn vm_file_list(args: &Args) -> R {
 }
 
 fn vm_file_delete(args: &Args) -> R {
-    Ok(Value::Bool(rak_stdlib::file::delete(&to_str(
-        args.first(),
-    ))))
+    Ok(Value::Bool(rak_stdlib::file::delete(&to_str(args.first()))))
 }
 
 fn vm_file_mkdir(args: &Args) -> R {
@@ -1007,15 +1002,11 @@ fn vm_file_ext(args: &Args) -> R {
 }
 
 fn vm_file_basename(args: &Args) -> R {
-    Ok(s_owned(rak_stdlib::file::basename(&to_str(
-        args.first(),
-    ))))
+    Ok(s_owned(rak_stdlib::file::basename(&to_str(args.first()))))
 }
 
 fn vm_file_dirname(args: &Args) -> R {
-    Ok(s_owned(rak_stdlib::file::dirname(&to_str(
-        args.first(),
-    ))))
+    Ok(s_owned(rak_stdlib::file::dirname(&to_str(args.first()))))
 }
 
 // ---------------------------------------------------------------------------
@@ -1042,9 +1033,7 @@ fn vm_dbg(args: &Args) -> R {
 }
 
 fn vm_args(_args: &Args) -> R {
-    Ok(strings(
-        std::env::args().skip(1).collect::<Vec<_>>(),
-    ))
+    Ok(strings(std::env::args().skip(1).collect::<Vec<_>>()))
 }
 
 fn vm_env_get(args: &Args) -> R {
@@ -1414,8 +1403,7 @@ fn vm_read_lines(args: &Args) -> R {
 fn vm_tcp_stream(args: &Args) -> R {
     let addr = to_str(args.first());
     use std::net::TcpStream;
-    let s = TcpStream::connect(&addr)
-        .map_err(|e| format!("{}: {}", addr, e))?;
+    let s = TcpStream::connect(&addr).map_err(|e| format!("{}: {}", addr, e))?;
     let _ = s.set_read_timeout(Some(std::time::Duration::from_secs(5)));
     Ok(stream_value(st::TcpLineStream::open(s)))
 }
@@ -1430,7 +1418,11 @@ fn vm_stream_csv(args: &Args) -> R {
     let delim = if opts.contains(';') { ';' } else { ',' };
     let has_header = opts.contains("header");
     let inner = st::LinesStream::open(&path).map_err(|e| e)?;
-    Ok(stream_value(st::CsvStream::new(st::handle(inner), delim, has_header)))
+    Ok(stream_value(st::CsvStream::new(
+        st::handle(inner),
+        delim,
+        has_header,
+    )))
 }
 
 fn vm_stream_jsonl(args: &Args) -> R {

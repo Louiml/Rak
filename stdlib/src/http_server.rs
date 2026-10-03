@@ -39,10 +39,16 @@ pub fn server_start(addr: &str, port: u16) -> Result<u16, String> {
     if REQUESTS.lock().map(|g| g.is_some()).unwrap_or(false) {
         return Err("http_server: already running".to_string());
     }
-    let listener = TcpListener::bind((addr, port)).map_err(|e| format!("http_server: bind {}:{}: {}", addr, port, e))?;
-    let bound = listener.local_addr().map_err(|e| format!("http_server: local_addr: {}", e))?.port();
+    let listener = TcpListener::bind((addr, port))
+        .map_err(|e| format!("http_server: bind {}:{}: {}", addr, port, e))?;
+    let bound = listener
+        .local_addr()
+        .map_err(|e| format!("http_server: local_addr: {}", e))?
+        .port();
     let (req_tx, req_rx) = channel::<HttpRequest>();
-    *REQUESTS.lock().map_err(|_| "http_server: lock".to_string())? = Some(req_rx);
+    *REQUESTS
+        .lock()
+        .map_err(|_| "http_server: lock".to_string())? = Some(req_rx);
 
     std::thread::spawn(move || {
         for stream in listener.incoming() {
@@ -54,7 +60,9 @@ pub fn server_start(addr: &str, port: u16) -> Result<u16, String> {
 }
 
 fn handle_conn(mut stream: TcpStream, req_tx: &std::sync::mpsc::Sender<HttpRequest>) {
-    let Ok(clone) = stream.try_clone() else { return };
+    let Ok(clone) = stream.try_clone() else {
+        return;
+    };
     let mut reader = BufReader::new(clone);
     // Request line.
     let mut line = String::new();
@@ -76,11 +84,17 @@ fn handle_conn(mut stream: TcpStream, req_tx: &std::sync::mpsc::Sender<HttpReque
             break;
         }
         if let Some(idx) = t.find(':') {
-            headers.insert(t[..idx].trim().to_lowercase(), t[idx + 1..].trim().to_string());
+            headers.insert(
+                t[..idx].trim().to_lowercase(),
+                t[idx + 1..].trim().to_string(),
+            );
         }
     }
     // Body.
-    let len: usize = headers.get("content-length").and_then(|v| v.trim().parse().ok()).unwrap_or(0);
+    let len: usize = headers
+        .get("content-length")
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(0);
     let mut body = String::new();
     if len > 0 {
         let mut buf = vec![0u8; len];
@@ -97,14 +111,27 @@ fn handle_conn(mut stream: TcpStream, req_tx: &std::sync::mpsc::Sender<HttpReque
     let (path, query) = split_query(&raw_path);
     let id = REQ_COUNTER.fetch_add(1, Ordering::SeqCst);
     let (rtx, rrx) = sync_channel::<String>(0);
-    RESPONDERS.lock().ok().and_then(|mut g| g.get_or_insert_with(HashMap::new).insert(id, rtx));
-    let req = HttpRequest { id, method, path, query, headers, body };
+    RESPONDERS
+        .lock()
+        .ok()
+        .and_then(|mut g| g.get_or_insert_with(HashMap::new).insert(id, rtx));
+    let req = HttpRequest {
+        id,
+        method,
+        path,
+        query,
+        headers,
+        body,
+    };
     let _ = req_tx.send(req);
     if let Ok(resp) = rrx.recv() {
         let _ = stream.write_all(resp.as_bytes());
         let _ = stream.flush();
     }
-    RESPONDERS.lock().ok().and_then(|mut g| g.as_mut().map(|m| m.remove(&id)));
+    RESPONDERS
+        .lock()
+        .ok()
+        .and_then(|mut g| g.as_mut().map(|m| m.remove(&id)));
 }
 
 fn split_query(path: &str) -> (String, HashMap<String, String>) {
@@ -131,7 +158,10 @@ fn url_decode(s: &str) -> String {
     let mut i = 0;
     while i < b.len() {
         if b[i] == b'%' && i + 2 < b.len() {
-            if let (Some(h), Some(l)) = ((b[i + 1] as char).to_digit(16), (b[i + 2] as char).to_digit(16)) {
+            if let (Some(h), Some(l)) = (
+                (b[i + 1] as char).to_digit(16),
+                (b[i + 2] as char).to_digit(16),
+            ) {
                 out.push((h * 16 + l) as u8);
                 i += 3;
                 continue;
@@ -151,7 +181,12 @@ pub fn poll() -> Option<HttpRequest> {
 }
 
 /// Queue an HTTP response for request `id`.
-pub fn respond(id: u64, status: u16, headers: &[(String, String)], body: &str) -> Result<(), String> {
+pub fn respond(
+    id: u64,
+    status: u16,
+    headers: &[(String, String)],
+    body: &str,
+) -> Result<(), String> {
     let mut head = format!("HTTP/1.1 {} {}\r\n", status, status_text(status));
     head.push_str(&format!("Content-Length: {}\r\n", body.len()));
     head.push_str("Connection: close\r\n");
@@ -168,7 +203,9 @@ pub fn respond(id: u64, status: u16, headers: &[(String, String)], body: &str) -
         .ok()
         .and_then(|g| g.as_ref().and_then(|m| m.get(&id).cloned()))
         .ok_or_else(|| format!("http_respond: unknown or closed connection {}", id))?;
-    sender.send(response).map_err(|_| format!("http_respond: connection {} closed", id))
+    sender
+        .send(response)
+        .map_err(|_| format!("http_respond: connection {} closed", id))
 }
 
 /// Stop the server and clear all state.

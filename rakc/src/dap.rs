@@ -272,7 +272,10 @@ fn spawn_worker(
             Ok(lines) => {
                 s.output = lines;
                 for line in &s.output {
-                    writer.event("output", json!({"category": "stdout", "output": format!("{}\n", line)}));
+                    writer.event(
+                        "output",
+                        json!({"category": "stdout", "output": format!("{}\n", line)}),
+                    );
                 }
             }
             Err(e) => s.error = Some(e),
@@ -281,7 +284,10 @@ fn spawn_worker(
         s.running = false;
         s.paused = None;
         if let Some(e) = &s.error {
-            writer.event("output", json!({"category": "stderr", "output": format!("{}\n", e)}));
+            writer.event(
+                "output",
+                json!({"category": "stderr", "output": format!("{}\n", e)}),
+            );
         }
         drop(s);
         cvar.notify_all();

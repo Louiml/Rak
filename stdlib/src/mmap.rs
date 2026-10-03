@@ -89,7 +89,12 @@ pub fn open(path: &str, mode: &str) -> Result<Arc<MmapHandle>, String> {
     let writable = match mode {
         "r" => false,
         "rw" | "rw_new" => true,
-        other => return Err(format!("mmap_open: unknown mode '{}', use \"r\" or \"rw\"", other)),
+        other => {
+            return Err(format!(
+                "mmap_open: unknown mode '{}', use \"r\" or \"rw\"",
+                other
+            ))
+        }
     };
     let file = if writable {
         std::fs::OpenOptions::new()
@@ -120,9 +125,7 @@ pub fn size(h: &MmapHandle) -> usize {
 /// Search for `needle` in the mapped region, returning the byte offset of the
 /// first match or `None`.
 pub fn find(h: &MmapHandle, needle: &[u8]) -> Option<usize> {
-    h.as_slice()
-        .windows(needle.len())
-        .position(|w| w == needle)
+    h.as_slice().windows(needle.len()).position(|w| w == needle)
 }
 
 /// Write one byte through a writable mapping.

@@ -187,7 +187,10 @@ mod tests {
         // `insert` reports whether the element was *newly* added, which is what
         // `set_add` returns to Rak. Re-adding a duplicate is therefore false
         // and must not grow the set.
-        assert!(!set.insert(V::Int(1)), "re-adding a duplicate reports false");
+        assert!(
+            !set.insert(V::Int(1)),
+            "re-adding a duplicate reports false"
+        );
         assert_eq!(set.len(), 1);
         assert!(set.insert(V::Int(2)), "a new element reports true");
         assert_eq!(set.len(), 2);
@@ -212,22 +215,34 @@ mod tests {
         let a = s(&[V::Int(1), V::Int(2), V::Int(3)]);
         let b = s(&[V::Int(2), V::Int(3), V::Int(4)]);
 
-        let u: Vec<i64> = a.union(&b).iter().filter_map(|v| match v {
-            V::Int(i) => Some(*i),
-            _ => None,
-        }).collect();
+        let u: Vec<i64> = a
+            .union(&b)
+            .iter()
+            .filter_map(|v| match v {
+                V::Int(i) => Some(*i),
+                _ => None,
+            })
+            .collect();
         assert_eq!(u, vec![1, 2, 3, 4], "union keeps left order then appends");
 
-        let i: Vec<i64> = a.intersect(&b).iter().filter_map(|v| match v {
-            V::Int(i) => Some(*i),
-            _ => None,
-        }).collect();
+        let i: Vec<i64> = a
+            .intersect(&b)
+            .iter()
+            .filter_map(|v| match v {
+                V::Int(i) => Some(*i),
+                _ => None,
+            })
+            .collect();
         assert_eq!(i, vec![2, 3], "intersect keeps left order");
 
-        let d: Vec<i64> = a.diff(&b).iter().filter_map(|v| match v {
-            V::Int(i) => Some(*i),
-            _ => None,
-        }).collect();
+        let d: Vec<i64> = a
+            .diff(&b)
+            .iter()
+            .filter_map(|v| match v {
+                V::Int(i) => Some(*i),
+                _ => None,
+            })
+            .collect();
         assert_eq!(d, vec![1], "diff keeps left order");
     }
 
@@ -236,10 +251,13 @@ mod tests {
         let mut set = s(&[V::Int(1), V::Int(2), V::Int(3)]);
         assert!(set.remove(&V::Int(2)));
         assert!(!set.remove(&V::Int(99)));
-        let left: Vec<i64> = set.iter().filter_map(|v| match v {
-            V::Int(i) => Some(*i),
-            _ => None,
-        }).collect();
+        let left: Vec<i64> = set
+            .iter()
+            .filter_map(|v| match v {
+                V::Int(i) => Some(*i),
+                _ => None,
+            })
+            .collect();
         assert_eq!(left, vec![1, 3]);
     }
 

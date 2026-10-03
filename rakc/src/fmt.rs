@@ -26,7 +26,10 @@ pub fn format_source(source: &str) -> FmtResult<String> {
 }
 
 pub fn format_module(m: &Module) -> FmtResult<String> {
-    let mut f = Formatter { out: String::new(), indent: 0 };
+    let mut f = Formatter {
+        out: String::new(),
+        indent: 0,
+    };
     f.module(m)?;
     Ok(f.out)
 }
@@ -132,12 +135,24 @@ impl Formatter {
 
     fn stmt(&mut self, s: &Stmt) -> FmtResult<()> {
         match s {
-            Stmt::Let { name, pattern, mutable, value, type_hint } => {
+            Stmt::Let {
+                name,
+                pattern,
+                mutable,
+                value,
+                type_hint,
+            } => {
                 if let Some(p) = pattern {
                     // `let pattern = value` (destructuring let).
                     let expr = self.expr(value)?;
                     self.line(&format!("let {} = {}", pattern_str(p), expr));
-                } else if let Expr::Function { params, body, return_type, .. } = value.as_ref() {
+                } else if let Expr::Function {
+                    params,
+                    body,
+                    return_type,
+                    ..
+                } = value.as_ref()
+                {
                     // `let name = fn(...) { ... }` renders as a fn definition.
                     self.fn_def(None, name, params, body, return_type)?;
                 } else {
@@ -158,7 +173,13 @@ impl Formatter {
                 self.line(&format!("const {} = {}", name, expr));
             }
             Stmt::Expr(e) => {
-                if let Expr::Function { params, body, return_type, .. } = e.as_ref() {
+                if let Expr::Function {
+                    params,
+                    body,
+                    return_type,
+                    ..
+                } = e.as_ref()
+                {
                     self.fn_def(None, "<anon>", params, body, return_type)?;
                     return Ok(());
                 }
@@ -188,7 +209,11 @@ impl Formatter {
                 let expr = self.expr(e)?;
                 self.line(&format!("defer {}", expr));
             }
-            Stmt::If { cond, then_branch, else_branch } => {
+            Stmt::If {
+                cond,
+                then_branch,
+                else_branch,
+            } => {
                 let cond = self.expr(cond)?;
                 self.line(&format!("if {} {{", cond));
                 self.block(then_branch)?;
@@ -201,7 +226,12 @@ impl Formatter {
                     None => self.line("}"),
                 }
             }
-            Stmt::IfLet { pattern, value, then_branch, else_branch } => {
+            Stmt::IfLet {
+                pattern,
+                value,
+                then_branch,
+                else_branch,
+            } => {
                 let pat = pattern_str(pattern);
                 let val = self.expr(value)?;
                 self.line(&format!("if let {} = {} {{", pat, val));
@@ -215,13 +245,19 @@ impl Formatter {
                     None => self.line("}"),
                 }
             }
-            Stmt::While { label, cond, body, .. } => {
+            Stmt::While {
+                label, cond, body, ..
+            } => {
                 let cond = self.expr(cond)?;
                 self.line(&format!("{}while {} {{", label_str(label), cond));
                 self.block(body)?;
                 self.line("}");
             }
-            Stmt::WhileLet { pattern, value, body } => {
+            Stmt::WhileLet {
+                pattern,
+                value,
+                body,
+            } => {
                 let pat = pattern_str(pattern);
                 let val = self.expr(value)?;
                 self.line(&format!("while let {} = {} {{", pat, val));
@@ -239,7 +275,12 @@ impl Formatter {
                 self.block(body)?;
                 self.line("}");
             }
-            Stmt::For { label, pattern, iterable, body } => {
+            Stmt::For {
+                label,
+                pattern,
+                iterable,
+                body,
+            } => {
                 let pat = pattern_str(pattern);
                 let it = self.expr(iterable)?;
                 self.line(&format!("{}for {} in {} {{", label_str(label), pat, it));
@@ -267,7 +308,11 @@ impl Formatter {
                 self.indent -= 1;
                 self.line("}");
             }
-            Stmt::Try { body, catch_name, catch_body } => {
+            Stmt::Try {
+                body,
+                catch_name,
+                catch_body,
+            } => {
                 self.line("try {");
                 self.block(body)?;
                 match catch_name {
@@ -281,11 +326,19 @@ impl Formatter {
                 let expr = self.expr(e)?;
                 self.line(&format!("raise {}", expr));
             }
-            Stmt::Struct { name, type_params, fields } => {
+            Stmt::Struct {
+                name,
+                type_params,
+                fields,
+            } => {
                 let parts: Vec<String> = fields
                     .iter()
                     .map(|f| {
-                        let t = f.type_hint.as_ref().map(type_str).unwrap_or_else(|| "nil".to_string());
+                        let t = f
+                            .type_hint
+                            .as_ref()
+                            .map(type_str)
+                            .unwrap_or_else(|| "nil".to_string());
                         format!("{}: {}", f.name, t)
                     })
                     .collect();
@@ -294,16 +347,29 @@ impl Formatter {
                 } else {
                     format!("<{}>", type_params.join(", "))
                 };
-                self.line(&format!("struct {}{} {{ {} }}", name, generics, parts.join(", ")));
+                self.line(&format!(
+                    "struct {}{} {{ {} }}",
+                    name,
+                    generics,
+                    parts.join(", ")
+                ));
             }
-            Stmt::Enum { name, type_params, variants } => {
+            Stmt::Enum {
+                name,
+                type_params,
+                variants,
+            } => {
                 let vs: Vec<String> = variants
                     .iter()
                     .map(|v| {
                         if v.fields.is_empty() {
                             v.name.clone()
                         } else {
-                            format!("{}({})", v.name, v.fields.iter().map(type_str).collect::<Vec<_>>().join(", "))
+                            format!(
+                                "{}({})",
+                                v.name,
+                                v.fields.iter().map(type_str).collect::<Vec<_>>().join(", ")
+                            )
                         }
                     })
                     .collect();
@@ -312,9 +378,18 @@ impl Formatter {
                 } else {
                     format!("<{}>", type_params.join(", "))
                 };
-                self.line(&format!("enum {}{} {{ {} }}", name, generics, vs.join(", ")));
+                self.line(&format!(
+                    "enum {}{} {{ {} }}",
+                    name,
+                    generics,
+                    vs.join(", ")
+                ));
             }
-            Stmt::Impl { target, trait_name, methods } => match trait_name {
+            Stmt::Impl {
+                target,
+                trait_name,
+                methods,
+            } => match trait_name {
                 Some(ty) => {
                     self.line(&format!("impl {} for {} {{", target, ty));
                     self.indent += 1;
@@ -361,7 +436,11 @@ impl Formatter {
                 self.block(items)?;
                 self.line("}");
             }
-            Stmt::Use { path, is_file, alias } => {
+            Stmt::Use {
+                path,
+                is_file,
+                alias,
+            } => {
                 let target = if *is_file {
                     format!("{:?}", path.first().cloned().unwrap_or_default())
                 } else {
@@ -416,7 +495,11 @@ impl Formatter {
                 self.block(body)?;
                 self.line("}");
             }
-            Stmt::Tunnel { name, passphrase, body } => {
+            Stmt::Tunnel {
+                name,
+                passphrase,
+                body,
+            } => {
                 self.line(&format!("tunnel {} {:?} {{", name, passphrase));
                 self.block(body)?;
                 self.line("}");
@@ -449,8 +532,20 @@ impl Formatter {
     /// `pub fn name(...) { ... }` / `pub let x = ...` — an exported item.
     fn stmt_pub(&mut self, inner: &Stmt) -> FmtResult<()> {
         match inner {
-            Stmt::Let { name, pattern: _, mutable, value, type_hint } => {
-                if let Expr::Function { params, body, return_type, .. } = value.as_ref() {
+            Stmt::Let {
+                name,
+                pattern: _,
+                mutable,
+                value,
+                type_hint,
+            } => {
+                if let Expr::Function {
+                    params,
+                    body,
+                    return_type,
+                    ..
+                } = value.as_ref()
+                {
                     self.fn_def(Some("pub "), name, params, body, return_type)?;
                     return Ok(());
                 }
@@ -469,11 +564,19 @@ impl Formatter {
                 let expr = self.expr(value)?;
                 self.line(&format!("pub const {} = {}", name, expr));
             }
-            Stmt::Struct { name, type_params, fields } => {
+            Stmt::Struct {
+                name,
+                type_params,
+                fields,
+            } => {
                 let parts: Vec<String> = fields
                     .iter()
                     .map(|f| {
-                        let t = f.type_hint.as_ref().map(type_str).unwrap_or_else(|| "nil".to_string());
+                        let t = f
+                            .type_hint
+                            .as_ref()
+                            .map(type_str)
+                            .unwrap_or_else(|| "nil".to_string());
                         format!("{}: {}", f.name, t)
                     })
                     .collect();
@@ -482,16 +585,29 @@ impl Formatter {
                 } else {
                     format!("<{}>", type_params.join(", "))
                 };
-                self.line(&format!("pub struct {}{} {{ {} }}", name, generics, parts.join(", ")));
+                self.line(&format!(
+                    "pub struct {}{} {{ {} }}",
+                    name,
+                    generics,
+                    parts.join(", ")
+                ));
             }
-            Stmt::Enum { name, type_params, variants } => {
+            Stmt::Enum {
+                name,
+                type_params,
+                variants,
+            } => {
                 let vs: Vec<String> = variants
                     .iter()
                     .map(|v| {
                         if v.fields.is_empty() {
                             v.name.clone()
                         } else {
-                            format!("{}({})", v.name, v.fields.iter().map(type_str).collect::<Vec<_>>().join(", "))
+                            format!(
+                                "{}({})",
+                                v.name,
+                                v.fields.iter().map(type_str).collect::<Vec<_>>().join(", ")
+                            )
                         }
                     })
                     .collect();
@@ -500,7 +616,12 @@ impl Formatter {
                 } else {
                     format!("<{}>", type_params.join(", "))
                 };
-                self.line(&format!("pub enum {}{} {{ {} }}", name, generics, vs.join(", ")));
+                self.line(&format!(
+                    "pub enum {}{} {{ {} }}",
+                    name,
+                    generics,
+                    vs.join(", ")
+                ));
             }
             Stmt::MacroDef { name, params, body } => {
                 let ps: Vec<String> = params.iter().map(|p| p.name.clone()).collect();
@@ -621,7 +742,11 @@ impl Formatter {
             Expr::Map(pairs) => {
                 let mut parts = Vec::new();
                 for (k, v) in pairs {
-                    parts.push(format!("{}: {}", self.expr_inline(k)?, self.expr_inline(v)?));
+                    parts.push(format!(
+                        "{}: {}",
+                        self.expr_inline(k)?,
+                        self.expr_inline(v)?
+                    ));
                 }
                 Ok(format!("{{{}}}", parts.join(", ")))
             }
@@ -632,9 +757,17 @@ impl Formatter {
                 }
                 Ok(format!("{} {{ {} }}", name, parts.join(", ")))
             }
-            Expr::Index(obj, idx) => Ok(format!("{}[{}]", self.expr_inline(obj)?, self.expr_inline(idx)?)),
+            Expr::Index(obj, idx) => Ok(format!(
+                "{}[{}]",
+                self.expr_inline(obj)?,
+                self.expr_inline(idx)?
+            )),
             Expr::FieldAccess(obj, field) => Ok(format!("{}.{}", self.expr_inline(obj)?, field)),
-            Expr::Call { callee, args, named } => {
+            Expr::Call {
+                callee,
+                args,
+                named,
+            } => {
                 let c = self.expr_inline(callee)?;
                 let mut parts = Vec::new();
                 for a in args {
@@ -660,18 +793,24 @@ impl Formatter {
                 self.expr_inline(r)?
             )),
             Expr::Assign(name, value) => Ok(format!("{} = {}", name, self.expr_inline(value)?)),
-            Expr::CompoundAssign(op, name, value) => {
-                Ok(format!("{} {}= {}", name, compound_str(op), self.expr_inline(value)?))
-            }
+            Expr::CompoundAssign(op, name, value) => Ok(format!(
+                "{} {}= {}",
+                name,
+                compound_str(op),
+                self.expr_inline(value)?
+            )),
             Expr::IndexAssign { obj, idx, value } => Ok(format!(
                 "{}[{}] = {}",
                 self.expr_inline(obj)?,
                 self.expr_inline(idx)?,
                 self.expr_inline(value)?
             )),
-            Expr::FieldAssign { obj, field, value } => {
-                Ok(format!("{}.{} = {}", self.expr_inline(obj)?, field, self.expr_inline(value)?))
-            }
+            Expr::FieldAssign { obj, field, value } => Ok(format!(
+                "{}.{} = {}",
+                self.expr_inline(obj)?,
+                field,
+                self.expr_inline(value)?
+            )),
             Expr::MultiAssign { targets, values } => {
                 let mut ts = Vec::new();
                 for t in targets {
@@ -683,17 +822,29 @@ impl Formatter {
                 }
                 Ok(format!("{} = {}", ts.join(", "), vs.join(", ")))
             }
-            Expr::If { cond, then_branch, else_branch } => {
+            Expr::If {
+                cond,
+                then_branch,
+                else_branch,
+            } => {
                 let cond_s = self.expr(cond)?;
                 let then_s = self.block_value_inline(then_branch)?;
                 let else_s = match else_branch {
                     Some(els) => self.block_value_inline(els)?,
                     None => "nil".to_string(),
                 };
-                Ok(format!("if {} {{ {} }} else {{ {} }}", cond_s, then_s, else_s))
+                Ok(format!(
+                    "if {} {{ {} }} else {{ {} }}",
+                    cond_s, then_s, else_s
+                ))
             }
             Expr::Block(stmts) => self.block_value_inline(stmts),
-            Expr::Function { params, body, return_type, .. } => {
+            Expr::Function {
+                params,
+                body,
+                return_type,
+                ..
+            } => {
                 let ps: Vec<String> = params
                     .iter()
                     .map(|p| {
@@ -754,7 +905,14 @@ impl Formatter {
                 };
                 Ok(format!("{}..{}", lo_s, hi_s))
             }
-            Expr::Comprehension { is_map, var, iterable, cond, elem, value } => {
+            Expr::Comprehension {
+                is_map,
+                var,
+                iterable,
+                cond,
+                elem,
+                value,
+            } => {
                 let it = self.expr(iterable)?;
                 let el = self.expr(elem)?;
                 let c = match cond {
@@ -766,7 +924,14 @@ impl Formatter {
                         Some(v) => self.expr(v)?,
                         None => "nil".to_string(),
                     };
-                    Ok(format!("{{{}: {} for {} in {}{}}}", el, v, pattern_str(var), it, c))
+                    Ok(format!(
+                        "{{{}: {} for {} in {}{}}}",
+                        el,
+                        v,
+                        pattern_str(var),
+                        it,
+                        c
+                    ))
                 } else {
                     Ok(format!("[{} for {} in {}{}]", el, pattern_str(var), it, c))
                 }
@@ -894,9 +1059,16 @@ fn type_str(t: &Type) -> String {
         Type::Bool => "bool".to_string(),
         Type::Nil => "nil".to_string(),
         Type::Array(t) => format!("array<{}>", type_str(t)),
-        Type::Tuple(ts) => format!("({})", ts.iter().map(type_str).collect::<Vec<_>>().join(", ")),
+        Type::Tuple(ts) => format!(
+            "({})",
+            ts.iter().map(type_str).collect::<Vec<_>>().join(", ")
+        ),
         Type::Map(k, v) => format!("map<{}, {}>", type_str(k), type_str(v)),
-        Type::Function(ps, r) => format!("fn({}) -> {}", ps.iter().map(type_str).collect::<Vec<_>>().join(", "), type_str(r)),
+        Type::Function(ps, r) => format!(
+            "fn({}) -> {}",
+            ps.iter().map(type_str).collect::<Vec<_>>().join(", "),
+            type_str(r)
+        ),
         Type::Custom(n) => n.clone(),
         Type::Generic(n) => n.clone(),
         Type::Option(t) => format!("option<{}>", type_str(t)),
@@ -934,8 +1106,14 @@ fn pattern_str(p: &Pattern) -> String {
         Pattern::String(s) => format!("{:?}", s),
         Pattern::Bool(b) => b.to_string(),
         Pattern::Nil => "nil".to_string(),
-        Pattern::Tuple(ps) => format!("({})", ps.iter().map(pattern_str).collect::<Vec<_>>().join(", ")),
-        Pattern::Array(ps) => format!("[{}]", ps.iter().map(pattern_str).collect::<Vec<_>>().join(", ")),
+        Pattern::Tuple(ps) => format!(
+            "({})",
+            ps.iter().map(pattern_str).collect::<Vec<_>>().join(", ")
+        ),
+        Pattern::Array(ps) => format!(
+            "[{}]",
+            ps.iter().map(pattern_str).collect::<Vec<_>>().join(", ")
+        ),
         Pattern::Byte(b) => format!("0x{:02X}", b),
         Pattern::Bytes(pats) => {
             let parts: Vec<String> = pats
@@ -964,11 +1142,19 @@ fn pattern_str(p: &Pattern) -> String {
             if subs.is_empty() {
                 format!("{}::{}", en, vn)
             } else {
-                format!("{}::{}({})", en, vn, subs.iter().map(pattern_str).collect::<Vec<_>>().join(", "))
+                format!(
+                    "{}::{}({})",
+                    en,
+                    vn,
+                    subs.iter().map(pattern_str).collect::<Vec<_>>().join(", ")
+                )
             }
         }
         Pattern::Range(lo, hi) => format!("{}..{}", pattern_str(lo), pattern_str(hi)),
-        Pattern::Or(ps) => format!("| {}", ps.iter().map(pattern_str).collect::<Vec<_>>().join(" | ")),
+        Pattern::Or(ps) => format!(
+            "| {}",
+            ps.iter().map(pattern_str).collect::<Vec<_>>().join(" | ")
+        ),
         Pattern::Some(inner) => format!("Some({})", pattern_str(inner)),
         Pattern::None => "None".to_string(),
         Pattern::Ok(inner) => format!("Ok({})", pattern_str(inner)),

@@ -13,7 +13,7 @@ use std::path::PathBuf;
 
 /// Windows STATUS_STACK_OVERFLOW as a wait status, which is what a native stack
 /// overflow surfaces as. It does not fit in i32.
-const STACK_OVERFLOW: i32 = i32::MIN + 1;  // 0xC00000FD as a signed wait status
+const STACK_OVERFLOW: i32 = i32::MIN + 1; // 0xC00000FD as a signed wait status
 
 /// Write `source` to a uniquely-named file and run it under `mode`.
 ///
@@ -52,20 +52,21 @@ fn recursive(depth: u32) -> String {
 fn the_interpreter_reports_the_limit_instead_of_dying() {
     let (text, code) = run("run", &recursive(5000), &[]);
     assert_ne!(
-        code,
-        STACK_OVERFLOW,
+        code, STACK_OVERFLOW,
         "the process was killed by a stack overflow rather than reporting an error:\n{text}"
     );
     assert!(text.contains("depth exceeded"), "got: {text}");
-    assert!(text.contains("256"), "the message should name the limit: {text}");
+    assert!(
+        text.contains("256"),
+        "the message should name the limit: {text}"
+    );
 }
 
 #[test]
 fn the_vm_reports_the_limit_instead_of_dying() {
     let (text, code) = run("vm", &recursive(5000), &[]);
     assert_ne!(
-        code,
-        STACK_OVERFLOW,
+        code, STACK_OVERFLOW,
         "the VM overflowed the stack rather than reporting an error:\n{text}"
     );
     assert!(text.contains("depth exceeded"), "got: {text}");

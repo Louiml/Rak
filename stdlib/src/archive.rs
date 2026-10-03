@@ -61,8 +61,10 @@ pub fn gzip_decompress(data: &[u8]) -> Result<Vec<u8>, String> {
 
 /// One zip entry: (name, size, compressed_size).
 pub fn zip_list(path: &str) -> Result<Vec<(String, u64, u64)>, String> {
-    let f = std::fs::File::open(path).map_err(|e| format!("zip_list: cannot open '{}': {}", path, e))?;
-    let mut z = zip::ZipArchive::new(f).map_err(|e| format!("zip_list: bad zip '{}': {}", path, e))?;
+    let f = std::fs::File::open(path)
+        .map_err(|e| format!("zip_list: cannot open '{}': {}", path, e))?;
+    let mut z =
+        zip::ZipArchive::new(f).map_err(|e| format!("zip_list: bad zip '{}': {}", path, e))?;
     let mut out = Vec::new();
     for i in 0..z.len() {
         let f = z.by_index(i).map_err(|e| format!("zip_list: {}", e))?;
@@ -73,8 +75,10 @@ pub fn zip_list(path: &str) -> Result<Vec<(String, u64, u64)>, String> {
 
 /// Read one entry's bytes out of a zip archive.
 pub fn zip_read(path: &str, name: &str) -> Result<Vec<u8>, String> {
-    let f = std::fs::File::open(path).map_err(|e| format!("zip_read: cannot open '{}': {}", path, e))?;
-    let mut z = zip::ZipArchive::new(f).map_err(|e| format!("zip_read: bad zip '{}': {}", path, e))?;
+    let f = std::fs::File::open(path)
+        .map_err(|e| format!("zip_read: cannot open '{}': {}", path, e))?;
+    let mut z =
+        zip::ZipArchive::new(f).map_err(|e| format!("zip_read: bad zip '{}': {}", path, e))?;
     let mut entry = z
         .by_name(name)
         .map_err(|e| format!("zip_read: no entry '{}' in '{}': {}", name, path, e))?;
@@ -88,7 +92,8 @@ pub fn zip_read(path: &str, name: &str) -> Result<Vec<u8>, String> {
 /// Create (or overwrite) a zip with the given `(name, bytes)` entries.
 /// Returns the total number of bytes written to disk.
 pub fn zip_write(path: &str, entries: &[(String, Vec<u8>)]) -> Result<usize, String> {
-    let f = std::fs::File::create(path).map_err(|e| format!("zip_write: cannot create '{}': {}", path, e))?;
+    let f = std::fs::File::create(path)
+        .map_err(|e| format!("zip_write: cannot create '{}': {}", path, e))?;
     let mut w = zip::ZipWriter::new(f);
     let opts: zip::write::FileOptions = Default::default();
     for (name, data) in entries {
@@ -199,4 +204,3 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 }
-

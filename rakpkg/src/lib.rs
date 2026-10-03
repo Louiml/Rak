@@ -31,8 +31,8 @@ impl Default for Manifest {
 /// Parse a `package.rak` manifest. Supports single-line and multi-line
 /// `let deps = { ... }` blocks and `let name` / `let version` / `let entry`.
 pub fn parse_manifest(path: &Path) -> Result<Manifest, String> {
-    let content = std::fs::read_to_string(path)
-        .map_err(|e| format!("Cannot read package.rak: {}", e))?;
+    let content =
+        std::fs::read_to_string(path).map_err(|e| format!("Cannot read package.rak: {}", e))?;
     parse_manifest_str(&content)
 }
 
@@ -56,9 +56,7 @@ pub fn parse_manifest_str(content: &str) -> Result<Manifest, String> {
             m.entry = unquote(rest);
         } else if line.starts_with("let deps = {") || line.starts_with("let deps =") {
             // Consume the whole (possibly multi-line) object literal.
-            let mut acc = line
-                .trim_start_matches("let deps =")
-                .to_string();
+            let mut acc = line.trim_start_matches("let deps =").to_string();
             if !acc.contains('}') {
                 let mut closed = false;
                 i += 1;
@@ -71,7 +69,11 @@ pub fn parse_manifest_str(content: &str) -> Result<Manifest, String> {
                     i += 1;
                 }
             }
-            let inner = acc.trim().trim_start_matches('{').trim_end_matches('}').trim_end_matches(';');
+            let inner = acc
+                .trim()
+                .trim_start_matches('{')
+                .trim_end_matches('}')
+                .trim_end_matches(';');
             for pair in inner.split(',') {
                 let pair = pair.trim();
                 if pair.is_empty() {
@@ -157,7 +159,10 @@ mod tests {
 
     #[test]
     fn single_line_deps() {
-        let m = parse_manifest_str("let name = \"p\"\nlet version = \"1.0.0\"\nlet deps = { a: \"u/a\", b: \"u/b\" }\n").unwrap();
+        let m = parse_manifest_str(
+            "let name = \"p\"\nlet version = \"1.0.0\"\nlet deps = { a: \"u/a\", b: \"u/b\" }\n",
+        )
+        .unwrap();
         assert_eq!(m.name, "p");
         assert_eq!(m.deps.len(), 2);
         assert_eq!(m.deps.get("a").unwrap(), "u/a");

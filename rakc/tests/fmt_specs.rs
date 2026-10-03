@@ -18,10 +18,7 @@
 fn agree(source: &str) -> Vec<String> {
     let parity = rakc::run_on_both(source, ".");
     if let Some(why) = parity.divergence() {
-        panic!(
-            "backend divergence:\n{}\n--- source ---\n{}",
-            why, source
-        );
+        panic!("backend divergence:\n{}\n--- source ---\n{}", why, source);
     }
     match parity {
         rakc::BackendParity::Agree(out) => out,

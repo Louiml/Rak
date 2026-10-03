@@ -92,7 +92,11 @@ pub fn parse_frame(data: &[u8]) -> Result<(Frame, usize), String> {
     }
     let len = len as usize;
     if data.len() < off + len {
-        return Err(format!("ws: frame body incomplete (need {}, have {})", off + len, data.len()));
+        return Err(format!(
+            "ws: frame body incomplete (need {}, have {})",
+            off + len,
+            data.len()
+        ));
     }
     let mut payload = data[off..off + len].to_vec();
     if masked {
@@ -100,7 +104,14 @@ pub fn parse_frame(data: &[u8]) -> Result<(Frame, usize), String> {
             *b ^= mask_key[i % 4];
         }
     }
-    Ok((Frame { opcode, fin, payload }, off + len))
+    Ok((
+        Frame {
+            opcode,
+            fin,
+            payload,
+        },
+        off + len,
+    ))
 }
 
 fn magic() -> u8 {
@@ -108,7 +119,10 @@ fn magic() -> u8 {
     // should be cryptographically random; this is adequate for Rak's
     // scripted, non-adversarial use and keeps the module self-contained.
     use std::time::{SystemTime, UNIX_EPOCH};
-    let ms = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(0);
+    let ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
     let tick = (ms ^ 0x9E3779B97F4A7C15).rotate_left(17) as usize;
     MAGIC_GEN[(tick + 3) % MAGIC_GEN.len()]
 }
@@ -124,7 +138,10 @@ mod tests {
     #[test]
     fn rfc6455_accept_vector() {
         // RFC 6455 §1.3 example: key -> s3pPLMBiTxaQ9kYGzzhZRbK+xOo=
-        assert_eq!(accept_value("dGhlIHNhbXBsZSBub25jZQ=="), "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=");
+        assert_eq!(
+            accept_value("dGhlIHNhbXBsZSBub25jZQ=="),
+            "s3pPLMBiTxaQ9kYGzzhZRbK+xOo="
+        );
     }
 
     #[test]
@@ -176,17 +193,27 @@ pub fn client_handshake(stream: &mut TcpStream, host: &str, path: &str) -> Resul
         "GET {} HTTP/1.1\r\nHost: {}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: {}\r\nSec-WebSocket-Version: 13\r\n\r\n",
         path, host, key
     );
-    stream.write_all(req.as_bytes()).map_err(|e| format!("ws: handshake write: {}", e))?;
-    let mut reader = BufReader::new(stream.try_clone().map_err(|e| format!("ws: clone: {}", e))?);
+    stream
+        .write_all(req.as_bytes())
+        .map_err(|e| format!("ws: handshake write: {}", e))?;
+    let mut reader = BufReader::new(
+        stream
+            .try_clone()
+            .map_err(|e| format!("ws: clone: {}", e))?,
+    );
     let mut line = String::new();
-    reader.read_line(&mut line).map_err(|e| format!("ws: handshake read: {}", e))?;
+    reader
+        .read_line(&mut line)
+        .map_err(|e| format!("ws: handshake read: {}", e))?;
     if !line.contains("101") {
         return Err(format!("ws: handshake rejected: {}", line.trim()));
     }
     let mut subprotocol = String::new();
     loop {
         let mut h = String::new();
-        let n = reader.read_line(&mut h).map_err(|e| format!("ws: header read: {}", e))?;
+        let n = reader
+            .read_line(&mut h)
+            .map_err(|e| format!("ws: header read: {}", e))?;
         if n == 0 || h.trim().is_empty() {
             break;
         }
@@ -206,13 +233,17 @@ pub fn server_handshake(stream: &mut TcpStream, key: &str) -> Result<(), String>
         "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {}\r\n\r\n",
         accept
     );
-    stream.write_all(resp.as_bytes()).map_err(|e| format!("ws: handshake write: {}", e))
+    stream
+        .write_all(resp.as_bytes())
+        .map_err(|e| format!("ws: handshake write: {}", e))
 }
 
 /// Read one frame from a buffered reader.
 pub fn read_frame(reader: &mut BufReader<TcpStream>) -> Result<Option<Frame>, String> {
     let mut header = [0u8; 2];
-    let n = reader.read(&mut header).map_err(|e| format!("ws: read: {}", e))?;
+    let n = reader
+        .read(&mut header)
+        .map_err(|e| format!("ws: read: {}", e))?;
     if n == 0 {
         return Ok(None);
     }
@@ -224,24 +255,32 @@ pub fn read_frame(reader: &mut BufReader<TcpStream>) -> Result<Option<Frame>, St
     let mut len = (b1 & 0x7F) as u64;
     if len == 126 {
         let mut ext = [0u8; 2];
-        reader.read_exact(&mut ext).map_err(|e| format!("ws: read len: {}", e))?;
+        reader
+            .read_exact(&mut ext)
+            .map_err(|e| format!("ws: read len: {}", e))?;
         buf.extend_from_slice(&ext);
         len = u16::from_be_bytes(ext) as u64;
     } else if len == 127 {
         let mut ext = [0u8; 8];
-        reader.read_exact(&mut ext).map_err(|e| format!("ws: read len: {}", e))?;
+        reader
+            .read_exact(&mut ext)
+            .map_err(|e| format!("ws: read len: {}", e))?;
         buf.extend_from_slice(&ext);
         len = u64::from_be_bytes(ext);
     }
     if b1 & 0x80 != 0 {
         let mut key = [0u8; 4];
-        reader.read_exact(&mut key).map_err(|e| format!("ws: read mask: {}", e))?;
+        reader
+            .read_exact(&mut key)
+            .map_err(|e| format!("ws: read mask: {}", e))?;
         buf.extend_from_slice(&key);
     }
     let len = len as usize;
     let mut payload = vec![0u8; len];
     if len > 0 {
-        reader.read_exact(&mut payload).map_err(|e| format!("ws: read payload: {}", e))?;
+        reader
+            .read_exact(&mut payload)
+            .map_err(|e| format!("ws: read payload: {}", e))?;
     }
     buf.extend_from_slice(&payload);
     let (frame, _) = parse_frame(&buf)?;

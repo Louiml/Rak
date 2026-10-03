@@ -49,7 +49,9 @@ pub struct ArrayStream {
 
 impl ArrayStream {
     pub fn new(items: Vec<Value>) -> Self {
-        ArrayStream { items: items.into_iter() }
+        ArrayStream {
+            items: items.into_iter(),
+        }
     }
 }
 
@@ -68,7 +70,9 @@ impl LinesStream {
     pub fn open(path: &str) -> Result<Self, String> {
         use std::io::BufRead;
         let f = std::fs::File::open(path).map_err(|e| format!("read_lines: {}: {}", path, e))?;
-        Ok(LinesStream { reader: Some(std::io::BufReader::new(f).lines()) })
+        Ok(LinesStream {
+            reader: Some(std::io::BufReader::new(f).lines()),
+        })
     }
 }
 
@@ -97,7 +101,9 @@ pub struct TcpLineStream {
 
 impl TcpLineStream {
     pub fn open(stream: std::net::TcpStream) -> Self {
-        TcpLineStream { reader: Some(std::io::BufReader::new(stream)) }
+        TcpLineStream {
+            reader: Some(std::io::BufReader::new(stream)),
+        }
     }
 }
 
@@ -181,7 +187,10 @@ pub struct TakeStream {
 
 impl TakeStream {
     pub fn new(inner: VmStreamHandle, n: u64) -> Self {
-        TakeStream { inner, remaining: n }
+        TakeStream {
+            inner,
+            remaining: n,
+        }
     }
 }
 
@@ -210,7 +219,13 @@ pub struct CsvStream {
 
 impl CsvStream {
     pub fn new(inner: VmStreamHandle, delim: char, has_header: bool) -> Self {
-        CsvStream { inner, delim, has_header, headers: Vec::new(), started: false }
+        CsvStream {
+            inner,
+            delim,
+            has_header,
+            headers: Vec::new(),
+            started: false,
+        }
     }
 }
 
@@ -240,7 +255,9 @@ impl VmStream for CsvStream {
                     .map(|(i, h)| {
                         (
                             h.clone(),
-                            Value::String(Arc::from(fields.get(i).cloned().unwrap_or_default().as_str())),
+                            Value::String(Arc::from(
+                                fields.get(i).cloned().unwrap_or_default().as_str(),
+                            )),
                         )
                     })
                     .collect();
@@ -327,7 +344,10 @@ mod tests {
     fn take_is_lazy_over_a_large_source() {
         // The point of laziness: `take(1)` must not cost 100k allocations.
         let big: Vec<Value> = (0..100_000).map(|i| Value::I64(i)).collect();
-        let h = handle(TakeStream { inner: handle(ArrayStream::new(big)), remaining: 1 });
+        let h = handle(TakeStream {
+            inner: handle(ArrayStream::new(big)),
+            remaining: 1,
+        });
         let first = h.lock().unwrap().next(&mut no_call).unwrap();
         assert_eq!(first, Some(Value::I64(0)));
         assert!(h.lock().unwrap().next(&mut no_call).unwrap().is_none());
@@ -335,7 +355,10 @@ mod tests {
 
     #[test]
     fn take_zero_yields_nothing_without_touching_the_source() {
-        let h = handle(TakeStream { inner: handle(ArrayStream::new(strings(&["a"]))), remaining: 0 });
+        let h = handle(TakeStream {
+            inner: handle(ArrayStream::new(strings(&["a"]))),
+            remaining: 0,
+        });
         assert!(h.lock().unwrap().next(&mut no_call).unwrap().is_none());
     }
 
@@ -344,8 +367,14 @@ mod tests {
         // Streams are shared values, so a second consumer must not restart the
         // sequence.
         let h = handle(ArrayStream::new(strings(&["a", "b"])));
-        assert_eq!(h.lock().unwrap().next(&mut no_call).unwrap(), Some(strings(&["a"]).remove(0)));
-        assert_eq!(h.lock().unwrap().next(&mut no_call).unwrap(), Some(strings(&["b"]).remove(0)));
+        assert_eq!(
+            h.lock().unwrap().next(&mut no_call).unwrap(),
+            Some(strings(&["a"]).remove(0))
+        );
+        assert_eq!(
+            h.lock().unwrap().next(&mut no_call).unwrap(),
+            Some(strings(&["b"]).remove(0))
+        );
         assert!(h.lock().unwrap().next(&mut no_call).unwrap().is_none());
     }
 
@@ -353,7 +382,10 @@ mod tests {
     fn map_propagates_a_call_failure() {
         // With no machine available, `map` must surface the error rather than
         // silently producing nil.
-        let h = handle(MapStream { inner: handle(ArrayStream::new(strings(&["x"]))), f: Value::Nil });
+        let h = handle(MapStream {
+            inner: handle(ArrayStream::new(strings(&["x"]))),
+            f: Value::Nil,
+        });
         let err = h.lock().unwrap().next(&mut no_call).unwrap_err();
         assert!(err.contains("no machine"), "got: {}", err);
     }
@@ -374,7 +406,10 @@ mod tests {
         let Value::Map(m) = row else {
             panic!("expected a map, got {}", row);
         };
-        assert_eq!(m.get("name").map(|v| v.to_string()), Some("ada".to_string()));
+        assert_eq!(
+            m.get("name").map(|v| v.to_string()),
+            Some("ada".to_string())
+        );
         assert_eq!(m.get("age").map(|v| v.to_string()), Some("36".to_string()));
     }
 

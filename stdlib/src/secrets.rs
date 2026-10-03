@@ -40,11 +40,15 @@ fn wipe_string(mut s: String) {
 /// page cache. Missing file is not an error: there is nothing to wipe.
 fn shred_file(p: &PathBuf) {
     use std::io::{Seek, SeekFrom, Write};
-    let Ok(len) = fs::metadata(p).map(|m| m.len()) else { return };
+    let Ok(len) = fs::metadata(p).map(|m| m.len()) else {
+        return;
+    };
     if len == 0 {
         return;
     }
-    let Ok(mut f) = fs::OpenOptions::new().write(true).open(p) else { return };
+    let Ok(mut f) = fs::OpenOptions::new().write(true).open(p) else {
+        return;
+    };
     if f.set_len(0).is_err() {
         return;
     }
@@ -69,21 +73,35 @@ fn secrets_path() -> Option<PathBuf> {
             let parts = p.split(';');
             #[cfg(not(windows))]
             let parts = p.split(':');
-            parts.filter(|s| !s.is_empty()).next().map(|s| s.to_string())
+            parts
+                .filter(|s| !s.is_empty())
+                .next()
+                .map(|s| s.to_string())
         })
         .map(PathBuf::from)
-        .or_else(|| std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).ok().map(|h| PathBuf::from(h).join(".rak")))?;
+        .or_else(|| {
+            std::env::var("HOME")
+                .or_else(|_| std::env::var("USERPROFILE"))
+                .ok()
+                .map(|h| PathBuf::from(h).join(".rak"))
+        })?;
     Some(base.join("secrets.json"))
 }
 
 fn read_file() -> HashMap<String, String> {
-    let Some(p) = secrets_path() else { return HashMap::new() };
-    let Ok(text) = fs::read_to_string(&p) else { return HashMap::new() };
+    let Some(p) = secrets_path() else {
+        return HashMap::new();
+    };
+    let Ok(text) = fs::read_to_string(&p) else {
+        return HashMap::new();
+    };
     serde_json::from_str(&text).unwrap_or_default()
 }
 
 fn write_file(map: &HashMap<String, String>) -> Result<(), String> {
-    let Some(p) = secrets_path() else { return Ok(()) };
+    let Some(p) = secrets_path() else {
+        return Ok(());
+    };
     if let Some(dir) = p.parent() {
         let _ = fs::create_dir_all(dir);
         #[cfg(unix)]
@@ -125,7 +143,8 @@ pub fn get(name: &str) -> Option<String> {
 /// Set a secret in the session store (not persisted to disk).
 pub fn set(name: &str, value: &str) {
     if let Ok(mut g) = SESSION.lock() {
-        g.get_or_insert_with(HashMap::new).insert(name.to_string(), value.to_string());
+        g.get_or_insert_with(HashMap::new)
+            .insert(name.to_string(), value.to_string());
     }
 }
 

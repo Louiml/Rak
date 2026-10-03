@@ -55,7 +55,11 @@ pub fn lint_source(source: &str) -> Result<Vec<LintFinding>, String> {
 /// its author wrote down.
 pub fn format_audit(file: &str, sites: &[String]) -> String {
     let mut out = String::new();
-    out.push_str(&format!("\nsafety audit: {} unsafe block(s) in {}\n", sites.len(), file));
+    out.push_str(&format!(
+        "\nsafety audit: {} unsafe block(s) in {}\n",
+        sites.len(),
+        file
+    ));
     if sites.is_empty() {
         out.push_str("  no unsafe blocks. nothing to review.\n");
         return out;
@@ -172,7 +176,10 @@ impl Linter {
         if !self.imported.insert(key) {
             self.findings.push(LintFinding {
                 rule: "duplicate-import",
-                message: format!("module '{}' is imported more than once in the same form", target),
+                message: format!(
+                    "module '{}' is imported more than once in the same form",
+                    target
+                ),
             });
         }
     }
@@ -203,7 +210,12 @@ impl Linter {
                     self.stmt(st);
                 }
             }
-            Stmt::Let { name, value, pattern, .. } => {
+            Stmt::Let {
+                name,
+                value,
+                pattern,
+                ..
+            } => {
                 // A credential assigned directly from a literal is the classic
                 // leak. Assigned from a call or a variable, it is fine.
                 if pattern.is_none() && Self::is_secret_name(name) {
@@ -217,7 +229,8 @@ impl Linter {
                 match pattern {
                     Some(p) => self.binds_from_pattern(p),
                     None => {
-                        self.declared.push((name.clone(), matches!(s, Stmt::Let { mutable: true, .. })));
+                        self.declared
+                            .push((name.clone(), matches!(s, Stmt::Let { mutable: true, .. })));
                         self.defined.insert(name.clone());
                     }
                 }
@@ -261,14 +274,23 @@ impl Linter {
             Stmt::Trace { value } => self.expr(value),
             Stmt::Assert(e) => self.expr(e),
             Stmt::Defer(e) => self.expr(e),
-            Stmt::If { cond, then_branch, else_branch } => {
+            Stmt::If {
+                cond,
+                then_branch,
+                else_branch,
+            } => {
                 self.expr(cond);
                 self.block(then_branch);
                 if let Some(els) = else_branch {
                     self.block(els);
                 }
             }
-            Stmt::IfLet { pattern, value, then_branch, else_branch } => {
+            Stmt::IfLet {
+                pattern,
+                value,
+                then_branch,
+                else_branch,
+            } => {
                 self.binds_from_pattern(pattern);
                 self.expr(value);
                 self.block(then_branch);
@@ -280,7 +302,11 @@ impl Linter {
                 self.expr(cond);
                 self.block(body);
             }
-            Stmt::WhileLet { pattern, value, body } => {
+            Stmt::WhileLet {
+                pattern,
+                value,
+                body,
+            } => {
                 self.binds_from_pattern(pattern);
                 self.expr(value);
                 self.block(body);
@@ -290,13 +316,22 @@ impl Linter {
                 self.expr(cond);
             }
             Stmt::Loop { body, .. } => self.block(body),
-            Stmt::For { pattern, iterable, body, .. } => {
+            Stmt::For {
+                pattern,
+                iterable,
+                body,
+                ..
+            } => {
                 self.binds_from_pattern(pattern);
                 self.expr(iterable);
                 self.block(body);
             }
             Stmt::Break(_) | Stmt::Continue(_) => {}
-            Stmt::Scan { target, options, body } => {
+            Stmt::Scan {
+                target,
+                options,
+                body,
+            } => {
                 self.expr(target);
                 for (_, e) in options {
                     self.expr(e);
@@ -305,7 +340,11 @@ impl Linter {
                     self.block(b);
                 }
             }
-            Stmt::Fetch { target, options, body } => {
+            Stmt::Fetch {
+                target,
+                options,
+                body,
+            } => {
                 self.expr(target);
                 for (_, e) in options {
                     self.expr(e);
@@ -324,7 +363,11 @@ impl Linter {
                     self.block(body);
                 }
             }
-            Stmt::Try { body, catch_name, catch_body } => {
+            Stmt::Try {
+                body,
+                catch_name,
+                catch_body,
+            } => {
                 self.block(body);
                 if let Some(n) = catch_name {
                     self.defined.insert(n.clone());
@@ -379,10 +422,16 @@ impl Linter {
             Stmt::Async(body) => self.block(body),
             Stmt::Export(inner) => {
                 if let Stmt::Let { name, value, .. } = inner.as_ref() {
-                    if let Expr::Function { return_type: None, .. } = value.as_ref() {
+                    if let Expr::Function {
+                        return_type: None, ..
+                    } = value.as_ref()
+                    {
                         self.findings.push(LintFinding {
                             rule: "missing-ret-type",
-                            message: format!("exported fn '{}' has no return type annotation", name),
+                            message: format!(
+                                "exported fn '{}' has no return type annotation",
+                                name
+                            ),
                         });
                     }
                 }
@@ -402,11 +451,17 @@ impl Linter {
             if self.saw_return && !matches!(s, Stmt::Return(_) | Stmt::Test { .. }) {
                 self.findings.push(LintFinding {
                     rule: "unreachable",
-                    message: "statement is unreachable (a `return` precedes it in this block)".to_string(),
+                    message: "statement is unreachable (a `return` precedes it in this block)"
+                        .to_string(),
                 });
                 self.saw_return = false;
             }
-            if let Stmt::Let { name, pattern: None, .. } = s {
+            if let Stmt::Let {
+                name,
+                pattern: None,
+                ..
+            } = s
+            {
                 if !seen.insert(name.clone()) {
                     self.findings.push(LintFinding {
                         rule: "shadowed",
@@ -460,9 +515,23 @@ impl Linter {
     fn is_secret_name(name: &str) -> bool {
         let n = name.to_ascii_lowercase();
         const NEEDLES: &[&str] = &[
-            "secret", "password", "passwd", "pwd", "token", "apikey", "api_key",
-            "credential", "cred", "private_key", "privatekey", "priv_key",
-            "passphrase", "auth", "session_key", "signing_key", "client_secret",
+            "secret",
+            "password",
+            "passwd",
+            "pwd",
+            "token",
+            "apikey",
+            "api_key",
+            "credential",
+            "cred",
+            "private_key",
+            "privatekey",
+            "priv_key",
+            "passphrase",
+            "auth",
+            "session_key",
+            "signing_key",
+            "client_secret",
         ];
         NEEDLES.iter().any(|k| n.contains(k))
     }
@@ -470,70 +539,87 @@ impl Linter {
     /// True when an expression plausibly yields a secret: a secret-named
     /// identifier, or a call to one of the key-producing builtins.
     /// Does the template read like a SQL statement?
-///
-/// Keyword matching, deliberately crude. It does not try to parse SQL: the goal is
-/// to notice `f"SELECT ... WHERE id = {x}"`, and every attempt to be cleverer gives
-/// either misses or false positives on prose that merely mentions "select".
-fn looks_like_sql(template: &str) -> bool {
-    if !template.contains('{') {
-        return false;
-    }
-    let lower = template.to_ascii_lowercase();
-    const WORDS: &[&str] = &[
-        "select ", "insert into", "update ", "delete from", " where ", " from ",
-        "values (", "order by", "union select", "drop table",
-    ];
-    WORDS.iter().any(|w| lower.contains(w))
-}
-
-/// Does the template read like a shell command?
-fn looks_like_shell(template: &str) -> bool {
-    if !template.contains('{') {
-        return false;
-    }
-    // A command word at the start. `curl` is the case worth catching: a URL or a
-    // header built into one is the common way untrusted input reaches a shell.
-    let trimmed = template.trim_start();
-    const COMMANDS: &[&str] = &[
-        "curl ", "wget ", "ssh ", "scp ", "bash ", "sh -c", "eval ", "sudo ",
-        "rm ", "cat ", "grep ", "ping ", "nc ",
-    ];
-    COMMANDS.iter().any(|c| trimmed.starts_with(c))
-}
-
-/// Is this expression already wrapped in one of the `*_escape` calls?
-fn is_wrapped_in_escape(e: &Expr) -> bool {
-    match e {
-        Expr::Call { callee, args, .. } => {
-            let escaped = match callee.as_ref() {
-                Expr::Ident(n) => n.ends_with("_escape"),
-                _ => false,
-            };
-            // Either the interpolated value is the escape call itself, or the
-            // transform happened underneath: `f"{trim(sql_escape(x))}"` is safe.
-            escaped || args.iter().any(|a| Self::is_wrapped_in_escape(a))
+    ///
+    /// Keyword matching, deliberately crude. It does not try to parse SQL: the goal is
+    /// to notice `f"SELECT ... WHERE id = {x}"`, and every attempt to be cleverer gives
+    /// either misses or false positives on prose that merely mentions "select".
+    fn looks_like_sql(template: &str) -> bool {
+        if !template.contains('{') {
+            return false;
         }
-        // A field access or a unary op on an escaped value still counts, because
-        // the transform already happened underneath it.
-        Expr::FieldAccess(obj, _) => Self::is_wrapped_in_escape(obj),
-        Expr::Unary(_, inner) => Self::is_wrapped_in_escape(inner),
-        _ => false,
+        let lower = template.to_ascii_lowercase();
+        const WORDS: &[&str] = &[
+            "select ",
+            "insert into",
+            "update ",
+            "delete from",
+            " where ",
+            " from ",
+            "values (",
+            "order by",
+            "union select",
+            "drop table",
+        ];
+        WORDS.iter().any(|w| lower.contains(w))
     }
-}
 
-fn looks_secret_expr(e: &Expr) -> bool {
+    /// Does the template read like a shell command?
+    fn looks_like_shell(template: &str) -> bool {
+        if !template.contains('{') {
+            return false;
+        }
+        // A command word at the start. `curl` is the case worth catching: a URL or a
+        // header built into one is the common way untrusted input reaches a shell.
+        let trimmed = template.trim_start();
+        const COMMANDS: &[&str] = &[
+            "curl ", "wget ", "ssh ", "scp ", "bash ", "sh -c", "eval ", "sudo ", "rm ", "cat ",
+            "grep ", "ping ", "nc ",
+        ];
+        COMMANDS.iter().any(|c| trimmed.starts_with(c))
+    }
+
+    /// Is this expression already wrapped in one of the `*_escape` calls?
+    fn is_wrapped_in_escape(e: &Expr) -> bool {
+        match e {
+            Expr::Call { callee, args, .. } => {
+                let escaped = match callee.as_ref() {
+                    Expr::Ident(n) => n.ends_with("_escape"),
+                    _ => false,
+                };
+                // Either the interpolated value is the escape call itself, or the
+                // transform happened underneath: `f"{trim(sql_escape(x))}"` is safe.
+                escaped || args.iter().any(|a| Self::is_wrapped_in_escape(a))
+            }
+            // A field access or a unary op on an escaped value still counts, because
+            // the transform already happened underneath it.
+            Expr::FieldAccess(obj, _) => Self::is_wrapped_in_escape(obj),
+            Expr::Unary(_, inner) => Self::is_wrapped_in_escape(inner),
+            _ => false,
+        }
+    }
+
+    fn looks_secret_expr(e: &Expr) -> bool {
         match e {
             Expr::Ident(n) => Self::is_secret_name(n),
             Expr::FieldAccess(o, f) => Self::is_secret_name(f) || Self::looks_secret_expr(o),
             Expr::Index(o, i) => {
-                Self::is_secret_name(&literal_str(i).unwrap_or_default()) || Self::looks_secret_expr(o)
+                Self::is_secret_name(&literal_str(i).unwrap_or_default())
+                    || Self::looks_secret_expr(o)
             }
             Expr::Call { callee, .. } => match callee.as_ref() {
                 Expr::Ident(n) => matches!(
                     n.as_str(),
-                    "secret_get" | "hmac_sha256" | "ed25519_keypair" | "rsa_keypair"
-                        | "ecdsa_keypair" | "x25519_keypair" | "tunnel_preshared_key"
-                        | "psk_derive" | "hkdf_derive" | "sha256" | "md5"
+                    "secret_get"
+                        | "hmac_sha256"
+                        | "ed25519_keypair"
+                        | "rsa_keypair"
+                        | "ecdsa_keypair"
+                        | "x25519_keypair"
+                        | "tunnel_preshared_key"
+                        | "psk_derive"
+                        | "hkdf_derive"
+                        | "sha256"
+                        | "md5"
                 ),
                 _ => false,
             },
@@ -550,7 +636,10 @@ fn looks_secret_expr(e: &Expr) -> bool {
             if !host.is_empty() && !host.starts_with("localhost") && !host.starts_with("127.") {
                 self.findings.push(LintFinding {
                     rule: "plaintext-url",
-                    message: format!("'http://{}' sends in the clear; use https:// unless this is localhost", host),
+                    message: format!(
+                        "'http://{}' sends in the clear; use https:// unless this is localhost",
+                        host
+                    ),
                 });
             }
         }
@@ -567,15 +656,37 @@ fn looks_secret_expr(e: &Expr) -> bool {
     /// SQL, HTML) do not trip it.
     fn looks_like_token(s: &str) -> bool {
         const PREFIXES: &[&str] = &[
-            "sk-", "sk_live_", "sk_test_", "pk_live_", "ghp_", "gho_", "github_pat_",
-            "xoxb-", "xoxp-", "xoxa-", "AKIA", "ASIA", "AIza", "ya29.", "eyJ",
-            "-----BEGIN", "ssh-rsa", "ssh-ed25519",
+            "sk-",
+            "sk_live_",
+            "sk_test_",
+            "pk_live_",
+            "ghp_",
+            "gho_",
+            "github_pat_",
+            "xoxb-",
+            "xoxp-",
+            "xoxa-",
+            "AKIA",
+            "ASIA",
+            "AIza",
+            "ya29.",
+            "eyJ",
+            "-----BEGIN",
+            "ssh-rsa",
+            "ssh-ed25519",
         ];
         if PREFIXES.iter().any(|p| s.starts_with(p)) {
             return true;
         }
         // Assignment form inside a string, e.g. an .env line pasted inline.
-        for sep in ["password=", "passwd=", "secret=", "token=", "api_key=", "apikey="] {
+        for sep in [
+            "password=",
+            "passwd=",
+            "secret=",
+            "token=",
+            "api_key=",
+            "apikey=",
+        ] {
             if let Some(i) = s.to_ascii_lowercase().find(sep) {
                 let tail = &s[i + sep.len()..];
                 if tail.len() >= 8 && tail.chars().all(|c| !c.is_whitespace()) {
@@ -592,11 +703,14 @@ fn looks_secret_expr(e: &Expr) -> bool {
 
     /// Flag weak primitives and raw-pointer FFI at the call site.
     fn check_builtin_call(&mut self, callee: &Expr, args: &[Expr]) {
-        let Expr::Ident(name) = callee else { return };        let weak = match name.as_str() {
+        let Expr::Ident(name) = callee else { return };
+        let weak = match name.as_str() {
             "md5" => Some("MD5 is broken for anything adversarial; use sha256"),
             "sha1" => Some("SHA-1 is broken for collision resistance; use sha256"),
             "rot13" => Some("ROT13 is an encoding, not encryption"),
-            "xor" => Some("repeating-key XOR is not a cipher; use aes_gcm_encrypt or chacha20_encrypt"),
+            "xor" => {
+                Some("repeating-key XOR is not a cipher; use aes_gcm_encrypt or chacha20_encrypt")
+            }
             "file_hash" => {
                 // Signature is file_hash(path, algorithm); the algorithm is
                 // the second argument.
@@ -617,36 +731,41 @@ fn looks_secret_expr(e: &Expr) -> bool {
         }
         // Raw-pointer FFI is unchecked memory access. Name it explicitly so a
         // reviewer can find it, and point at the sandbox switch.
-        if name.starts_with("ffi_") && !matches!(name.as_str(), "ffi_load" | "ffi_cstr_to_string" | "ffi_string_to_cstr") {
+        if name.starts_with("ffi_")
+            && !matches!(
+                name.as_str(),
+                "ffi_load" | "ffi_cstr_to_string" | "ffi_string_to_cstr"
+            )
+        {
             self.findings.push(LintFinding {
                 rule: "ffi-raw-pointer",
                 message: format!("{}() is unchecked memory access; run with --sandbox and without the ffi capability, or review the pointer arithmetic", name),
             });
         }
-          // A ws_ or bare tcp_ connection carries no TLS.
-          if name == "ws_connect" || name == "net_connect" {
-              self.findings.push(LintFinding {
+        // A ws_ or bare tcp_ connection carries no TLS.
+        if name == "ws_connect" || name == "net_connect" {
+            self.findings.push(LintFinding {
                   rule: "insecure-transport",
                   message: format!("{}() opens an unencrypted connection; anything sent over it is readable in transit", name),
               });
-          }
-          // Inline assembly, under its own rule rather than `weak-crypto` or
-          // `ffi-raw-pointer`, because it is a distinct kind of finding: those
-          // two are about choosing a weak primitive or unchecked memory, while
-          // this is about the sandbox not being able to see the call at all.
-          if name == "asm" {
-              self.findings.push(LintFinding {
-                  rule: "inline-asm",
-                  message: format!(
-                      "{}() is not mediated by the capability sandbox: the sandbox \
+        }
+        // Inline assembly, under its own rule rather than `weak-crypto` or
+        // `ffi-raw-pointer`, because it is a distinct kind of finding: those
+        // two are about choosing a weak primitive or unchecked memory, while
+        // this is about the sandbox not being able to see the call at all.
+        if name == "asm" {
+            self.findings.push(LintFinding {
+                rule: "inline-asm",
+                message: format!(
+                    "{}() is not mediated by the capability sandbox: the sandbox \
                        gates builtins, and the machine executes the instruction \
                        directly. It is behind the `asm` capability and requires an \
                        `unsafe` block, so treat every use as a review boundary",
-                      name
-                  ),
-              });
-          }
-      }
+                    name
+                ),
+            });
+        }
+    }
 
     /// Flag an f-string that assembles a SQL statement or a shell command from a
     /// value that no `*_escape` call wraps.
@@ -670,7 +789,11 @@ fn looks_secret_expr(e: &Expr) -> bool {
             None
         };
         let Some(context) = context else { return };
-        let escape_for = if context == "sql" { "sql_escape" } else { "shell_escape" };
+        let escape_for = if context == "sql" {
+            "sql_escape"
+        } else {
+            "shell_escape"
+        };
 
         for part in parts {
             if Self::is_wrapped_in_escape(part) {
@@ -767,7 +890,11 @@ fn looks_secret_expr(e: &Expr) -> bool {
                     self.expr(v);
                 }
             }
-            Expr::Call { callee, args, named } => {
+            Expr::Call {
+                callee,
+                args,
+                named,
+            } => {
                 self.check_builtin_call(callee, args);
                 self.expr(callee);
                 for a in args {
@@ -814,7 +941,11 @@ fn looks_secret_expr(e: &Expr) -> bool {
                 }
                 self.expr(body);
             }
-            Expr::If { cond, then_branch, else_branch } => {
+            Expr::If {
+                cond,
+                then_branch,
+                else_branch,
+            } => {
                 self.expr(cond);
                 self.block(then_branch);
                 if let Some(els) = else_branch {
@@ -832,7 +963,13 @@ fn looks_secret_expr(e: &Expr) -> bool {
                 }
             }
             Expr::Block(stmts) => self.block(stmts),
-            Expr::Comprehension { iterable, cond, elem, value, .. } => {
+            Expr::Comprehension {
+                iterable,
+                cond,
+                elem,
+                value,
+                ..
+            } => {
                 self.expr(iterable);
                 self.expr(elem);
                 if let Some(c) = cond {
@@ -879,7 +1016,9 @@ mod tests {
     #[test]
     fn lint_flags_unused_variable() {
         let findings = lint_source("let x = 10\ndump 1").unwrap();
-        assert!(findings.iter().any(|f| f.rule == "unused-var" && f.message.contains("'x'")));
+        assert!(findings
+            .iter()
+            .any(|f| f.rule == "unused-var" && f.message.contains("'x'")));
     }
 
     #[test]
@@ -902,8 +1041,11 @@ mod tests {
 
     #[test]
     fn lint_flags_shadowed_binding() {
-        let findings = lint_source("fn f() {\n    let a = 1\n    let a = 2\n    dump a\n}\ndump f()").unwrap();
-        assert!(findings.iter().any(|f| f.rule == "shadowed" && f.message.contains("'a'")));
+        let findings =
+            lint_source("fn f() {\n    let a = 1\n    let a = 2\n    dump a\n}\ndump f()").unwrap();
+        assert!(findings
+            .iter()
+            .any(|f| f.rule == "shadowed" && f.message.contains("'a'")));
     }
 
     #[test]
@@ -916,8 +1058,7 @@ mod tests {
 
     #[test]
     fn flags_hardcoded_secret_by_binding_name() {
-        let findings =
-            lint_source("let api_key = \"hunter2hunter2\"\ndump api_key").unwrap();
+        let findings = lint_source("let api_key = \"hunter2hunter2\"\ndump api_key").unwrap();
         assert!(
             findings.iter().any(|f| f.rule == "hardcoded-secret"),
             "expected hardcoded-secret, got {:?}",
@@ -928,8 +1069,7 @@ mod tests {
     #[test]
     fn does_not_flag_secret_bound_from_a_call() {
         // secret_set is the correct way to do this.
-        let findings =
-            lint_source("let api_key = secret_get(\"K\")\ndump api_key").unwrap();
+        let findings = lint_source("let api_key = secret_get(\"K\")\ndump api_key").unwrap();
         assert!(!findings.iter().any(|f| f.rule == "hardcoded-secret"));
     }
 
@@ -984,13 +1124,22 @@ mod tests {
         for ok in ["\"http://localhost:8080/x\"", "\"http://127.0.0.1:9000\""] {
             let src = format!("let u = {}\ndump u", ok);
             let findings = lint_source(&src).unwrap();
-            assert!(!findings.iter().any(|f| f.rule == "plaintext-url"), "false positive for {}", ok);
+            assert!(
+                !findings.iter().any(|f| f.rule == "plaintext-url"),
+                "false positive for {}",
+                ok
+            );
         }
     }
 
     #[test]
     fn flags_weak_crypto() {
-        for call in ["md5(\"x\")", "sha1(\"x\")", "rot13(\"x\")", "xor(b\"a\", b\"b\")"] {
+        for call in [
+            "md5(\"x\")",
+            "sha1(\"x\")",
+            "rot13(\"x\")",
+            "xor(b\"a\", b\"b\")",
+        ] {
             let src = format!("let h = {}\ndump h", call);
             let findings = lint_source(&src).unwrap();
             assert!(
@@ -1005,7 +1154,11 @@ mod tests {
     #[test]
     fn flags_weak_hash_via_file_hash_argument() {
         let findings = lint_source("let h = file_hash(\"f.bin\", \"md5\")\ndump h").unwrap();
-        assert!(findings.iter().any(|f| f.rule == "weak-crypto"), "{:?}", findings);
+        assert!(
+            findings.iter().any(|f| f.rule == "weak-crypto"),
+            "{:?}",
+            findings
+        );
     }
     #[test]
     fn does_not_flag_strong_crypto() {
@@ -1033,7 +1186,8 @@ mod tests {
 
     #[test]
     fn flags_ffi_raw_pointer_calls() {
-        let findings = lint_source("let p = ffi_load(\"m\")\nlet q = ffi_ptr(p, 0)\ndump q").unwrap();
+        let findings =
+            lint_source("let p = ffi_load(\"m\")\nlet q = ffi_ptr(p, 0)\ndump q").unwrap();
         assert!(findings.iter().any(|f| f.rule == "ffi-raw-pointer"));
     }
 
@@ -1091,10 +1245,9 @@ mod tests {
         assert!(out.iter().any(|l| l.contains("42")), "{:?}", out);
 
         // ...and mutability is still enforced inside it.
-        let err = crate::eval(
-            "unsafe \"a real justification for this block\" {\n let y = 1\n y = 2\n}",
-        )
-        .unwrap_err();
+        let err =
+            crate::eval("unsafe \"a real justification for this block\" {\n let y = 1\n y = 2\n}")
+                .unwrap_err();
         assert!(err.to_string().contains("immutable"), "{}", err);
     }
 
@@ -1109,7 +1262,8 @@ mod tests {
 
     #[test]
     fn audit_finds_unsafe_blocks_nested_inside_functions() {
-        let src = "fn f() {\n unsafe \"nested reason long enough here\" {\n dump 1\n }\n}\ndump f()";
+        let src =
+            "fn f() {\n unsafe \"nested reason long enough here\" {\n dump 1\n }\n}\ndump f()";
         let report = lint_source_full(src).unwrap();
         assert_eq!(report.unsafe_sites.len(), 1, "{:?}", report.unsafe_sites);
     }
@@ -1120,7 +1274,10 @@ mod tests {
             let src = format!("unsafe \"{}\" {{\n dump 1\n}}", reason);
             let report = lint_source_full(&src).unwrap();
             assert!(
-                report.findings.iter().any(|f| f.rule == "unsafe-thin-reason"),
+                report
+                    .findings
+                    .iter()
+                    .any(|f| f.rule == "unsafe-thin-reason"),
                 "expected a thin-reason finding for {:?}, got {:?}",
                 reason,
                 report.findings
@@ -1130,10 +1287,14 @@ mod tests {
 
     #[test]
     fn a_real_justification_is_not_flagged() {
-        let src = "unsafe \"the binstruct decoder already bounds-checked this length\" {\n dump 1\n}";
+        let src =
+            "unsafe \"the binstruct decoder already bounds-checked this length\" {\n dump 1\n}";
         let report = lint_source_full(src).unwrap();
         assert!(
-            !report.findings.iter().any(|f| f.rule == "unsafe-thin-reason"),
+            !report
+                .findings
+                .iter()
+                .any(|f| f.rule == "unsafe-thin-reason"),
             "{:?}",
             report.findings
         );
@@ -1189,7 +1350,8 @@ mod tests {
     #[test]
     fn quiet_when_the_escape_is_applied_underneath_the_interpolation() {
         // `f"{trim(sql_escape(x))}"` has the transform in it, just not at the top.
-        let rules = findings_for(r#"let q = f"SELECT * FROM t WHERE id = {trim(sql_escape(uid))}""#);
+        let rules =
+            findings_for(r#"let q = f"SELECT * FROM t WHERE id = {trim(sql_escape(uid))}""#);
         assert!(
             !rules.iter().any(|r| r == "unescaped-interpolation"),
             "the transform happened underneath: {:?}",
@@ -1222,7 +1384,10 @@ mod tests {
     fn one_finding_per_fstring_however_many_holes() {
         let rules = findings_for(r#"let q = f"SELECT {a} FROM t WHERE b = {c} AND d = {e}""#);
         assert_eq!(
-            rules.iter().filter(|r| *r == "unescaped-interpolation").count(),
+            rules
+                .iter()
+                .filter(|r| *r == "unescaped-interpolation")
+                .count(),
             1,
             "five copies of the same fix is five times the noise: {:?}",
             rules
@@ -1263,5 +1428,4 @@ mod tests {
             );
         }
     }
-
 }

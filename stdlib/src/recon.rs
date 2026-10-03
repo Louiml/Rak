@@ -3,7 +3,7 @@ use std::net::{IpAddr, ToSocketAddrs};
 /// Resolve a hostname to IP addresses
 pub fn dns_lookup(hostname: &str) -> Vec<IpAddr> {
     let mut results = Vec::new();
-    
+
     // Try to resolve using ToSocketAddrs
     if let Ok(addrs) = format!("{}:80", hostname).to_socket_addrs() {
         for addr in addrs {
@@ -12,24 +12,29 @@ pub fn dns_lookup(hostname: &str) -> Vec<IpAddr> {
             }
         }
     }
-    
+
     results
 }
 
 /// Reverse DNS lookup for an IP address (real PTR query).
 pub fn reverse_dns(ip: &str) -> Option<String> {
-    crate::dns::reverse(ip, None).ok().and_then(|mut names| if names.is_empty() { None } else { Some(names.remove(0)) })
+    crate::dns::reverse(ip, None).ok().and_then(|mut names| {
+        if names.is_empty() {
+            None
+        } else {
+            Some(names.remove(0))
+        }
+    })
 }
 
 /// Enumerate common subdomains
 pub fn subdomain_enum(domain: &str) -> Vec<String> {
     let common_prefixes = [
-        "www", "mail", "ftp", "admin", "api", "dev", "test", "staging",
-        "blog", "shop", "support", "portal", "remote", "vpn", "dns",
-        "mx", "smtp", "imap", "pop", "webmail", "cpanel", "webdisk",
-        "ns1", "ns2", "ns3", "ns4"
+        "www", "mail", "ftp", "admin", "api", "dev", "test", "staging", "blog", "shop", "support",
+        "portal", "remote", "vpn", "dns", "mx", "smtp", "imap", "pop", "webmail", "cpanel",
+        "webdisk", "ns1", "ns2", "ns3", "ns4",
     ];
-    
+
     common_prefixes
         .iter()
         .map(|prefix| format!("{}.{}", prefix, domain))
@@ -40,38 +45,42 @@ pub fn subdomain_enum(domain: &str) -> Vec<String> {
 pub fn port_scan(host: &str, start_port: u16, end_port: u16, timeout_ms: u64) -> Vec<u16> {
     use std::net::{TcpStream, ToSocketAddrs};
     use std::time::Duration;
-    
+
     let mut open_ports = Vec::new();
-    
+
     for port in start_port..=end_port {
         let addr = format!("{}:{}", host, port);
         if let Ok(mut addrs) = addr.to_socket_addrs() {
             if let Some(socket_addr) = addrs.next() {
-                if TcpStream::connect_timeout(&socket_addr, Duration::from_millis(timeout_ms)).is_ok() {
+                if TcpStream::connect_timeout(&socket_addr, Duration::from_millis(timeout_ms))
+                    .is_ok()
+                {
                     open_ports.push(port);
                 }
             }
         }
     }
-    
+
     open_ports
 }
 
 /// Extract metadata from HTTP headers
-pub fn analyze_headers(headers: &std::collections::HashMap<String, String>) -> std::collections::HashMap<String, String> {
+pub fn analyze_headers(
+    headers: &std::collections::HashMap<String, String>,
+) -> std::collections::HashMap<String, String> {
     let mut analysis = std::collections::HashMap::new();
-    
+
     if let Some(server) = headers.get("Server") {
         analysis.insert("Web Server".to_string(), server.clone());
     }
-    
+
     if let Some(powered_by) = headers.get("X-Powered-By") {
         analysis.insert("Technology Stack".to_string(), powered_by.clone());
     }
-    
+
     if let Some(via) = headers.get("Via") {
         analysis.insert("Proxy".to_string(), via.clone());
     }
-    
+
     analysis
 }

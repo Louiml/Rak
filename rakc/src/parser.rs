@@ -70,7 +70,10 @@ impl<'a> Parser<'a> {
     }
 
     fn cur_off(&self) -> usize {
-        self.tokens.get(self.pos).map(|(_, o)| *o).unwrap_or(self.source.len())
+        self.tokens
+            .get(self.pos)
+            .map(|(_, o)| *o)
+            .unwrap_or(self.source.len())
     }
 
     fn span_here(&self) -> (usize, usize) {
@@ -458,7 +461,10 @@ impl<'a> Parser<'a> {
                 }
             }
             Some(Token::For) => self.parse_for(label),
-            other => Err(self.perr(format!("Expected loop/while/for after label, found {:?}", other))),
+            other => Err(self.perr(format!(
+                "Expected loop/while/for after label, found {:?}",
+                other
+            ))),
         }
     }
 
@@ -914,7 +920,10 @@ impl<'a> Parser<'a> {
             } else {
                 vec![]
             };
-            variants.push(EnumVariant { name: vname, fields });
+            variants.push(EnumVariant {
+                name: vname,
+                fields,
+            });
             if !self.match_token(&Token::Comma) {
                 break;
             }
@@ -1025,10 +1034,15 @@ impl<'a> Parser<'a> {
                 self.advance();
                 s
             }
-            _ => return Err(self.perr("Expected ABI string after 'extern' (e.g. \"C\")".to_string())),
+            _ => {
+                return Err(self.perr("Expected ABI string after 'extern' (e.g. \"C\")".to_string()))
+            }
         };
         if abi != "C" {
-            return Err(self.perr(format!("Unsupported ABI '{}' (only \"C\" is supported)", abi)));
+            return Err(self.perr(format!(
+                "Unsupported ABI '{}' (only \"C\" is supported)",
+                abi
+            )));
         }
         let lib = if matches!(self.peek(), Some(Token::From)) {
             self.advance();
@@ -1062,7 +1076,13 @@ impl<'a> Parser<'a> {
                 } else {
                     None
                 };
-                params.push(Param { name: pname, type_hint, default: None, rest: false, optional: false });
+                params.push(Param {
+                    name: pname,
+                    type_hint,
+                    default: None,
+                    rest: false,
+                    optional: false,
+                });
                 if !self.match_token(&Token::Comma) {
                     break;
                 }
@@ -1075,7 +1095,12 @@ impl<'a> Parser<'a> {
             };
             self.match_token(&Token::Semi);
             self.match_token(&Token::Comma);
-            decls.push(ForeignFn { name, params, varargs, return_type });
+            decls.push(ForeignFn {
+                name,
+                params,
+                varargs,
+                return_type,
+            });
         }
         self.expect(Token::RBrace)?;
         Ok(Stmt::Extern { abi, lib, decls })
@@ -1100,7 +1125,10 @@ impl<'a> Parser<'a> {
         self.expect(Token::Eq)?;
         let value = self.parse_expr()?;
         self.semi()?;
-        Ok(Stmt::Const { name, value: Box::new(value) })
+        Ok(Stmt::Const {
+            name,
+            value: Box::new(value),
+        })
     }
 
     /// Parse `binstruct Name { field: type, ... }`.
@@ -1120,7 +1148,11 @@ impl<'a> Parser<'a> {
             } else {
                 None
             };
-            fields.push(BinField { name: fname, kind, repeat });
+            fields.push(BinField {
+                name: fname,
+                kind,
+                repeat,
+            });
             self.match_token(&Token::Comma);
             self.match_token(&Token::Semi);
         }
@@ -1143,7 +1175,11 @@ impl<'a> Parser<'a> {
             _ => self.expect_ident()?,
         };
         let body = self.parse_block()?;
-        Ok(Stmt::Tunnel { name, passphrase, body })
+        Ok(Stmt::Tunnel {
+            name,
+            passphrase,
+            body,
+        })
     }
 
     /// Parse a `binstruct` field type: `u16be`, `u4`, `i32le`, `bytes`, `rest`,
@@ -1295,12 +1331,19 @@ impl<'a> Parser<'a> {
             } else {
                 None
             };
-            let default = if self.match_token(&Token::Eq) { // name: T = default
+            let default = if self.match_token(&Token::Eq) {
+                // name: T = default
                 Some(Box::new(self.parse_expr()?))
             } else {
                 None
             };
-            params.push(Param { name, type_hint, default, rest, optional });
+            params.push(Param {
+                name,
+                type_hint,
+                default,
+                rest,
+                optional,
+            });
             if !self.match_token(&Token::Comma) {
                 break;
             }
@@ -1494,9 +1537,21 @@ impl<'a> Parser<'a> {
                     }
                     self.expect(Token::RParen)?;
                     match n.as_str() {
-                        "Some" => return Ok(Pattern::Some(Box::new(inner.into_iter().next().unwrap_or(Pattern::Wild)))),
-                        "Ok" => return Ok(Pattern::Ok(Box::new(inner.into_iter().next().unwrap_or(Pattern::Wild)))),
-                        "Err" => return Ok(Pattern::Err(Box::new(inner.into_iter().next().unwrap_or(Pattern::Wild)))),
+                        "Some" => {
+                            return Ok(Pattern::Some(Box::new(
+                                inner.into_iter().next().unwrap_or(Pattern::Wild),
+                            )))
+                        }
+                        "Ok" => {
+                            return Ok(Pattern::Ok(Box::new(
+                                inner.into_iter().next().unwrap_or(Pattern::Wild),
+                            )))
+                        }
+                        "Err" => {
+                            return Ok(Pattern::Err(Box::new(
+                                inner.into_iter().next().unwrap_or(Pattern::Wild),
+                            )))
+                        }
                         _ => {}
                     }
                 }
@@ -1645,21 +1700,27 @@ impl<'a> Parser<'a> {
                 Some(Token::Hex(h)) => {
                     self.advance();
                     if h > 0xFF {
-                        return Err(self.perr("Byte value out of range in bytes pattern".to_string()));
+                        return Err(
+                            self.perr("Byte value out of range in bytes pattern".to_string())
+                        );
                     }
                     h as u8
                 }
                 Some(Token::Int(i)) => {
                     self.advance();
                     if !(0..=255).contains(&i) {
-                        return Err(self.perr("Byte value out of range in bytes pattern".to_string()));
+                        return Err(
+                            self.perr("Byte value out of range in bytes pattern".to_string())
+                        );
                     }
                     i as u8
                 }
                 Some(Token::Char(c)) => {
                     self.advance();
                     if c as u32 > 0xFF {
-                        return Err(self.perr("Char out of byte range in bytes pattern".to_string()));
+                        return Err(
+                            self.perr("Char out of byte range in bytes pattern".to_string())
+                        );
                     }
                     c as u8
                 }
@@ -1760,7 +1821,10 @@ impl<'a> Parser<'a> {
             let mut ok = true;
             while self.match_token(&Token::Comma) {
                 let t = self.parse_or()?;
-                if !is_assignable(&t) { ok = false; break; }
+                if !is_assignable(&t) {
+                    ok = false;
+                    break;
+                }
                 targets.push(t);
             }
             if ok && self.match_token(&Token::Eq) {
@@ -1768,10 +1832,7 @@ impl<'a> Parser<'a> {
                 while self.match_token(&Token::Comma) {
                     values.push(self.parse_or()?);
                 }
-                return Ok(Expr::MultiAssign {
-                    targets,
-                    values,
-                });
+                return Ok(Expr::MultiAssign { targets, values });
             }
             // not a multi-assign; restore and fall through
             self.pos = saved;
@@ -1808,16 +1869,36 @@ impl<'a> Parser<'a> {
     }
 
     fn match_compound_assign(&mut self) -> Option<CompoundOp> {
-        if self.match_token(&Token::PlusEq) { return Some(CompoundOp::Add); }
-        if self.match_token(&Token::MinusEq) { return Some(CompoundOp::Sub); }
-        if self.match_token(&Token::StarEq) { return Some(CompoundOp::Mul); }
-        if self.match_token(&Token::SlashEq) { return Some(CompoundOp::Div); }
-        if self.match_token(&Token::PercentEq) { return Some(CompoundOp::Rem); }
-        if self.match_token(&Token::AmpersandEq) { return Some(CompoundOp::BitAnd); }
-        if self.match_token(&Token::PipeEq) { return Some(CompoundOp::BitOr); }
-        if self.match_token(&Token::CaretEq) { return Some(CompoundOp::BitXor); }
-        if self.match_token(&Token::ShlEq) { return Some(CompoundOp::Shl); }
-        if self.match_token(&Token::ShrEq) { return Some(CompoundOp::Shr); }
+        if self.match_token(&Token::PlusEq) {
+            return Some(CompoundOp::Add);
+        }
+        if self.match_token(&Token::MinusEq) {
+            return Some(CompoundOp::Sub);
+        }
+        if self.match_token(&Token::StarEq) {
+            return Some(CompoundOp::Mul);
+        }
+        if self.match_token(&Token::SlashEq) {
+            return Some(CompoundOp::Div);
+        }
+        if self.match_token(&Token::PercentEq) {
+            return Some(CompoundOp::Rem);
+        }
+        if self.match_token(&Token::AmpersandEq) {
+            return Some(CompoundOp::BitAnd);
+        }
+        if self.match_token(&Token::PipeEq) {
+            return Some(CompoundOp::BitOr);
+        }
+        if self.match_token(&Token::CaretEq) {
+            return Some(CompoundOp::BitXor);
+        }
+        if self.match_token(&Token::ShlEq) {
+            return Some(CompoundOp::Shl);
+        }
+        if self.match_token(&Token::ShrEq) {
+            return Some(CompoundOp::Shr);
+        }
         None
     }
 
@@ -2272,10 +2353,7 @@ impl<'a> Parser<'a> {
             Some(Token::Interp(template)) => {
                 self.advance();
                 let parts = parse_interp_parts(&template)?;
-                Ok(Expr::Interp {
-                    template,
-                    parts,
-                })
+                Ok(Expr::Interp { template, parts })
             }
             Some(Token::Bytes(b)) => {
                 self.advance();
@@ -2341,7 +2419,9 @@ impl<'a> Parser<'a> {
                 }
                 let mut elements = vec![first];
                 while self.match_token(&Token::Comma) {
-                    if self.check(&Token::RBracket) { break; }
+                    if self.check(&Token::RBracket) {
+                        break;
+                    }
                     elements.push(self.parse_expr()?);
                 }
                 self.expect(Token::RBracket)?;
@@ -2381,7 +2461,11 @@ impl<'a> Parser<'a> {
 
     fn looks_like_struct_lit(&self) -> bool {
         if self.check(&Token::LBrace) {
-            if self.peek_n(1).map(|t| matches!(t, Token::RBrace)).unwrap_or(false) {
+            if self
+                .peek_n(1)
+                .map(|t| matches!(t, Token::RBrace))
+                .unwrap_or(false)
+            {
                 return true;
             }
             matches!(self.peek_n(1), Some(Token::Ident(_)))
@@ -2401,7 +2485,8 @@ impl<'a> Parser<'a> {
         // identifier followed by `:` (the conventional `{ k: v }`) or a string
         // literal followed by `:` (the `{ "k": v }` JSON-style form).
         let is_map_key = |tok: Option<&Token>, next: Option<&Token>| -> bool {
-            matches!(tok, Some(Token::Ident(_)) | Some(Token::String(_))) && matches!(next, Some(Token::Colon))
+            matches!(tok, Some(Token::Ident(_)) | Some(Token::String(_)))
+                && matches!(next, Some(Token::Colon))
         };
         if is_map_key(self.peek(), self.peek_n(1)) {
             // Parse the first key as its raw form (Ident or String). An ident
@@ -2427,10 +2512,15 @@ impl<'a> Parser<'a> {
                 return self.parse_map_comprehension(first_key, value);
             }
             // Regular map: convert an ident key to a string literal.
-            let key = match first_key { Expr::Ident(n) => Expr::String(n), other => other };
+            let key = match first_key {
+                Expr::Ident(n) => Expr::String(n),
+                other => other,
+            };
             let mut pairs = vec![(key, value)];
             while self.match_token(&Token::Comma) {
-                if self.check(&Token::RBrace) { break; }
+                if self.check(&Token::RBrace) {
+                    break;
+                }
                 let key = match self.peek() {
                     Some(Token::Ident(name)) => {
                         let name = name.clone();
@@ -2515,7 +2605,10 @@ impl<'a> Parser<'a> {
 }
 
 fn is_assignable(e: &Expr) -> bool {
-    matches!(e, Expr::Ident(_) | Expr::Index(_, _) | Expr::FieldAccess(_, _))
+    matches!(
+        e,
+        Expr::Ident(_) | Expr::Index(_, _) | Expr::FieldAccess(_, _)
+    )
 }
 
 fn is_numeric_pattern(p: &Pattern) -> bool {
@@ -2529,13 +2622,25 @@ fn is_numeric_pattern(p: &Pattern) -> bool {
 /// `x |> SomeIdent`       becomes  `SomeIdent(x)`
 fn desugar_pipe(left: Expr, right: Expr) -> Expr {
     match right {
-        Expr::Call { callee, mut args, named } => {
+        Expr::Call {
+            callee,
+            mut args,
+            named,
+        } => {
             let mut new_args = Vec::with_capacity(args.len() + 1);
             new_args.push(left);
             new_args.append(&mut args);
-            Expr::Call { callee, args: new_args, named }
+            Expr::Call {
+                callee,
+                args: new_args,
+                named,
+            }
         }
-        other => Expr::Call { callee: Box::new(other), args: vec![left], named: vec![] },
+        other => Expr::Call {
+            callee: Box::new(other),
+            args: vec![left],
+            named: vec![],
+        },
     }
 }
 
@@ -2830,14 +2935,78 @@ mod tests {
     #[test]
     fn test_parse_import_forms() {
         let cases = vec![
-            ("import math", ImportKind::Whole, false, false, 0, false, false),
-            ("import math as m", ImportKind::Whole, false, false, 0, false, false),
-            ("import \"./m.rak\"", ImportKind::Whole, true, false, 0, false, false),
-            ("from math import add", ImportKind::From, false, false, 1, false, false),
-            ("from math import add as plus, mul as times", ImportKind::From, false, false, 2, false, false),
-            ("from math import *", ImportKind::From, false, false, 0, true, false),
-            ("pub use math", ImportKind::Whole, false, false, 0, false, true),
-            ("pub use {add, mul} from math", ImportKind::From, false, false, 2, false, true),
+            (
+                "import math",
+                ImportKind::Whole,
+                false,
+                false,
+                0,
+                false,
+                false,
+            ),
+            (
+                "import math as m",
+                ImportKind::Whole,
+                false,
+                false,
+                0,
+                false,
+                false,
+            ),
+            (
+                "import \"./m.rak\"",
+                ImportKind::Whole,
+                true,
+                false,
+                0,
+                false,
+                false,
+            ),
+            (
+                "from math import add",
+                ImportKind::From,
+                false,
+                false,
+                1,
+                false,
+                false,
+            ),
+            (
+                "from math import add as plus, mul as times",
+                ImportKind::From,
+                false,
+                false,
+                2,
+                false,
+                false,
+            ),
+            (
+                "from math import *",
+                ImportKind::From,
+                false,
+                false,
+                0,
+                true,
+                false,
+            ),
+            (
+                "pub use math",
+                ImportKind::Whole,
+                false,
+                false,
+                0,
+                false,
+                true,
+            ),
+            (
+                "pub use {add, mul} from math",
+                ImportKind::From,
+                false,
+                false,
+                2,
+                false,
+                true,
+            ),
         ];
         for (src, kind, is_file, _has_alias, n_names, star, reexport) in cases {
             let tokens = tokenize(src).unwrap();

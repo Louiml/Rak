@@ -1,144 +1,104 @@
-# Rak v0.8.3
+## 0.8.4 — 2026-10-03
 
-Cross-module variables that behave like Python's, byte-exact binary file I/O, a
-`for` loop that survives a NUL byte, and `fmt` that understands a format spec.
+Security and performance release. This one should be read before upgrading, not
+after.
 
-## About the version number
+### Security
 
-This release is tagged **v0.8.3**. The tags before it read `v0.4.0` … `v0.7.2` and
-then switched to `v8.0.0`, `v8.1.0`, `v8.1.1`, so v0.8.3 sits numerically below the
-8.x line it follows.
+**FFI pointer provenance — an arbitrary write anywhere in the process is closed.**
 
-That is deliberate, and it has one consequence worth stating plainly: **`cargo`
-will read this as a downgrade from 8.1.1.** A `cargo update` will move the dependency
-backwards rather than forwards, and a lockfile pinning `8.1.1` will not move to
-`0.8.3` on its own. If you depend on Rak, take the commit rather than the tag, or
-specify `=0.8.3` deliberately.
+`ffi_write` and `ffi_read` did this:
 
-The two commits this release contains are titled `Rak v8.2.0`, which was the number
-in use when they were written. Rewriting them would have meant force-pushing already
-public history to make the subjects agree with a number decided afterwards, which
-seemed the worse trade. The titles describe the work; the tag names the release.
-
-## A `for` loop stopped at the first `0x00`
-
-The headline fix, and it is worse than anything else in this release.
-
-```rak
-let buf = bytes([0, 15, 16, 255])
-let mut n = 0
-for b in buf { n = n + 1 }
-dump n            // interpreter: 4    VM, before: 0
+```rust
+unsafe { *((ptr as usize + off) as *mut u8) = byte }
 ```
 
-The VM's loop decided whether to continue by testing the **element's truthiness**
-rather than the loop bound — `IndexGet`, then `JumpIfFalse`. Since `0`, `""` and
-`false` are all falsy, iteration ended at the first of them. No diagnostic, and
-silent, because the interpreter was fine and the divergence gate did not cover it.
+with no check that `ptr` was ever allocated, and none that `off` was inside it.
+Because `ffi_ptr(n)` builds a pointer from *any* integer,
+`ffi_write(ffi_ptr(ADDRESS), 0, 0x41)` could write a byte anywhere the process
+could reach. `ffi_read` was the matching read. This is the most severe item in the
+security review, and unlike most of that list it was completely real.
 
-`0x00` is the most common byte in a binary file, so `for b in buffer` walked a buffer
-and then stopped dead at the first NUL. It was found by writing a hex editor on top
-of Rak: the engine's first buffer walk died partway through a test file, and the
-cause was a language bug rather than anything in the editor.
+A pointer is now *provenanced* if Rak allocated it (`ffi_alloc`,
+`ffi_string_to_cstr`) or was told it owns a region (`ffi_trust`). Provenanced
+pointers are range-checked on every access against the size recorded at allocation.
+A pointer that is neither is refused by name, and the error says what to do about
+it.
 
-`Op::Len` now makes the bound `idx < len`. A loop bound has to be a comparison
-against a length, not a test of the value being carried.
+`ffi_trust` is the deliberate escape hatch. A language with FFI that refused every
+foreign address would be useless, and resolving a symbol's address and then calling
+it is legitimate work. What is not acceptable is an address that is *silently*
+accepted, because that is indistinguishable from a safety check that always passes.
+`ffi_trust` turns unchecked pointer arithmetic into an assertion written down in the
+source — the same bargain `unsafe { reason }` makes everywhere else. It also
+narrows: trusting 4 bytes of a 16-byte allocation makes an access at offset 4 fail
+again, which is tested.
 
-It survived review because the one test covering byte iteration used `bytes([1, 2])`,
-which has no falsy byte in it.
+`ffi_cstr_to_string` was a denial of service by another route — it scanned for a NUL
+byte with no bound, so a pointer to a NUL-free buffer walked off the end into
+unmapped memory, reachable from a pointer that came out of a network response. It
+is now bounded at 1 MiB.
 
-## `fmt` takes real format specs
+`ffi_read_i32` checks all four bytes, not merely that `off` is inside: `off` being
+valid while the read runs three bytes past the end is still a read past the end.
 
-```rak
-dump fmt("{:02X}", 5)     // 5, before.  05, now.
-dump fmt("{:#x}", 255)    // 0xff
-dump fmt("[{:>4}]", n)     // right-aligned, width 4
-dump fmt("{:.2f}", ratio)  // two decimals, on both backends
-```
+The bounds arithmetic is done in `u128`, not `u64`, on purpose. `ptr + off` in `u64`
+wraps, and a bounds check a large offset can defeat is not a check. There is a test
+that specifically tries to defeat it.
 
-The spec was matched by asking whether the text *contained* `04X`, `08X`, `x` or `X`.
-Exactly two widths worked and no other type did, so `{:02X}` — the width a hex dump
-wants — fell through to the default rendering.
+Both backends share `rak_stdlib::ffi::Allocations` so the logic lives in one tested
+place. `ffi_trust` is covered by the existing `ffi_` capability prefix, so it needs
+no new sandbox entry.
 
-The VM's copy had drifted further and had **no float branch at all**, so
-`fmt("{:.2f}", x)` printed a rounded value on the interpreter and the raw float on
-the VM. Two hand-written copies of the same chain is the underlying mistake; they are
-now one shared parser (`rakc/src/fmt_spec.rs`), and `rakc/tests/fmt_specs.rs` runs a
-table of specs through both backends and fails if they disagree.
+Existing `ffi_alloc`/`ffi_free` and legitimate access are unchanged and tested.
 
-The width counts the sign, matching Rust, Python and Go: `{:05}` of `-42` is `-0042`.
+### Performance
 
-## Cross-module variables
+**Constant folding.** `compile_expr` had none. Every `2 * 3` became two `LoadConst`s,
+an `AddI` and a push, on every evaluation — inside the innermost loop of every
+numeric program. `fold_int_binary` now folds the literal-on-literal case for the
+arithmetic and bitwise operators, and is deliberately narrow: both operands must be
+literals; division or remainder by zero, out-of-range shift counts, and overflow all
+fold to *nothing* so the runtime behaviour is unchanged.
 
-`import m` used to bind a *snapshot* of the module's exports, so a `pub let mut` the
-module reassigned never reached the importer. A module's own top-level `let mut`
-reset on every call, because a module body ran in a scope on the importer's
-environment and `Env::clone` deep-copies scopes — `bump(); bump()` gave `1, 1`.
+**`rakc bench` now measures something.** The old version timed
+`rakc::eval(&source)` against `vm.run()` and nothing else. That is not a backend
+comparison: the interpreter figure included lexing, parsing and setup, the VM figure
+was bytecode execution on an already-compiled chunk, and compile time was attributed
+to nobody. It also used `as_millis()`, so anything under a millisecond printed
+`0 ms`.
 
-```rak
-import m
-m.X = v         // writes the module's state, and only if it is `pub let mut`
-from m import x as y   // a copy, on both backends
-```
+It now reports five phases — lex, parse, compile, interp, vm — each over `--repeat`
+samples (default 5) after an unmeasured warm-up, as a median. The two execution
+numbers are finally like for like, and the output labels them "execution only" so
+they cannot be misread. On `examples/bench.rak` in a debug build it reports 6.61x,
+which is a measured number where the README previously had a hand-written estimate.
 
-The interpreter already did this. Five of the six documented VM differences are now
-closed: a private top-level is no longer visible to the importer, two modules may
-export the same name, `from m import x` copies with or without an alias, `mod { }`
-blocks no longer collide, and reading a private or misspelled name through a handle
-reports it by name instead of returning `nil`.
+**A benchmark corpus.** `examples/bench/` has six workloads covering recursion,
+arithmetic, arrays, map fields, strings and bytes.
 
-The last one is not fixed, and `docs/V8-KNOWN-ISSUES.md` says what it needs: a
-module body still sees a name it never *declared*. Closing it requires a module
-scope in the compiler, and the compiler has no list of builtin globals — the VM
-registers those at startup — so it cannot tell `len` from a leaked name. Guessing
-would break every module that calls a builtin. The test that covers it fails loudly
-with "convert this to agree_on" if it ever closes.
+### Fixes
 
-## Byte-exact binary file I/O
+Three backend message divergences, all the same defect — the VM and the interpreter
+described the same failure differently, so an error message told you which backend
+you were on:
 
-`file_read` is `fs::read_to_string`, so it **fails** on any file containing a byte
-sequence that is not valid UTF-8, and `write` coerces through UTF-8, so a `0xFF`
-came back as U+FFFD. There was no way to open a binary file at all.
+| expression | interpreter | VM (before) |
+|---|---|---|
+| `5 % 0` | `Division by zero` | `rem by zero` |
+| `5 / 0` | `Division by zero` | `div by zero` |
+| `n * x` | `Undefined variable: x` | `Undefined: x` |
 
-```rak
-let buf = file_read_bytes("firmware.bin")
-buf[0] = 0xFF
-file_write_bytes("patched.bin", buf)
+The first two were Rust's internal panic wording copied into hand-written `Err`
+strings. The interpreter was itself inconsistent on the third (`Undefined variable:`
+in two places, `Undefined:` in a third); both backends are now normalised to the
+clearer form.
 
-let m = mmap_open("firmware.bin", "rw")
-mmap_write(m, 0x100, 0x90)          // the mapping *is* the file
-```
+### Upgrade notes
 
-Plus `bytes([...])`, byte indexing, byte assignment, byte iteration, and buffer
-concatenation. `mmap_write` refuses a read-only mapping and an out-of-range offset
-*by name*, and a multi-byte write that would run past the end applies none of its
-bytes.
+If you use FFI, you may need to add `ffi_trust` calls. Any `ffi_write`/`ffi_read`
+through a pointer that did not come from `ffi_alloc` or `ffi_string_to_cstr` will now
+fail at the point of use rather than corrupting memory silently — which is the
+intended behaviour, but it is a behavioural change.
 
-## Smaller things
-
-  * **`Hex` no longer renders padded.** `dump 0x00` printed
-    `0x0000000000000000` on the VM. The value carried a digit width and `Display`
-    used it, but nothing ever set that width from the source — the compiler
-    hardcoded 64 — so all sixteen slots were used. The field had exactly one reader,
-    so it is gone.
-  * **A corrected claim.** The known-issues entry said the two backends *compared*
-    `Hex` differently. They never did: `PartialEq` has a cross-representation numeric
-    fallback and `Op::Eq` goes straight through it. Retracted, with the evidence,
-    rather than left as a warning that would send someone hunting a bug that is not
-    there.
-  * **`:dis` desynced** by one byte after every `for` loop, because `IterItems` has
-    a 1-byte operand and was missing from the width table.
-  * **The VM's `len` did not accept a struct**, which the interpreter's did.
-  * **The IDE version is pinned from the tag** by `scripts/pin-ide-version.sh`, which
-    has been run against `v0.8.3` to confirm all three files take. v8.1.0 shipped
-    four Tauri bundles named `8.0.0` because that check did not exist.
-
-## Tests
-
-505 workspace tests pass. `module_state.rs` is 33, `fmt_specs.rs` is 9,
-`bytes_io.rs` is 11 — each running its cases on both backends and failing on any
-disagreement. The tests that used to *pin* a divergence now assert agreement; the one
-that is still real says so in its name.
-
-The hex editor these primitives were built for is at
-<https://github.com/Louiml/HexEditor>.
+Release notes are generated from `.github/release_body.md` at tag time.

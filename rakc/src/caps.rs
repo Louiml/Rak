@@ -46,10 +46,18 @@ pub fn enable(allow: &str) {
     let mut sb = Sandbox::default();
     for cap in allow.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()) {
         match cap {
-            "all" => sb = Sandbox {
-                net: true, fs_write: true, process: true, ffi: true,
-                raw_sockets: true, gui: true, secrets: true, asm: true,
-            },
+            "all" => {
+                sb = Sandbox {
+                    net: true,
+                    fs_write: true,
+                    process: true,
+                    ffi: true,
+                    raw_sockets: true,
+                    gui: true,
+                    secrets: true,
+                    asm: true,
+                }
+            }
             "net" => sb.net = true,
             "fs" | "fs_write" => sb.fs_write = true,
             "process" | "proc" => sb.process = true,
@@ -69,7 +77,6 @@ pub fn disable() {
     *ACTIVE.write().unwrap() = None;
 }
 
-
 /// Map a builtin name to the capability it requires, if any. Pure builders
 /// (packet/header construction, TLS parsing, hashing) are intentionally not
 /// gated — they cannot touch the outside world.
@@ -87,11 +94,22 @@ fn required_cap(name: &str) -> Option<&'static str> {
         (
             "net",
             &[
-                "net_listen", "net_accept", "net_connect", "net_local_addr",
+                "net_listen",
+                "net_accept",
+                "net_connect",
+                "net_local_addr",
                 // every TCP/UDP/HTTP/WebSocket/DNS I/O builtin
-                "tcp_", "udp_", "http_", "ws_", "dns_",
+                "tcp_",
+                "udp_",
+                "http_",
+                "ws_",
+                "dns_",
                 // network-capable investigation builtins (ext packs)
-                "scan_ports", "fetch", "tunnel_", "whois", "ct_subdomains",
+                "scan_ports",
+                "fetch",
+                "tunnel_",
+                "whois",
+                "ct_subdomains",
             ],
         ),
         ("process", &["process_"]),
@@ -103,25 +121,34 @@ fn required_cap(name: &str) -> Option<&'static str> {
             "raw_sockets",
             &["net_raw_send", "net_raw_recv", "pcap_listen"],
         ),
-          ("gui", &["gui_", "window_"]),
-          ("secrets", &["secret_"]),
-          // Inline assembly. A separate capability rather than a reuse of `ffi`
-          // or `raw` on purpose: `ffi` is about calling named functions through
-          // a library Rak chose, and `raw` is about packet bytes. Assembly is
-          // arbitrary machine code, which can do either of those and a great
-          // deal more, including anything the sandbox has not thought to name.
-          // A capability that is granted in the same breath as `raw` would be
-          // granted by habit.
-          ("asm", &["asm"]),
+        ("gui", &["gui_", "window_"]),
+        ("secrets", &["secret_"]),
+        // Inline assembly. A separate capability rather than a reuse of `ffi`
+        // or `raw` on purpose: `ffi` is about calling named functions through
+        // a library Rak chose, and `raw` is about packet bytes. Assembly is
+        // arbitrary machine code, which can do either of those and a great
+        // deal more, including anything the sandbox has not thought to name.
+        // A capability that is granted in the same breath as `raw` would be
+        // granted by habit.
+        ("asm", &["asm"]),
         (
             "fs_write",
-            &["file_write", "file_append", "append_file", "mkdir", "remove_file",
-              "zip_write", "report_write",
-              // Byte-exact writers, and writing through a mapping. Each of these
-              // modifies a file, so gating `file_write` while leaving these
-              // ungated would have been a hole in the sandbox rather than a
-              // narrower surface.
-              "file_write_bytes", "file_append_bytes", "mmap_write"],
+            &[
+                "file_write",
+                "file_append",
+                "append_file",
+                "mkdir",
+                "remove_file",
+                "zip_write",
+                "report_write",
+                // Byte-exact writers, and writing through a mapping. Each of these
+                // modifies a file, so gating `file_write` while leaving these
+                // ungated would have been a hole in the sandbox rather than a
+                // narrower surface.
+                "file_write_bytes",
+                "file_append_bytes",
+                "mmap_write",
+            ],
         ),
     ];
     for (cap, prefixes) in table {
@@ -149,12 +176,12 @@ pub fn check_str(name: &str) -> Result<(), String> {
         "fs_write" => sb.fs_write,
         "process" => sb.process,
         "ffi" => sb.ffi,
-            "raw_sockets" => sb.raw_sockets,
-            "gui" => sb.gui,
-            "secrets" => sb.secrets,
-            "asm" => sb.asm,
-            _ => false,
-        };
+        "raw_sockets" => sb.raw_sockets,
+        "gui" => sb.gui,
+        "secrets" => sb.secrets,
+        "asm" => sb.asm,
+        _ => false,
+    };
     if allowed {
         Ok(())
     } else {
@@ -195,9 +222,7 @@ pub fn parse_cli(rest: &[String]) -> (bool, String, Option<u32>, Vec<String>) {
                 i += 1;
                 match rest.get(i).and_then(|v| v.parse::<u32>().ok()) {
                     Some(d) if d > 0 => max_depth = Some(d),
-                    _ => eprintln!(
-                        "--max-depth needs a positive number, e.g. --max-depth 512"
-                    ),
+                    _ => eprintln!("--max-depth needs a positive number, e.g. --max-depth 512"),
                 }
             }
             other => clean.push(other.to_string()),
@@ -208,9 +233,11 @@ pub fn parse_cli(rest: &[String]) -> (bool, String, Option<u32>, Vec<String>) {
 }
 
 /// List the recognized sandbox capabilities (for `--help` text).
-    pub fn capability_names() -> &'static [&'static str] {
-        &["net", "fs_write", "process", "ffi", "raw", "gui", "secrets", "asm", "all"]
-    }
+pub fn capability_names() -> &'static [&'static str] {
+    &[
+        "net", "fs_write", "process", "ffi", "raw", "gui", "secrets", "asm", "all",
+    ]
+}
 
 #[cfg(test)]
 mod tests {

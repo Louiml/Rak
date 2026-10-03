@@ -289,7 +289,10 @@ mod tests {
         let cases = ["'", "\"", "<", ">", "&", "`", "$", ";", "|", "&"];
         for c in cases {
             let html = html_escape(c);
-            assert!(!html.contains('<') && !html.contains('>'), "{c:?} -> {html:?}");
+            assert!(
+                !html.contains('<') && !html.contains('>'),
+                "{c:?} -> {html:?}"
+            );
             let sql = sql_escape(c);
             assert_eq!(sql.matches('\'').count() % 2, 0, "{c:?} -> {sql:?}");
         }

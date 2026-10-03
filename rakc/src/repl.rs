@@ -9,7 +9,8 @@ pub fn run() {
     let mut history: Vec<String> = Vec::new();
     let mut buffer = String::new();
 
-    let mut rl = rustyline::DefaultEditor::new().unwrap_or_else(|_| rustyline::DefaultEditor::new().unwrap());
+    let mut rl = rustyline::DefaultEditor::new()
+        .unwrap_or_else(|_| rustyline::DefaultEditor::new().unwrap());
     let _ = rl.load_history("~/.rak_history");
 
     loop {
@@ -101,27 +102,23 @@ fn handle_repl_command(interp: &mut Interpreter, cmd: &str, rest: &str, buffer: 
             println!("vars command: not yet implemented (need interpreter scope dump)");
             let _ = (interp, rest);
         }
-        "ast" => {
-            match crate::lexer::tokenize(rest) {
-                Ok(tokens) => match crate::parser::parse(&tokens, rest) {
-                    Ok(ast) => println!("{:#?}", ast),
-                    Err(e) => println!("parse error: {}", e),
+        "ast" => match crate::lexer::tokenize(rest) {
+            Ok(tokens) => match crate::parser::parse(&tokens, rest) {
+                Ok(ast) => println!("{:#?}", ast),
+                Err(e) => println!("parse error: {}", e),
+            },
+            Err(e) => println!("lex error: {}", e),
+        },
+        "bytecode" => match crate::lexer::tokenize(rest) {
+            Ok(tokens) => match crate::parser::parse(&tokens, rest) {
+                Ok(ast) => match crate::compiler::compile_module(&ast) {
+                    Ok(chunk) => print_chunk(&chunk),
+                    Err(e) => println!("compile error: {}", e),
                 },
-                Err(e) => println!("lex error: {}", e),
-            }
-        }
-        "bytecode" => {
-            match crate::lexer::tokenize(rest) {
-                Ok(tokens) => match crate::parser::parse(&tokens, rest) {
-                    Ok(ast) => match crate::compiler::compile_module(&ast) {
-                        Ok(chunk) => print_chunk(&chunk),
-                        Err(e) => println!("compile error: {}", e),
-                    },
-                    Err(e) => println!("parse error: {}", e),
-                },
-                Err(e) => println!("lex error: {}", e),
-            }
-        }
+                Err(e) => println!("parse error: {}", e),
+            },
+            Err(e) => println!("lex error: {}", e),
+        },
         "trace" => {
             println!("trace command: not yet implemented");
             let _ = (interp, rest, buffer);

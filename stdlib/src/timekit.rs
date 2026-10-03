@@ -104,7 +104,9 @@ pub fn fmt(ts: i64, fmt: &str) -> String {
                 Some('H') => out.push_str(&format!("{:02}", c.hour)),
                 Some('M') => out.push_str(&format!("{:02}", c.minute)),
                 Some('S') => out.push_str(&format!("{:02}", c.second)),
-                Some('T') => out.push_str(&format!("{:02}:{:02}:{:02}", c.hour, c.minute, c.second)),
+                Some('T') => {
+                    out.push_str(&format!("{:02}:{:02}:{:02}", c.hour, c.minute, c.second))
+                }
                 Some('%') => out.push('%'),
                 Some(other) => {
                     out.push('%');
@@ -132,9 +134,18 @@ pub fn parse(s: &str) -> Result<i64, String> {
         },
     };
     let mut dp = date.split('-');
-    let year = dp.next().and_then(|v| v.parse::<i64>().ok()).ok_or("expected YYYY")?;
-    let month = dp.next().and_then(|v| v.parse::<i64>().ok()).ok_or("expected MM")?;
-    let day = dp.next().and_then(|v| v.parse::<i64>().ok()).ok_or("expected DD")?;
+    let year = dp
+        .next()
+        .and_then(|v| v.parse::<i64>().ok())
+        .ok_or("expected YYYY")?;
+    let month = dp
+        .next()
+        .and_then(|v| v.parse::<i64>().ok())
+        .ok_or("expected MM")?;
+    let day = dp
+        .next()
+        .and_then(|v| v.parse::<i64>().ok())
+        .ok_or("expected DD")?;
     if dp.next().is_some() || !(1..=12).contains(&month) {
         return bad("invalid month");
     }
@@ -150,9 +161,18 @@ pub fn parse(s: &str) -> Result<i64, String> {
     let (mut hour, mut minute, mut second) = (0i64, 0i64, 0i64);
     if let Some(t) = time {
         let mut tp = t.split(':');
-        hour = tp.next().and_then(|v| v.parse::<i64>().ok()).ok_or("expected HH")?;
-        minute = tp.next().and_then(|v| v.parse::<i64>().ok()).ok_or("expected MM")?;
-        second = tp.next().map(|v| v.parse::<i64>().unwrap_or(0)).unwrap_or(0);
+        hour = tp
+            .next()
+            .and_then(|v| v.parse::<i64>().ok())
+            .ok_or("expected HH")?;
+        minute = tp
+            .next()
+            .and_then(|v| v.parse::<i64>().ok())
+            .ok_or("expected MM")?;
+        second = tp
+            .next()
+            .map(|v| v.parse::<i64>().unwrap_or(0))
+            .unwrap_or(0);
         if !(0..=23).contains(&hour) || !(0..=59).contains(&minute) || !(0..=60).contains(&second) {
             return bad("time out of range");
         }
@@ -178,7 +198,10 @@ mod tests {
         // 2023-11-14 22:13:20 UTC
         assert_eq!(tm_from_unix(1_700_000_000).year, 2023);
         let c = tm_from_unix(1_700_000_000);
-        assert_eq!((c.month, c.day, c.hour, c.minute, c.second), (11, 14, 22, 13, 20));
+        assert_eq!(
+            (c.month, c.day, c.hour, c.minute, c.second),
+            (11, 14, 22, 13, 20)
+        );
         // leap day: 2024-02-29
         let c = tm_from_unix(1_709_164_800);
         assert_eq!((c.month, c.day), (2, 29));
@@ -186,7 +209,10 @@ mod tests {
 
     #[test]
     fn fmt_tokens() {
-        assert_eq!(fmt(1_700_000_000, "%Y-%m-%d %H:%M:%S"), "2023-11-14 22:13:20");
+        assert_eq!(
+            fmt(1_700_000_000, "%Y-%m-%d %H:%M:%S"),
+            "2023-11-14 22:13:20"
+        );
         assert_eq!(fmt(1_700_000_000, "%y"), "23");
         assert_eq!(fmt(0, "%T"), "00:00:00");
         assert_eq!(fmt(0, "%%"), "%");
@@ -199,7 +225,10 @@ mod tests {
         let s = fmt(ts, "%Y-%m-%d %H:%M:%S");
         assert_eq!(parse(&s).unwrap(), ts);
         assert_eq!(parse("2023-11-14T22:13:20Z").unwrap(), ts);
-        assert_eq!(parse("2023-11-14").unwrap(), parse("2023-11-14 00:00:00").unwrap());
+        assert_eq!(
+            parse("2023-11-14").unwrap(),
+            parse("2023-11-14 00:00:00").unwrap()
+        );
         assert!(parse("2023-13-01").is_err());
         assert!(parse("2023-02-30").is_err());
         assert!(parse("not a date").is_err());

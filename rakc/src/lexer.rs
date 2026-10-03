@@ -459,7 +459,10 @@ pub fn tokenize(source: &str) -> crate::Result<Vec<(Token, usize)>> {
 /// Rewrite the token stream so that a `/` appearing in operand position
 /// (where a value may not legally end) is treated as the start of a regex
 /// literal `/pattern/flags`. Division is otherwise untouched.
-fn postprocess_regexes(source: &str, raw: Vec<(Option<Token>, usize)>) -> crate::Result<Vec<(Token, usize)>> {
+fn postprocess_regexes(
+    source: &str,
+    raw: Vec<(Option<Token>, usize)>,
+) -> crate::Result<Vec<(Token, usize)>> {
     let mut out: Vec<(Token, usize)> = Vec::with_capacity(raw.len());
     let mut i = 0;
     while i < raw.len() {
@@ -633,8 +636,20 @@ mod tests {
     fn test_float_and_typed_int() {
         let toks = tokenize("3.14 42i32 10u8 7").unwrap();
         assert_eq!(toks[0].0, Token::Float(3.14));
-        assert_eq!(toks[1].0, Token::TypedInt(TypedIntData { value: 42, kind: IntKind::I32 }));
-        assert_eq!(toks[2].0, Token::TypedInt(TypedIntData { value: 10, kind: IntKind::U8 }));
+        assert_eq!(
+            toks[1].0,
+            Token::TypedInt(TypedIntData {
+                value: 42,
+                kind: IntKind::I32
+            })
+        );
+        assert_eq!(
+            toks[2].0,
+            Token::TypedInt(TypedIntData {
+                value: 10,
+                kind: IntKind::U8
+            })
+        );
         assert_eq!(toks[3].0, Token::Int(7));
     }
 
@@ -642,7 +657,14 @@ mod tests {
     fn test_pipe_token() {
         let toks = tokenize("x |> f").unwrap();
         let kinds: Vec<&Token> = toks.iter().map(|(t, _)| t).collect();
-        assert_eq!(kinds, vec![&Token::Ident("x".to_string()), &Token::PipeGt, &Token::Ident("f".to_string())]);
+        assert_eq!(
+            kinds,
+            vec![
+                &Token::Ident("x".to_string()),
+                &Token::PipeGt,
+                &Token::Ident("f".to_string())
+            ]
+        );
     }
 
     #[test]
@@ -693,6 +715,8 @@ mod tests {
     #[test]
     fn test_regex_after_paren() {
         let toks = tokenize("dump(/foo/i)").unwrap();
-        assert!(toks.iter().any(|(t, _)| matches!(t, Token::Regex((ref p, ref f)) if p == "foo" && f == "i")));
+        assert!(toks
+            .iter()
+            .any(|(t, _)| matches!(t, Token::Regex((ref p, ref f)) if p == "foo" && f == "i")));
     }
 }

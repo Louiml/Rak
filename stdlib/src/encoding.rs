@@ -1,8 +1,6 @@
 /// Encode bytes to hex string
 pub fn hex_encode(data: &[u8]) -> String {
-    data.iter()
-        .map(|b| format!("{:02x}", b))
-        .collect()
+    data.iter().map(|b| format!("{:02x}", b)).collect()
 }
 
 /// Decode hex string to bytes
@@ -10,10 +8,10 @@ pub fn hex_decode(hex: &str) -> Option<Vec<u8>> {
     if hex.len() % 2 != 0 {
         return None;
     }
-    
+
     let mut bytes = Vec::with_capacity(hex.len() / 2);
     for i in (0..hex.len()).step_by(2) {
-        if let Ok(byte) = u8::from_str_radix(&hex[i..i+2], 16) {
+        if let Ok(byte) = u8::from_str_radix(&hex[i..i + 2], 16) {
             bytes.push(byte);
         } else {
             return None;
@@ -24,13 +22,13 @@ pub fn hex_decode(hex: &str) -> Option<Vec<u8>> {
 
 /// Encode bytes to base64
 pub fn base64_encode(data: &[u8]) -> String {
-    use base64::{Engine as _, engine::general_purpose};
+    use base64::{engine::general_purpose, Engine as _};
     general_purpose::STANDARD.encode(data)
 }
 
 /// Decode base64 to bytes
 pub fn base64_decode(data: &str) -> Option<Vec<u8>> {
-    use base64::{Engine as _, engine::general_purpose};
+    use base64::{engine::general_purpose, Engine as _};
     general_purpose::STANDARD.decode(data).ok()
 }
 

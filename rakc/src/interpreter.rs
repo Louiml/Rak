@@ -1,12 +1,12 @@
 use crate::ast::*;
-use std::collections::{HashMap, HashSet};
 use crate::setrepr::SetRepr;
+use std::collections::{HashMap, HashSet};
+use std::ffi::CString;
 use std::fmt;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
 use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
-use std::ffi::CString;
 
 fn async_runtime() -> &'static tokio::runtime::Runtime {
     crate::async_rt::runtime()
@@ -93,10 +93,26 @@ fn asm_intrinsic(template: &str, value: i64) -> crate::Result<i64> {
     match key.as_str() {
         // CPUID leaf 1, ECX bit 23: SSE2. Reported by every x86-64 CPU, which
         // makes it a useful smoke test that `asm` reached the hardware.
-        "cpuid_sse2" => Ok(if is_x86_feature_detected!("sse2") { 1 } else { 0 }),
-        "cpuid_pclmulqdq" => Ok(if is_x86_feature_detected!("pclmulqdq") { 1 } else { 0 }),
-        "cpuid_aes" => Ok(if is_x86_feature_detected!("aes") { 1 } else { 0 }),
-        "cpuid_rdrand" => Ok(if is_x86_feature_detected!("rdrand") { 1 } else { 0 }),
+        "cpuid_sse2" => Ok(if is_x86_feature_detected!("sse2") {
+            1
+        } else {
+            0
+        }),
+        "cpuid_pclmulqdq" => Ok(if is_x86_feature_detected!("pclmulqdq") {
+            1
+        } else {
+            0
+        }),
+        "cpuid_aes" => Ok(if is_x86_feature_detected!("aes") {
+            1
+        } else {
+            0
+        }),
+        "cpuid_rdrand" => Ok(if is_x86_feature_detected!("rdrand") {
+            1
+        } else {
+            0
+        }),
         // RDTSC. A serialising variant would be needed for a measurement meant
         // to be meaningful, so this is documented as a raw read.
         "rdtsc" => Ok(unsafe { x86_64::_rdtsc() } as i64),
@@ -179,7 +195,9 @@ pub struct ArrayStream {
 }
 impl ArrayStream {
     pub fn new(values: Vec<Value>) -> Self {
-        ArrayStream { items: values.into_iter() }
+        ArrayStream {
+            items: values.into_iter(),
+        }
     }
 }
 impl RakStream for ArrayStream {
@@ -197,7 +215,9 @@ impl LinesStream {
         use std::io::BufRead;
         let f = std::fs::File::open(path)
             .map_err(|e| crate::RakError::Runtime(format!("read_lines: {}: {}", path, e)))?;
-        Ok(LinesStream { reader: Some(std::io::BufReader::new(f).lines()) })
+        Ok(LinesStream {
+            reader: Some(std::io::BufReader::new(f).lines()),
+        })
     }
 }
 impl RakStream for LinesStream {
@@ -223,7 +243,9 @@ pub struct TcpLineStream {
 }
 impl TcpLineStream {
     pub fn open(stream: std::net::TcpStream) -> Self {
-        TcpLineStream { reader: Some(std::io::BufReader::new(stream)) }
+        TcpLineStream {
+            reader: Some(std::io::BufReader::new(stream)),
+        }
     }
 }
 impl RakStream for TcpLineStream {
@@ -233,9 +255,15 @@ impl RakStream for TcpLineStream {
             Some(r) => {
                 let mut line = String::new();
                 match r.read_line(&mut line) {
-                    Ok(0) => { self.reader = None; Ok(None) }
+                    Ok(0) => {
+                        self.reader = None;
+                        Ok(None)
+                    }
                     Ok(_) => Ok(Some(Value::String(line.trim_end_matches('\n').to_string()))),
-                    Err(_) => { self.reader = None; Ok(None) }
+                    Err(_) => {
+                        self.reader = None;
+                        Ok(None)
+                    }
                 }
             }
             None => Ok(None),
@@ -292,9 +320,13 @@ pub struct TakeStream {
 }
 impl RakStream for TakeStream {
     fn next(&mut self, interp: &mut Interpreter) -> crate::Result<Option<Value>> {
-        if self.remaining == 0 { return Ok(None); }
+        if self.remaining == 0 {
+            return Ok(None);
+        }
         let item = self.inner.lock().unwrap().next(interp)?;
-        if item.is_some() { self.remaining -= 1; }
+        if item.is_some() {
+            self.remaining -= 1;
+        }
         Ok(item)
     }
 }
@@ -312,8 +344,13 @@ impl RakStream for CsvStream {
     fn next(&mut self, interp: &mut Interpreter) -> crate::Result<Option<Value>> {
         loop {
             let line = self.inner.lock().unwrap().next(interp)?;
-            let line = match line { Some(v) => v.to_string(), None => return Ok(None) };
-            if line.trim().is_empty() { continue; }
+            let line = match line {
+                Some(v) => v.to_string(),
+                None => return Ok(None),
+            };
+            if line.trim().is_empty() {
+                continue;
+            }
             let fields = rak_stdlib::stream_io::parse_csv_line(&line, self.delim);
             if !self.started {
                 self.started = true;
@@ -325,11 +362,16 @@ impl RakStream for CsvStream {
             if self.has_header {
                 let mut map = std::collections::HashMap::new();
                 for (i, h) in self.headers.iter().enumerate() {
-                    map.insert(h.clone(), Value::String(fields.get(i).cloned().unwrap_or_default()));
+                    map.insert(
+                        h.clone(),
+                        Value::String(fields.get(i).cloned().unwrap_or_default()),
+                    );
                 }
                 return Ok(Some(Value::Map(map)));
             }
-            return Ok(Some(Value::Array(fields.into_iter().map(Value::String).collect())));
+            return Ok(Some(Value::Array(
+                fields.into_iter().map(Value::String).collect(),
+            )));
         }
     }
 }
@@ -343,8 +385,13 @@ impl RakStream for JsonlStream {
     fn next(&mut self, interp: &mut Interpreter) -> crate::Result<Option<Value>> {
         loop {
             let line = self.inner.lock().unwrap().next(interp)?;
-            let line = match line { Some(v) => v.to_string(), None => return Ok(None) };
-            if line.trim().is_empty() { continue; }
+            let line = match line {
+                Some(v) => v.to_string(),
+                None => return Ok(None),
+            };
+            if line.trim().is_empty() {
+                continue;
+            }
             let parsed = rak_stdlib::stream_io::parse_jsonl_line(&line)
                 .map_err(|e| crate::RakError::Runtime(format!("stream_jsonl: {}", e)))?;
             return Ok(Some(json_value_to_rak(&parsed)));
@@ -358,14 +405,19 @@ pub fn json_value_to_rak(v: &serde_json::Value) -> Value {
         serde_json::Value::Null => Value::Nil,
         serde_json::Value::Bool(b) => Value::Bool(*b),
         serde_json::Value::Number(n) => {
-            if let Some(i) = n.as_i64() { Value::Int(i) }
-            else { Value::Float(n.as_f64().unwrap_or(0.0)) }
+            if let Some(i) = n.as_i64() {
+                Value::Int(i)
+            } else {
+                Value::Float(n.as_f64().unwrap_or(0.0))
+            }
         }
         serde_json::Value::String(s) => Value::String(s.clone()),
         serde_json::Value::Array(a) => Value::Array(a.iter().map(json_value_to_rak).collect()),
-        serde_json::Value::Object(o) => {
-            Value::Map(o.iter().map(|(k, v)| (k.clone(), json_value_to_rak(v))).collect())
-        }
+        serde_json::Value::Object(o) => Value::Map(
+            o.iter()
+                .map(|(k, v)| (k.clone(), json_value_to_rak(v)))
+                .collect(),
+        ),
     }
 }
 
@@ -422,15 +474,23 @@ fn contains_member(coll: &Value, item: &Value) -> crate::Result<bool> {
 /// Compute `[start, end)` slice bounds with Python-style negative indices and
 /// clamping. `nil` (or absent) bounds are open. Errors when start > end
 /// after clamping.
-fn slice_bounds(len: usize, start: Option<&Value>, end: Option<&Value>) -> crate::Result<(usize, usize)> {
+fn slice_bounds(
+    len: usize,
+    start: Option<&Value>,
+    end: Option<&Value>,
+) -> crate::Result<(usize, usize)> {
     let len_i = len as i64;
     let mut s = match start {
         Some(Value::Nil) | None => 0,
-        Some(v) => v.as_i64().ok_or_else(|| crate::RakError::Runtime("slice: start must be an int or nil".to_string()))?,
+        Some(v) => v.as_i64().ok_or_else(|| {
+            crate::RakError::Runtime("slice: start must be an int or nil".to_string())
+        })?,
     };
     let mut e = match end {
         Some(Value::Nil) | None => len_i,
-        Some(v) => v.as_i64().ok_or_else(|| crate::RakError::Runtime("slice: end must be an int or nil".to_string()))?,
+        Some(v) => v.as_i64().ok_or_else(|| {
+            crate::RakError::Runtime("slice: end must be an int or nil".to_string())
+        })?,
     };
     if s < 0 {
         s += len_i;
@@ -638,10 +698,17 @@ impl fmt::Display for Value {
                 write!(f, "{{{}}}", parts.join(", "))
             }
             Value::Struct { name, fields } => {
-                let parts: Vec<String> = fields.iter().map(|(k, v)| format!("{}: {}", k, v)).collect();
+                let parts: Vec<String> = fields
+                    .iter()
+                    .map(|(k, v)| format!("{}: {}", k, v))
+                    .collect();
                 write!(f, "{} {{{}}}", name, parts.join(", "))
             }
-            Value::Enum { name, variant, data } => {
+            Value::Enum {
+                name,
+                variant,
+                data,
+            } => {
                 if data.is_empty() {
                     write!(f, "{}::{}", name, variant)
                 } else {
@@ -751,7 +818,10 @@ impl Env {
         } else {
             self.global.lock().unwrap().insert(name.to_string(), value);
             if !mutable {
-                self.global_immutable.lock().unwrap().insert(name.to_string());
+                self.global_immutable
+                    .lock()
+                    .unwrap()
+                    .insert(name.to_string());
             }
         }
     }
@@ -809,7 +879,10 @@ impl Env {
             return Ok(());
         }
         drop(g);
-        Err(crate::RakError::Runtime(format!("Undefined variable: {}", name)))
+        Err(crate::RakError::Runtime(format!(
+            "Undefined variable: {}",
+            name
+        )))
     }
 
     pub fn current_scope_clone(&self) -> HashMap<String, Value> {
@@ -1264,8 +1337,16 @@ impl Interpreter {
                 self.env = saved_env;
                 self.returning = saved_returning;
                 match result {
-                    Ok(()) => TestResult { name, passed: true, message: None },
-                    Err(e) => TestResult { name, passed: false, message: Some(e.to_string()) },
+                    Ok(()) => TestResult {
+                        name,
+                        passed: true,
+                        message: None,
+                    },
+                    Err(e) => TestResult {
+                        name,
+                        passed: false,
+                        message: Some(e.to_string()),
+                    },
                 }
             })
             .collect()
@@ -1280,7 +1361,10 @@ impl Interpreter {
             } else {
                 Path::new(&self.base_dir).join(rel)
             };
-            Ok(crate::modules::DottedResolve { init: None, leaf: full })
+            Ok(crate::modules::DottedResolve {
+                init: None,
+                leaf: full,
+            })
         } else {
             crate::modules::resolve_dotted(Path::new(&self.base_dir), &spec.path).ok_or_else(|| {
                 crate::RakError::Runtime(format!(
@@ -1294,7 +1378,11 @@ impl Interpreter {
 
     /// Load a module file once (cached). Returns its namespace + macros.
     /// Circular imports return the partially-built entry (Python semantics).
-    fn load_module_file(&mut self, leaf: PathBuf, init: Option<PathBuf>) -> crate::Result<ModuleEntry> {
+    fn load_module_file(
+        &mut self,
+        leaf: PathBuf,
+        init: Option<PathBuf>,
+    ) -> crate::Result<ModuleEntry> {
         let canon = crate::modules::canonical(&leaf);
         if let Some(entry) = self.module_cache.get(&canon).cloned() {
             return Ok(entry);
@@ -1303,7 +1391,11 @@ impl Interpreter {
             // Cycle: return whatever has been exported so far. The namespace is
             // live, so a module further along the cycle that fills it in later
             // is visible to whoever holds this handle.
-            return Ok(self.module_cache.get(&canon).cloned().unwrap_or_else(ModuleEntry::partial));
+            return Ok(self
+                .module_cache
+                .get(&canon)
+                .cloned()
+                .unwrap_or_else(ModuleEntry::partial));
         }
         // Load the package init first (binds the package's own exports).
         if let Some(init_path) = init {
@@ -1358,7 +1450,9 @@ impl Interpreter {
 
         let saved_base = std::mem::replace(
             &mut self.base_dir,
-            leaf.parent().map(|p| p.to_string_lossy().to_string()).unwrap_or_default(),
+            leaf.parent()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_default(),
         );
         // No scope is pushed: a top-level `let` in a module goes straight into
         // the cell, which is what makes it shared module state rather than a
@@ -1395,11 +1489,18 @@ impl Interpreter {
     fn collect_export(&mut self, inner: &Stmt) -> crate::Result<()> {
         let canon_key = self.loading_modules.last().cloned();
         let name = match inner {
-            Stmt::Let { name, .. } | Stmt::Const { name, .. } | Stmt::Struct { name, .. } | Stmt::Enum { name, .. } => Some(name.clone()),
+            Stmt::Let { name, .. }
+            | Stmt::Const { name, .. }
+            | Stmt::Struct { name, .. }
+            | Stmt::Enum { name, .. } => Some(name.clone()),
             Stmt::MacroDef { name, .. } => {
                 if let Some(canon) = canon_key.as_ref() {
                     if let Some(entry) = self.module_cache.get(canon) {
-                        entry.macros.lock().unwrap().insert(name.clone(), inner.clone());
+                        entry
+                            .macros
+                            .lock()
+                            .unwrap()
+                            .insert(name.clone(), inner.clone());
                     }
                 }
                 None
@@ -1437,7 +1538,10 @@ impl Interpreter {
         let bind_name = if let Some(a) = &import.alias {
             a.clone()
         } else if import.is_file {
-            Path::new(&import.path[0]).file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| import.path[0].clone())
+            Path::new(&import.path[0])
+                .file_stem()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_else(|| import.path[0].clone())
         } else {
             import.path[0].clone() // top package name for `import pkg.sub`
         };
@@ -1502,7 +1606,7 @@ impl Interpreter {
                 for (n, v) in exports {
                     if !guard.values.lock().unwrap().contains_key(&n) {
                         guard.publish(&n, v);
-                }
+                    }
                 }
             }
         }
@@ -1582,8 +1686,13 @@ impl Interpreter {
             None => return,
         };
         let exports = from.ns.lock().unwrap().exports();
-        let macros: Vec<(String, crate::ast::Stmt)> =
-            from.macros.lock().unwrap().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        let macros: Vec<(String, crate::ast::Stmt)> = from
+            .macros
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
         if let Some(entry) = self.module_cache.get(&canon).cloned() {
             for (n, v) in exports {
                 let mut ns = entry.ns.lock().unwrap();
@@ -1632,7 +1741,11 @@ impl Interpreter {
             self.limits.steps += 1;
             if self.limits.steps > max {
                 return Err(crate::RakError::Runtime(
-                    LimitHit::Steps { used: self.limits.steps, max }.to_string(),
+                    LimitHit::Steps {
+                        used: self.limits.steps,
+                        max,
+                    }
+                    .to_string(),
                 ));
             }
         }
@@ -1657,7 +1770,13 @@ impl Interpreter {
             Stmt::Export(inner) => {
                 self.exec_stmt(inner)?;
             }
-            Stmt::Let { name, pattern, mutable, value, type_hint } => {
+            Stmt::Let {
+                name,
+                pattern,
+                mutable,
+                value,
+                type_hint,
+            } => {
                 let val = self.eval_expr(value)?;
                 // Enforce declared type hints at runtime (type checker catches
                 // these statically; this is a defensive runtime backstop).
@@ -1692,7 +1811,11 @@ impl Interpreter {
                 self.return_value = val;
                 self.returning = true;
             }
-            Stmt::If { cond, then_branch, else_branch } => {
+            Stmt::If {
+                cond,
+                then_branch,
+                else_branch,
+            } => {
                 let val = self.eval_expr(cond)?;
                 if is_truthy(&val) {
                     self.env.push_scope();
@@ -1714,7 +1837,12 @@ impl Interpreter {
                     self.env.pop_scope();
                 }
             }
-            Stmt::IfLet { pattern, value, then_branch, else_branch } => {
+            Stmt::IfLet {
+                pattern,
+                value,
+                then_branch,
+                else_branch,
+            } => {
                 let v = self.eval_expr(value)?;
                 let matched = self.pattern_matches(&pattern, &v)?;
                 if matched {
@@ -1722,14 +1850,18 @@ impl Interpreter {
                     self.bind_pattern(&pattern, &v)?;
                     for s in then_branch {
                         self.exec_stmt(s)?;
-                        if self.returning { break; }
+                        if self.returning {
+                            break;
+                        }
                     }
                     self.env.pop_scope();
                 } else if let Some(else_stmts) = else_branch {
                     self.env.push_scope();
                     for s in else_stmts {
                         self.exec_stmt(s)?;
-                        if self.returning { break; }
+                        if self.returning {
+                            break;
+                        }
                     }
                     self.env.pop_scope();
                 }
@@ -1742,8 +1874,12 @@ impl Interpreter {
                     self.env.push_scope();
                     for s in body {
                         self.exec_stmt(s)?;
-                        if self.returning { break; }
-                        if self.loop_signal.is_some() { break; }
+                        if self.returning {
+                            break;
+                        }
+                        if self.loop_signal.is_some() {
+                            break;
+                        }
                     }
                     if self.returning {
                         self.env.pop_scope();
@@ -1764,8 +1900,12 @@ impl Interpreter {
                     self.env.push_scope();
                     for s in body {
                         self.exec_stmt(s)?;
-                        if self.returning { break; }
-                        if self.loop_signal.is_some() { break; }
+                        if self.returning {
+                            break;
+                        }
+                        if self.loop_signal.is_some() {
+                            break;
+                        }
                     }
                     if self.returning {
                         self.env.pop_scope();
@@ -1786,8 +1926,12 @@ impl Interpreter {
                     self.env.push_scope();
                     for s in body {
                         self.exec_stmt(s)?;
-                        if self.returning { break; }
-                        if self.loop_signal.is_some() { break; }
+                        if self.returning {
+                            break;
+                        }
+                        if self.loop_signal.is_some() {
+                            break;
+                        }
                     }
                     if self.returning {
                         self.env.pop_scope();
@@ -1803,7 +1947,11 @@ impl Interpreter {
                     }
                 }
             }
-            Stmt::WhileLet { pattern, value, body } => {
+            Stmt::WhileLet {
+                pattern,
+                value,
+                body,
+            } => {
                 let mut iter: u64 = 0;
                 loop {
                     let v = self.eval_expr(value)?;
@@ -1820,8 +1968,12 @@ impl Interpreter {
                     self.bind_pattern(&pattern, &v)?;
                     for s in body {
                         self.exec_stmt(s)?;
-                        if self.returning { break; }
-                        if self.loop_signal.is_some() { break; }
+                        if self.returning {
+                            break;
+                        }
+                        if self.loop_signal.is_some() {
+                            break;
+                        }
                     }
                     if self.returning {
                         self.env.pop_scope();
@@ -1834,7 +1986,12 @@ impl Interpreter {
                     }
                 }
             }
-            Stmt::For { label, pattern, iterable, body } => {
+            Stmt::For {
+                label,
+                pattern,
+                iterable,
+                body,
+            } => {
                 let iter = self.eval_expr(iterable)?;
                 let tn = iter.type_name();
                 let mut for_iter: u64 = 0;
@@ -1852,16 +2009,24 @@ impl Interpreter {
                                 self.bind_pattern(pattern, &v)?;
                                 for st in body {
                                     self.exec_stmt(st)?;
-                                    if self.returning { break; }
-                                    if self.loop_signal.is_some() { break; }
+                                    if self.returning {
+                                        break;
+                                    }
+                                    if self.loop_signal.is_some() {
+                                        break;
+                                    }
                                 }
                                 let mut stop = self.returning;
                                 if self.loop_signal.is_some() {
                                     let ctrl = self.resolve_loop_signal(label);
-                                    if let LoopCtrl::Break = ctrl { stop = true; }
+                                    if let LoopCtrl::Break = ctrl {
+                                        stop = true;
+                                    }
                                 }
                                 self.env.pop_scope();
-                                if stop { break; }
+                                if stop {
+                                    break;
+                                }
                             }
                             None => break,
                         }
@@ -1888,7 +2053,12 @@ impl Interpreter {
                     match iter {
                         Value::Array(arr) => {
                             if is_idx {
-                                arr.iter().enumerate().map(|(i, v)| Value::Tuple(vec![Value::Int(i as i64), v.clone()])).collect()
+                                arr.iter()
+                                    .enumerate()
+                                    .map(|(i, v)| {
+                                        Value::Tuple(vec![Value::Int(i as i64), v.clone()])
+                                    })
+                                    .collect()
                             } else {
                                 arr
                             }
@@ -1896,14 +2066,23 @@ impl Interpreter {
                         Value::Tuple(t) => t,
                         Value::String(s) => {
                             if is_idx {
-                                s.chars().enumerate().map(|(i, c)| Value::Tuple(vec![Value::Int(i as i64), Value::String(c.to_string())])).collect()
+                                s.chars()
+                                    .enumerate()
+                                    .map(|(i, c)| {
+                                        Value::Tuple(vec![
+                                            Value::Int(i as i64),
+                                            Value::String(c.to_string()),
+                                        ])
+                                    })
+                                    .collect()
                             } else {
                                 s.chars().map(|c| Value::String(c.to_string())).collect()
                             }
                         }
-                        Value::Map(m) => {
-                            m.into_iter().map(|(k, v)| Value::Tuple(vec![Value::String(k), v])).collect()
-                        }
+                        Value::Map(m) => m
+                            .into_iter()
+                            .map(|(k, v)| Value::Tuple(vec![Value::String(k), v]))
+                            .collect(),
                         // Insertion order, so `for x in set_of([3,1,2])`
                         // yields 3, 1, 2 — see `setrepr` for why this is
                         // ordered at all.
@@ -1914,13 +2093,25 @@ impl Interpreter {
                         // comparison. Yielding one-character strings instead would
                         // put `hex_encode` and friends out of reach from a loop.
                         Value::Bytes(b) => b.iter().map(|x| Value::Int(*x as i64)).collect(),
-                        _ => return Err(crate::RakError::Runtime("Cannot iterate over this value".to_string())),
+                        _ => {
+                            return Err(crate::RakError::Runtime(
+                                "Cannot iterate over this value".to_string(),
+                            ))
+                        }
                     }
                 };
                 self.run_for_loop(pattern, label, items, body)?;
             }
-            Stmt::Scan { target, options, body } => self.exec_scan(target, options, body)?,
-            Stmt::Fetch { target, options, body } => self.exec_fetch(target, options, body)?,
+            Stmt::Scan {
+                target,
+                options,
+                body,
+            } => self.exec_scan(target, options, body)?,
+            Stmt::Fetch {
+                target,
+                options,
+                body,
+            } => self.exec_fetch(target, options, body)?,
             Stmt::Dump { value, target } => {
                 let val = self.eval_expr(value)?;
                 if let Some(t) = target {
@@ -1933,7 +2124,9 @@ impl Interpreter {
                                 Err(e) => self.output.push(format!("[DUMP] File error: {}", e)),
                             }
                         }
-                        _ => self.output.push(format!("[DUMP] {} -> {}", val, target_val)),
+                        _ => self
+                            .output
+                            .push(format!("[DUMP] {} -> {}", val, target_val)),
                     }
                 } else {
                     let s = self.display_value(&val)?;
@@ -1985,12 +2178,21 @@ impl Interpreter {
                 let declared: Vec<String> = {
                     let guard = ns.lock().unwrap();
                     let values = guard.values.lock().unwrap();
-                    values.keys().filter(|k| !k.starts_with("__")).cloned().collect()
+                    values
+                        .keys()
+                        .filter(|k| !k.starts_with("__"))
+                        .cloned()
+                        .collect()
                 };
                 let mutable: Vec<String> = items
                     .iter()
                     .filter_map(|s| match s {
-                        Stmt::Let { name, mutable: true, pattern: None, .. } => Some(name.clone()),
+                        Stmt::Let {
+                            name,
+                            mutable: true,
+                            pattern: None,
+                            ..
+                        } => Some(name.clone()),
                         _ => None,
                     })
                     .filter(|n| declared.contains(n))
@@ -2002,13 +2204,35 @@ impl Interpreter {
                 }
                 self.env.define(name, Value::Module(ns));
             }
-            Stmt::Struct { name, type_params: _, fields } => {
-                self.env.define(name, Value::StructDef { fields: fields.clone() });
+            Stmt::Struct {
+                name,
+                type_params: _,
+                fields,
+            } => {
+                self.env.define(
+                    name,
+                    Value::StructDef {
+                        fields: fields.clone(),
+                    },
+                );
             }
-            Stmt::Enum { name, type_params: _, variants } => {
-                self.env.define(name, Value::EnumDef { variants: variants.clone() });
+            Stmt::Enum {
+                name,
+                type_params: _,
+                variants,
+            } => {
+                self.env.define(
+                    name,
+                    Value::EnumDef {
+                        variants: variants.clone(),
+                    },
+                );
             }
-            Stmt::Impl { target, trait_name, methods } => {
+            Stmt::Impl {
+                target,
+                trait_name,
+                methods,
+            } => {
                 // Parser stores `impl <A> for <B>` as target=A (trait), trait_name=B (type).
                 // For an inherent `impl <Type>` (no `for`), trait_name is None.
                 let (trait_str, type_name) = match trait_name {
@@ -2016,7 +2240,10 @@ impl Interpreter {
                     None => (String::new(), target.clone()),
                 };
                 for method in methods {
-                    if let Stmt::Let { name: mname, value, .. } = method {
+                    if let Stmt::Let {
+                        name: mname, value, ..
+                    } = method
+                    {
                         let method_name = format!("{}.{}", target, mname);
                         let val = self.eval_expr(value)?;
                         self.env.define(&method_name, val.clone());
@@ -2028,7 +2255,10 @@ impl Interpreter {
                     }
                 }
             }
-            Stmt::Trait { name: _, methods: _ } => {}
+            Stmt::Trait {
+                name: _,
+                methods: _,
+            } => {}
             Stmt::Match { value, arms } => {
                 let val = self.eval_expr(value)?;
                 for (pattern, guard, body) in arms {
@@ -2057,7 +2287,11 @@ impl Interpreter {
                     }
                 }
             }
-            Stmt::Try { body, catch_name, catch_body } => {
+            Stmt::Try {
+                body,
+                catch_name,
+                catch_body,
+            } => {
                 self.env.push_scope();
                 let result: crate::Result<()> = (|| {
                     for s in body {
@@ -2082,7 +2316,11 @@ impl Interpreter {
                                 other => Value::Error(Arc::new(
                                     crate::ErrorInfo::new(other.to_string())
                                         .with_kind(crate::ErrorKind::User)
-                                        .with_span(self.current_file.clone().unwrap_or_default(), self.current_line, 0),
+                                        .with_span(
+                                            self.current_file.clone().unwrap_or_default(),
+                                            self.current_line,
+                                            0,
+                                        ),
                                 )),
                             };
                             self.env.define(cn, bound);
@@ -2142,11 +2380,18 @@ impl Interpreter {
                 for decl in decls {
                     self.foreign_fns.insert(
                         decl.name.clone(),
-                        ForeignFnDecl { decl: decl.clone(), lib: lib_handle.clone() },
+                        ForeignFnDecl {
+                            decl: decl.clone(),
+                            lib: lib_handle.clone(),
+                        },
                     );
                 }
             }
-            Stmt::MacroDef { name, params: _, body: _ } => {
+            Stmt::MacroDef {
+                name,
+                params: _,
+                body: _,
+            } => {
                 self.macros.insert(name.clone(), stmt.clone());
             }
             Stmt::Const { name, value } => {
@@ -2154,10 +2399,13 @@ impl Interpreter {
                 self.env.define(name, val);
             }
             Stmt::BinStructDef { name, fields } => {
-                self.binstructs
-                    .insert(name.clone(), fields.clone());
+                self.binstructs.insert(name.clone(), fields.clone());
             }
-            Stmt::Tunnel { name, passphrase, body } => {
+            Stmt::Tunnel {
+                name,
+                passphrase,
+                body,
+            } => {
                 self.exec_tunnel(name, passphrase, body)?;
             }
             Stmt::Defer(expr) => {
@@ -2195,7 +2443,13 @@ impl Interpreter {
         Ok(())
     }
 
-    fn run_for_loop(&mut self, pattern: &Pattern, label: &Option<String>, items: Vec<Value>, body: &[Stmt]) -> crate::Result<()> {
+    fn run_for_loop(
+        &mut self,
+        pattern: &Pattern,
+        label: &Option<String>,
+        items: Vec<Value>,
+        body: &[Stmt],
+    ) -> crate::Result<()> {
         for (idx, item) in items.into_iter().enumerate() {
             self.check_iterations(idx as u64 + 1)?;
             self.env.push_scope();
@@ -2239,8 +2493,15 @@ impl Interpreter {
                 if target {
                     LoopCtrl::Break
                 } else {
-                    let new_depth = if l.is_none() && depth > 1 { depth - 1 } else { depth };
-                    self.loop_signal = Some(LoopSignal::Break { label: l, depth: new_depth });
+                    let new_depth = if l.is_none() && depth > 1 {
+                        depth - 1
+                    } else {
+                        depth
+                    };
+                    self.loop_signal = Some(LoopSignal::Break {
+                        label: l,
+                        depth: new_depth,
+                    });
                     LoopCtrl::Break
                 }
             }
@@ -2252,15 +2513,27 @@ impl Interpreter {
                 if target {
                     LoopCtrl::Continue
                 } else {
-                    let new_depth = if l.is_none() && depth > 1 { depth - 1 } else { depth };
-                    self.loop_signal = Some(LoopSignal::Continue { label: l, depth: new_depth });
+                    let new_depth = if l.is_none() && depth > 1 {
+                        depth - 1
+                    } else {
+                        depth
+                    };
+                    self.loop_signal = Some(LoopSignal::Continue {
+                        label: l,
+                        depth: new_depth,
+                    });
                     LoopCtrl::Break
                 }
             }
         }
     }
 
-    fn exec_scan(&mut self, target: &Expr, options: &[(String, Expr)], body: &Option<Vec<Stmt>>) -> crate::Result<()> {
+    fn exec_scan(
+        &mut self,
+        target: &Expr,
+        options: &[(String, Expr)],
+        body: &Option<Vec<Stmt>>,
+    ) -> crate::Result<()> {
         let target_val = self.eval_expr(target)?;
         let target_str = match target_val {
             Value::String(s) => s,
@@ -2284,19 +2557,27 @@ impl Interpreter {
                     self.output.push(format!(
                         "[SCAN] Target: {} | Ports: {}",
                         target_str,
-                        arr.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(", ")
+                        arr.iter()
+                            .map(|v| v.to_string())
+                            .collect::<Vec<_>>()
+                            .join(", ")
                     ));
                     for port_val in arr {
                         let port = port_val.as_u64().unwrap_or(0) as u16;
                         let is_open = rak_stdlib::net::tcp_scan(&target_str, port, timeout_ms);
                         if is_open {
-                            self.output.push(format!("[SCAN] Port {} (0x{:04X}) OPEN", port, port));
+                            self.output
+                                .push(format!("[SCAN] Port {} (0x{:04X}) OPEN", port, port));
                             if let Some(body_stmts) = body {
                                 self.env.push_scope();
                                 self.env.define("port", Value::Int(port as i64));
                                 self.env.define("open", Value::Bool(true));
-                                let banner = rak_stdlib::net::tcp_banner_grab(&target_str, port, timeout_ms);
-                                self.env.define("banner", banner.map(Value::String).unwrap_or(Value::Nil));
+                                let banner =
+                                    rak_stdlib::net::tcp_banner_grab(&target_str, port, timeout_ms);
+                                self.env.define(
+                                    "banner",
+                                    banner.map(Value::String).unwrap_or(Value::Nil),
+                                );
                                 for s in body_stmts {
                                     self.exec_stmt(s)?;
                                 }
@@ -2313,15 +2594,18 @@ impl Interpreter {
             "[SCAN] Target: {} | Ports: {}-{} (0x{:04X}-0x{:04X})",
             target_str, start_port, end_port, start_port, end_port
         ));
-        let open_ports = rak_stdlib::recon::port_scan(&target_str, start_port, end_port, timeout_ms);
+        let open_ports =
+            rak_stdlib::recon::port_scan(&target_str, start_port, end_port, timeout_ms);
         for port in open_ports {
-            self.output.push(format!("[SCAN] Port {} (0x{:04X}) OPEN", port, port));
+            self.output
+                .push(format!("[SCAN] Port {} (0x{:04X}) OPEN", port, port));
             if let Some(body_stmts) = body {
                 self.env.push_scope();
                 self.env.define("port", Value::Int(port as i64));
                 self.env.define("open", Value::Bool(true));
                 let banner = rak_stdlib::net::tcp_banner_grab(&target_str, port, timeout_ms);
-                self.env.define("banner", banner.map(Value::String).unwrap_or(Value::Nil));
+                self.env
+                    .define("banner", banner.map(Value::String).unwrap_or(Value::Nil));
                 for s in body_stmts {
                     self.exec_stmt(s)?;
                 }
@@ -2349,19 +2633,18 @@ impl Interpreter {
             crate::ext_stdlib::TUNNEL_KEY_LEN as u32,
         )
         .map_err(crate::RakError::Runtime)?;
-        let (transport, local) = rak_stdlib::tunnel::udp_bind("127.0.0.1:0")
-            .map_err(crate::RakError::Runtime)?;
+        let (transport, local) =
+            rak_stdlib::tunnel::udp_bind("127.0.0.1:0").map_err(crate::RakError::Runtime)?;
 
         self.env.push_scope();
-        self.env.define(
-            name.to_string().as_str(),
-            Value::Bytes(key.clone().into()),
-        );
+        self.env
+            .define(name.to_string().as_str(), Value::Bytes(key.clone().into()));
         let udp_value = Value::UdpTransport(std::sync::Arc::new(transport));
-        self.env
-            .define(format!("{}_udp", name).as_str(), udp_value);
-        self.env
-            .define(format!("{}_addr", name).as_str(), Value::String(local.to_string()));
+        self.env.define(format!("{}_udp", name).as_str(), udp_value);
+        self.env.define(
+            format!("{}_addr", name).as_str(),
+            Value::String(local.to_string()),
+        );
         // Expose a stable bare `tunnel_key` alias inside the block too.
         self.env.define("tunnel_key", Value::Bytes(key.into()));
         for s in body {
@@ -2374,7 +2657,12 @@ impl Interpreter {
         Ok(())
     }
 
-    fn exec_fetch(&mut self, target: &Expr, options: &[(String, Expr)], body: &Option<Vec<Stmt>>) -> crate::Result<()> {
+    fn exec_fetch(
+        &mut self,
+        target: &Expr,
+        options: &[(String, Expr)],
+        body: &Option<Vec<Stmt>>,
+    ) -> crate::Result<()> {
         let target_val = self.eval_expr(target)?;
         let target_str = match target_val {
             Value::String(s) => s,
@@ -2398,22 +2686,35 @@ impl Interpreter {
                 post_body = Some(self.eval_expr(expr)?.to_string());
             }
         }
-        self.output.push(format!("[FETCH] {} {}", method, target_str));
+        self.output
+            .push(format!("[FETCH] {} {}", method, target_str));
         let result = if method == "POST" {
             rak_stdlib::net::http_post(
                 &target_str,
                 post_body.as_deref().unwrap_or(""),
-                if headers_map.is_empty() { None } else { Some(headers_map.clone()) },
+                if headers_map.is_empty() {
+                    None
+                } else {
+                    Some(headers_map.clone())
+                },
             )
         } else {
             rak_stdlib::net::http_get(
                 &target_str,
-                if headers_map.is_empty() { None } else { Some(headers_map.clone()) },
+                if headers_map.is_empty() {
+                    None
+                } else {
+                    Some(headers_map.clone())
+                },
             )
         };
         match result {
             Ok(resp) => {
-                self.output.push(format!("[FETCH] Status: {} {}", resp.status, if resp.status < 400 { "OK" } else { "ERROR" }));
+                self.output.push(format!(
+                    "[FETCH] Status: {} {}",
+                    resp.status,
+                    if resp.status < 400 { "OK" } else { "ERROR" }
+                ));
                 let mut header_map = HashMap::new();
                 for (k, v) in &resp.headers {
                     self.output.push(format!("[FETCH] {}: {}", k, v));
@@ -2437,130 +2738,147 @@ impl Interpreter {
         Ok(())
     }
 
-
     /// Index evaluation, extracted so its locals stay off the hot
     /// eval_expr stack frame. Handles mmap zero-copy slicing, range slicing
     /// (`xs[a..b]`, negatives, clamping), and generic indexing.
     #[inline(never)]
     fn eval_index(&mut self, obj: &Box<Expr>, idx: &Box<Expr>) -> crate::Result<Value> {
-                let obj_val = self.eval_expr(obj)?;
-                // Zero-copy indexing/slicing for memory maps.
-                if let Value::Mmap(h) = &obj_val {
-                    if let Expr::Range(lo, hi) = idx.as_ref() {
-                        // mmap slice; bounds support negatives and clamp.
-                        let lo_v = lo.as_ref().map(|e| self.eval_expr(e)).transpose()?;
-                        let hi_v = hi.as_ref().map(|e| self.eval_expr(e)).transpose()?;
-                        let (s, e) = slice_bounds(h.len(), lo_v.as_ref(), hi_v.as_ref())?;
-                        return Ok(Value::MmapSlice(h.clone(), s, e - s));
-                    }
-                    let idx_val = self.eval_expr(idx)?;
-                    let i = idx_val.as_i64().unwrap_or(0) as usize;
-                    let data = h.as_slice();
-                    if i >= data.len() { return Err(crate::RakError::Runtime("Index out of bounds".to_string())); }
-                    return Ok(Value::Int(data[i] as i64));
+        let obj_val = self.eval_expr(obj)?;
+        // Zero-copy indexing/slicing for memory maps.
+        if let Value::Mmap(h) = &obj_val {
+            if let Expr::Range(lo, hi) = idx.as_ref() {
+                // mmap slice; bounds support negatives and clamp.
+                let lo_v = lo.as_ref().map(|e| self.eval_expr(e)).transpose()?;
+                let hi_v = hi.as_ref().map(|e| self.eval_expr(e)).transpose()?;
+                let (s, e) = slice_bounds(h.len(), lo_v.as_ref(), hi_v.as_ref())?;
+                return Ok(Value::MmapSlice(h.clone(), s, e - s));
+            }
+            let idx_val = self.eval_expr(idx)?;
+            let i = idx_val.as_i64().unwrap_or(0) as usize;
+            let data = h.as_slice();
+            if i >= data.len() {
+                return Err(crate::RakError::Runtime("Index out of bounds".to_string()));
+            }
+            return Ok(Value::Int(data[i] as i64));
+        }
+        if let Value::MmapSlice(h, base, n) = &obj_val {
+            if let Expr::Range(lo, hi) = idx.as_ref() {
+                let lo_v = lo.as_ref().map(|e| self.eval_expr(e)).transpose()?;
+                let hi_v = hi.as_ref().map(|e| self.eval_expr(e)).transpose()?;
+                let (s, e) = slice_bounds(*n, lo_v.as_ref(), hi_v.as_ref())?;
+                return Ok(Value::MmapSlice(h.clone(), base + s, e - s));
+            }
+            let idx_val = self.eval_expr(idx)?;
+            let i = idx_val.as_i64().unwrap_or(0) as usize;
+            if i >= *n {
+                return Err(crate::RakError::Runtime("Index out of bounds".to_string()));
+            }
+            return Ok(Value::Int(h.as_slice()[base + i] as i64));
+        }
+        if let Value::Bytes(b) = &obj_val {
+            if let Expr::Range(lo, hi) = idx.as_ref() {
+                // bytes slice; bounds support negatives and clamp.
+                let lo_v = lo.as_ref().map(|e| self.eval_expr(e)).transpose()?;
+                let hi_v = hi.as_ref().map(|e| self.eval_expr(e)).transpose()?;
+                let (s, e) = slice_bounds(b.len(), lo_v.as_ref(), hi_v.as_ref())?;
+                return Ok(Value::Bytes(b[s..e].to_vec()));
+            }
+            let idx_val = self.eval_expr(idx)?;
+            if let Value::Int(i) = idx_val {
+                // Negative index counts from the end (like Rust slices).
+                let i = normalize_index(b.len(), i);
+                return i
+                    .map(|k| Value::Int(b[k] as i64))
+                    .ok_or_else(|| crate::RakError::Runtime("Index out of bounds".to_string()));
+            }
+        }
+        // Slice indexing: `xs[1..4]`, `xs[..3]`, `xs[2..]` for
+        // arrays, tuples and strings. Negative indices count from the
+        // end; bounds clamp to the container; char-based for strings.
+        if let Expr::Range(lo, hi) = idx.as_ref() {
+            let lo_v = match lo {
+                Some(e) => Some(self.eval_expr(e)?),
+                None => None,
+            };
+            let hi_v = match hi {
+                Some(e) => Some(self.eval_expr(e)?),
+                None => None,
+            };
+            match &obj_val {
+                Value::Array(vals) => {
+                    let (s, e) = slice_bounds(vals.len(), lo_v.as_ref(), hi_v.as_ref())?;
+                    return Ok(Value::Array(vals[s..e].to_vec()));
                 }
-                if let Value::MmapSlice(h, base, n) = &obj_val {
-                    if let Expr::Range(lo, hi) = idx.as_ref() {
-                        let lo_v = lo.as_ref().map(|e| self.eval_expr(e)).transpose()?;
-                        let hi_v = hi.as_ref().map(|e| self.eval_expr(e)).transpose()?;
-                        let (s, e) = slice_bounds(*n, lo_v.as_ref(), hi_v.as_ref())?;
-                        return Ok(Value::MmapSlice(h.clone(), base + s, e - s));
-                    }
-                    let idx_val = self.eval_expr(idx)?;
-                    let i = idx_val.as_i64().unwrap_or(0) as usize;
-                    if i >= *n { return Err(crate::RakError::Runtime("Index out of bounds".to_string())); }
-                    return Ok(Value::Int(h.as_slice()[base + i] as i64));
+                Value::Tuple(vals) => {
+                    let (s, e) = slice_bounds(vals.len(), lo_v.as_ref(), hi_v.as_ref())?;
+                    return Ok(Value::Tuple(vals[s..e].to_vec()));
                 }
-                if let Value::Bytes(b) = &obj_val {
-                    if let Expr::Range(lo, hi) = idx.as_ref() {
-                        // bytes slice; bounds support negatives and clamp.
-                        let lo_v = lo.as_ref().map(|e| self.eval_expr(e)).transpose()?;
-                        let hi_v = hi.as_ref().map(|e| self.eval_expr(e)).transpose()?;
-                        let (s, e) = slice_bounds(b.len(), lo_v.as_ref(), hi_v.as_ref())?;
-                        return Ok(Value::Bytes(b[s..e].to_vec()));
-                    }
-                    let idx_val = self.eval_expr(idx)?;
-                    if let Value::Int(i) = idx_val {
-                        // Negative index counts from the end (like Rust slices).
-                        let i = normalize_index(b.len(), i);
-                        return i.map(|k| Value::Int(b[k] as i64)).ok_or_else(|| crate::RakError::Runtime("Index out of bounds".to_string()));
-                    }
+                Value::String(st) => {
+                    let chars: Vec<char> = st.chars().collect();
+                    let (s, e) = slice_bounds(chars.len(), lo_v.as_ref(), hi_v.as_ref())?;
+                    return Ok(Value::String(chars[s..e].iter().collect()));
                 }
-                // Slice indexing: `xs[1..4]`, `xs[..3]`, `xs[2..]` for
-                // arrays, tuples and strings. Negative indices count from the
-                // end; bounds clamp to the container; char-based for strings.
-                if let Expr::Range(lo, hi) = idx.as_ref() {
-                    let lo_v = match lo {
-                        Some(e) => Some(self.eval_expr(e)?),
-                        None => None,
-                    };
-                    let hi_v = match hi {
-                        Some(e) => Some(self.eval_expr(e)?),
-                        None => None,
-                    };
-                    match &obj_val {
-                        Value::Array(vals) => {
-                            let (s, e) = slice_bounds(vals.len(), lo_v.as_ref(), hi_v.as_ref())?;
-                            return Ok(Value::Array(vals[s..e].to_vec()));
-                        }
-                        Value::Tuple(vals) => {
-                            let (s, e) = slice_bounds(vals.len(), lo_v.as_ref(), hi_v.as_ref())?;
-                            return Ok(Value::Tuple(vals[s..e].to_vec()));
-                        }
-                        Value::String(st) => {
-                            let chars: Vec<char> = st.chars().collect();
-                            let (s, e) = slice_bounds(chars.len(), lo_v.as_ref(), hi_v.as_ref())?;
-                            return Ok(Value::String(chars[s..e].iter().collect()));
-                        }
-                        _ => {
-                            return Err(crate::RakError::Runtime(format!(
-                                "cannot slice a value of type '{}'",
-                                obj_val.type_name()
-                            )))
-                        }
-                    }
+                _ => {
+                    return Err(crate::RakError::Runtime(format!(
+                        "cannot slice a value of type '{}'",
+                        obj_val.type_name()
+                    )))
                 }
-                let idx_val = self.eval_expr(idx)?;
-                let tn = obj_val.type_name();
-                if let Some(func) = self
-                    .trait_impls
-                    .get(&("Index".to_string(), tn.clone(), "index".to_string()))
-                    .cloned()
-                {
-                    return self.call_method_with_values(func, obj_val, vec![idx_val]);
-                }
-                match (&obj_val, &idx_val) {
-                    (Value::Array(arr), Value::Int(i)) => {
-                        let i = normalize_index(arr.len(), *i);
-                        i.map(|k| arr[k].clone()).ok_or_else(|| crate::RakError::Runtime("Index out of bounds".to_string()))
-                    }
-                    (Value::Tuple(t), Value::Int(i)) => {
-                        let i = normalize_index(t.len(), *i);
-                        i.map(|k| t[k].clone()).ok_or_else(|| crate::RakError::Runtime("Index out of bounds".to_string()))
-                    }
-                    (Value::String(s), Value::Int(i)) => {
-                        let k = normalize_index(s.chars().count(), *i);
-                        k.map(|k| Value::String(s.chars().nth(k).unwrap().to_string())).ok_or_else(|| crate::RakError::Runtime("Index out of bounds".to_string()))
-                    }
-                    (Value::Map(map), Value::String(key)) => {
-                        map.get(key).cloned().ok_or_else(|| crate::RakError::Runtime(format!("Key '{}' not found", key)))
-                    }
-                    _ => Err(crate::RakError::Runtime("Invalid index operation".to_string())),
-                }
+            }
+        }
+        let idx_val = self.eval_expr(idx)?;
+        let tn = obj_val.type_name();
+        if let Some(func) = self
+            .trait_impls
+            .get(&("Index".to_string(), tn.clone(), "index".to_string()))
+            .cloned()
+        {
+            return self.call_method_with_values(func, obj_val, vec![idx_val]);
+        }
+        match (&obj_val, &idx_val) {
+            (Value::Array(arr), Value::Int(i)) => {
+                let i = normalize_index(arr.len(), *i);
+                i.map(|k| arr[k].clone())
+                    .ok_or_else(|| crate::RakError::Runtime("Index out of bounds".to_string()))
+            }
+            (Value::Tuple(t), Value::Int(i)) => {
+                let i = normalize_index(t.len(), *i);
+                i.map(|k| t[k].clone())
+                    .ok_or_else(|| crate::RakError::Runtime("Index out of bounds".to_string()))
+            }
+            (Value::String(s), Value::Int(i)) => {
+                let k = normalize_index(s.chars().count(), *i);
+                k.map(|k| Value::String(s.chars().nth(k).unwrap().to_string()))
+                    .ok_or_else(|| crate::RakError::Runtime("Index out of bounds".to_string()))
+            }
+            (Value::Map(map), Value::String(key)) => map
+                .get(key)
+                .cloned()
+                .ok_or_else(|| crate::RakError::Runtime(format!("Key '{}' not found", key))),
+            _ => Err(crate::RakError::Runtime(
+                "Invalid index operation".to_string(),
+            )),
+        }
     }
 
     fn eval_expr(&mut self, expr: &Expr) -> crate::Result<Value> {
         match expr {
             Expr::Hex(h) => Ok(Value::Hex(*h)),
-Expr::BinLit(b) => Ok(Value::Hex(*b)),
+            Expr::BinLit(b) => Ok(Value::Hex(*b)),
             Expr::OctLit(o) => Ok(Value::Hex(*o)),
             Expr::Int(i) => Ok(Value::Int(*i)),
             Expr::Float(f) => Ok(Value::Float(*f)),
             Expr::Float32(f) => Ok(Value::Float(*f as f64)),
             Expr::Char(c) => Ok(Value::Char(*c)),
             Expr::TypedInt(v, k) => Ok(match k {
-                crate::ast::IntKind::I8 | crate::ast::IntKind::I16 | crate::ast::IntKind::I32 | crate::ast::IntKind::I64 => Value::Int(*v),
-                crate::ast::IntKind::U8 | crate::ast::IntKind::U16 | crate::ast::IntKind::U32 | crate::ast::IntKind::U64 => Value::Hex(*v as u64),
+                crate::ast::IntKind::I8
+                | crate::ast::IntKind::I16
+                | crate::ast::IntKind::I32
+                | crate::ast::IntKind::I64 => Value::Int(*v),
+                crate::ast::IntKind::U8
+                | crate::ast::IntKind::U16
+                | crate::ast::IntKind::U32
+                | crate::ast::IntKind::U64 => Value::Hex(*v as u64),
             }),
             Expr::String(s) => Ok(Value::String(s.clone())),
             Expr::Bytes(b) => Ok(Value::Bytes(b.clone())),
@@ -2631,13 +2949,17 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                         Value::Hex(h) => Ok(Value::Hex(h.wrapping_neg())),
                         Value::Int(i) => Ok(Value::Int(i.wrapping_neg())),
                         Value::Float(n) => Ok(Value::Float(-n)),
-                        _ => Err(crate::RakError::Runtime("Cannot negate this value".to_string())),
+                        _ => Err(crate::RakError::Runtime(
+                            "Cannot negate this value".to_string(),
+                        )),
                     },
                     UnOp::Not => Ok(Value::Bool(!is_truthy(&val))),
                     UnOp::BitNot => match val {
                         Value::Hex(h) => Ok(Value::Hex(!h)),
                         Value::Int(i) => Ok(Value::Int(!i)),
-                        _ => Err(crate::RakError::Runtime("Cannot bitwise-not this value".to_string())),
+                        _ => Err(crate::RakError::Runtime(
+                            "Cannot bitwise-not this value".to_string(),
+                        )),
                     },
                 }
             }
@@ -2682,7 +3004,8 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                 {
                     // IndexMut::set returns the updated container (functional
                     // update semantics), which we store back to the target.
-                    let updated = self.call_method_with_values(func, container, vec![idx_val, v.clone()])?;
+                    let updated =
+                        self.call_method_with_values(func, container, vec![idx_val, v.clone()])?;
                     self.store_back(obj, updated)?;
                     return Ok(v);
                 }
@@ -2690,8 +3013,13 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                 match &mut container {
                     Value::Array(a) => {
                         if let Value::Int(i) = idx_val {
-                            let i = normalize_index(a.len(), i)
-                                .ok_or_else(|| crate::RakError::Runtime(format!("index-assign: index {} out of bounds (len {})", i, a.len())))?;
+                            let i = normalize_index(a.len(), i).ok_or_else(|| {
+                                crate::RakError::Runtime(format!(
+                                    "index-assign: index {} out of bounds (len {})",
+                                    i,
+                                    a.len()
+                                ))
+                            })?;
                             a[i] = v.clone();
                         }
                     }
@@ -2712,7 +3040,11 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                         }
                         b[i] = self.byte_arg(&v)?;
                     }
-                    _ => return Err(crate::RakError::Runtime("cannot index-assign this value".to_string())),
+                    _ => {
+                        return Err(crate::RakError::Runtime(
+                            "cannot index-assign this value".to_string(),
+                        ))
+                    }
                 }
                 self.store_back(obj, container)?;
                 Ok(v)
@@ -2729,7 +3061,9 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                 Ok(v)
             }
             Expr::CompoundAssign(op, name, value) => {
-                let cur = self.env.get(name).ok_or_else(|| crate::RakError::Runtime(format!("Undefined variable: {}", name)))?;
+                let cur = self.env.get(name).ok_or_else(|| {
+                    crate::RakError::Runtime(format!("Undefined variable: {}", name))
+                })?;
                 let rv = self.eval_expr(value)?;
                 let binop = match op {
                     CompoundOp::Add => BinOp::Add,
@@ -2761,13 +3095,22 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                         crate::RakError::Runtime(format!("Field '{}' not found", field))
                     }),
                     Value::Module(ns) => ns.lock().unwrap().get(field).ok_or_else(|| {
-                        crate::RakError::Runtime(format!("'{}' is not exported from this module", field))
+                        crate::RakError::Runtime(format!(
+                            "'{}' is not exported from this module",
+                            field
+                        ))
                     }),
                     Value::Tuple(t) => {
-                        let idx: usize = field.parse().map_err(|_| crate::RakError::Runtime("Bad tuple index".to_string()))?;
-                        t.get(idx).cloned().ok_or_else(|| crate::RakError::Runtime("Tuple index out of bounds".to_string()))
+                        let idx: usize = field
+                            .parse()
+                            .map_err(|_| crate::RakError::Runtime("Bad tuple index".to_string()))?;
+                        t.get(idx).cloned().ok_or_else(|| {
+                            crate::RakError::Runtime("Tuple index out of bounds".to_string())
+                        })
                     }
-                    _ => Err(crate::RakError::Runtime("Cannot access field on this value".to_string())),
+                    _ => Err(crate::RakError::Runtime(
+                        "Cannot access field on this value".to_string(),
+                    )),
                 }
             }
             Expr::Index(obj, idx) => self.eval_index(obj, idx),
@@ -2788,18 +3131,29 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                 }
                 Ok(Value::Array(arr))
             }
-            Expr::Function { params, return_type: _, body, captures: _, is_async, name, requires, ensures } => {
-                Ok(Value::Function {
-                    params: params.clone(),
-                    body: body.clone(),
-                    closure: Arc::new(self.env.clone()),
-                    is_async: *is_async,
-                    name: name.clone().unwrap_or_else(|| "<anon>".to_string()),
-                    requires: requires.clone(),
-                    ensures: ensures.clone(),
-                })
-            }
-            Expr::Lambda { params, body, captures: _ } => {
+            Expr::Function {
+                params,
+                return_type: _,
+                body,
+                captures: _,
+                is_async,
+                name,
+                requires,
+                ensures,
+            } => Ok(Value::Function {
+                params: params.clone(),
+                body: body.clone(),
+                closure: Arc::new(self.env.clone()),
+                is_async: *is_async,
+                name: name.clone().unwrap_or_else(|| "<anon>".to_string()),
+                requires: requires.clone(),
+                ensures: ensures.clone(),
+            }),
+            Expr::Lambda {
+                params,
+                body,
+                captures: _,
+            } => {
                 let single = Stmt::Expr(body.clone());
                 Ok(Value::Function {
                     params: params.clone(),
@@ -2811,8 +3165,16 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                     ensures: vec![],
                 })
             }
-            Expr::Call { callee, args, named } => self.eval_call(callee, args, named),
-            Expr::If { cond, then_branch, else_branch } => {
+            Expr::Call {
+                callee,
+                args,
+                named,
+            } => self.eval_call(callee, args, named),
+            Expr::If {
+                cond,
+                then_branch,
+                else_branch,
+            } => {
                 let v = self.eval_expr(cond)?;
                 if is_truthy(&v) {
                     self.env.push_scope();
@@ -2929,7 +3291,10 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                 for (fname, fval) in fields {
                     fmap.insert(fname.clone(), self.eval_expr(fval)?);
                 }
-                Ok(Value::Struct { name: name.clone(), fields: fmap })
+                Ok(Value::Struct {
+                    name: name.clone(),
+                    fields: fmap,
+                })
             }
             Expr::Ternary { cond, then, els } => {
                 if is_truthy(&self.eval_expr(cond)?) {
@@ -2973,7 +3338,10 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                     }
                     (Value::String(s), Value::Int(i)) => {
                         let k = normalize_index(s.chars().count(), *i);
-                        Ok(k.map(|k| Value::String(s.chars().nth(k).unwrap().to_string())).unwrap_or(Value::Nil))
+                        Ok(
+                            k.map(|k| Value::String(s.chars().nth(k).unwrap().to_string()))
+                                .unwrap_or(Value::Nil),
+                        )
                     }
                     (Value::Map(m), Value::String(k)) => {
                         Ok(m.get(k).cloned().unwrap_or(Value::Nil))
@@ -2982,11 +3350,15 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                 }
             }
             Expr::MultiAssign { targets, values } => {
-                let vals: Vec<Value> = values.iter().map(|e| self.eval_expr(e)).collect::<crate::Result<_>>()?;
+                let vals: Vec<Value> = values
+                    .iter()
+                    .map(|e| self.eval_expr(e))
+                    .collect::<crate::Result<_>>()?;
                 if targets.len() != vals.len() {
                     return Err(crate::RakError::Runtime(format!(
                         "Multi-assign needs {} targets and {} values",
-                        targets.len(), vals.len()
+                        targets.len(),
+                        vals.len()
                     )));
                 }
                 let mut last = Value::Nil;
@@ -2999,7 +3371,14 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                 }
                 Ok(last)
             }
-            Expr::Comprehension { is_map, var, iterable, cond, elem, value } => {
+            Expr::Comprehension {
+                is_map,
+                var,
+                iterable,
+                cond,
+                elem,
+                value,
+            } => {
                 let iter = self.eval_expr(iterable)?;
                 let tn = iter.type_name();
                 let items = if let Some(func) = self
@@ -3010,18 +3389,30 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                     let produced = self.call_method_value(func, iter, &[])?;
                     match produced {
                         Value::Array(items) => items,
-                        other => return Err(crate::RakError::Runtime(format!(
-                            "Iterable::iter must return an array, got {}", other.type_name()
-                        ))),
+                        other => {
+                            return Err(crate::RakError::Runtime(format!(
+                                "Iterable::iter must return an array, got {}",
+                                other.type_name()
+                            )))
+                        }
                     }
                 } else {
                     match iter {
                         Value::Array(arr) => arr,
                         Value::Tuple(t) => t,
-                        Value::String(s) => s.chars().map(|c| Value::String(c.to_string())).collect(),
-                        Value::Map(m) => m.into_iter().map(|(k, v)| Value::Tuple(vec![Value::String(k), v])).collect(),
+                        Value::String(s) => {
+                            s.chars().map(|c| Value::String(c.to_string())).collect()
+                        }
+                        Value::Map(m) => m
+                            .into_iter()
+                            .map(|(k, v)| Value::Tuple(vec![Value::String(k), v]))
+                            .collect(),
                         Value::Option(Some(v)) => vec![*v],
-                        _ => return Err(crate::RakError::Runtime("Cannot iterate over this value".to_string())),
+                        _ => {
+                            return Err(crate::RakError::Runtime(
+                                "Cannot iterate over this value".to_string(),
+                            ))
+                        }
                     }
                 };
                 if *is_map {
@@ -3066,7 +3457,8 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                 Ok(self.cast_as(&v, ty))
             }
             Expr::MacroVar(name) => Err(crate::RakError::Runtime(format!(
-                "macro variable '${}' used outside a macro body", name
+                "macro variable '${}' used outside a macro body",
+                name
             ))),
             Expr::MacroInvoke { name, args } => self.eval_macro_invoke(name, args),
             Expr::EvidenceFrom { value } => {
@@ -3079,7 +3471,10 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                     raw_len: None,
                     parent: None,
                 });
-                Ok(Value::Evidence { inner: Box::new(v), provenance: prov })
+                Ok(Value::Evidence {
+                    inner: Box::new(v),
+                    provenance: prov,
+                })
             }
         }
     }
@@ -3089,15 +3484,28 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
     fn eval_macro_invoke(&mut self, name: &str, args: &[Expr]) -> crate::Result<Value> {
         let def = match self.macros.get(name) {
             Some(d) => d.clone(),
-            None => return Err(crate::RakError::Runtime(format!("undefined macro '{}!'", name))),
+            None => {
+                return Err(crate::RakError::Runtime(format!(
+                    "undefined macro '{}!'",
+                    name
+                )))
+            }
         };
         let (params, body) = match def {
             Stmt::MacroDef { params, body, .. } => (params, body),
-            _ => return Err(crate::RakError::Runtime(format!("'{}' is not a macro", name))),
+            _ => {
+                return Err(crate::RakError::Runtime(format!(
+                    "'{}' is not a macro",
+                    name
+                )))
+            }
         };
         if args.len() != params.len() {
             return Err(crate::RakError::Runtime(format!(
-                "macro '{}!' expects {} args, got {}", name, params.len(), args.len()
+                "macro '{}!' expects {} args, got {}",
+                name,
+                params.len(),
+                args.len()
             )));
         }
         let mut bindings: HashMap<String, Expr> = HashMap::new();
@@ -3173,7 +3581,10 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
             parent: None,
         });
         Ok(Value::Evidence {
-            inner: Box::new(Value::Struct { name: name.to_string(), fields: out }),
+            inner: Box::new(Value::Struct {
+                name: name.to_string(),
+                fields: out,
+            }),
             provenance: prov,
         })
     }
@@ -3204,7 +3615,11 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                 if start + n > bytes.len() {
                     return Err(crate::RakError::Runtime(format!(
                         "binstruct {}: field '{}' outruns buffer ({}+{} > {})",
-                        parent, f.name, start, n, bytes.len()
+                        parent,
+                        f.name,
+                        start,
+                        n,
+                        bytes.len()
                     )));
                 }
                 let v = bytes[start..start + n].to_vec();
@@ -3217,7 +3632,11 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                 if start + nbytes > bytes.len() {
                     return Err(crate::RakError::Runtime(format!(
                         "binstruct {}: field '{}' outruns buffer ({}+{} > {})",
-                        parent, f.name, start, nbytes, bytes.len()
+                        parent,
+                        f.name,
+                        start,
+                        nbytes,
+                        bytes.len()
                     )));
                 }
                 let mut acc: u64 = 0;
@@ -3273,21 +3692,18 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                 Ok((Value::Hex(acc), off + new_bit / 8, new_bit % 8))
             }
             BinKind::Ref(inner_name) => {
-                let inner_fields = self
-                    .binstructs
-                    .get(inner_name)
-                    .cloned()
-                    .ok_or_else(|| {
-                        crate::RakError::Runtime(format!(
-                            "binstruct {}: unknown nested binstruct '{}'",
-                            parent, inner_name
-                        ))
-                    })?;
+                let inner_fields = self.binstructs.get(inner_name).cloned().ok_or_else(|| {
+                    crate::RakError::Runtime(format!(
+                        "binstruct {}: unknown nested binstruct '{}'",
+                        parent, inner_name
+                    ))
+                })?;
                 let mut inner_out: HashMap<String, Value> = HashMap::new();
                 let mut inner_off = off + bit_off.div_ceil(8);
                 let mut inner_bit = 0usize;
                 for nf in &inner_fields {
-                    let (v, no, nb) = self.decode_field(inner_name, nf, bytes, inner_off, inner_bit)?;
+                    let (v, no, nb) =
+                        self.decode_field(inner_name, nf, bytes, inner_off, inner_bit)?;
                     inner_out.insert(nf.name.clone(), v);
                     inner_off = no;
                     inner_bit = nb;
@@ -3315,7 +3731,11 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
             .ok_or_else(|| crate::RakError::Runtime(format!("unknown binstruct '{}'", name)))?;
         let val = match args.first() {
             Some(v) => v.clone(),
-            None => return Err(crate::RakError::Runtime("encode expects a value".to_string())),
+            None => {
+                return Err(crate::RakError::Runtime(
+                    "encode expects a value".to_string(),
+                ))
+            }
         };
         let unwrap = |v: &Value| -> Value {
             match v {
@@ -3426,31 +3846,26 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                         .rev()
                         .map(|i| ((v >> (8 * i)) & 0xFF) as u8)
                         .collect(),
-                    Endian::Little => (0..nbytes)
-                        .map(|i| ((v >> (8 * i)) & 0xFF) as u8)
-                        .collect(),
+                    Endian::Little => (0..nbytes).map(|i| ((v >> (8 * i)) & 0xFF) as u8).collect(),
                 };
                 out.extend(buf);
                 Ok(0)
             }
             BinKind::Ref(inner_name) => {
-                let inner_fields = self
-                    .binstructs
-                    .get(inner_name)
-                    .cloned()
-                    .ok_or_else(|| {
-                        crate::RakError::Runtime(format!(
-                            "binstruct {}: unknown nested binstruct '{}'",
-                            parent, inner_name
-                        ))
-                    })?;
+                let inner_fields = self.binstructs.get(inner_name).cloned().ok_or_else(|| {
+                    crate::RakError::Runtime(format!(
+                        "binstruct {}: unknown nested binstruct '{}'",
+                        parent, inner_name
+                    ))
+                })?;
                 let inner_map = match val {
                     Value::Struct { fields, .. } => fields,
                     Value::Map(m) => m,
                     other => {
                         return Err(crate::RakError::Runtime(format!(
                             "encode: field '{}' expects a nested struct, got {}",
-                            f.name, other.type_name()
+                            f.name,
+                            other.type_name()
                         )))
                     }
                 };
@@ -3498,7 +3913,9 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                     Err(crate::RakError::Runtime(guard.refusal(field)))
                 }
             }
-            _ => Err(crate::RakError::Runtime("cannot field-assign this value".to_string())),
+            _ => Err(crate::RakError::Runtime(
+                "cannot field-assign this value".to_string(),
+            )),
         }
     }
 
@@ -3521,8 +3938,13 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                 match &mut container {
                     Value::Array(a) => {
                         if let Value::Int(i) = idx_val {
-                            let i = normalize_index(a.len(), i)
-                                .ok_or_else(|| crate::RakError::Runtime(format!("index-assign: index {} out of bounds (len {})", i, a.len())))?;
+                            let i = normalize_index(a.len(), i).ok_or_else(|| {
+                                crate::RakError::Runtime(format!(
+                                    "index-assign: index {} out of bounds (len {})",
+                                    i,
+                                    a.len()
+                                ))
+                            })?;
                             a[i] = value;
                         }
                     }
@@ -3543,11 +3965,17 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                         }
                         b[i] = self.byte_arg(&value)?;
                     }
-                    _ => return Err(crate::RakError::Runtime("cannot index-assign this value".to_string())),
+                    _ => {
+                        return Err(crate::RakError::Runtime(
+                            "cannot index-assign this value".to_string(),
+                        ))
+                    }
                 }
                 self.store_back(obj, container)
             }
-            _ => Err(crate::RakError::Runtime("invalid assignment target".to_string())),
+            _ => Err(crate::RakError::Runtime(
+                "invalid assignment target".to_string(),
+            )),
         }
     }
 
@@ -3560,10 +3988,18 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
             "nil" => return Ok(Value::Nil),
             _ => {}
         }
-        Err(crate::RakError::Runtime(format!("Undefined variable: {}", name)))
+        Err(crate::RakError::Runtime(format!(
+            "Undefined variable: {}",
+            name
+        )))
     }
 
-    fn eval_call(&mut self, callee: &Expr, args: &[Expr], named: &[(String, Expr)]) -> crate::Result<Value> {
+    fn eval_call(
+        &mut self,
+        callee: &Expr,
+        args: &[Expr],
+        named: &[(String, Expr)],
+    ) -> crate::Result<Value> {
         if let Expr::Ident(name) = callee {
             match name.as_str() {
                 "Some" => {
@@ -3611,23 +4047,47 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                 _ => {}
             }
             if let Some(val) = self.env.get(name) {
-                if let Value::Function { params, body, closure, is_async, name: fname, requires, ensures } = val {
-                    return self.call_function(&params, &body, &closure, is_async, &fname, &requires, &ensures, args, named);
+                if let Value::Function {
+                    params,
+                    body,
+                    closure,
+                    is_async,
+                    name: fname,
+                    requires,
+                    ensures,
+                } = val
+                {
+                    return self.call_function(
+                        &params, &body, &closure, is_async, &fname, &requires, &ensures, args,
+                        named,
+                    );
                 }
             }
             if let Some(decl) = self.foreign_fns.get(name).cloned() {
                 if !named.is_empty() {
-                    return Err(crate::RakError::Runtime(format!("named arguments not supported for extern '{}'", name)));
+                    return Err(crate::RakError::Runtime(format!(
+                        "named arguments not supported for extern '{}'",
+                        name
+                    )));
                 }
-                let arg_vals: Vec<Value> = args.iter().map(|a| self.eval_expr(a)).collect::<crate::Result<_>>()?;
+                let arg_vals: Vec<Value> = args
+                    .iter()
+                    .map(|a| self.eval_expr(a))
+                    .collect::<crate::Result<_>>()?;
                 // Sandbox: calling an `extern "C"` function requires ffi.
                 crate::caps::check_builtin("ffi:extern")?;
                 return self.call_foreign(decl, &arg_vals);
             }
             if !named.is_empty() {
-                return Err(crate::RakError::Runtime(format!("named arguments not supported for builtin '{}'", name)));
+                return Err(crate::RakError::Runtime(format!(
+                    "named arguments not supported for builtin '{}'",
+                    name
+                )));
             }
-            let arg_vals: Vec<Value> = args.iter().map(|a| self.eval_expr(a)).collect::<crate::Result<_>>()?;
+            let arg_vals: Vec<Value> = args
+                .iter()
+                .map(|a| self.eval_expr(a))
+                .collect::<crate::Result<_>>()?;
             return self.eval_builtin(name, &arg_vals);
         }
         if let Expr::Path(segs) = callee {
@@ -3639,8 +4099,10 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
             // registered `binstruct` — dispatch before value-based method lookup.
             if let Expr::Ident(name) = obj_expr.as_ref() {
                 if self.binstructs.contains_key(name) {
-                    let arg_vals: Vec<Value> =
-                        args.iter().map(|a| self.eval_expr(a)).collect::<crate::Result<_>>()?;
+                    let arg_vals: Vec<Value> = args
+                        .iter()
+                        .map(|a| self.eval_expr(a))
+                        .collect::<crate::Result<_>>()?;
                     match method.as_str() {
                         "decode" => return self.bin_decode(name, &arg_vals),
                         "encode" => return self.bin_encode(name, &arg_vals),
@@ -3661,8 +4123,20 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
             }
             // Fallback: a field that itself holds a callable (modules, etc.).
             if let Some(v) = self.field_value(&obj_val, method) {
-                if let Value::Function { params, body, closure, is_async, name: fname, requires, ensures } = v {
-                    return self.call_function(&params, &body, &closure, is_async, &fname, &requires, &ensures, args, named);
+                if let Value::Function {
+                    params,
+                    body,
+                    closure,
+                    is_async,
+                    name: fname,
+                    requires,
+                    ensures,
+                } = v
+                {
+                    return self.call_function(
+                        &params, &body, &closure, is_async, &fname, &requires, &ensures, args,
+                        named,
+                    );
                 }
             }
             return Err(crate::RakError::Runtime(format!(
@@ -3671,29 +4145,65 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
             )));
         }
         let callee_val = self.eval_expr(callee)?;
-        if let Value::Function { params, body, closure, is_async, name: fname, requires, ensures } = callee_val {
-            return self.call_function(&params, &body, &closure, is_async, &fname, &requires, &ensures, args, named);
+        if let Value::Function {
+            params,
+            body,
+            closure,
+            is_async,
+            name: fname,
+            requires,
+            ensures,
+        } = callee_val
+        {
+            return self.call_function(
+                &params, &body, &closure, is_async, &fname, &requires, &ensures, args, named,
+            );
         }
         if let Value::Module(map) = callee_val {
             let _ = map;
         }
-        Err(crate::RakError::Runtime("Cannot call non-function".to_string()))
+        Err(crate::RakError::Runtime(
+            "Cannot call non-function".to_string(),
+        ))
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn call_function(&mut self, params: &[Param], body: &[Stmt], closure: &Arc<Env>, is_async: bool, name: &str, requires: &[Expr], ensures: &[Expr], args: &[Expr], named: &[(String, Expr)]) -> crate::Result<Value> {
-        let arg_vals: Vec<Value> = args.iter().map(|a| self.eval_expr(a)).collect::<crate::Result<_>>()?;
+    fn call_function(
+        &mut self,
+        params: &[Param],
+        body: &[Stmt],
+        closure: &Arc<Env>,
+        is_async: bool,
+        name: &str,
+        requires: &[Expr],
+        ensures: &[Expr],
+        args: &[Expr],
+        named: &[(String, Expr)],
+    ) -> crate::Result<Value> {
+        let arg_vals: Vec<Value> = args
+            .iter()
+            .map(|a| self.eval_expr(a))
+            .collect::<crate::Result<_>>()?;
         let named_vals: crate::Result<Vec<(String, Value)>> = named
             .iter()
             .map(|(n, e)| Ok((n.clone(), self.eval_expr(e)?)))
             .collect();
         let named_vals = named_vals?;
-        self.call_function_values(params, body, closure, is_async, name, requires, ensures, arg_vals, named_vals)
+        self.call_function_values(
+            params, body, closure, is_async, name, requires, ensures, arg_vals, named_vals,
+        )
     }
 
     /// Run a function's body in the current scope (env already set to the
     /// closure). Used by `task_group`. Returns the function's return value.
-    fn run_function_body(&mut self, params: &[Param], body: &[Stmt], _is_async: bool, arg_vals: &[Value], named_vals: &[(String, Value)]) -> crate::Result<Value> {
+    fn run_function_body(
+        &mut self,
+        params: &[Param],
+        body: &[Stmt],
+        _is_async: bool,
+        arg_vals: &[Value],
+        named_vals: &[(String, Value)],
+    ) -> crate::Result<Value> {
         let bound = self.bind_params(params, arg_vals, named_vals)?;
         for (name, v) in bound {
             self.env.define(&name, v);
@@ -3780,16 +4290,52 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
     /// Call a function value with already-evaluated argument values. Used by
     /// trait-method dispatch where the receiver and arguments are computed
     /// before the call.
-    fn call_function_with_values(&mut self, func: Value, arg_vals: Vec<Value>) -> crate::Result<Value> {
-        if let Value::Function { params, body, closure, is_async, name, requires, ensures } = func {
-            self.call_function_values(&params, &body, &closure, is_async, &name, &requires, &ensures, arg_vals, vec![])
+    fn call_function_with_values(
+        &mut self,
+        func: Value,
+        arg_vals: Vec<Value>,
+    ) -> crate::Result<Value> {
+        if let Value::Function {
+            params,
+            body,
+            closure,
+            is_async,
+            name,
+            requires,
+            ensures,
+        } = func
+        {
+            self.call_function_values(
+                &params,
+                &body,
+                &closure,
+                is_async,
+                &name,
+                &requires,
+                &ensures,
+                arg_vals,
+                vec![],
+            )
         } else {
-            Err(crate::RakError::Runtime("value is not callable".to_string()))
+            Err(crate::RakError::Runtime(
+                "value is not callable".to_string(),
+            ))
         }
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn call_function_values(&mut self, params: &[Param], body: &[Stmt], closure: &Arc<Env>, is_async: bool, name: &str, requires: &[Expr], ensures: &[Expr], arg_vals: Vec<Value>, named_vals: Vec<(String, Value)>) -> crate::Result<Value> {
+    fn call_function_values(
+        &mut self,
+        params: &[Param],
+        body: &[Stmt],
+        closure: &Arc<Env>,
+        is_async: bool,
+        name: &str,
+        requires: &[Expr],
+        ensures: &[Expr],
+        arg_vals: Vec<Value>,
+        named_vals: Vec<(String, Value)>,
+    ) -> crate::Result<Value> {
         if is_async {
             // An async function does not run its body at call time; it returns a
             // deferred future whose body is driven on the first `await`.
@@ -3843,7 +4389,11 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                 self.returning = saved_returning;
                 self.defers = saved_defers;
                 return Err(crate::RakError::Runtime(
-                    LimitHit::Depth { used: self.call_depth, max }.to_string(),
+                    LimitHit::Depth {
+                        used: self.call_depth,
+                        max,
+                    }
+                    .to_string(),
                 ));
             }
         }
@@ -3887,7 +4437,12 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
     /// Bind function arguments to params, applying positional fill, named
     /// args, defaults, optional (nil), and rest collection. Returns name→value
     /// pairs to define in the function scope.
-    fn bind_params(&mut self, params: &[Param], positional: &[Value], named: &[(String, Value)]) -> crate::Result<Vec<(String, Value)>> {
+    fn bind_params(
+        &mut self,
+        params: &[Param],
+        positional: &[Value],
+        named: &[(String, Value)],
+    ) -> crate::Result<Vec<(String, Value)>> {
         let mut bound: Vec<(String, Value)> = Vec::with_capacity(params.len());
         let mut named_map: HashMap<String, Value> = named.iter().cloned().collect();
         let mut pos_iter = positional.iter();
@@ -3901,12 +4456,18 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                 continue;
             }
             if saw_rest {
-                return Err(crate::RakError::Runtime(format!("parameter '{}' follows a rest parameter", p.name)));
+                return Err(crate::RakError::Runtime(format!(
+                    "parameter '{}' follows a rest parameter",
+                    p.name
+                )));
             }
             if let Some(v) = pos_iter.next() {
                 let v = v.clone();
                 if named_map.contains_key(&p.name) {
-                    return Err(crate::RakError::Runtime(format!("argument '{}' given twice (positional and named)", p.name)));
+                    return Err(crate::RakError::Runtime(format!(
+                        "argument '{}' given twice (positional and named)",
+                        p.name
+                    )));
                 }
                 bound.push((p.name.clone(), v));
                 continue;
@@ -3924,16 +4485,25 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                 bound.push((p.name.clone(), Value::Nil));
                 continue;
             }
-            return Err(crate::RakError::Runtime(format!("missing required argument '{}'", p.name)));
+            return Err(crate::RakError::Runtime(format!(
+                "missing required argument '{}'",
+                p.name
+            )));
         }
 
         let leftover = pos_iter.count();
         if leftover > 0 {
-            return Err(crate::RakError::Runtime(format!("too many positional arguments ({} extra)", leftover)));
+            return Err(crate::RakError::Runtime(format!(
+                "too many positional arguments ({} extra)",
+                leftover
+            )));
         }
         if !named_map.is_empty() {
             let names: Vec<String> = named_map.keys().cloned().collect();
-            return Err(crate::RakError::Runtime(format!("unknown named argument(s): {}", names.join(", "))));
+            return Err(crate::RakError::Runtime(format!(
+                "unknown named argument(s): {}",
+                names.join(", ")
+            )));
         }
         Ok(bound)
     }
@@ -3951,32 +4521,52 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
         match state {
             FutureState::Ready(v) => Ok(v),
             FutureState::Pending(jh) => {
-                let joined = async_runtime().block_on(async { jh.await })
+                let joined = async_runtime()
+                    .block_on(async { jh.await })
                     .map_err(|e| crate::RakError::Runtime(format!("await: task failed: {}", e)))?;
                 *handle.state.lock().unwrap() = FutureState::Ready(joined.clone());
                 Ok(joined)
             }
-            FutureState::Deferred { params, body, closure, args, named, name, requires, ensures } => {
-                let result = self.call_function_values(&params, &body, &closure, false, &name, &requires, &ensures, args, named)?;
+            FutureState::Deferred {
+                params,
+                body,
+                closure,
+                args,
+                named,
+                name,
+                requires,
+                ensures,
+            } => {
+                let result = self.call_function_values(
+                    &params, &body, &closure, false, &name, &requires, &ensures, args, named,
+                )?;
                 *handle.state.lock().unwrap() = FutureState::Ready(result.clone());
                 Ok(result)
             }
-            FutureState::Polled => Err(crate::RakError::Runtime("await: future already polled".to_string())),
+            FutureState::Polled => Err(crate::RakError::Runtime(
+                "await: future already polled".to_string(),
+            )),
         }
     }
 
     /// Resolve a `Value::Future` **concurrently** by driving it on a plain OS
-/// thread (bounded by a counting semaphore so thousands of concurrent ops share
-/// a handful of threads). Deferred `async fn` bodies are run in their own
-/// `Interpreter`; pending I/O futures are joined via `block_on` on that thread
-/// (legal because the thread is not itself a Tokio worker). Returns a
-/// `std::thread::JoinHandle<crate::Result<Value>>`; does not block.
-    fn drive_future_concurrent(&self, fv: Value) -> crate::Result<std::thread::JoinHandle<crate::Result<Value>>> {
+    /// thread (bounded by a counting semaphore so thousands of concurrent ops share
+    /// a handful of threads). Deferred `async fn` bodies are run in their own
+    /// `Interpreter`; pending I/O futures are joined via `block_on` on that thread
+    /// (legal because the thread is not itself a Tokio worker). Returns a
+    /// `std::thread::JoinHandle<crate::Result<Value>>`; does not block.
+    fn drive_future_concurrent(
+        &self,
+        fv: Value,
+    ) -> crate::Result<std::thread::JoinHandle<crate::Result<Value>>> {
         let handle = match fv {
             Value::Future(h) => h,
-            other => return Err(crate::RakError::Runtime(format!(
-                "expected a future, got {}", other.type_name()
-            ))),
+            other => {
+                return Err(crate::RakError::Runtime(format!(
+                    "expected a future, got {}",
+                    other.type_name()
+                )))
+            }
         };
         let state = std::mem::replace(&mut *handle.state.lock().unwrap(), FutureState::Polled);
         let permit = crate::async_rt::permit_count();
@@ -3994,12 +4584,24 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                     let _ = jh;
                     match async_runtime().block_on(async { jh.await }) {
                         Ok(v) => Ok(v),
-                        Err(e) => Err(crate::RakError::Runtime(format!("async task failed: {}", e))),
+                        Err(e) => Err(crate::RakError::Runtime(format!(
+                            "async task failed: {}",
+                            e
+                        ))),
                     }
                 });
                 Ok(th)
             }
-            FutureState::Deferred { params, body, closure, args, named, name, requires, ensures } => {
+            FutureState::Deferred {
+                params,
+                body,
+                closure,
+                args,
+                named,
+                name,
+                requires,
+                ensures,
+            } => {
                 let th = std::thread::spawn(move || {
                     let _p = permit.acquire();
                     let mut interp = Interpreter::new();
@@ -4022,11 +4624,15 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                     let r: crate::Result<()> = (|| {
                         for s in &body {
                             interp.exec_stmt(s)?;
-                            if interp.returning { break; }
+                            if interp.returning {
+                                break;
+                            }
                         }
                         Ok(())
                     })();
-                    if let Err(e) = r { return Err(e); }
+                    if let Err(e) = r {
+                        return Err(e);
+                    }
                     let ret = if interp.returning {
                         std::mem::replace(&mut interp.return_value, Value::Nil)
                     } else {
@@ -4037,18 +4643,23 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                 });
                 Ok(th)
             }
-            FutureState::Polled => Err(crate::RakError::Runtime("future already polled".to_string())),
+            FutureState::Polled => Err(crate::RakError::Runtime(
+                "future already polled".to_string(),
+            )),
         }
     }
 
     /// Join an array of concurrently-driven futures, returning an array of
     /// their values. Fails fast on the first task error.
-    fn join_futures_concurrent(&self, handles: Vec<std::thread::JoinHandle<crate::Result<Value>>>)
-        -> crate::Result<Vec<Value>> {
+    fn join_futures_concurrent(
+        &self,
+        handles: Vec<std::thread::JoinHandle<crate::Result<Value>>>,
+    ) -> crate::Result<Vec<Value>> {
         let mut out = Vec::with_capacity(handles.len());
         for h in handles {
-            let joined = h.join()
-                .map_err(|_| crate::RakError::Runtime("join: concurrent task panicked".to_string()))??;
+            let joined = h.join().map_err(|_| {
+                crate::RakError::Runtime("join: concurrent task panicked".to_string())
+            })??;
             out.push(joined);
         }
         Ok(out)
@@ -4059,7 +4670,12 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
     fn spawn_value(&mut self, v: Value) -> crate::Result<Value> {
         match v {
             Value::Future(_) => Ok(v),
-            Value::Function { params: _, body, closure, .. } => {
+            Value::Function {
+                params: _,
+                body,
+                closure,
+                ..
+            } => {
                 let body = body.clone();
                 let closure = closure.clone();
                 let handle: JoinHandle<Value> = std::thread::spawn(move || {
@@ -4086,7 +4702,12 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
 
     /// Dispatch a user-defined method `obj.method(args...)`, passing `obj` as
     /// the first argument (the receiver).
-    fn call_method_value(&mut self, func: Value, receiver: Value, args: &[Expr]) -> crate::Result<Value> {
+    fn call_method_value(
+        &mut self,
+        func: Value,
+        receiver: Value,
+        args: &[Expr],
+    ) -> crate::Result<Value> {
         let mut arg_vals = vec![receiver];
         for a in args {
             arg_vals.push(self.eval_expr(a)?);
@@ -4095,7 +4716,12 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
     }
 
     /// Like `call_method_value` but with already-evaluated argument values.
-    fn call_method_with_values(&mut self, func: Value, receiver: Value, args: Vec<Value>) -> crate::Result<Value> {
+    fn call_method_with_values(
+        &mut self,
+        func: Value,
+        receiver: Value,
+        args: Vec<Value>,
+    ) -> crate::Result<Value> {
         let mut arg_vals = vec![receiver];
         arg_vals.extend(args);
         self.call_function_with_values(func, arg_vals)
@@ -4174,7 +4800,11 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
 
     /// Coerce an argument into a compiled regex: pass through `Value::Regex`,
     /// or build one from a string pattern (with optional flags argument).
-    fn coerce_regex(&self, v: Option<&Value>, flags_arg: Option<&Value>) -> crate::Result<Arc<RegexValue>> {
+    fn coerce_regex(
+        &self,
+        v: Option<&Value>,
+        flags_arg: Option<&Value>,
+    ) -> crate::Result<Arc<RegexValue>> {
         match v {
             Some(Value::Regex(r)) => Ok(r.clone()),
             Some(other) => {
@@ -4187,12 +4817,20 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
     }
 
     /// Dispatch native methods on a `Value::Regex`.
-    fn call_regex_method(&mut self, re_val: &Value, method: &str, args: &[Expr]) -> crate::Result<Value> {
+    fn call_regex_method(
+        &mut self,
+        re_val: &Value,
+        method: &str,
+        args: &[Expr],
+    ) -> crate::Result<Value> {
         let re = match re_val {
             Value::Regex(r) => r.clone(),
             _ => return Err(crate::RakError::Runtime("not a regex".to_string())),
         };
-        let arg_vals: Vec<Value> = args.iter().map(|a| self.eval_expr(a)).collect::<crate::Result<_>>()?;
+        let arg_vals: Vec<Value> = args
+            .iter()
+            .map(|a| self.eval_expr(a))
+            .collect::<crate::Result<_>>()?;
         match method {
             "match" | "is_match" => {
                 let hay = self.val_to_string(arg_vals.first())?;
@@ -4200,39 +4838,62 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
             }
             "find" => {
                 let hay = self.val_to_string(arg_vals.first())?;
-                Ok(re.re.find(&hay).map(|m| Value::String(m.as_str().to_string())).unwrap_or(Value::Nil))
+                Ok(re
+                    .re
+                    .find(&hay)
+                    .map(|m| Value::String(m.as_str().to_string()))
+                    .unwrap_or(Value::Nil))
             }
             "find_all" => {
                 let hay = self.val_to_string(arg_vals.first())?;
                 Ok(Value::Array(
-                    re.re.find_iter(&hay).map(|m| Value::String(m.as_str().to_string())).collect(),
+                    re.re
+                        .find_iter(&hay)
+                        .map(|m| Value::String(m.as_str().to_string()))
+                        .collect(),
                 ))
             }
             "replace" | "replace_all" => {
                 let hay = self.val_to_string(arg_vals.first())?;
                 let rep = self.val_to_string(arg_vals.get(1))?;
-                Ok(Value::String(re.re.replace_all(&hay, rep.as_str()).into_owned()))
+                Ok(Value::String(
+                    re.re.replace_all(&hay, rep.as_str()).into_owned(),
+                ))
             }
-            _ => Err(crate::RakError::Runtime(format!("regex has no method '{}'", method))),
+            _ => Err(crate::RakError::Runtime(format!(
+                "regex has no method '{}'",
+                method
+            ))),
         }
     }
 
     /// Dispatch `lib.method(args)` on a `Value::ForeignLib`.
-    fn call_foreign_lib_method(&mut self, lib_val: &Value, method: &str, args: &[Expr]) -> crate::Result<Value> {
+    fn call_foreign_lib_method(
+        &mut self,
+        lib_val: &Value,
+        method: &str,
+        args: &[Expr],
+    ) -> crate::Result<Value> {
         let lib = match lib_val {
             Value::ForeignLib(h) => h.clone(),
             _ => return Err(crate::RakError::Runtime("not an ffi library".to_string())),
         };
         match method {
             "call" => {
-                let arg_vals: Vec<Value> = args.iter().map(|a| self.eval_expr(a)).collect::<crate::Result<_>>()?;
+                let arg_vals: Vec<Value> = args
+                    .iter()
+                    .map(|a| self.eval_expr(a))
+                    .collect::<crate::Result<_>>()?;
                 let symbol = self.val_to_string(arg_vals.first())?;
                 let c_args: Vec<Value> = match arg_vals.get(1) {
                     Some(Value::Array(a)) => a.clone(),
                     Some(Value::Nil) | None => Vec::new(),
-                    Some(other) => return Err(crate::RakError::Runtime(format!(
-                        "ffi: lib.call(symbol, args) expects an array of args, got {}", other.type_name()
-                    ))),
+                    Some(other) => {
+                        return Err(crate::RakError::Runtime(format!(
+                            "ffi: lib.call(symbol, args) expects an array of args, got {}",
+                            other.type_name()
+                        )))
+                    }
                 };
                 let mut marshalled: Vec<u64> = Vec::with_capacity(c_args.len());
                 let _guards = self.marshal_args(&c_args, &mut marshalled)?;
@@ -4264,7 +4925,10 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                 }
                 Ok(Value::Nil)
             }
-            _ => Err(crate::RakError::Runtime(format!("ffi library has no method '{}'", method))),
+            _ => Err(crate::RakError::Runtime(format!(
+                "ffi library has no method '{}'",
+                method
+            ))),
         }
     }
 
@@ -4274,7 +4938,9 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
         if !decl.varargs && args.len() > decl.params.len() {
             return Err(crate::RakError::Runtime(format!(
                 "ffi: {} expects {} args, got {}",
-                decl.name, decl.params.len(), args.len()
+                decl.name,
+                decl.params.len(),
+                args.len()
             )));
         }
         let mut marshalled: Vec<u64> = Vec::with_capacity(args.len());
@@ -4307,7 +4973,8 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                 Value::ForeignPtr(p) => out.push(*p),
                 Value::Nil => out.push(0),
                 Value::String(s) => {
-                    let c = CString::new(s.as_str()).map_err(|e| crate::RakError::Runtime(format!("ffi: bad string: {}", e)))?;
+                    let c = CString::new(s.as_str())
+                        .map_err(|e| crate::RakError::Runtime(format!("ffi: bad string: {}", e)))?;
                     let p = c.as_ptr() as u64;
                     out.push(p);
                     guards.push(MarshalGuard::CStr(c));
@@ -4319,20 +4986,32 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                     out.push(p);
                     guards.push(MarshalGuard::Bytes(v));
                 }
-                other => return Err(crate::RakError::Runtime(format!("ffi: cannot marshal {} to C", other.type_name()))),
+                other => {
+                    return Err(crate::RakError::Runtime(format!(
+                        "ffi: cannot marshal {} to C",
+                        other.type_name()
+                    )))
+                }
             }
         }
         Ok(guards)
     }
 
     /// Marshal Rak `Value`s to `u64` bit patterns using declared `Param` types.
-    fn marshal_args_typed(&self, args: &[Value], params: &[Param], varargs: bool, out: &mut Vec<u64>) -> crate::Result<Vec<MarshalGuard>> {
+    fn marshal_args_typed(
+        &self,
+        args: &[Value],
+        params: &[Param],
+        varargs: bool,
+        out: &mut Vec<u64>,
+    ) -> crate::Result<Vec<MarshalGuard>> {
         let mut guards = Vec::with_capacity(args.len());
         for (i, a) in args.iter().enumerate() {
             let ty = params.get(i).and_then(|p| p.type_hint.as_ref());
             match (a, ty) {
                 (Value::String(s), _) => {
-                    let c = CString::new(s.as_str()).map_err(|e| crate::RakError::Runtime(format!("ffi: bad string: {}", e)))?;
+                    let c = CString::new(s.as_str())
+                        .map_err(|e| crate::RakError::Runtime(format!("ffi: bad string: {}", e)))?;
                     let p = c.as_ptr() as u64;
                     out.push(p);
                     guards.push(MarshalGuard::CStr(c));
@@ -4361,10 +5040,18 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                             Value::ForeignPtr(p) => out.push(*p),
                             Value::Bool(b) => out.push(if *b { 1 } else { 0 }),
                             Value::Nil => out.push(0),
-                            _ => return Err(crate::RakError::Runtime(format!("ffi: cannot marshal {} as vararg", other.type_name()))),
+                            _ => {
+                                return Err(crate::RakError::Runtime(format!(
+                                    "ffi: cannot marshal {} as vararg",
+                                    other.type_name()
+                                )))
+                            }
                         }
                     } else {
-                        return Err(crate::RakError::Runtime(format!("ffi: cannot marshal {} to C", other.type_name())));
+                        return Err(crate::RakError::Runtime(format!(
+                            "ffi: cannot marshal {} to C",
+                            other.type_name()
+                        )));
                     }
                 }
             }
@@ -4398,21 +5085,43 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
         }
     }
 
-    fn eval_path(&mut self, segs: &[String], args: &[Expr], named: &[(String, Expr)]) -> crate::Result<Value> {
+    fn eval_path(
+        &mut self,
+        segs: &[String],
+        args: &[Expr],
+        named: &[(String, Expr)],
+    ) -> crate::Result<Value> {
         if segs.len() >= 2 {
             let base = &segs[0];
             let variant = &segs[1];
             if let Some(Value::EnumDef { variants }) = self.env.get(base) {
                 if variants.iter().any(|v| v.name == *variant) {
-                    let data: crate::Result<Vec<Value>> = args.iter().map(|a| self.eval_expr(a)).collect();
+                    let data: crate::Result<Vec<Value>> =
+                        args.iter().map(|a| self.eval_expr(a)).collect();
                     let data = data?;
-                    return Ok(Value::Enum { name: base.clone(), variant: variant.clone(), data });
+                    return Ok(Value::Enum {
+                        name: base.clone(),
+                        variant: variant.clone(),
+                        data,
+                    });
                 }
             }
             if let Some(Value::Module(ns)) = self.env.get(base) {
                 if let Some(v) = ns.lock().unwrap().get(variant) {
-                    if let Value::Function { params, body, closure, is_async, name: fname, requires, ensures } = v {
-                        return self.call_function(&params, &body, &closure, is_async, &fname, &requires, &ensures, args, named);
+                    if let Value::Function {
+                        params,
+                        body,
+                        closure,
+                        is_async,
+                        name: fname,
+                        requires,
+                        ensures,
+                    } = v
+                    {
+                        return self.call_function(
+                            &params, &body, &closure, is_async, &fname, &requires, &ensures, args,
+                            named,
+                        );
                     }
                     return Ok(v.clone());
                 }
@@ -4423,16 +5132,26 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
         }
         let joined = segs.join("::");
         if args.is_empty() {
-            return Err(crate::RakError::Runtime(format!("Undefined path: {}", joined)));
+            return Err(crate::RakError::Runtime(format!(
+                "Undefined path: {}",
+                joined
+            )));
         }
-        let arg_vals: Vec<Value> = args.iter().map(|a| self.eval_expr(a)).collect::<crate::Result<_>>()?;
+        let arg_vals: Vec<Value> = args
+            .iter()
+            .map(|a| self.eval_expr(a))
+            .collect::<crate::Result<_>>()?;
         self.eval_builtin(&joined, &arg_vals)
     }
 
     fn cast_as(&self, v: &Value, ty: &Type) -> Value {
         match ty {
-            Type::Int | Type::I64 | Type::I32 | Type::I16 | Type::I8 => Value::Int(v.as_i64().unwrap_or(0)),
-            Type::U64 | Type::U32 | Type::U16 | Type::U8 | Type::Hex(_) => Value::Hex(v.as_u64().unwrap_or(0)),
+            Type::Int | Type::I64 | Type::I32 | Type::I16 | Type::I8 => {
+                Value::Int(v.as_i64().unwrap_or(0))
+            }
+            Type::U64 | Type::U32 | Type::U16 | Type::U8 | Type::Hex(_) => {
+                Value::Hex(v.as_u64().unwrap_or(0))
+            }
             Type::F64 | Type::F32 => Value::Float(v.as_f64().unwrap_or(0.0)),
             Type::String => Value::String(v.to_string()),
             _ => v.clone(),
@@ -4500,7 +5219,11 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                 Value::Enum { name, .. } => name.to_string(),
                 _ => left.type_name().to_string(),
             };
-            if let Some(f) = self.trait_impls.get(&(tr.to_string(), tn, method.to_string())).cloned() {
+            if let Some(f) = self
+                .trait_impls
+                .get(&(tr.to_string(), tn, method.to_string()))
+                .cloned()
+            {
                 let v = self.call_method_with_values(f, left.clone(), vec![right.clone()])?;
                 return match op {
                     BinOp::NotEq => Ok(Value::Bool(!is_truthy(&v))),
@@ -4534,15 +5257,23 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                 r.extend(b.clone());
                 Ok(Value::Array(r))
             }
-            _ if matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem)
-                && (matches!(left, Value::Float(_)) || matches!(right, Value::Float(_))) =>
+            _ if matches!(
+                op,
+                BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem
+            ) && (matches!(left, Value::Float(_)) || matches!(right, Value::Float(_))) =>
             {
                 let (l, r) = (left.as_f64().unwrap_or(0.0), right.as_f64().unwrap_or(0.0));
                 let res = match op {
                     BinOp::Add => l + r,
                     BinOp::Sub => l - r,
                     BinOp::Mul => l * r,
-                    BinOp::Div => if r == 0.0 { return Err(crate::RakError::Runtime("Division by zero".to_string())); } else { l / r },
+                    BinOp::Div => {
+                        if r == 0.0 {
+                            return Err(crate::RakError::Runtime("Division by zero".to_string()));
+                        } else {
+                            l / r
+                        }
+                    }
                     BinOp::Rem => l % r,
                     _ => unreachable!(),
                 };
@@ -4567,14 +5298,30 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                     (Value::Int(l), Value::Int(r)) => (*l, *r, false),
                     (Value::Hex(l), Value::Int(r)) => (*l as i64, *r, true),
                     (Value::Int(l), Value::Hex(r)) => (*l, *r as i64, true),
-                    _ => return Err(crate::RakError::Runtime("Invalid operand types for binary operation".to_string())),
+                    _ => {
+                        return Err(crate::RakError::Runtime(
+                            "Invalid operand types for binary operation".to_string(),
+                        ))
+                    }
                 };
                 let res = match op {
                     BinOp::Add => l.wrapping_add(r),
                     BinOp::Sub => l.wrapping_sub(r),
                     BinOp::Mul => l.wrapping_mul(r),
-                    BinOp::Div => if r == 0 { return Err(crate::RakError::Runtime("Division by zero".to_string())); } else { l / r },
-                    BinOp::Rem => if r == 0 { return Err(crate::RakError::Runtime("Division by zero".to_string())); } else { l % r },
+                    BinOp::Div => {
+                        if r == 0 {
+                            return Err(crate::RakError::Runtime("Division by zero".to_string()));
+                        } else {
+                            l / r
+                        }
+                    }
+                    BinOp::Rem => {
+                        if r == 0 {
+                            return Err(crate::RakError::Runtime("Division by zero".to_string()));
+                        } else {
+                            l % r
+                        }
+                    }
                     BinOp::BitAnd => l & r,
                     BinOp::BitOr => l | r,
                     BinOp::BitXor => l ^ r,
@@ -4605,7 +5352,12 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
     }
 
     /// Like `bind_pattern`, but `mutable` is propagated to `let mut` (...).
-    fn bind_pattern_mut(&mut self, pattern: &Pattern, value: &Value, mutable: bool) -> crate::Result<()> {
+    fn bind_pattern_mut(
+        &mut self,
+        pattern: &Pattern,
+        value: &Value,
+        mutable: bool,
+    ) -> crate::Result<()> {
         match pattern {
             Pattern::Wild => {}
             Pattern::Ident(n) => {
@@ -4676,7 +5428,14 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
             (Pattern::Some(inner), Value::Option(Some(v))) => self.pattern_matches(inner, v)?,
             (Pattern::Ok(inner), Value::Result(Some(v), _)) => self.pattern_matches(inner, v)?,
             (Pattern::Err(inner), Value::Result(_, Some(v))) => self.pattern_matches(inner, v)?,
-            (Pattern::EnumVariant(en, vn, subpats), Value::Enum { name, variant, data }) => {
+            (
+                Pattern::EnumVariant(en, vn, subpats),
+                Value::Enum {
+                    name,
+                    variant,
+                    data,
+                },
+            ) => {
                 &name[..] == en.as_str()
                     && &variant[..] == vn.as_str()
                     && subpats.len() == data.len()
@@ -4686,10 +5445,18 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                         .all(|(p, v)| self.pattern_matches(p, v).unwrap_or(false))
             }
             (Pattern::Tuple(pats), Value::Tuple(vals)) => {
-                pats.len() == vals.len() && pats.iter().zip(vals.iter()).all(|(p, v)| self.pattern_matches(p, v).unwrap_or(false))
+                pats.len() == vals.len()
+                    && pats
+                        .iter()
+                        .zip(vals.iter())
+                        .all(|(p, v)| self.pattern_matches(p, v).unwrap_or(false))
             }
             (Pattern::Array(pats), Value::Array(vals)) => {
-                pats.len() == vals.len() && pats.iter().zip(vals.iter()).all(|(p, v)| self.pattern_matches(p, v).unwrap_or(false))
+                pats.len() == vals.len()
+                    && pats
+                        .iter()
+                        .zip(vals.iter())
+                        .all(|(p, v)| self.pattern_matches(p, v).unwrap_or(false))
             }
             // Exact-length byte slice matching via an array pattern of byte literals.
             (Pattern::Array(pats), Value::Bytes(vals)) => {
@@ -4741,12 +5508,23 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                 }
                 vi == vals.len()
             }
-            (Pattern::Struct(name, fields), Value::Struct { name: sn, fields: fmap }) => {
-                name == sn && fields.iter().all(|(fname, fp)| {
-                    fmap.get(fname).map(|v| self.pattern_matches(fp, v).unwrap_or(false)).unwrap_or(false)
-                })
+            (
+                Pattern::Struct(name, fields),
+                Value::Struct {
+                    name: sn,
+                    fields: fmap,
+                },
+            ) => {
+                name == sn
+                    && fields.iter().all(|(fname, fp)| {
+                        fmap.get(fname)
+                            .map(|v| self.pattern_matches(fp, v).unwrap_or(false))
+                            .unwrap_or(false)
+                    })
             }
-            (Pattern::Or(opts), _) => opts.iter().any(|p| self.pattern_matches(p, value).unwrap_or(false)),
+            (Pattern::Or(opts), _) => opts
+                .iter()
+                .any(|p| self.pattern_matches(p, value).unwrap_or(false)),
             // Binary pattern matching directly against a zero-copy mmap slice.
             (Pattern::Bytes(pats), Value::MmapSlice(h, off, n)) => {
                 let data = &h.as_slice()[*off..off + n];
@@ -4755,8 +5533,11 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                 while pi < pats.len() {
                     match &pats[pi] {
                         BytesPat::Byte(b) => {
-                            if vi >= data.len() || data[vi] != *b { return Ok(false); }
-                            vi += 1; pi += 1;
+                            if vi >= data.len() || data[vi] != *b {
+                                return Ok(false);
+                            }
+                            vi += 1;
+                            pi += 1;
                         }
                         BytesPat::Rest => return Ok(true),
                     }
@@ -4879,14 +5660,18 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
             "assert_true" => {
                 let a = args.get(0).cloned().unwrap_or(Value::Nil);
                 if !is_truthy(&a) {
-                    return Err(crate::RakError::Runtime("assertion failed: assert_true()".to_string()));
+                    return Err(crate::RakError::Runtime(
+                        "assertion failed: assert_true()".to_string(),
+                    ));
                 }
                 Ok(Value::Bool(true))
             }
             "assert_false" => {
                 let a = args.get(0).cloned().unwrap_or(Value::Nil);
                 if is_truthy(&a) {
-                    return Err(crate::RakError::Runtime("assertion failed: assert_false()".to_string()));
+                    return Err(crate::RakError::Runtime(
+                        "assertion failed: assert_false()".to_string(),
+                    ));
                 }
                 Ok(Value::Bool(true))
             }
@@ -4895,16 +5680,12 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                 // pass only if it raises. A non-callable argument is a failure.
                 let f = args.first().cloned().unwrap_or(Value::Nil);
                 match f {
-                    Value::Function { .. } => {
-                        match self.call_function_with_values(f, vec![]) {
-                            Ok(_) => {
-                                Err(crate::RakError::Runtime(
-                                    "expected error, but no error was raised".to_string(),
-                                ))
-                            }
-                            Err(_) => Ok(Value::Bool(true)),
-                        }
-                    }
+                    Value::Function { .. } => match self.call_function_with_values(f, vec![]) {
+                        Ok(_) => Err(crate::RakError::Runtime(
+                            "expected error, but no error was raised".to_string(),
+                        )),
+                        Err(_) => Ok(Value::Bool(true)),
+                    },
                     other => Err(crate::RakError::Runtime(format!(
                         "expect_error expects a function argument, got {}",
                         other.type_name()
@@ -4912,7 +5693,10 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                 }
             }
             "panic" => {
-                let msg = args.first().map(|v| v.to_string()).unwrap_or_else(|| "panic".to_string());
+                let msg = args
+                    .first()
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "panic".to_string());
                 Err(crate::RakError::Runtime(format!("panic: {}", msg)))
             }
             "report" => return self.builtin_report(args),
@@ -4931,7 +5715,9 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                     "it is broken for anything adversarial",
                     "sha256",
                 );
-                Ok(Value::String(rak_stdlib::md5(&self.val_to_bytes(args.first())?)))
+                Ok(Value::String(rak_stdlib::md5(
+                    &self.val_to_bytes(args.first())?,
+                )))
             }
             "sha1" => {
                 rak_stdlib::escape::warn_weak_crypto(
@@ -4939,7 +5725,9 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                     "it is broken for collision resistance",
                     "sha256",
                 );
-                Ok(Value::String(rak_stdlib::sha1(&self.val_to_bytes(args.first())?)))
+                Ok(Value::String(rak_stdlib::sha1(
+                    &self.val_to_bytes(args.first())?,
+                )))
             }
             "sql_escape" => Ok(Value::String(rak_stdlib::escape::sql_escape(
                 &self.val_to_string(args.first())?,
@@ -4954,19 +5742,28 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                 &self.val_to_string(args.first())?,
             ))),
 
-            "sha256" => Ok(Value::String(rak_stdlib::sha256(&self.val_to_bytes(args.first())?))),
-            "hmac_sha256" => Ok(Value::String(rak_stdlib::hmac_sha256(&self.val_to_bytes(args.first())?, &self.val_to_bytes(args.get(1))?))),
+            "sha256" => Ok(Value::String(rak_stdlib::sha256(
+                &self.val_to_bytes(args.first())?,
+            ))),
+            "hmac_sha256" => Ok(Value::String(rak_stdlib::hmac_sha256(
+                &self.val_to_bytes(args.first())?,
+                &self.val_to_bytes(args.get(1))?,
+            ))),
             "aes_gcm_encrypt" => {
                 let key = self.val_to_bytes(args.first())?;
                 let nonce = self.val_to_bytes(args.get(1))?;
                 let pt = self.val_to_bytes(args.get(2))?;
-                rak_stdlib::aes_gcm_encrypt(&key, &nonce, &pt).map(Value::Bytes).map_err(crate::RakError::Runtime)
+                rak_stdlib::aes_gcm_encrypt(&key, &nonce, &pt)
+                    .map(Value::Bytes)
+                    .map_err(crate::RakError::Runtime)
             }
             "aes_gcm_decrypt" => {
                 let key = self.val_to_bytes(args.first())?;
                 let nonce = self.val_to_bytes(args.get(1))?;
                 let ct = self.val_to_bytes(args.get(2))?;
-                rak_stdlib::aes_gcm_decrypt(&key, &nonce, &ct).map(Value::Bytes).map_err(crate::RakError::Runtime)
+                rak_stdlib::aes_gcm_decrypt(&key, &nonce, &ct)
+                    .map(Value::Bytes)
+                    .map_err(crate::RakError::Runtime)
             }
             "ed25519_keypair" => {
                 let seed = self.val_to_bytes(args.first())?;
@@ -4978,13 +5775,17 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
             "ed25519_sign" => {
                 let sk = self.val_to_bytes(args.first())?;
                 let msg = self.val_to_bytes(args.get(1))?;
-                rak_stdlib::ed25519_sign(&sk, &msg).map(Value::Bytes).map_err(crate::RakError::Runtime)
+                rak_stdlib::ed25519_sign(&sk, &msg)
+                    .map(Value::Bytes)
+                    .map_err(crate::RakError::Runtime)
             }
             "ed25519_verify" => {
                 let pk = self.val_to_bytes(args.first())?;
                 let sig = self.val_to_bytes(args.get(1))?;
                 let msg = self.val_to_bytes(args.get(2))?;
-                rak_stdlib::ed25519_verify(&pk, &sig, &msg).map(Value::Bool).map_err(crate::RakError::Runtime)
+                rak_stdlib::ed25519_verify(&pk, &sig, &msg)
+                    .map(Value::Bool)
+                    .map_err(crate::RakError::Runtime)
             }
             // Constant-time helpers. `==` on a value is a data-dependent branch,
             // so comparing a MAC or a token with it leaks the length of the
@@ -5003,26 +5804,28 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                 let choice = args.first().and_then(|v| v.as_u64()).unwrap_or(0) as u8;
                 let a = self.val_to_bytes(args.get(1))?;
                 let b = self.val_to_bytes(args.get(2))?;
-                rak_stdlib::ct_select(choice, &a, &b).map(Value::Bytes).map_err(crate::RakError::Runtime)
+                rak_stdlib::ct_select(choice, &a, &b)
+                    .map(Value::Bytes)
+                    .map_err(crate::RakError::Runtime)
             }
             // Overwrite a buffer in place in a way the optimizer cannot elide.
             // Rak values are copy-on-write, so this returns the wiped buffer;
             // use it on a value you are about to discard.
-            "zeroize" => {
-                match args.first() {
-                    Some(Value::Bytes(b)) => {
-                        let mut v = b.to_vec();
-                        rak_stdlib::zeroize_bytes(&mut v);
-                        Ok(Value::Bytes(v))
-                    }
-                    Some(Value::String(s)) => {
-                        let mut v = s.as_bytes().to_vec();
-                        rak_stdlib::zeroize_bytes(&mut v);
-                        Ok(Value::Bytes(v))
-                    }
-                    _ => Err(crate::RakError::Runtime("zeroize: expected a string or bytes".to_string())),
+            "zeroize" => match args.first() {
+                Some(Value::Bytes(b)) => {
+                    let mut v = b.to_vec();
+                    rak_stdlib::zeroize_bytes(&mut v);
+                    Ok(Value::Bytes(v))
                 }
-            }
+                Some(Value::String(s)) => {
+                    let mut v = s.as_bytes().to_vec();
+                    rak_stdlib::zeroize_bytes(&mut v);
+                    Ok(Value::Bytes(v))
+                }
+                _ => Err(crate::RakError::Runtime(
+                    "zeroize: expected a string or bytes".to_string(),
+                )),
+            },
             "rsa_keypair" => {
                 let bits = args.first().and_then(|v| v.as_u64()).unwrap_or(2048) as u32;
                 match rak_stdlib::rsa_keypair(bits) {
@@ -5033,13 +5836,17 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
             "rsa_sign" => {
                 let sk = self.val_to_bytes(args.first())?;
                 let msg = self.val_to_bytes(args.get(1))?;
-                rak_stdlib::rsa_sign(&sk, &msg).map(Value::Bytes).map_err(crate::RakError::Runtime)
+                rak_stdlib::rsa_sign(&sk, &msg)
+                    .map(Value::Bytes)
+                    .map_err(crate::RakError::Runtime)
             }
             "rsa_verify" => {
                 let pk = self.val_to_bytes(args.first())?;
                 let sig = self.val_to_bytes(args.get(1))?;
                 let msg = self.val_to_bytes(args.get(2))?;
-                rak_stdlib::rsa_verify(&pk, &sig, &msg).map(Value::Bool).map_err(crate::RakError::Runtime)
+                rak_stdlib::rsa_verify(&pk, &sig, &msg)
+                    .map(Value::Bool)
+                    .map_err(crate::RakError::Runtime)
             }
             "rsa_encrypt" => {
                 let pk = self.val_to_bytes(args.first())?;
@@ -5048,7 +5855,9 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                     Some(v) => self.val_to_bytes(Some(v))?,
                     None => Vec::new(),
                 };
-                rak_stdlib::rsa_encrypt(&pk, &pt, &label).map(Value::Bytes).map_err(crate::RakError::Runtime)
+                rak_stdlib::rsa_encrypt(&pk, &pt, &label)
+                    .map(Value::Bytes)
+                    .map_err(crate::RakError::Runtime)
             }
             "rsa_decrypt" => {
                 let sk = self.val_to_bytes(args.first())?;
@@ -5057,7 +5866,9 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                     Some(v) => self.val_to_bytes(Some(v))?,
                     None => Vec::new(),
                 };
-                rak_stdlib::rsa_decrypt(&sk, &ct, &label).map(Value::Bytes).map_err(crate::RakError::Runtime)
+                rak_stdlib::rsa_decrypt(&sk, &ct, &label)
+                    .map(Value::Bytes)
+                    .map_err(crate::RakError::Runtime)
             }
             "ecdsa_keypair" => match rak_stdlib::ecdsa_keypair() {
                 Ok((pk, sk)) => Ok(Value::Tuple(vec![Value::Bytes(pk), Value::Bytes(sk)])),
@@ -5066,43 +5877,66 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
             "ecdsa_sign" => {
                 let sk = self.val_to_bytes(args.first())?;
                 let msg = self.val_to_bytes(args.get(1))?;
-                rak_stdlib::ecdsa_sign(&sk, &msg).map(Value::Bytes).map_err(crate::RakError::Runtime)
+                rak_stdlib::ecdsa_sign(&sk, &msg)
+                    .map(Value::Bytes)
+                    .map_err(crate::RakError::Runtime)
             }
             "ecdsa_verify" => {
                 let pk = self.val_to_bytes(args.first())?;
                 let sig = self.val_to_bytes(args.get(1))?;
                 let msg = self.val_to_bytes(args.get(2))?;
-                rak_stdlib::ecdsa_verify(&pk, &sig, &msg).map(Value::Bool).map_err(crate::RakError::Runtime)
+                rak_stdlib::ecdsa_verify(&pk, &sig, &msg)
+                    .map(Value::Bool)
+                    .map_err(crate::RakError::Runtime)
             }
-            "xor" => Ok(Value::Bytes(rak_stdlib::xor_encrypt(&self.val_to_bytes(args.first())?, &self.val_to_bytes(args.get(1))?))),
-            "rot13" => Ok(Value::String(rak_stdlib::rot13(&self.val_to_string(args.first())?))),
-            "hex_encode" => Ok(Value::String(rak_stdlib::hex_encode(&self.val_to_bytes(args.first())?))),
+            "xor" => Ok(Value::Bytes(rak_stdlib::xor_encrypt(
+                &self.val_to_bytes(args.first())?,
+                &self.val_to_bytes(args.get(1))?,
+            ))),
+            "rot13" => Ok(Value::String(rak_stdlib::rot13(
+                &self.val_to_string(args.first())?,
+            ))),
+            "hex_encode" => Ok(Value::String(rak_stdlib::hex_encode(
+                &self.val_to_bytes(args.first())?,
+            ))),
             "hex_decode" => match rak_stdlib::hex_decode(&self.val_to_string(args.first())?) {
                 Some(b) => Ok(Value::Bytes(b)),
                 None => Err(crate::RakError::Runtime("Invalid hex string".to_string())),
             },
-            "base64_encode" => Ok(Value::String(rak_stdlib::base64_encode(&self.val_to_bytes(args.first())?))),
-            "base64_decode" => match rak_stdlib::base64_decode(&self.val_to_string(args.first())?) {
-                Some(b) => Ok(Value::Bytes(b)),
-                None => Err(crate::RakError::Runtime("Invalid base64".to_string())),
-            },
-            "url_encode" => Ok(Value::String(rak_stdlib::url_encode(&self.val_to_string(args.first())?))),
+            "base64_encode" => Ok(Value::String(rak_stdlib::base64_encode(
+                &self.val_to_bytes(args.first())?,
+            ))),
+            "base64_decode" => {
+                match rak_stdlib::base64_decode(&self.val_to_string(args.first())?) {
+                    Some(b) => Ok(Value::Bytes(b)),
+                    None => Err(crate::RakError::Runtime("Invalid base64".to_string())),
+                }
+            }
+            "url_encode" => Ok(Value::String(rak_stdlib::url_encode(
+                &self.val_to_string(args.first())?,
+            ))),
             "url_decode" => match rak_stdlib::url_decode(&self.val_to_string(args.first())?) {
                 Some(d) => Ok(Value::String(d)),
                 None => Err(crate::RakError::Runtime("Invalid URL encoding".to_string())),
             },
             "dns_lookup" => {
                 let ips = rak_stdlib::recon::dns_lookup(&self.val_to_string(args.first())?);
-                Ok(Value::Array(ips.into_iter().map(|ip| Value::String(ip.to_string())).collect()))
+                Ok(Value::Array(
+                    ips.into_iter()
+                        .map(|ip| Value::String(ip.to_string()))
+                        .collect(),
+                ))
             }
             "subdomain_enum" => {
                 let subs = rak_stdlib::recon::subdomain_enum(&self.val_to_string(args.first())?);
                 Ok(Value::Array(subs.into_iter().map(Value::String).collect()))
             }
-            "reverse_dns" => match rak_stdlib::recon::reverse_dns(&self.val_to_string(args.first())?) {
-                Some(s) => Ok(Value::String(s)),
-                None => Ok(Value::Nil),
-            },
+            "reverse_dns" => {
+                match rak_stdlib::recon::reverse_dns(&self.val_to_string(args.first())?) {
+                    Some(s) => Ok(Value::String(s)),
+                    None => Ok(Value::Nil),
+                }
+            }
             "len" => match args.first() {
                 Some(Value::String(s)) => Ok(Value::Int(s.chars().count() as i64)),
                 Some(Value::Array(a)) => Ok(Value::Int(a.len() as i64)),
@@ -5110,12 +5944,18 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                 Some(Value::Bytes(b)) => Ok(Value::Int(b.len() as i64)),
                 Some(Value::Map(m)) => Ok(Value::Int(m.len() as i64)),
                 Some(Value::Struct { fields, .. }) => Ok(Value::Int(fields.len() as i64)),
-                _ => Err(crate::RakError::Runtime("len() requires a string, array, tuple, bytes, or map".to_string())),
+                _ => Err(crate::RakError::Runtime(
+                    "len() requires a string, array, tuple, bytes, or map".to_string(),
+                )),
             },
             "split" => {
                 let s = self.val_to_string(args.first())?;
                 let delim = self.val_to_string(args.get(1))?;
-                Ok(Value::Array(s.split(&delim).map(|p| Value::String(p.to_string())).collect()))
+                Ok(Value::Array(
+                    s.split(&delim)
+                        .map(|p| Value::String(p.to_string()))
+                        .collect(),
+                ))
             }
             "join" => {
                 let delim = self.val_to_string(args.first())?;
@@ -5123,7 +5963,9 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                     let parts: Vec<String> = arr.iter().map(|v| v.to_string()).collect();
                     Ok(Value::String(parts.join(&delim)))
                 } else {
-                    Err(crate::RakError::Runtime("join() requires an array".to_string()))
+                    Err(crate::RakError::Runtime(
+                        "join() requires an array".to_string(),
+                    ))
                 }
             }
             "contains" => {
@@ -5150,9 +5992,9 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                     }
                     None => Vec::new(),
                 };
-                Ok(Value::Set(Arc::new(Mutex::new(SetRepr::from_iter_ordered(
-                    items,
-                )))))
+                Ok(Value::Set(Arc::new(Mutex::new(
+                    SetRepr::from_iter_ordered(items),
+                ))))
             }
             "set_add" => {
                 let set = self.set_handle(args.first())?;
@@ -5212,26 +6054,42 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                 let items = set.lock().unwrap().to_vec();
                 Ok(Value::Array(items))
             }
-            "to_hex" => Ok(Value::String(format!("0x{:X}", args.first().and_then(|v| v.as_u64()).unwrap_or(0)))),
+            "to_hex" => Ok(Value::String(format!(
+                "0x{:X}",
+                args.first().and_then(|v| v.as_u64()).unwrap_or(0)
+            ))),
             "from_hex" => {
                 let s = self.val_to_string(args.first())?;
                 let s = s.trim_start_matches("0x").trim_start_matches("0X");
-                u64::from_str_radix(s, 16).map(Value::Hex).map_err(|_| crate::RakError::Runtime("Invalid hex literal".to_string()))
+                u64::from_str_radix(s, 16)
+                    .map(Value::Hex)
+                    .map_err(|_| crate::RakError::Runtime("Invalid hex literal".to_string()))
             }
             "int" => match args.first() {
                 Some(Value::Hex(h)) => Ok(Value::Int(*h as i64)),
                 Some(Value::Int(i)) => Ok(Value::Int(*i)),
                 Some(Value::Float(f)) => Ok(Value::Int(*f as i64)),
-                Some(Value::String(s)) => s.parse::<i64>().map(Value::Int).map_err(|_| crate::RakError::Runtime("Cannot convert to int".to_string())),
+                Some(Value::String(s)) => s
+                    .parse::<i64>()
+                    .map(Value::Int)
+                    .map_err(|_| crate::RakError::Runtime("Cannot convert to int".to_string())),
                 Some(Value::Bool(b)) => Ok(Value::Int(if *b { 1 } else { 0 })),
                 _ => Ok(Value::Int(0)),
             },
-            "float" => Ok(Value::Float(args.first().and_then(|v| v.as_f64()).unwrap_or(0.0))),
+            "float" => Ok(Value::Float(
+                args.first().and_then(|v| v.as_f64()).unwrap_or(0.0),
+            )),
             "string" => Ok(Value::String(self.val_to_string(args.first())?)),
             "bytes" => Ok(Value::Bytes(self.val_to_bytes(args.first())?)),
-            "upper" => Ok(Value::String(self.val_to_string(args.first())?.to_uppercase())),
-            "lower" => Ok(Value::String(self.val_to_string(args.first())?.to_lowercase())),
-            "trim" => Ok(Value::String(self.val_to_string(args.first())?.trim().to_string())),
+            "upper" => Ok(Value::String(
+                self.val_to_string(args.first())?.to_uppercase(),
+            )),
+            "lower" => Ok(Value::String(
+                self.val_to_string(args.first())?.to_lowercase(),
+            )),
+            "trim" => Ok(Value::String(
+                self.val_to_string(args.first())?.trim().to_string(),
+            )),
             "push" => {
                 if let Some(Value::Array(arr)) = args.first().cloned() {
                     let mut arr = arr;
@@ -5240,14 +6098,18 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                     }
                     Ok(Value::Array(arr))
                 } else {
-                    Err(crate::RakError::Runtime("push() requires an array".to_string()))
+                    Err(crate::RakError::Runtime(
+                        "push() requires an array".to_string(),
+                    ))
                 }
             }
             "keys" => {
                 if let Some(Value::Map(m)) = args.first() {
                     Ok(Value::Array(m.keys().cloned().map(Value::String).collect()))
                 } else {
-                    Err(crate::RakError::Runtime("keys() requires a map".to_string()))
+                    Err(crate::RakError::Runtime(
+                        "keys() requires a map".to_string(),
+                    ))
                 }
             }
             "has" => {
@@ -5261,7 +6123,10 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
             "get" => {
                 let k = self.val_to_string(args.get(1))?;
                 match args.first() {
-                    Some(Value::Map(map)) => Ok(map.get(&k).cloned().unwrap_or_else(|| args.get(2).cloned().unwrap_or(Value::Nil))),
+                    Some(Value::Map(map)) => Ok(map
+                        .get(&k)
+                        .cloned()
+                        .unwrap_or_else(|| args.get(2).cloned().unwrap_or(Value::Nil))),
                     _ => Ok(args.get(2).cloned().unwrap_or(Value::Nil)),
                 }
             }
@@ -5269,31 +6134,56 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                 if let Some(Value::Map(m)) = args.first() {
                     Ok(Value::Array(m.values().cloned().collect()))
                 } else {
-                    Err(crate::RakError::Runtime("values() requires a map".to_string()))
+                    Err(crate::RakError::Runtime(
+                        "values() requires a map".to_string(),
+                    ))
                 }
             }
             // --- Iterator builtins (Part 7A.10) ---
             "zip" => {
                 let (a, b) = match (args.first(), args.get(1)) {
                     (Some(Value::Array(a)), Some(Value::Array(b))) => (a.clone(), b.clone()),
-                    _ => return Err(crate::RakError::Runtime("zip() requires two arrays".to_string())),
+                    _ => {
+                        return Err(crate::RakError::Runtime(
+                            "zip() requires two arrays".to_string(),
+                        ))
+                    }
                 };
                 let n = a.len().min(b.len());
-                Ok(Value::Array((0..n).map(|i| Value::Tuple(vec![a[i].clone(), b[i].clone()])).collect()))
+                Ok(Value::Array(
+                    (0..n)
+                        .map(|i| Value::Tuple(vec![a[i].clone(), b[i].clone()]))
+                        .collect(),
+                ))
             }
             "enumerate" => {
                 let items = match args.first() {
                     Some(Value::Array(a)) => a.clone(),
-                    other => return Err(crate::RakError::Runtime(format!("enumerate() requires an array, got {}", other.map(|v| v.type_name()).unwrap_or_else(|| "nil".to_string())))),
+                    other => {
+                        return Err(crate::RakError::Runtime(format!(
+                            "enumerate() requires an array, got {}",
+                            other
+                                .map(|v| v.type_name())
+                                .unwrap_or_else(|| "nil".to_string())
+                        )))
+                    }
                 };
                 Ok(Value::Array(
-                    items.into_iter().enumerate().map(|(i, v)| Value::Tuple(vec![Value::Int(i as i64), v])).collect(),
+                    items
+                        .into_iter()
+                        .enumerate()
+                        .map(|(i, v)| Value::Tuple(vec![Value::Int(i as i64), v]))
+                        .collect(),
                 ))
             }
             "skip" => {
                 let items = match args.first() {
                     Some(Value::Array(a)) => a.clone(),
-                    _ => return Err(crate::RakError::Runtime("skip() requires an array".to_string())),
+                    _ => {
+                        return Err(crate::RakError::Runtime(
+                            "skip() requires an array".to_string(),
+                        ))
+                    }
                 };
                 let n = args.get(1).and_then(|v| v.as_i64()).unwrap_or(0).max(0) as usize;
                 Ok(Value::Array(items.into_iter().skip(n).collect()))
@@ -5301,9 +6191,15 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
             "fold" => {
                 let items = match args.first() {
                     Some(Value::Array(a)) => a.clone(),
-                    _ => return Err(crate::RakError::Runtime("fold() requires an array".to_string())),
+                    _ => {
+                        return Err(crate::RakError::Runtime(
+                            "fold() requires an array".to_string(),
+                        ))
+                    }
                 };
-                let f = args.get(2).cloned().ok_or_else(|| crate::RakError::Runtime("fold() requires (xs, init, f)".to_string()))?;
+                let f = args.get(2).cloned().ok_or_else(|| {
+                    crate::RakError::Runtime("fold() requires (xs, init, f)".to_string())
+                })?;
                 let mut acc = args.get(1).cloned().unwrap_or(Value::Nil);
                 for item in items {
                     acc = self.call_function_with_values(f.clone(), vec![acc, item])?;
@@ -5313,9 +6209,15 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
             "reduce" => {
                 let items = match args.first() {
                     Some(Value::Array(a)) => a.clone(),
-                    _ => return Err(crate::RakError::Runtime("reduce() requires an array".to_string())),
+                    _ => {
+                        return Err(crate::RakError::Runtime(
+                            "reduce() requires an array".to_string(),
+                        ))
+                    }
                 };
-                let f = args.get(1).cloned().ok_or_else(|| crate::RakError::Runtime("reduce() requires (xs, f)".to_string()))?;
+                let f = args.get(1).cloned().ok_or_else(|| {
+                    crate::RakError::Runtime("reduce() requires (xs, f)".to_string())
+                })?;
                 if items.is_empty() {
                     return Ok(Value::Option(None));
                 }
@@ -5328,9 +6230,15 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
             "any" => {
                 let items = match args.first() {
                     Some(Value::Array(a)) => a.clone(),
-                    _ => return Err(crate::RakError::Runtime("any() requires an array".to_string())),
+                    _ => {
+                        return Err(crate::RakError::Runtime(
+                            "any() requires an array".to_string(),
+                        ))
+                    }
                 };
-                let f = args.get(1).cloned().ok_or_else(|| crate::RakError::Runtime("any() requires (xs, f)".to_string()))?;
+                let f = args.get(1).cloned().ok_or_else(|| {
+                    crate::RakError::Runtime("any() requires (xs, f)".to_string())
+                })?;
                 for item in items {
                     if is_truthy(&self.call_function_with_values(f.clone(), vec![item])?) {
                         return Ok(Value::Bool(true));
@@ -5341,9 +6249,15 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
             "all" => {
                 let items = match args.first() {
                     Some(Value::Array(a)) => a.clone(),
-                    _ => return Err(crate::RakError::Runtime("all() requires an array".to_string())),
+                    _ => {
+                        return Err(crate::RakError::Runtime(
+                            "all() requires an array".to_string(),
+                        ))
+                    }
                 };
-                let f = args.get(1).cloned().ok_or_else(|| crate::RakError::Runtime("all() requires (xs, f)".to_string()))?;
+                let f = args.get(1).cloned().ok_or_else(|| {
+                    crate::RakError::Runtime("all() requires (xs, f)".to_string())
+                })?;
                 for item in items {
                     if !is_truthy(&self.call_function_with_values(f.clone(), vec![item])?) {
                         return Ok(Value::Bool(false));
@@ -5354,9 +6268,15 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
             "flat_map" => {
                 let items = match args.first() {
                     Some(Value::Array(a)) => a.clone(),
-                    _ => return Err(crate::RakError::Runtime("flat_map() requires an array".to_string())),
+                    _ => {
+                        return Err(crate::RakError::Runtime(
+                            "flat_map() requires an array".to_string(),
+                        ))
+                    }
                 };
-                let f = args.get(1).cloned().ok_or_else(|| crate::RakError::Runtime("flat_map() requires (xs, f)".to_string()))?;
+                let f = args.get(1).cloned().ok_or_else(|| {
+                    crate::RakError::Runtime("flat_map() requires (xs, f)".to_string())
+                })?;
                 let mut out: Vec<Value> = Vec::new();
                 for item in items {
                     match self.call_function_with_values(f.clone(), vec![item])? {
@@ -5369,9 +6289,15 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
             "take_while" => {
                 let items = match args.first() {
                     Some(Value::Array(a)) => a.clone(),
-                    _ => return Err(crate::RakError::Runtime("take_while() requires an array".to_string())),
+                    _ => {
+                        return Err(crate::RakError::Runtime(
+                            "take_while() requires an array".to_string(),
+                        ))
+                    }
                 };
-                let f = args.get(1).cloned().ok_or_else(|| crate::RakError::Runtime("take_while() requires (xs, f)".to_string()))?;
+                let f = args.get(1).cloned().ok_or_else(|| {
+                    crate::RakError::Runtime("take_while() requires (xs, f)".to_string())
+                })?;
                 let mut out: Vec<Value> = Vec::new();
                 for item in items {
                     if !is_truthy(&self.call_function_with_values(f.clone(), vec![item.clone()])?) {
@@ -5385,7 +6311,10 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                 Ok(c) => Ok(Value::String(c)),
                 Err(e) => Err(crate::RakError::Runtime(format!("Read error: {}", e))),
             },
-            "write" => match std::fs::write(self.val_to_string(args.first())?, self.val_to_string(args.get(1))?) {
+            "write" => match std::fs::write(
+                self.val_to_string(args.first())?,
+                self.val_to_string(args.get(1))?,
+            ) {
                 Ok(_) => Ok(Value::Bool(true)),
                 Err(e) => Err(crate::RakError::Runtime(format!("Write error: {}", e))),
             },
@@ -5393,11 +6322,17 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                 Ok(c) => Ok(Value::String(c)),
                 Err(e) => Err(crate::RakError::Runtime(format!("{}", e))),
             },
-            "file_write" => match rak_stdlib::file::write(&self.val_to_string(args.first())?, &self.val_to_string(args.get(1))?) {
+            "file_write" => match rak_stdlib::file::write(
+                &self.val_to_string(args.first())?,
+                &self.val_to_string(args.get(1))?,
+            ) {
                 Ok(_) => Ok(Value::Bool(true)),
                 Err(e) => Err(crate::RakError::Runtime(format!("{}", e))),
             },
-            "file_append" => match rak_stdlib::file::append(&self.val_to_string(args.first())?, &self.val_to_string(args.get(1))?) {
+            "file_append" => match rak_stdlib::file::append(
+                &self.val_to_string(args.first())?,
+                &self.val_to_string(args.get(1))?,
+            ) {
                 Ok(_) => Ok(Value::Bool(true)),
                 Err(e) => Err(crate::RakError::Runtime(format!("{}", e))),
             },
@@ -5409,52 +6344,140 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
             // means there was no way to open a binary file at all, and no way to
             // put arbitrary bytes back. These are the two that fix it, and they
             // take a `bytes` rather than a string so no coercion is possible.
-            "file_read_bytes" => match rak_stdlib::file::read_bytes(&self.val_to_string(args.first())?) {
-                Ok(c) => Ok(Value::Bytes(c)),
-                Err(e) => Err(crate::RakError::Runtime(format!("{}", e))),
-            },
-            "file_write_bytes" => match rak_stdlib::file::write_bytes(&self.val_to_string(args.first())?, &self.val_to_bytes(args.get(1))?) {
+            "file_read_bytes" => {
+                match rak_stdlib::file::read_bytes(&self.val_to_string(args.first())?) {
+                    Ok(c) => Ok(Value::Bytes(c)),
+                    Err(e) => Err(crate::RakError::Runtime(format!("{}", e))),
+                }
+            }
+            "file_write_bytes" => match rak_stdlib::file::write_bytes(
+                &self.val_to_string(args.first())?,
+                &self.val_to_bytes(args.get(1))?,
+            ) {
                 Ok(_) => Ok(Value::Bool(true)),
                 Err(e) => Err(crate::RakError::Runtime(format!("{}", e))),
             },
-            "file_append_bytes" => match rak_stdlib::file::append_bytes(&self.val_to_string(args.first())?, &self.val_to_bytes(args.get(1))?) {
+            "file_append_bytes" => match rak_stdlib::file::append_bytes(
+                &self.val_to_string(args.first())?,
+                &self.val_to_bytes(args.get(1))?,
+            ) {
                 Ok(_) => Ok(Value::Bool(true)),
                 Err(e) => Err(crate::RakError::Runtime(format!("{}", e))),
             },
-            "file_exists" => Ok(Value::Bool(rak_stdlib::file::exists(&self.val_to_string(args.first())?))),
-            "file_size" => Ok(Value::Int(rak_stdlib::file::size(&self.val_to_string(args.first())?).unwrap_or(0) as i64)),
-            "file_list" => Ok(Value::Array(rak_stdlib::file::list(&self.val_to_string(args.first())?).into_iter().map(Value::String).collect())),
-            "file_delete" => Ok(Value::Bool(rak_stdlib::file::delete(&self.val_to_string(args.first())?))),
-            "file_mkdir" => Ok(Value::Bool(rak_stdlib::file::create_dir(&self.val_to_string(args.first())?))),
-            "file_copy" => Ok(Value::Bool(rak_stdlib::file::copy(&self.val_to_string(args.first())?, &self.val_to_string(args.get(1))?))),
-            "file_rename" => Ok(Value::Bool(rak_stdlib::file::rename(&self.val_to_string(args.first())?, &self.val_to_string(args.get(1))?))),
-            "file_ext" => Ok(Value::String(rak_stdlib::file::ext(&self.val_to_string(args.first())?).unwrap_or_default())),
-            "file_basename" => Ok(Value::String(rak_stdlib::file::basename(&self.val_to_string(args.first())?))),
-            "file_dirname" => Ok(Value::String(rak_stdlib::file::dirname(&self.val_to_string(args.first())?))),
+            "file_exists" => Ok(Value::Bool(rak_stdlib::file::exists(
+                &self.val_to_string(args.first())?,
+            ))),
+            "file_size" => Ok(Value::Int(
+                rak_stdlib::file::size(&self.val_to_string(args.first())?).unwrap_or(0) as i64,
+            )),
+            "file_list" => Ok(Value::Array(
+                rak_stdlib::file::list(&self.val_to_string(args.first())?)
+                    .into_iter()
+                    .map(Value::String)
+                    .collect(),
+            )),
+            "file_delete" => Ok(Value::Bool(rak_stdlib::file::delete(
+                &self.val_to_string(args.first())?,
+            ))),
+            "file_mkdir" => Ok(Value::Bool(rak_stdlib::file::create_dir(
+                &self.val_to_string(args.first())?,
+            ))),
+            "file_copy" => Ok(Value::Bool(rak_stdlib::file::copy(
+                &self.val_to_string(args.first())?,
+                &self.val_to_string(args.get(1))?,
+            ))),
+            "file_rename" => Ok(Value::Bool(rak_stdlib::file::rename(
+                &self.val_to_string(args.first())?,
+                &self.val_to_string(args.get(1))?,
+            ))),
+            "file_ext" => Ok(Value::String(
+                rak_stdlib::file::ext(&self.val_to_string(args.first())?).unwrap_or_default(),
+            )),
+            "file_basename" => Ok(Value::String(rak_stdlib::file::basename(
+                &self.val_to_string(args.first())?,
+            ))),
+            "file_dirname" => Ok(Value::String(rak_stdlib::file::dirname(
+                &self.val_to_string(args.first())?,
+            ))),
             "html_title" => match rak_stdlib::web::html_title(&self.val_to_string(args.first())?) {
                 Some(t) => Ok(Value::String(t)),
                 None => Ok(Value::Nil),
             },
-            "html_select" => match rak_stdlib::web::html_select(&self.val_to_string(args.first())?, &self.val_to_string(args.get(1))?) {
+            "html_select" => match rak_stdlib::web::html_select(
+                &self.val_to_string(args.first())?,
+                &self.val_to_string(args.get(1))?,
+            ) {
                 Some(t) => Ok(Value::String(t)),
                 None => Ok(Value::Nil),
             },
-            "html_select_all" => Ok(Value::Array(rak_stdlib::web::html_select_all(&self.val_to_string(args.first())?, &self.val_to_string(args.get(1))?).into_iter().map(Value::String).collect())),
-            "html_attr" => match rak_stdlib::web::html_attr(&self.val_to_string(args.first())?, &self.val_to_string(args.get(1))?, &self.val_to_string(args.get(2))?) {
+            "html_select_all" => Ok(Value::Array(
+                rak_stdlib::web::html_select_all(
+                    &self.val_to_string(args.first())?,
+                    &self.val_to_string(args.get(1))?,
+                )
+                .into_iter()
+                .map(Value::String)
+                .collect(),
+            )),
+            "html_attr" => match rak_stdlib::web::html_attr(
+                &self.val_to_string(args.first())?,
+                &self.val_to_string(args.get(1))?,
+                &self.val_to_string(args.get(2))?,
+            ) {
                 Some(v) => Ok(Value::String(v)),
                 None => Ok(Value::Nil),
             },
-            "html_links" => Ok(Value::Array(rak_stdlib::web::html_links(&self.val_to_string(args.first())?).into_iter().map(Value::String).collect())),
-            "html_images" => Ok(Value::Array(rak_stdlib::web::html_images(&self.val_to_string(args.first())?).into_iter().map(Value::String).collect())),
-            "html_scripts" => Ok(Value::Array(rak_stdlib::web::html_scripts(&self.val_to_string(args.first())?).into_iter().map(Value::String).collect())),
-            "html_forms" => Ok(Value::Array(rak_stdlib::web::html_forms(&self.val_to_string(args.first())?).into_iter().map(|f| Value::Map(f.into_iter().map(|(k, v)| (k, Value::String(v))).collect())).collect())),
-            "html_inputs" => Ok(Value::Array(rak_stdlib::web::html_inputs(&self.val_to_string(args.first())?).into_iter().map(|f| Value::Map(f.into_iter().map(|(k, v)| (k, Value::String(v))).collect())).collect())),
-            "html_meta" => match rak_stdlib::web::html_meta(&self.val_to_string(args.first())?, &self.val_to_string(args.get(1))?) {
+            "html_links" => Ok(Value::Array(
+                rak_stdlib::web::html_links(&self.val_to_string(args.first())?)
+                    .into_iter()
+                    .map(Value::String)
+                    .collect(),
+            )),
+            "html_images" => Ok(Value::Array(
+                rak_stdlib::web::html_images(&self.val_to_string(args.first())?)
+                    .into_iter()
+                    .map(Value::String)
+                    .collect(),
+            )),
+            "html_scripts" => Ok(Value::Array(
+                rak_stdlib::web::html_scripts(&self.val_to_string(args.first())?)
+                    .into_iter()
+                    .map(Value::String)
+                    .collect(),
+            )),
+            "html_forms" => Ok(Value::Array(
+                rak_stdlib::web::html_forms(&self.val_to_string(args.first())?)
+                    .into_iter()
+                    .map(|f| {
+                        Value::Map(f.into_iter().map(|(k, v)| (k, Value::String(v))).collect())
+                    })
+                    .collect(),
+            )),
+            "html_inputs" => Ok(Value::Array(
+                rak_stdlib::web::html_inputs(&self.val_to_string(args.first())?)
+                    .into_iter()
+                    .map(|f| {
+                        Value::Map(f.into_iter().map(|(k, v)| (k, Value::String(v))).collect())
+                    })
+                    .collect(),
+            )),
+            "html_meta" => match rak_stdlib::web::html_meta(
+                &self.val_to_string(args.first())?,
+                &self.val_to_string(args.get(1))?,
+            ) {
                 Some(c) => Ok(Value::String(c)),
                 None => Ok(Value::Nil),
             },
-            "html_count" => Ok(Value::Int(rak_stdlib::web::html_count(&self.val_to_string(args.first())?, &self.val_to_string(args.get(1))?) as i64)),
-            "html_headers" => Ok(Value::Array(rak_stdlib::web::html_headers(&self.val_to_string(args.first())?).into_iter().map(Value::String).collect())),
+            "html_count" => Ok(Value::Int(rak_stdlib::web::html_count(
+                &self.val_to_string(args.first())?,
+                &self.val_to_string(args.get(1))?,
+            ) as i64)),
+            "html_headers" => Ok(Value::Array(
+                rak_stdlib::web::html_headers(&self.val_to_string(args.first())?)
+                    .into_iter()
+                    .map(Value::String)
+                    .collect(),
+            )),
             "json_parse" => match rak_stdlib::js::json_parse(&self.val_to_string(args.first())?) {
                 Ok(v) => Ok(json_to_value(v)),
                 Err(e) => Err(crate::RakError::Runtime(format!("{}", e))),
@@ -5462,12 +6485,18 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
             "json_stringify" => {
                 let v = args.first().cloned().unwrap_or(Value::Nil);
                 Ok(Value::String(value_to_json(&v).to_string()))
-            },
-            "json_get" => match rak_stdlib::js::json_get(&self.val_to_string(args.first())?, &self.val_to_string(args.get(1))?) {
+            }
+            "json_get" => match rak_stdlib::js::json_get(
+                &self.val_to_string(args.first())?,
+                &self.val_to_string(args.get(1))?,
+            ) {
                 Ok(v) => Ok(Value::String(v)),
                 Err(e) => Err(crate::RakError::Runtime(format!("{}", e))),
             },
-            "json_path" => match rak_stdlib::js::json_path(&self.val_to_string(args.first())?, &self.val_to_string(args.get(1))?) {
+            "json_path" => match rak_stdlib::js::json_path(
+                &self.val_to_string(args.first())?,
+                &self.val_to_string(args.get(1))?,
+            ) {
                 Ok(v) => Ok(Value::String(v)),
                 Err(e) => Err(crate::RakError::Runtime(format!("{}", e))),
             },
@@ -5479,7 +6508,15 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                 Ok(n) => Ok(Value::Int(n as i64)),
                 Err(e) => Err(crate::RakError::Runtime(format!("{}", e))),
             },
-            "json_find_all" => Ok(Value::Array(rak_stdlib::js::json_find_all(&self.val_to_string(args.first())?, &self.val_to_string(args.get(1))?).into_iter().map(Value::String).collect())),
+            "json_find_all" => Ok(Value::Array(
+                rak_stdlib::js::json_find_all(
+                    &self.val_to_string(args.first())?,
+                    &self.val_to_string(args.get(1))?,
+                )
+                .into_iter()
+                .map(Value::String)
+                .collect(),
+            )),
             "scan_ports" => {
                 let target = self.val_to_string(args.first())?;
                 let mut start_port: u16 = 1;
@@ -5501,8 +6538,14 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                         end_port = range[1].as_u64().unwrap_or(1024) as u16;
                     }
                 }
-                let open_ports = rak_stdlib::recon::port_scan(&target, start_port, end_port, timeout_ms);
-                Ok(Value::Array(open_ports.into_iter().map(|p| Value::Int(p as i64)).collect()))
+                let open_ports =
+                    rak_stdlib::recon::port_scan(&target, start_port, end_port, timeout_ms);
+                Ok(Value::Array(
+                    open_ports
+                        .into_iter()
+                        .map(|p| Value::Int(p as i64))
+                        .collect(),
+                ))
             }
             "scan_subdomains" => {
                 let domain = self.val_to_string(args.first())?;
@@ -5511,7 +6554,11 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                 for sub in subs {
                     let ips = rak_stdlib::recon::dns_lookup(&sub);
                     if !ips.is_empty() {
-                        results.push(Value::String(format!("{} -> {}", sub, ips.first().unwrap())));
+                        results.push(Value::String(format!(
+                            "{} -> {}",
+                            sub,
+                            ips.first().unwrap()
+                        )));
                     }
                 }
                 Ok(Value::Array(results))
@@ -5526,21 +6573,21 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                     Err(e) => Err(crate::RakError::Runtime(format!("net_listen: {}", e))),
                 }
             }
-            "net_accept" => {
-                match args.first() {
-                    Some(Value::TcpListener(l)) => {
-                        let accepted = l.lock().unwrap().accept();
-                        match accepted {
-                            Ok((stream, addr)) => Ok(Value::Tuple(vec![
-                                Value::TcpStream(Arc::new(Mutex::new(stream))),
-                                Value::String(addr.to_string()),
-                            ])),
-                            Err(e) => Err(crate::RakError::Runtime(format!("net_accept: {}", e))),
-                        }
+            "net_accept" => match args.first() {
+                Some(Value::TcpListener(l)) => {
+                    let accepted = l.lock().unwrap().accept();
+                    match accepted {
+                        Ok((stream, addr)) => Ok(Value::Tuple(vec![
+                            Value::TcpStream(Arc::new(Mutex::new(stream))),
+                            Value::String(addr.to_string()),
+                        ])),
+                        Err(e) => Err(crate::RakError::Runtime(format!("net_accept: {}", e))),
                     }
-                    _ => Err(crate::RakError::Runtime("net_accept requires a listener".to_string())),
                 }
-            }
+                _ => Err(crate::RakError::Runtime(
+                    "net_accept requires a listener".to_string(),
+                )),
+            },
             "net_connect" => {
                 let addr = self.val_to_string(args.first())?;
                 match std::net::TcpStream::connect(&addr) {
@@ -5548,123 +6595,139 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                     Err(e) => Err(crate::RakError::Runtime(format!("net_connect: {}", e))),
                 }
             }
-            "net_local_addr" => {
-                match args.first() {
-                    Some(Value::TcpListener(l)) => {
-                        Ok(Value::String(l.lock().unwrap().local_addr().map(|a| a.to_string()).unwrap_or_default()))
-                    }
-                    _ => Err(crate::RakError::Runtime("net_local_addr requires a listener".to_string())),
-                }
-            }
-            "tcp_write" => {
-                match (args.first(), args.get(1)) {
-                    (Some(Value::TcpStream(s)), Some(v)) => {
-                        let data = self.val_to_bytes(Some(v))?;
-                        let n = {
-                            let mut st = s.lock().unwrap();
-                            use std::io::Write;
-                            st.write(&data).map_err(|e| crate::RakError::Runtime(format!("tcp_write: {}", e)))?
-                        };
-                        Ok(Value::Int(n as i64))
-                    }
-                    _ => Err(crate::RakError::Runtime("tcp_write(stream, data)".to_string())),
-                }
-            }
-            "tcp_read" => {
-                match (args.first(), args.get(1)) {
-                    (Some(Value::TcpStream(s)), Some(v)) => {
-                        let n = v.as_u64().unwrap_or(1024) as usize;
-                        let mut buf = vec![0u8; n];
-                        let read = {
-                            use std::io::Read;
-                            let mut st = s.lock().unwrap();
-                            st.read(&mut buf).map_err(|e| crate::RakError::Runtime(format!("tcp_read: {}", e)))?
-                        };
-                        buf.truncate(read);
-                        Ok(Value::Bytes(buf))
-                    }
-                    _ => Err(crate::RakError::Runtime("tcp_read(stream, n)".to_string())),
-                }
-            }
-            "tcp_read_line" => {
-                match args.first() {
-                    Some(Value::TcpStream(s)) => {
-                        let s = s.clone();
-                        let mut out = Vec::new();
-                        use std::io::Read;
-                        loop {
-                            let mut byte = [0u8; 1];
-                            let r = { s.lock().unwrap().read(&mut byte) };
-                            match r {
-                                Ok(0) => break,
-                                Ok(_) => {
-                                    if byte[0] == b'\n' { break; }
-                                    if byte[0] != b'\r' { out.push(byte[0]); }
-                                }
-                                Err(e) => return Err(crate::RakError::Runtime(format!("tcp_read_line: {}", e))),
-                            }
-                        }
-                        Ok(Value::String(String::from_utf8_lossy(&out).to_string()))
-                    }
-                    _ => Err(crate::RakError::Runtime("tcp_read_line(stream)".to_string())),
-                }
-            }
-            "tcp_close" => {
-                match args.first() {
-                    Some(Value::TcpStream(s)) => {
+            "net_local_addr" => match args.first() {
+                Some(Value::TcpListener(l)) => Ok(Value::String(
+                    l.lock()
+                        .unwrap()
+                        .local_addr()
+                        .map(|a| a.to_string())
+                        .unwrap_or_default(),
+                )),
+                _ => Err(crate::RakError::Runtime(
+                    "net_local_addr requires a listener".to_string(),
+                )),
+            },
+            "tcp_write" => match (args.first(), args.get(1)) {
+                (Some(Value::TcpStream(s)), Some(v)) => {
+                    let data = self.val_to_bytes(Some(v))?;
+                    let n = {
+                        let mut st = s.lock().unwrap();
                         use std::io::Write;
-                        let _ = s.lock().unwrap().shutdown(std::net::Shutdown::Both);
-                        let _ = s.lock().unwrap().flush();
-                        Ok(Value::Nil)
-                    }
-                    _ => Err(crate::RakError::Runtime("tcp_close(stream)".to_string())),
+                        st.write(&data)
+                            .map_err(|e| crate::RakError::Runtime(format!("tcp_write: {}", e)))?
+                    };
+                    Ok(Value::Int(n as i64))
                 }
-            }
-            "spawn" => {
-                match args.first() {
-                    Some(Value::Function { params, body, closure, .. }) => {
-                        let params = params.clone();
-                        let body = body.clone();
-                        let closure = closure.clone();
-                        let handle: JoinHandle<Value> = std::thread::spawn(move || {
-                            let mut interp = Interpreter::new();
-                            interp.env = (*closure).clone();
-                            interp.env.push_scope();
-                            for s in &body {
-                                let _ = interp.exec_stmt(s);
-                                if interp.returning {
+                _ => Err(crate::RakError::Runtime(
+                    "tcp_write(stream, data)".to_string(),
+                )),
+            },
+            "tcp_read" => match (args.first(), args.get(1)) {
+                (Some(Value::TcpStream(s)), Some(v)) => {
+                    let n = v.as_u64().unwrap_or(1024) as usize;
+                    let mut buf = vec![0u8; n];
+                    let read = {
+                        use std::io::Read;
+                        let mut st = s.lock().unwrap();
+                        st.read(&mut buf)
+                            .map_err(|e| crate::RakError::Runtime(format!("tcp_read: {}", e)))?
+                    };
+                    buf.truncate(read);
+                    Ok(Value::Bytes(buf))
+                }
+                _ => Err(crate::RakError::Runtime("tcp_read(stream, n)".to_string())),
+            },
+            "tcp_read_line" => match args.first() {
+                Some(Value::TcpStream(s)) => {
+                    let s = s.clone();
+                    let mut out = Vec::new();
+                    use std::io::Read;
+                    loop {
+                        let mut byte = [0u8; 1];
+                        let r = { s.lock().unwrap().read(&mut byte) };
+                        match r {
+                            Ok(0) => break,
+                            Ok(_) => {
+                                if byte[0] == b'\n' {
                                     break;
                                 }
+                                if byte[0] != b'\r' {
+                                    out.push(byte[0]);
+                                }
                             }
-                            let ret = if interp.returning {
-                                std::mem::replace(&mut interp.return_value, Value::Nil)
-                            } else {
-                                Value::Nil
-                            };
-                            ret
-                        });
-                        let _ = params;
-                        Ok(Value::JoinHandle(Arc::new(Mutex::new(Some(handle)))))
-                    }
-                    _ => Err(crate::RakError::Runtime("spawn requires a function".to_string())),
-                }
-            }
-            "thread_join" => {
-                match args.first() {
-                    Some(Value::JoinHandle(h)) => {
-                        let handle_opt = h.lock().unwrap().take();
-                        if let Some(handle) = handle_opt {
-                            match handle.join() {
-                                Ok(v) => Ok(v),
-                                Err(_) => Err(crate::RakError::Runtime("thread panicked".to_string())),
+                            Err(e) => {
+                                return Err(crate::RakError::Runtime(format!(
+                                    "tcp_read_line: {}",
+                                    e
+                                )))
                             }
-                        } else {
-                            Err(crate::RakError::Runtime("already joined".to_string()))
                         }
                     }
-                    _ => Err(crate::RakError::Runtime("thread_join requires a thread handle".to_string())),
+                    Ok(Value::String(String::from_utf8_lossy(&out).to_string()))
                 }
-            }
+                _ => Err(crate::RakError::Runtime(
+                    "tcp_read_line(stream)".to_string(),
+                )),
+            },
+            "tcp_close" => match args.first() {
+                Some(Value::TcpStream(s)) => {
+                    use std::io::Write;
+                    let _ = s.lock().unwrap().shutdown(std::net::Shutdown::Both);
+                    let _ = s.lock().unwrap().flush();
+                    Ok(Value::Nil)
+                }
+                _ => Err(crate::RakError::Runtime("tcp_close(stream)".to_string())),
+            },
+            "spawn" => match args.first() {
+                Some(Value::Function {
+                    params,
+                    body,
+                    closure,
+                    ..
+                }) => {
+                    let params = params.clone();
+                    let body = body.clone();
+                    let closure = closure.clone();
+                    let handle: JoinHandle<Value> = std::thread::spawn(move || {
+                        let mut interp = Interpreter::new();
+                        interp.env = (*closure).clone();
+                        interp.env.push_scope();
+                        for s in &body {
+                            let _ = interp.exec_stmt(s);
+                            if interp.returning {
+                                break;
+                            }
+                        }
+                        let ret = if interp.returning {
+                            std::mem::replace(&mut interp.return_value, Value::Nil)
+                        } else {
+                            Value::Nil
+                        };
+                        ret
+                    });
+                    let _ = params;
+                    Ok(Value::JoinHandle(Arc::new(Mutex::new(Some(handle)))))
+                }
+                _ => Err(crate::RakError::Runtime(
+                    "spawn requires a function".to_string(),
+                )),
+            },
+            "thread_join" => match args.first() {
+                Some(Value::JoinHandle(h)) => {
+                    let handle_opt = h.lock().unwrap().take();
+                    if let Some(handle) = handle_opt {
+                        match handle.join() {
+                            Ok(v) => Ok(v),
+                            Err(_) => Err(crate::RakError::Runtime("thread panicked".to_string())),
+                        }
+                    } else {
+                        Err(crate::RakError::Runtime("already joined".to_string()))
+                    }
+                }
+                _ => Err(crate::RakError::Runtime(
+                    "thread_join requires a thread handle".to_string(),
+                )),
+            },
             "channel" => {
                 let (tx, rx) = mpsc::channel::<Value>();
                 Ok(Value::Tuple(vec![
@@ -5672,31 +6735,33 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                     Value::Receiver(Arc::new(Mutex::new(rx))),
                 ]))
             }
-            "chan_send" => {
-                match (args.first(), args.get(1)) {
-                    (Some(Value::Sender(tx)), Some(v)) => {
-                        tx.lock().unwrap().send(v.clone()).map(|_| Value::Bool(true)).map_err(|_| crate::RakError::Runtime("chan_send failed".to_string()))
-                    }
-                    _ => Err(crate::RakError::Runtime("chan_send(tx, v)".to_string())),
-                }
-            }
-            "chan_recv" => {
-                match args.first() {
-                    Some(Value::Receiver(rx)) => {
-                        match rx.lock().unwrap().recv() {
-                            Ok(v) => Ok(Value::Option(Some(Box::new(v)))),
-                            Err(_) => Ok(Value::Option(None)),
-                        }
-                    }
-                    _ => Err(crate::RakError::Runtime("chan_recv(rx)".to_string())),
-                }
-            }
+            "chan_send" => match (args.first(), args.get(1)) {
+                (Some(Value::Sender(tx)), Some(v)) => tx
+                    .lock()
+                    .unwrap()
+                    .send(v.clone())
+                    .map(|_| Value::Bool(true))
+                    .map_err(|_| crate::RakError::Runtime("chan_send failed".to_string())),
+                _ => Err(crate::RakError::Runtime("chan_send(tx, v)".to_string())),
+            },
+            "chan_recv" => match args.first() {
+                Some(Value::Receiver(rx)) => match rx.lock().unwrap().recv() {
+                    Ok(v) => Ok(Value::Option(Some(Box::new(v)))),
+                    Err(_) => Ok(Value::Option(None)),
+                },
+                _ => Err(crate::RakError::Runtime("chan_recv(rx)".to_string())),
+            },
             "sleep" => {
                 let ms = args.first().and_then(|v| v.as_u64()).unwrap_or(0);
                 std::thread::sleep(std::time::Duration::from_millis(ms));
                 Ok(Value::Nil)
             }
-            "now_ms" => Ok(Value::Int(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0))),
+            "now_ms" => Ok(Value::Int(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as i64)
+                    .unwrap_or(0),
+            )),
             "args" => {
                 let a: Vec<Value> = std::env::args().skip(1).map(Value::String).collect();
                 Ok(Value::Array(a))
@@ -5711,7 +6776,9 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
             }
             "chr" => {
                 let n = args.first().and_then(|v| v.as_i64()).unwrap_or(0) as u32;
-                Ok(Value::String(char::from_u32(n).map(|c| c.to_string()).unwrap_or_default()))
+                Ok(Value::String(
+                    char::from_u32(n).map(|c| c.to_string()).unwrap_or_default(),
+                ))
             }
             "substr" => {
                 let s = self.val_to_string(args.first())?;
@@ -5728,7 +6795,9 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                     a.sort_by(|x, y| x.to_string().cmp(&y.to_string()));
                     Ok(Value::Array(a))
                 } else {
-                    Err(crate::RakError::Runtime("sort() requires an array".to_string()))
+                    Err(crate::RakError::Runtime(
+                        "sort() requires an array".to_string(),
+                    ))
                 }
             }
             "exit" => {
@@ -5757,7 +6826,9 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
             "find" => {
                 let s = self.val_to_string(args.first())?;
                 let needle = self.val_to_string(args.get(1))?;
-                Ok(s.find(&needle).map(|i| Value::Int(i as i64)).unwrap_or(Value::Int(-1)))
+                Ok(s.find(&needle)
+                    .map(|i| Value::Int(i as i64))
+                    .unwrap_or(Value::Int(-1)))
             }
             "starts_with" => {
                 let s = self.val_to_string(args.first())?;
@@ -5805,8 +6876,12 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                 let n = args.get(1).and_then(|v| v.as_i64()).unwrap_or(1).max(0) as usize;
                 Ok(Value::String(s.repeat(n)))
             }
-            "trim_start" => Ok(Value::String(self.val_to_string(args.first())?.trim_start().to_string())),
-            "trim_end" => Ok(Value::String(self.val_to_string(args.first())?.trim_end().to_string())),
+            "trim_start" => Ok(Value::String(
+                self.val_to_string(args.first())?.trim_start().to_string(),
+            )),
+            "trim_end" => Ok(Value::String(
+                self.val_to_string(args.first())?.trim_end().to_string(),
+            )),
             "reverse" => {
                 if let Some(Value::Array(a)) = args.first().cloned() {
                     let mut a = a;
@@ -5815,28 +6890,46 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                 } else if let Some(Value::String(s)) = args.first().cloned() {
                     Ok(Value::String(s.chars().rev().collect()))
                 } else {
-                    Err(crate::RakError::Runtime("reverse() requires array or string".to_string()))
+                    Err(crate::RakError::Runtime(
+                        "reverse() requires array or string".to_string(),
+                    ))
                 }
             }
             "min" => {
                 let nums: Vec<i64> = args.iter().filter_map(|v| v.as_i64()).collect();
-                if nums.is_empty() { return Ok(Value::Nil); }
+                if nums.is_empty() {
+                    return Ok(Value::Nil);
+                }
                 Ok(Value::Int(*nums.iter().min().unwrap()))
             }
             "max" => {
                 let nums: Vec<i64> = args.iter().filter_map(|v| v.as_i64()).collect();
-                if nums.is_empty() { return Ok(Value::Nil); }
+                if nums.is_empty() {
+                    return Ok(Value::Nil);
+                }
                 Ok(Value::Int(*nums.iter().max().unwrap()))
             }
             "sum" => {
                 if let Some(Value::Array(a)) = args.first() {
                     let mut total = 0i64;
-                    for v in a.iter() { if let Some(n) = v.as_i64() { total += n; } else if v.as_f64().is_some() { return Ok(Value::Float(a.iter().filter_map(|v| v.as_f64()).sum())); } }
+                    for v in a.iter() {
+                        if let Some(n) = v.as_i64() {
+                            total += n;
+                        } else if v.as_f64().is_some() {
+                            return Ok(Value::Float(a.iter().filter_map(|v| v.as_f64()).sum()));
+                        }
+                    }
                     Ok(Value::Int(total))
-                } else { Ok(Value::Int(0)) }
+                } else {
+                    Ok(Value::Int(0))
+                }
             }
-            "abs" => Ok(Value::Int(args.first().and_then(|v| v.as_i64()).unwrap_or(0).abs())),
-            "sqrt" => Ok(Value::Float(args.first().and_then(|v| v.as_f64()).unwrap_or(0.0).sqrt())),
+            "abs" => Ok(Value::Int(
+                args.first().and_then(|v| v.as_i64()).unwrap_or(0).abs(),
+            )),
+            "sqrt" => Ok(Value::Float(
+                args.first().and_then(|v| v.as_f64()).unwrap_or(0.0).sqrt(),
+            )),
             "pow" => {
                 let base = args.first().and_then(|v| v.as_f64()).unwrap_or(0.0);
                 let exp = args.get(1).and_then(|v| v.as_f64()).unwrap_or(0.0);
@@ -5926,7 +7019,9 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
             }
             #[cfg(not(feature = "gui"))]
             "gui_open" | "gui_update" | "gui_title" | "gui_close" | "gui_wait" | "gui_callback" => {
-                Err(crate::RakError::Runtime("GUI support not enabled (build with --features gui)".to_string()))
+                Err(crate::RakError::Runtime(
+                    "GUI support not enabled (build with --features gui)".to_string(),
+                ))
             }
             // --- FFI builtins ---
             "ffi_load" => {
@@ -5934,7 +7029,9 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                 let h = rak_stdlib::ffi::load(&path).map_err(crate::RakError::Runtime)?;
                 Ok(Value::ForeignLib(Arc::new(Mutex::new(h))))
             }
-            "ffi_ptr" => Ok(Value::ForeignPtr(args.first().and_then(|v| v.as_u64()).unwrap_or(0))),
+            "ffi_ptr" => Ok(Value::ForeignPtr(
+                args.first().and_then(|v| v.as_u64()).unwrap_or(0),
+            )),
             "ffi_alloc" => {
                 let n = args.first().and_then(|v| v.as_u64()).unwrap_or(0) as usize;
                 let mut v = vec![0u8; n];
@@ -5946,7 +7043,11 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
             "ffi_free" => {
                 let ptr = match args.first() {
                     Some(Value::ForeignPtr(p)) => *p,
-                    _ => return Err(crate::RakError::Runtime("ffi_free(ptr) requires a ptr".to_string())),
+                    _ => {
+                        return Err(crate::RakError::Runtime(
+                            "ffi_free(ptr) requires a ptr".to_string(),
+                        ))
+                    }
                 };
                 match self.ffi_allocs.release(ptr) {
                     Some(n) => {
@@ -5957,7 +7058,15 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                 }
             }
             "ffi_write" => {
-                let ptr = args.first().and_then(|v| match v { Value::ForeignPtr(p) => Some(*p), _ => None }).ok_or_else(|| crate::RakError::Runtime("ffi_write(ptr, off, byte)".to_string()))?;
+                let ptr = args
+                    .first()
+                    .and_then(|v| match v {
+                        Value::ForeignPtr(p) => Some(*p),
+                        _ => None,
+                    })
+                    .ok_or_else(|| {
+                        crate::RakError::Runtime("ffi_write(ptr, off, byte)".to_string())
+                    })?;
                 let off = args.get(1).and_then(|v| v.as_u64()).unwrap_or(0);
                 let byte = args.get(2).and_then(|v| v.as_u64()).unwrap_or(0) as u8;
                 // The check that was missing. Without it this was an arbitrary
@@ -5966,11 +7075,19 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                 self.ffi_allocs
                     .check(ptr, off, 1)
                     .map_err(crate::RakError::Runtime)?;
-                unsafe { *((ptr as usize).wrapping_add(off as usize) as *mut u8) = byte; }
+                unsafe {
+                    *((ptr as usize).wrapping_add(off as usize) as *mut u8) = byte;
+                }
                 Ok(Value::Nil)
             }
             "ffi_read" => {
-                let ptr = args.first().and_then(|v| match v { Value::ForeignPtr(p) => Some(*p), _ => None }).ok_or_else(|| crate::RakError::Runtime("ffi_read(ptr, off)".to_string()))?;
+                let ptr = args
+                    .first()
+                    .and_then(|v| match v {
+                        Value::ForeignPtr(p) => Some(*p),
+                        _ => None,
+                    })
+                    .ok_or_else(|| crate::RakError::Runtime("ffi_read(ptr, off)".to_string()))?;
                 let off = args.get(1).and_then(|v| v.as_u64()).unwrap_or(0);
                 self.ffi_allocs
                     .check(ptr, off, 1)
@@ -5979,7 +7096,15 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                 Ok(Value::Int(b as i64))
             }
             "ffi_read_i32" => {
-                let ptr = args.first().and_then(|v| match v { Value::ForeignPtr(p) => Some(*p), _ => None }).ok_or_else(|| crate::RakError::Runtime("ffi_read_i32(ptr, off)".to_string()))?;
+                let ptr = args
+                    .first()
+                    .and_then(|v| match v {
+                        Value::ForeignPtr(p) => Some(*p),
+                        _ => None,
+                    })
+                    .ok_or_else(|| {
+                        crate::RakError::Runtime("ffi_read_i32(ptr, off)".to_string())
+                    })?;
                 let off = args.get(1).and_then(|v| v.as_u64()).unwrap_or(0);
                 // Four bytes, and the check accounts for all four: `off` inside the
                 // allocation is not enough if it runs three bytes past the end.
@@ -5990,16 +7115,29 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                 Ok(Value::Int(v as i64))
             }
             "ffi_cstr_to_string" => {
-                let ptr = args.first().and_then(|v| match v { Value::ForeignPtr(p) => Some(*p), _ => None }).ok_or_else(|| crate::RakError::Runtime("ffi_cstr_to_string(ptr)".to_string()))?;
+                let ptr = args
+                    .first()
+                    .and_then(|v| match v {
+                        Value::ForeignPtr(p) => Some(*p),
+                        _ => None,
+                    })
+                    .ok_or_else(|| {
+                        crate::RakError::Runtime("ffi_cstr_to_string(ptr)".to_string())
+                    })?;
                 // Bounded by the allocation. The old loop had no bound at all: a
                 // buffer with no NUL in it walked off the end into unmapped memory
                 // and killed the process, which is a denial of service reachable
                 // from a pointer that came out of a network response.
-                let cap = self.ffi_allocs.cstr_cap(ptr, 0).map_err(crate::RakError::Runtime)?;
+                let cap = self
+                    .ffi_allocs
+                    .cstr_cap(ptr, 0)
+                    .map_err(crate::RakError::Runtime)?;
                 let base = ptr as usize;
                 let s = unsafe {
                     let mut len = 0usize;
-                    while len < cap && *((base + len) as *const u8) != 0 { len += 1; }
+                    while len < cap && *((base + len) as *const u8) != 0 {
+                        len += 1;
+                    }
                     if len == cap {
                         return Err(crate::RakError::Runtime(format!(
                             "ffi_cstr_to_string: no NUL terminator within the {} bytes Rak \
@@ -6016,12 +7154,18 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
             // declared before Rak will read or write through it, so an unchecked
             // access is an assertion in the source rather than an accident.
             "ffi_trust" => {
-                let ptr = args.first().and_then(|v| match v { Value::ForeignPtr(p) => Some(*p), _ => None })
+                let ptr = args
+                    .first()
+                    .and_then(|v| match v {
+                        Value::ForeignPtr(p) => Some(*p),
+                        _ => None,
+                    })
                     .ok_or_else(|| crate::RakError::Runtime("ffi_trust(ptr, len)".to_string()))?;
                 let len = args.get(1).and_then(|v| v.as_u64()).unwrap_or(0);
                 if len == 0 || len > (1u64 << 32) {
                     return Err(crate::RakError::Runtime(
-                        "ffi_trust: length must be 1..=4294967296".to_string()));
+                        "ffi_trust: length must be 1..=4294967296".to_string(),
+                    ));
                 }
                 self.ffi_allocs.record(ptr, len as usize);
                 // Returned rather than nil, so `let p = ffi_trust(...)` works.
@@ -6031,7 +7175,12 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                 let s = self.val_to_string(args.first())?;
                 let bytes = match CString::new(s.as_str()) {
                     Ok(c) => c.into_bytes_with_nul(),
-                    Err(e) => return Err(crate::RakError::Runtime(format!("ffi_string_to_cstr: {}", e))),
+                    Err(e) => {
+                        return Err(crate::RakError::Runtime(format!(
+                            "ffi_string_to_cstr: {}",
+                            e
+                        )))
+                    }
                 };
                 let len = bytes.len();
                 let ptr = bytes.as_ptr() as u64;
@@ -6042,25 +7191,37 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
             "ffi_call" => {
                 let (lib, symbol) = match (args.first(), args.get(1)) {
                     (Some(Value::ForeignLib(h)), Some(Value::String(s))) => (h.clone(), s.clone()),
-                    _ => return Err(crate::RakError::Runtime("ffi_call(lib, symbol, args_array)".to_string())),
+                    _ => {
+                        return Err(crate::RakError::Runtime(
+                            "ffi_call(lib, symbol, args_array)".to_string(),
+                        ))
+                    }
                 };
                 let c_args: Vec<Value> = match args.get(2) {
                     Some(Value::Array(a)) => a.clone(),
                     Some(Value::Nil) | None => Vec::new(),
-                    Some(other) => return Err(crate::RakError::Runtime(format!(
-                        "ffi_call: args must be an array, got {}", other.type_name()
-                    ))),
+                    Some(other) => {
+                        return Err(crate::RakError::Runtime(format!(
+                            "ffi_call: args must be an array, got {}",
+                            other.type_name()
+                        )))
+                    }
                 };
                 let mut marshalled = Vec::with_capacity(c_args.len());
                 let _g = self.marshal_args(&c_args, &mut marshalled)?;
-                let addr = { let h = lib.lock().unwrap(); rak_stdlib::ffi::sym_addr(&h, &symbol).map_err(crate::RakError::Runtime)? };
+                let addr = {
+                    let h = lib.lock().unwrap();
+                    rak_stdlib::ffi::sym_addr(&h, &symbol).map_err(crate::RakError::Runtime)?
+                };
                 let ret = unsafe { rak_stdlib::ffi::call_int(addr, &marshalled) };
                 Ok(Value::Int(ret as i64))
             }
             // --- Memory-mapped files ---
             "mmap_open" => {
                 let path = self.val_to_string(args.first())?;
-                let mode = self.val_to_string(args.get(1)).unwrap_or_else(|_| "r".to_string());
+                let mode = self
+                    .val_to_string(args.get(1))
+                    .unwrap_or_else(|_| "r".to_string());
                 match rak_stdlib::mmap::open(&path, &mode) {
                     Ok(h) => Ok(Value::Mmap(h)),
                     Err(e) => Err(crate::RakError::Runtime(e)),
@@ -6068,14 +7229,25 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
             }
             "mmap_slice" => {
                 let (h, off, len) = match args {
-                    [Value::Mmap(h), Value::Int(o), Value::Int(l)] => (h.clone(), *o as usize, *l as usize),
-                    [Value::Mmap(h), Value::Hex(o), Value::Hex(l)] => (h.clone(), *o as usize, *l as usize),
-                    _ => return Err(crate::RakError::Runtime("mmap_slice(mmap, off, len)".to_string())),
+                    [Value::Mmap(h), Value::Int(o), Value::Int(l)] => {
+                        (h.clone(), *o as usize, *l as usize)
+                    }
+                    [Value::Mmap(h), Value::Hex(o), Value::Hex(l)] => {
+                        (h.clone(), *o as usize, *l as usize)
+                    }
+                    _ => {
+                        return Err(crate::RakError::Runtime(
+                            "mmap_slice(mmap, off, len)".to_string(),
+                        ))
+                    }
                 };
                 let total = h.len();
                 if off.saturating_add(len) > total {
                     return Err(crate::RakError::Runtime(format!(
-                        "mmap_slice: [off, off+len) = [{}, {}) out of range (len {})", off, off + len, total
+                        "mmap_slice: [off, off+len) = [{}, {}) out of range (len {})",
+                        off,
+                        off + len,
+                        total
                     )));
                 }
                 Ok(Value::MmapSlice(h, off, len))
@@ -6093,7 +7265,8 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                     Some(Value::Mmap(h)) | Some(Value::MmapSlice(h, _, _)) => h.clone(),
                     _ => {
                         return Err(crate::RakError::Runtime(
-                            "mmap_write: first argument must be a mapping from mmap_open".to_string(),
+                            "mmap_write: first argument must be a mapping from mmap_open"
+                                .to_string(),
                         ))
                     }
                 };
@@ -6108,8 +7281,7 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                 // they were written, and `0x10` has to mean sixteen here, not fail.
                 let off = base + self.offset_arg(args.get(1), "mmap_write offset")?;
                 let byte = self.offset_arg(args.get(2), "mmap_write byte")? as u8;
-                rak_stdlib::mmap::write_byte(&h, off, byte)
-                    .map_err(crate::RakError::Runtime)?;
+                rak_stdlib::mmap::write_byte(&h, off, byte).map_err(crate::RakError::Runtime)?;
                 Ok(Value::Bool(true))
             }
             "mmap_close" => Ok(Value::Nil),
@@ -6117,7 +7289,11 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                 let h = match args.first() {
                     Some(Value::Mmap(h)) => h.clone(),
                     Some(Value::MmapSlice(h, _, _)) => h.clone(),
-                    _ => return Err(crate::RakError::Runtime("mmap_find(mmap, needle)".to_string())),
+                    _ => {
+                        return Err(crate::RakError::Runtime(
+                            "mmap_find(mmap, needle)".to_string(),
+                        ))
+                    }
                 };
                 let needle = self.val_to_bytes(args.get(1))?;
                 match rak_stdlib::mmap::find(&h, &needle) {
@@ -6128,20 +7304,38 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
             "mmap_lines" => {
                 let h = match args.first() {
                     Some(Value::Mmap(h)) => h.clone(),
-                    _ => return Err(crate::RakError::Runtime("mmap_lines(mmap, delim?)".to_string())),
+                    _ => {
+                        return Err(crate::RakError::Runtime(
+                            "mmap_lines(mmap, delim?)".to_string(),
+                        ))
+                    }
                 };
-                let delim = self.val_to_string(args.get(1)).unwrap_or_else(|_| "\n".to_string());
+                let delim = self
+                    .val_to_string(args.get(1))
+                    .unwrap_or_else(|_| "\n".to_string());
                 let ls = rak_stdlib::mmap::lines(&h, delim.as_bytes());
                 Ok(Value::Array(ls.into_iter().map(Value::String).collect()))
             }
             "mmap_lines_off" => {
                 let h = match args.first() {
                     Some(Value::Mmap(h)) => h.clone(),
-                    _ => return Err(crate::RakError::Runtime("mmap_lines_off(mmap, delim?)".to_string())),
+                    _ => {
+                        return Err(crate::RakError::Runtime(
+                            "mmap_lines_off(mmap, delim?)".to_string(),
+                        ))
+                    }
                 };
-                let delim = self.val_to_string(args.get(1)).unwrap_or_else(|_| "\n".to_string());
+                let delim = self
+                    .val_to_string(args.get(1))
+                    .unwrap_or_else(|_| "\n".to_string());
                 let offs = rak_stdlib::mmap::lines_off(&h, delim.as_bytes());
-                Ok(Value::Array(offs.into_iter().map(|(o, l)| Value::Tuple(vec![Value::Int(o as i64), Value::Int(l as i64)])).collect()))
+                Ok(Value::Array(
+                    offs.into_iter()
+                        .map(|(o, l)| {
+                            Value::Tuple(vec![Value::Int(o as i64), Value::Int(l as i64)])
+                        })
+                        .collect(),
+                ))
             }
             // --- Async I/O (Tokio-backed futures) ---
             "http_get_async" => {
@@ -6184,24 +7378,36 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                 })))
             }
             // --- Raw sockets / packet forging ---
-            "net_raw_csum" => Ok(Value::Int(rak_stdlib::net_raw::csum16(&self.val_to_bytes(args.first())?) as i64)),
+            "net_raw_csum" => Ok(Value::Int(rak_stdlib::net_raw::csum16(
+                &self.val_to_bytes(args.first())?,
+            ) as i64)),
             "net_raw_ipv4" => {
                 let src = self.val_to_string(args.first())?;
                 let dst = self.val_to_string(args.get(1))?;
                 let proto = args.get(2).and_then(|v| v.as_u64()).unwrap_or(6) as u8;
                 let payload = self.val_to_bytes(args.get(3))?;
-                Ok(Value::Bytes(rak_stdlib::net_raw::ipv4(&src, &dst, proto, &payload).map_err(crate::RakError::Runtime)?))
+                Ok(Value::Bytes(
+                    rak_stdlib::net_raw::ipv4(&src, &dst, proto, &payload)
+                        .map_err(crate::RakError::Runtime)?,
+                ))
             }
             "net_raw_tcp" => {
                 let src_ip = self.val_to_string(args.first())?;
                 let dst_ip = self.val_to_string(args.get(1))?;
                 let src_port = args.get(2).and_then(|v| v.as_u64()).unwrap_or(0) as u16;
                 let dst_port = args.get(3).and_then(|v| v.as_u64()).unwrap_or(0) as u16;
-                let flags = self.val_to_string(args.get(4)).unwrap_or_else(|_| "S".to_string());
+                let flags = self
+                    .val_to_string(args.get(4))
+                    .unwrap_or_else(|_| "S".to_string());
                 let seq = args.get(5).and_then(|v| v.as_u64()).unwrap_or(0) as u32;
                 let ack = args.get(6).and_then(|v| v.as_u64()).unwrap_or(0) as u32;
                 let payload = self.val_to_bytes(args.get(7))?;
-                Ok(Value::Bytes(rak_stdlib::net_raw::tcp(&src_ip, &dst_ip, src_port, dst_port, &flags, seq, ack, &payload).map_err(crate::RakError::Runtime)?))
+                Ok(Value::Bytes(
+                    rak_stdlib::net_raw::tcp(
+                        &src_ip, &dst_ip, src_port, dst_port, &flags, seq, ack, &payload,
+                    )
+                    .map_err(crate::RakError::Runtime)?,
+                ))
             }
             "net_raw_udp" => {
                 let src_ip = self.val_to_string(args.first())?;
@@ -6209,14 +7415,20 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                 let src_port = args.get(2).and_then(|v| v.as_u64()).unwrap_or(0) as u16;
                 let dst_port = args.get(3).and_then(|v| v.as_u64()).unwrap_or(0) as u16;
                 let payload = self.val_to_bytes(args.get(4))?;
-                Ok(Value::Bytes(rak_stdlib::net_raw::udp(&src_ip, &dst_ip, src_port, dst_port, &payload).map_err(crate::RakError::Runtime)?))
+                Ok(Value::Bytes(
+                    rak_stdlib::net_raw::udp(&src_ip, &dst_ip, src_port, dst_port, &payload)
+                        .map_err(crate::RakError::Runtime)?,
+                ))
             }
             "net_raw_tcp_syn" => {
                 let src = self.val_to_string(args.first())?;
                 let dst = self.val_to_string(args.get(1))?;
                 let src_port = args.get(2).and_then(|v| v.as_u64()).unwrap_or(12345) as u16;
                 let dport = args.get(3).and_then(|v| v.as_u64()).unwrap_or(80) as u16;
-                Ok(Value::Bytes(rak_stdlib::net_raw::tcp_syn(&src, &dst, src_port, dport).map_err(crate::RakError::Runtime)?))
+                Ok(Value::Bytes(
+                    rak_stdlib::net_raw::tcp_syn(&src, &dst, src_port, dport)
+                        .map_err(crate::RakError::Runtime)?,
+                ))
             }
             "net_raw_send" => {
                 let pkt = self.val_to_bytes(args.first())?;
@@ -6244,14 +7456,20 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                     Some(v) => self.val_to_bytes(Some(v))?,
                     None => Vec::new(),
                 };
-                Ok(Value::Bytes(rak_stdlib::net_raw::icmp_echo(&src, &dst, id, seq, &payload).map_err(crate::RakError::Runtime)?))
+                Ok(Value::Bytes(
+                    rak_stdlib::net_raw::icmp_echo(&src, &dst, id, seq, &payload)
+                        .map_err(crate::RakError::Runtime)?,
+                ))
             }
             "net_raw_icmp_ping" => {
                 let src = self.val_to_string(args.first())?;
                 let dst = self.val_to_string(args.get(1))?;
                 let id = args.get(2).and_then(|v| v.as_u64()).unwrap_or(0) as u16;
                 let seq = args.get(3).and_then(|v| v.as_u64()).unwrap_or(0) as u16;
-                Ok(Value::Bytes(rak_stdlib::net_raw::icmp_ping(&src, &dst, id, seq).map_err(crate::RakError::Runtime)?))
+                Ok(Value::Bytes(
+                    rak_stdlib::net_raw::icmp_ping(&src, &dst, id, seq)
+                        .map_err(crate::RakError::Runtime)?,
+                ))
             }
             "net_raw_icmp_echo_reply" => {
                 let src = self.val_to_string(args.first())?;
@@ -6262,20 +7480,29 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                     Some(v) => self.val_to_bytes(Some(v))?,
                     None => Vec::new(),
                 };
-                Ok(Value::Bytes(rak_stdlib::net_raw::icmp_echo_reply(&src, &dst, id, seq, &payload).map_err(crate::RakError::Runtime)?))
+                Ok(Value::Bytes(
+                    rak_stdlib::net_raw::icmp_echo_reply(&src, &dst, id, seq, &payload)
+                        .map_err(crate::RakError::Runtime)?,
+                ))
             }
             "net_raw_arp_request" => {
                 let src_mac = self.val_to_string(args.first())?;
                 let src_ip = self.val_to_string(args.get(1))?;
                 let target_ip = self.val_to_string(args.get(2))?;
-                Ok(Value::Bytes(rak_stdlib::net_raw::arp_request(&src_mac, &src_ip, &target_ip).map_err(crate::RakError::Runtime)?))
+                Ok(Value::Bytes(
+                    rak_stdlib::net_raw::arp_request(&src_mac, &src_ip, &target_ip)
+                        .map_err(crate::RakError::Runtime)?,
+                ))
             }
             "net_raw_arp_reply" => {
                 let src_mac = self.val_to_string(args.first())?;
                 let src_ip = self.val_to_string(args.get(1))?;
                 let target_mac = self.val_to_string(args.get(2))?;
                 let target_ip = self.val_to_string(args.get(3))?;
-                Ok(Value::Bytes(rak_stdlib::net_raw::arp_reply(&src_mac, &src_ip, &target_mac, &target_ip).map_err(crate::RakError::Runtime)?))
+                Ok(Value::Bytes(
+                    rak_stdlib::net_raw::arp_reply(&src_mac, &src_ip, &target_mac, &target_ip)
+                        .map_err(crate::RakError::Runtime)?,
+                ))
             }
             "net_raw_arp_parse" => {
                 let frame = self.val_to_bytes(args.first())?;
@@ -6346,7 +7573,9 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
             "tunnel_frame" => {
                 let seq = args.first().and_then(|v| v.as_u64()).unwrap_or(0);
                 let payload = self.val_to_bytes(args.get(1))?;
-                Ok(Value::Bytes(rak_stdlib::tunnel::tunnel_frame(seq, &payload)))
+                Ok(Value::Bytes(rak_stdlib::tunnel::tunnel_frame(
+                    seq, &payload,
+                )))
             }
             "tunnel_unframe" => {
                 let frame = self.val_to_bytes(args.first())?;
@@ -6364,7 +7593,9 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                 Ok(Value::Bytes(nonce.to_vec()))
             }
             "udp_bind" => {
-                let addr = self.val_to_string(args.first()).unwrap_or_else(|_| "127.0.0.1:0".to_string());
+                let addr = self
+                    .val_to_string(args.first())
+                    .unwrap_or_else(|_| "127.0.0.1:0".to_string());
                 match rak_stdlib::tunnel::udp_bind(&addr) {
                     Ok((transport, local)) => Ok(Value::Tuple(vec![
                         Value::UdpTransport(Arc::new(transport)),
@@ -6376,7 +7607,11 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
             "udp_send" => {
                 let transport = match args.first() {
                     Some(Value::UdpTransport(t)) => t.clone(),
-                    _ => return Err(crate::RakError::Runtime("udp_send: expected a UDP transport".to_string())),
+                    _ => {
+                        return Err(crate::RakError::Runtime(
+                            "udp_send: expected a UDP transport".to_string(),
+                        ))
+                    }
                 };
                 let data = self.val_to_bytes(args.get(1))?;
                 let target = self.val_to_string(args.get(2))?;
@@ -6388,7 +7623,11 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
             "udp_recv" => {
                 let transport = match args.first() {
                     Some(Value::UdpTransport(t)) => t.clone(),
-                    _ => return Err(crate::RakError::Runtime("udp_recv: expected a UDP transport".to_string())),
+                    _ => {
+                        return Err(crate::RakError::Runtime(
+                            "udp_recv: expected a UDP transport".to_string(),
+                        ))
+                    }
                 };
                 let max = args.get(1).and_then(|v| v.as_u64()).unwrap_or(65535) as usize;
                 let timeout = args.get(2).and_then(|v| v.as_u64()).unwrap_or(0);
@@ -6404,14 +7643,24 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
             "udp_local_addr" => {
                 let transport = match args.first() {
                     Some(Value::UdpTransport(t)) => t.clone(),
-                    _ => return Err(crate::RakError::Runtime("udp_local_addr: expected a UDP transport".to_string())),
+                    _ => {
+                        return Err(crate::RakError::Runtime(
+                            "udp_local_addr: expected a UDP transport".to_string(),
+                        ))
+                    }
                 };
-                Ok(Value::String(rak_stdlib::tunnel::udp_local_addr(&transport)))
+                Ok(Value::String(rak_stdlib::tunnel::udp_local_addr(
+                    &transport,
+                )))
             }
             // --- Structured errors ---
             "error" => {
-                let kind = self.val_to_string(args.first()).unwrap_or_else(|_| "runtime".to_string());
-                let message = self.val_to_string(args.get(1)).unwrap_or_else(|_| "error".to_string());
+                let kind = self
+                    .val_to_string(args.first())
+                    .unwrap_or_else(|_| "runtime".to_string());
+                let message = self
+                    .val_to_string(args.get(1))
+                    .unwrap_or_else(|_| "error".to_string());
                 let k = str_to_kind(&kind);
                 Ok(Value::Error(Arc::new(
                     crate::ErrorInfo::new(message).with_kind(k),
@@ -6446,7 +7695,12 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
             }
             "err_context" => {
                 let e = self.error_value(args.first())?;
-                Ok(Value::Map(e.context.iter().map(|(k, v)| (k.clone(), Value::String(v.clone()))).collect()))
+                Ok(Value::Map(
+                    e.context
+                        .iter()
+                        .map(|(k, v)| (k.clone(), Value::String(v.clone())))
+                        .collect(),
+                ))
             }
             "err_with_context" => {
                 let e = self.error_value(args.first())?;
@@ -6460,7 +7714,12 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
             "await_all" => {
                 let arr = match args.first().map(|v| v.clone()).unwrap_or(Value::Nil) {
                     Value::Array(items) => items.iter().cloned().collect::<Vec<_>>(),
-                    other => return Err(crate::RakError::Runtime(format!("await_all: expected an array of futures, got {}", other.type_name()))),
+                    other => {
+                        return Err(crate::RakError::Runtime(format!(
+                            "await_all: expected an array of futures, got {}",
+                            other.type_name()
+                        )))
+                    }
                 };
                 let mut handles = Vec::with_capacity(arr.len());
                 for f in arr {
@@ -6472,7 +7731,12 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
             "select" => {
                 let arr = match args.first().map(|v| v.clone()).unwrap_or(Value::Nil) {
                     Value::Array(items) => items.iter().cloned().collect::<Vec<_>>(),
-                    other => return Err(crate::RakError::Runtime(format!("select: expected an array of futures, got {}", other.type_name()))),
+                    other => {
+                        return Err(crate::RakError::Runtime(format!(
+                            "select: expected an array of futures, got {}",
+                            other.type_name()
+                        )))
+                    }
                 };
                 if arr.is_empty() {
                     return Err(crate::RakError::Runtime("select: empty array".to_string()));
@@ -6488,13 +7752,19 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                     let tx = tx.clone();
                     std::thread::spawn(move || {
                         let r = h.join();
-                        let v = match r { Ok(Ok(v)) => v, _ => Value::Nil };
+                        let v = match r {
+                            Ok(Ok(v)) => v,
+                            _ => Value::Nil,
+                        };
                         let _ = tx.send((i, v));
                     });
                 }
                 drop(tx);
-                let (idx, val) = async_runtime().block_on(async move { rx.recv().await })
-                    .ok_or_else(|| crate::RakError::Runtime("select: no future resolved".to_string()))?;
+                let (idx, val) = async_runtime()
+                    .block_on(async move { rx.recv().await })
+                    .ok_or_else(|| {
+                        crate::RakError::Runtime("select: no future resolved".to_string())
+                    })?;
                 Ok(Value::Tuple(vec![Value::Int(idx as i64), val]))
             }
             "timeout" => {
@@ -6510,7 +7780,9 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                             done2.store(true, std::sync::atomic::Ordering::SeqCst);
                             match r {
                                 Ok(inner) => inner,
-                                Err(_) => Err(crate::RakError::Runtime("timeout: task panicked".to_string())),
+                                Err(_) => Err(crate::RakError::Runtime(
+                                    "timeout: task panicked".to_string(),
+                                )),
                             }
                         });
                         let mut timed_out = false;
@@ -6518,19 +7790,29 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                             if done.load(std::sync::atomic::Ordering::SeqCst) {
                                 match h2.join() {
                                     Ok(inner) => break inner,
-                                    Err(_) => break Err(crate::RakError::Runtime("timeout: task panicked".to_string())),
+                                    Err(_) => {
+                                        break Err(crate::RakError::Runtime(
+                                            "timeout: task panicked".to_string(),
+                                        ))
+                                    }
                                 }
                             }
                             if start.elapsed().as_millis() >= ms as u128 {
                                 timed_out = true;
-                                break Err(crate::RakError::Runtime("operation timed out".to_string()));
+                                break Err(crate::RakError::Runtime(
+                                    "operation timed out".to_string(),
+                                ));
                             }
                             std::thread::sleep(std::time::Duration::from_micros(200));
                         };
                         if timed_out {
-                            Ok(Value::Result(None, Some(Box::new(Value::Error(Arc::new(
-                                crate::ErrorInfo::new("operation timed out").with_kind(crate::ErrorKind::Timeout)
-                            ))))))
+                            Ok(Value::Result(
+                                None,
+                                Some(Box::new(Value::Error(Arc::new(
+                                    crate::ErrorInfo::new("operation timed out")
+                                        .with_kind(crate::ErrorKind::Timeout),
+                                )))),
+                            ))
                         } else {
                             match result {
                                 Ok(v) => Ok(Value::Result(Some(Box::new(v)), None)),
@@ -6547,14 +7829,18 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                     tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
                     Value::Nil
                 });
-                Ok(Value::Future(Arc::new(FutureHandle { state: Mutex::new(FutureState::Pending(h)) })))
+                Ok(Value::Future(Arc::new(FutureHandle {
+                    state: Mutex::new(FutureState::Pending(h)),
+                })))
             }
             "async_yield" => {
                 let h = async_runtime().spawn(async move {
                     tokio::task::yield_now().await;
                     Value::Nil
                 });
-                Ok(Value::Future(Arc::new(FutureHandle { state: Mutex::new(FutureState::Pending(h)) })))
+                Ok(Value::Future(Arc::new(FutureHandle {
+                    state: Mutex::new(FutureState::Pending(h)),
+                })))
             }
             "task_group" => {
                 // task_group([fn1, fn2, ...], limit?) -> [results]
@@ -6564,13 +7850,23 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                 // any member propagates (fail-fast) after all dispatched tasks settle.
                 let fns = match args.first().map(|v| v.clone()).unwrap_or(Value::Nil) {
                     Value::Array(items) => items.iter().cloned().collect::<Vec<_>>(),
-                    other => return Err(crate::RakError::Runtime(format!("task_group: expected an array of functions, got {}", other.type_name()))),
+                    other => {
+                        return Err(crate::RakError::Runtime(format!(
+                            "task_group: expected an array of functions, got {}",
+                            other.type_name()
+                        )))
+                    }
                 };
-                let limit = args.get(1).and_then(|v| v.as_u64()).unwrap_or(crate::async_rt::num_workers_hint()) as usize;
+                let limit = args
+                    .get(1)
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(crate::async_rt::num_workers_hint())
+                    as usize;
                 let limit = limit.max(1);
                 let permit = crate::async_rt::permit_count_raw(limit);
                 let fns_arc = std::sync::Arc::new(fns);
-                let results = std::sync::Arc::new(std::sync::Mutex::new(vec![Value::Nil; fns_arc.len()]));
+                let results =
+                    std::sync::Arc::new(std::sync::Mutex::new(vec![Value::Nil; fns_arc.len()]));
                 let err_cell = std::sync::Arc::new(std::sync::Mutex::new(None::<crate::RakError>));
                 let next = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
                 let mut handles = Vec::new();
@@ -6580,21 +7876,28 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                     let results = results.clone();
                     let err_cell = err_cell.clone();
                     let next = next.clone();
-                    handles.push(std::thread::spawn(move || {
-                        loop {
-                            let idx = next.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                            if idx >= fns.len() { break; }
-                            let _p = permit.acquire();
-                            let f = fns[idx].clone();
-                            let result = run_group_fn(&f);
-                            match result {
-                                Ok(v) => results.lock().unwrap()[idx] = v,
-                                Err(e) => { let mut ec = err_cell.lock().unwrap(); if ec.is_none() { *ec = Some(e); } }
+                    handles.push(std::thread::spawn(move || loop {
+                        let idx = next.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        if idx >= fns.len() {
+                            break;
+                        }
+                        let _p = permit.acquire();
+                        let f = fns[idx].clone();
+                        let result = run_group_fn(&f);
+                        match result {
+                            Ok(v) => results.lock().unwrap()[idx] = v,
+                            Err(e) => {
+                                let mut ec = err_cell.lock().unwrap();
+                                if ec.is_none() {
+                                    *ec = Some(e);
+                                }
                             }
                         }
                     }));
                 }
-                for h in handles { let _ = h.join(); }
+                for h in handles {
+                    let _ = h.join();
+                }
                 if let Some(e) = err_cell.lock().unwrap().take() {
                     return Err(e);
                 }
@@ -6605,7 +7908,12 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
             "stream_from_array" => {
                 let arr = match args.first().map(|v| v.clone()).unwrap_or(Value::Nil) {
                     Value::Array(items) => items,
-                    other => return Err(crate::RakError::Runtime(format!("stream_from_array: expected an array, got {}", other.type_name()))),
+                    other => {
+                        return Err(crate::RakError::Runtime(format!(
+                            "stream_from_array: expected an array, got {}",
+                            other.type_name()
+                        )))
+                    }
                 };
                 Ok(make_stream(ArrayStream::new(arr)))
             }
@@ -6622,7 +7930,10 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
             "take" => {
                 let inner = self.stream_handle(args.first())?;
                 let n = args.get(1).and_then(|v| v.as_u64()).unwrap_or(0);
-                Ok(make_stream(TakeStream { inner, remaining: n }))
+                Ok(make_stream(TakeStream {
+                    inner,
+                    remaining: n,
+                }))
             }
             "stream_next" => {
                 let handle = self.stream_handle(args.first())?;
@@ -6654,15 +7965,20 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
             "tcp_stream" => {
                 let addr = self.val_to_string(args.first())?;
                 use std::net::TcpStream;
-                let s = TcpStream::connect(&addr)
-                    .map_err(|e| crate::RakError::Runtime(format!("tcp_stream: {}: {}", addr, e)))?;
+                let s = TcpStream::connect(&addr).map_err(|e| {
+                    crate::RakError::Runtime(format!("tcp_stream: {}: {}", addr, e))
+                })?;
                 let _ = s.set_read_timeout(Some(std::time::Duration::from_secs(5)));
                 Ok(make_stream(TcpLineStream::open(s)))
             }
             // --- CLI (program args + stdin/stdout) ---
-            "argv" => {
-                Ok(Value::Array(self.program_argv.iter().cloned().map(Value::String).collect()))
-            }
+            "argv" => Ok(Value::Array(
+                self.program_argv
+                    .iter()
+                    .cloned()
+                    .map(Value::String)
+                    .collect(),
+            )),
             "stdin_read_line" => {
                 let mut line = String::new();
                 use std::io::Read;
@@ -6690,7 +8006,11 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
             "parse_args" => {
                 let spec = match args.get(0).map(|v| v.clone()) {
                     Some(Value::Map(m)) => m.clone(),
-                    _ => return Err(crate::RakError::Runtime("parse_args: expected a spec map".to_string())),
+                    _ => {
+                        return Err(crate::RakError::Runtime(
+                            "parse_args: expected a spec map".to_string(),
+                        ))
+                    }
                 };
                 let argv = match args.get(1).map(|v| v.clone()) {
                     Some(Value::Array(a)) => a.iter().map(|v| v.to_string()).collect::<Vec<_>>(),
@@ -6709,10 +8029,15 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                     if a.starts_with("--") {
                         let body = a[2..].to_string();
                         let (key, inline) = match body.find('=') {
-                            Some(pos) => (body[..pos].to_string(), Some(body[pos + 1..].to_string())),
+                            Some(pos) => {
+                                (body[..pos].to_string(), Some(body[pos + 1..].to_string()))
+                            }
                             None => (body, None),
                         };
-                        let kind = spec.get(&key).map(|v| v.to_string()).unwrap_or_else(|| "bool".to_string());
+                        let kind = spec
+                            .get(&key)
+                            .map(|v| v.to_string())
+                            .unwrap_or_else(|| "bool".to_string());
                         if inline.is_some() || kind == "bool" {
                             let val = match inline {
                                 Some(v) => Value::String(v),
@@ -6794,13 +8119,20 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                     Value::Array(a) => {
                         for item in a.iter() {
                             if let Value::Tuple(t) = item {
-                                if let (Some(Value::String(name)), Some(bytes)) = (t.get(0), t.get(1)) {
+                                if let (Some(Value::String(name)), Some(bytes)) =
+                                    (t.get(0), t.get(1))
+                                {
                                     files.push((name.to_string(), self.val_to_bytes(Some(bytes))?));
                                 }
                             }
                         }
                     }
-                    other => return Err(crate::RakError::Runtime(format!("zip_archive: expected a map/array, got {}", other.type_name()))),
+                    other => {
+                        return Err(crate::RakError::Runtime(format!(
+                            "zip_archive: expected a map/array, got {}",
+                            other.type_name()
+                        )))
+                    }
                 }
                 match rak_stdlib::stream_io::zip_archive(files) {
                     Ok(out) => Ok(Value::Bytes(out)),
@@ -6824,10 +8156,14 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
             }
             "parse_csv_line" => {
                 let line = self.val_to_string(args.first())?;
-                let sep = self.val_to_string(args.get(1)).unwrap_or_else(|_| ",".to_string());
+                let sep = self
+                    .val_to_string(args.get(1))
+                    .unwrap_or_else(|_| ",".to_string());
                 let delim = sep.chars().next().unwrap_or(',');
                 let fields = rak_stdlib::stream_io::parse_csv_line(&line, delim);
-                Ok(Value::Array(fields.into_iter().map(Value::String).collect()))
+                Ok(Value::Array(
+                    fields.into_iter().map(Value::String).collect(),
+                ))
             }
             "stream_csv" => {
                 let path = self.val_to_string(args.first())?;
@@ -6835,30 +8171,44 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                 let delim = if opts.contains(";") { ';' } else { ',' };
                 let has_header = opts.contains("header");
                 let inner = make_stream(LinesStream::open(&path)?);
-                let wrapper = CsvStream { inner: self.stream_handle(Some(&inner))?, delim, has_header, headers: Vec::new(), started: false };
+                let wrapper = CsvStream {
+                    inner: self.stream_handle(Some(&inner))?,
+                    delim,
+                    has_header,
+                    headers: Vec::new(),
+                    started: false,
+                };
                 Ok(Value::Stream(Arc::new(Mutex::new(Box::new(wrapper)))))
             }
             "stream_jsonl" => {
                 let path = self.val_to_string(args.first())?;
                 let inner = make_stream(LinesStream::open(&path)?);
-                let wrapper = JsonlStream { inner: self.stream_handle(Some(&inner))? };
+                let wrapper = JsonlStream {
+                    inner: self.stream_handle(Some(&inner))?,
+                };
                 Ok(Value::Stream(Arc::new(Mutex::new(Box::new(wrapper)))))
             }
             // --- DNS ---
             "dns_query" => {
                 let name = self.val_to_string(args.first())?;
-                let rtype = self.val_to_string(args.get(1)).unwrap_or_else(|_| "A".to_string());
+                let rtype = self
+                    .val_to_string(args.get(1))
+                    .unwrap_or_else(|_| "A".to_string());
                 let server = args.get(2).map(|v| v.to_string());
                 match rak_stdlib::dns::query(&name, &rtype, server.as_deref()) {
                     Ok(resp) => {
-                        let answers: Vec<Value> = resp.answers.into_iter().map(|r| {
-                            Value::Map(HashMap::from([
-                                ("name".to_string(), Value::String(r.name)),
-                                ("type".to_string(), Value::String(r.rtype)),
-                                ("ttl".to_string(), Value::Int(r.ttl as i64)),
-                                ("rdata".to_string(), Value::String(r.rdata)),
-                            ]))
-                        }).collect();
+                        let answers: Vec<Value> = resp
+                            .answers
+                            .into_iter()
+                            .map(|r| {
+                                Value::Map(HashMap::from([
+                                    ("name".to_string(), Value::String(r.name)),
+                                    ("type".to_string(), Value::String(r.rtype)),
+                                    ("ttl".to_string(), Value::Int(r.ttl as i64)),
+                                    ("rdata".to_string(), Value::String(r.rdata)),
+                                ]))
+                            })
+                            .collect();
                         let m = Value::Map(HashMap::from([
                             ("answers".to_string(), Value::Array(answers)),
                             ("truncated".to_string(), Value::Bool(resp.truncated)),
@@ -6870,21 +8220,27 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
             }
             "dns_build" => {
                 let name = self.val_to_string(args.first())?;
-                let rtype = self.val_to_string(args.get(1)).unwrap_or_else(|_| "A".to_string());
+                let rtype = self
+                    .val_to_string(args.get(1))
+                    .unwrap_or_else(|_| "A".to_string());
                 Ok(Value::Bytes(rak_stdlib::dns::build_query(&name, &rtype)))
             }
             "dns_parse" => {
                 let msg = self.val_to_bytes(args.first())?;
                 match rak_stdlib::dns::parse_response(&msg) {
                     Ok(resp) => {
-                        let answers: Vec<Value> = resp.answers.into_iter().map(|r| {
-                            Value::Map(HashMap::from([
-                                ("name".to_string(), Value::String(r.name)),
-                                ("type".to_string(), Value::String(r.rtype)),
-                                ("ttl".to_string(), Value::Int(r.ttl as i64)),
-                                ("rdata".to_string(), Value::String(r.rdata)),
-                            ]))
-                        }).collect();
+                        let answers: Vec<Value> = resp
+                            .answers
+                            .into_iter()
+                            .map(|r| {
+                                Value::Map(HashMap::from([
+                                    ("name".to_string(), Value::String(r.name)),
+                                    ("type".to_string(), Value::String(r.rtype)),
+                                    ("ttl".to_string(), Value::Int(r.ttl as i64)),
+                                    ("rdata".to_string(), Value::String(r.rdata)),
+                                ]))
+                            })
+                            .collect();
                         Ok(Value::Map(HashMap::from([
                             ("answers".to_string(), Value::Array(answers)),
                             ("truncated".to_string(), Value::Bool(resp.truncated)),
@@ -6898,7 +8254,11 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                 let bytes = self.val_to_bytes(args.first())?;
                 match rak_stdlib::tls::parse_client_hello(&bytes) {
                     Ok(info) => {
-                        let ciphers: Vec<Value> = info.ciphers.into_iter().map(|c| Value::Hex(c as u64)).collect();
+                        let ciphers: Vec<Value> = info
+                            .ciphers
+                            .into_iter()
+                            .map(|c| Value::Hex(c as u64))
+                            .collect();
                         Ok(Value::Map(HashMap::from([
                             ("sni".to_string(), Value::String(info.sni)),
                             ("ciphers".to_string(), Value::Array(ciphers)),
@@ -6909,19 +8269,25 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
             }
             "tls_parse_cert_chain" => {
                 let der = self.val_to_bytes(args.first())?;
-                let certs: Vec<Value> = rak_stdlib::tls::parse_cert_chain(&der).into_iter().map(|c| {
-                    Value::Map(HashMap::from([
-                        ("subject".to_string(), Value::String(c.subject)),
-                        ("issuer".to_string(), Value::String(c.issuer)),
-                    ]))
-                }).collect();
+                let certs: Vec<Value> = rak_stdlib::tls::parse_cert_chain(&der)
+                    .into_iter()
+                    .map(|c| {
+                        Value::Map(HashMap::from([
+                            ("subject".to_string(), Value::String(c.subject)),
+                            ("issuer".to_string(), Value::String(c.issuer)),
+                        ]))
+                    })
+                    .collect();
                 Ok(Value::Array(certs))
             }
             // --- PCAP ---
             "pcap_open" => {
                 let path = self.val_to_string(args.first())?;
                 match rak_stdlib::pcap::open(&path) {
-                    Ok(h) => Ok(Value::Result(Some(Box::new(Value::Pcap(Arc::new(Mutex::new(h))))), None)),
+                    Ok(h) => Ok(Value::Result(
+                        Some(Box::new(Value::Pcap(Arc::new(Mutex::new(h))))),
+                        None,
+                    )),
                     Err(e) => Ok(Value::Result(None, Some(Box::new(Value::String(e))))),
                 }
             }
@@ -6954,18 +8320,29 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
             "regex_find" => {
                 let re = self.coerce_regex(args.first(), args.get(2))?;
                 let hay = self.val_to_string(args.get(1))?;
-                Ok(re.re.find(&hay).map(|m| Value::String(m.as_str().to_string())).unwrap_or(Value::Nil))
+                Ok(re
+                    .re
+                    .find(&hay)
+                    .map(|m| Value::String(m.as_str().to_string()))
+                    .unwrap_or(Value::Nil))
             }
             "regex_find_all" => {
                 let re = self.coerce_regex(args.first(), args.get(2))?;
                 let hay = self.val_to_string(args.get(1))?;
-                Ok(Value::Array(re.re.find_iter(&hay).map(|m| Value::String(m.as_str().to_string())).collect()))
+                Ok(Value::Array(
+                    re.re
+                        .find_iter(&hay)
+                        .map(|m| Value::String(m.as_str().to_string()))
+                        .collect(),
+                ))
             }
             "regex_replace" | "regex_replace_all" => {
                 let re = self.coerce_regex(args.first(), args.get(3))?;
                 let hay = self.val_to_string(args.get(1))?;
                 let rep = self.val_to_string(args.get(2))?;
-                Ok(Value::String(re.re.replace_all(&hay, rep.as_str()).into_owned()))
+                Ok(Value::String(
+                    re.re.replace_all(&hay, rep.as_str()).into_owned(),
+                ))
             }
             // --- Structured logging (#8) ---
             "log_level" => {
@@ -6986,7 +8363,10 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                     _ => rak_stdlib::log::Level::Info,
                 };
                 let key = self.val_to_string(args.first())?;
-                let fields = args.get(1).map(|v| self.value_to_json(v)).unwrap_or_default();
+                let fields = args
+                    .get(1)
+                    .map(|v| self.value_to_json(v))
+                    .unwrap_or_default();
                 rak_stdlib::log::log(lev, &key, &fields).map_err(crate::RakError::Runtime)?;
                 Ok(Value::Nil)
             }
@@ -6999,7 +8379,8 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                         args_v.push(self.val_to_string(Some(v))?);
                     }
                 }
-                let pid = rak_stdlib::process::spawn(&cmd, &args_v).map_err(crate::RakError::Runtime)?;
+                let pid =
+                    rak_stdlib::process::spawn(&cmd, &args_v).map_err(crate::RakError::Runtime)?;
                 Ok(Value::Int(pid as i64))
             }
             "process_wait" => {
@@ -7025,28 +8406,40 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
             // --- DNS toolkit (#3) ---
             "dns_resolve" => {
                 let name = self.val_to_string(args.first())?;
-                let server = args.get(1).map(|v| self.val_to_string(Some(v)).unwrap_or_default());
-                let addrs = rak_stdlib::dns::resolve(&name, server.as_deref()).map_err(crate::RakError::Runtime)?;
+                let server = args
+                    .get(1)
+                    .map(|v| self.val_to_string(Some(v)).unwrap_or_default());
+                let addrs = rak_stdlib::dns::resolve(&name, server.as_deref())
+                    .map_err(crate::RakError::Runtime)?;
                 Ok(Value::Array(addrs.into_iter().map(Value::String).collect()))
             }
             "dns_reverse" => {
                 let ip = self.val_to_string(args.first())?;
-                let server = args.get(1).map(|v| self.val_to_string(Some(v)).unwrap_or_default());
-                let names = rak_stdlib::dns::reverse(&ip, server.as_deref()).map_err(crate::RakError::Runtime)?;
+                let server = args
+                    .get(1)
+                    .map(|v| self.val_to_string(Some(v)).unwrap_or_default());
+                let names = rak_stdlib::dns::reverse(&ip, server.as_deref())
+                    .map_err(crate::RakError::Runtime)?;
                 Ok(Value::Array(names.into_iter().map(Value::String).collect()))
             }
             "dns_records" => {
                 let name = self.val_to_string(args.first())?;
-                let server = args.get(1).map(|v| self.val_to_string(Some(v)).unwrap_or_default());
-                let recs = rak_stdlib::dns::records(&name, server.as_deref()).map_err(crate::RakError::Runtime)?;
-                let arr: Vec<Value> = recs.into_iter().map(|r| {
-                    Value::Map(HashMap::from([
-                        ("name".to_string(), Value::String(r.name)),
-                        ("type".to_string(), Value::String(r.rtype)),
-                        ("ttl".to_string(), Value::Int(r.ttl as i64)),
-                        ("rdata".to_string(), Value::String(r.rdata)),
-                    ]))
-                }).collect();
+                let server = args
+                    .get(1)
+                    .map(|v| self.val_to_string(Some(v)).unwrap_or_default());
+                let recs = rak_stdlib::dns::records(&name, server.as_deref())
+                    .map_err(crate::RakError::Runtime)?;
+                let arr: Vec<Value> = recs
+                    .into_iter()
+                    .map(|r| {
+                        Value::Map(HashMap::from([
+                            ("name".to_string(), Value::String(r.name)),
+                            ("type".to_string(), Value::String(r.rtype)),
+                            ("ttl".to_string(), Value::Int(r.ttl as i64)),
+                            ("rdata".to_string(), Value::String(r.rdata)),
+                        ]))
+                    })
+                    .collect();
                 Ok(Value::Array(arr))
             }
             "dns_walk" => {
@@ -7057,7 +8450,9 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                         prefixes.push(self.val_to_string(Some(v))?);
                     }
                 }
-                let server = args.get(2).map(|v| self.val_to_string(Some(v)).unwrap_or_default());
+                let server = args
+                    .get(2)
+                    .map(|v| self.val_to_string(Some(v)).unwrap_or_default());
                 let found = rak_stdlib::dns::walk(&domain, &prefixes, server.as_deref());
                 Ok(Value::Array(found.into_iter().map(Value::String).collect()))
             }
@@ -7100,31 +8495,49 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
             "http_server_start" => {
                 let addr = self.val_to_string(args.first())?;
                 let port = args.get(1).and_then(|v| v.as_u64()).unwrap_or(8080) as u16;
-                let bound = rak_stdlib::http_server::server_start(&addr, port).map_err(crate::RakError::Runtime)?;
+                let bound = rak_stdlib::http_server::server_start(&addr, port)
+                    .map_err(crate::RakError::Runtime)?;
                 Ok(Value::Int(bound as i64))
             }
-            "http_server_poll" => {
-                match rak_stdlib::http_server::poll() {
-                    Some(req) => Ok(Value::Map(HashMap::from([
-                        ("id".to_string(), Value::Int(req.id as i64)),
-                        ("method".to_string(), Value::String(req.method)),
-                        ("path".to_string(), Value::String(req.path)),
-                        ("query".to_string(), Value::Map(req.query.into_iter().map(|(k, v)| (k, Value::String(v))).collect())),
-                        ("headers".to_string(), Value::Map(req.headers.into_iter().map(|(k, v)| (k, Value::String(v))).collect())),
-                        ("body".to_string(), Value::String(req.body)),
-                    ]))),
-                    None => Ok(Value::Nil),
-                }
-            }
+            "http_server_poll" => match rak_stdlib::http_server::poll() {
+                Some(req) => Ok(Value::Map(HashMap::from([
+                    ("id".to_string(), Value::Int(req.id as i64)),
+                    ("method".to_string(), Value::String(req.method)),
+                    ("path".to_string(), Value::String(req.path)),
+                    (
+                        "query".to_string(),
+                        Value::Map(
+                            req.query
+                                .into_iter()
+                                .map(|(k, v)| (k, Value::String(v)))
+                                .collect(),
+                        ),
+                    ),
+                    (
+                        "headers".to_string(),
+                        Value::Map(
+                            req.headers
+                                .into_iter()
+                                .map(|(k, v)| (k, Value::String(v)))
+                                .collect(),
+                        ),
+                    ),
+                    ("body".to_string(), Value::String(req.body)),
+                ]))),
+                None => Ok(Value::Nil),
+            },
             "http_server_respond" => {
                 let id = args.first().and_then(|v| v.as_u64()).unwrap_or(0);
                 let status = args.get(1).and_then(|v| v.as_u64()).unwrap_or(200) as u16;
                 let headers: Vec<(String, String)> = match args.get(2) {
-                    Some(Value::Map(m)) => m.iter().map(|(k, v)| (k.clone(), v.to_string())).collect(),
+                    Some(Value::Map(m)) => {
+                        m.iter().map(|(k, v)| (k.clone(), v.to_string())).collect()
+                    }
                     _ => Vec::new(),
                 };
                 let body = self.val_to_string(args.get(3))?;
-                rak_stdlib::http_server::respond(id, status, &headers, &body).map_err(crate::RakError::Runtime)?;
+                rak_stdlib::http_server::respond(id, status, &headers, &body)
+                    .map_err(crate::RakError::Runtime)?;
                 Ok(Value::Nil)
             }
             "http_server_stop" => {
@@ -7135,53 +8548,82 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
             "ws_connect" => {
                 let url = self.val_to_string(args.first())?;
                 let (host, port, path) = parse_ws_url(&url)?;
-                let mut stream = std::net::TcpStream::connect((host.as_str(), port)).map_err(|e| crate::RakError::Runtime(format!("ws_connect: {}", e)))?;
-                stream.set_read_timeout(Some(std::time::Duration::from_secs(10))).ok();
-                rak_stdlib::websocket::client_handshake(&mut stream, &host, &path).map_err(crate::RakError::Runtime)?;
+                let mut stream = std::net::TcpStream::connect((host.as_str(), port))
+                    .map_err(|e| crate::RakError::Runtime(format!("ws_connect: {}", e)))?;
+                stream
+                    .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+                    .ok();
+                rak_stdlib::websocket::client_handshake(&mut stream, &host, &path)
+                    .map_err(crate::RakError::Runtime)?;
                 Ok(Value::TcpStream(Arc::new(Mutex::new(stream))))
             }
-            "ws_handshake" => {
-                match args.first() {
-                    Some(Value::TcpStream(stream)) => {
-                        use std::io::BufRead;
-                        let mut reader = std::io::BufReader::new(stream.lock().unwrap().try_clone().map_err(|e| crate::RakError::Runtime(format!("ws_handshake: {}", e)))?);
-                        let mut key = String::new();
-                        loop {
-                            let mut line = String::new();
-                            reader.read_line(&mut line).map_err(|e| crate::RakError::Runtime(format!("ws_handshake: {}", e)))?;
-                            if line.trim().is_empty() { break; }
-                            let low = line.to_lowercase();
-                            if low.starts_with("sec-websocket-key:") {
-                                key = line["sec-websocket-key:".len()..].trim().to_string();
-                            }
+            "ws_handshake" => match args.first() {
+                Some(Value::TcpStream(stream)) => {
+                    use std::io::BufRead;
+                    let mut reader =
+                        std::io::BufReader::new(stream.lock().unwrap().try_clone().map_err(
+                            |e| crate::RakError::Runtime(format!("ws_handshake: {}", e)),
+                        )?);
+                    let mut key = String::new();
+                    loop {
+                        let mut line = String::new();
+                        reader.read_line(&mut line).map_err(|e| {
+                            crate::RakError::Runtime(format!("ws_handshake: {}", e))
+                        })?;
+                        if line.trim().is_empty() {
+                            break;
                         }
-                        let accept = rak_stdlib::websocket::accept_value(&key);
-                        let resp = format!("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {}\r\n\r\n", accept);
-                        use std::io::Write;
-                        stream.lock().unwrap().write_all(resp.as_bytes()).map_err(|e| crate::RakError::Runtime(format!("ws_handshake: {}", e)))?;
-                        Ok(Value::Nil)
+                        let low = line.to_lowercase();
+                        if low.starts_with("sec-websocket-key:") {
+                            key = line["sec-websocket-key:".len()..].trim().to_string();
+                        }
                     }
-                    _ => Err(crate::RakError::Runtime("ws_handshake(stream)".to_string())),
+                    let accept = rak_stdlib::websocket::accept_value(&key);
+                    let resp = format!("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {}\r\n\r\n", accept);
+                    use std::io::Write;
+                    stream
+                        .lock()
+                        .unwrap()
+                        .write_all(resp.as_bytes())
+                        .map_err(|e| crate::RakError::Runtime(format!("ws_handshake: {}", e)))?;
+                    Ok(Value::Nil)
                 }
-            }
-            "ws_send" => {
-                match (args.first(), args.get(1)) {
-                    (Some(Value::TcpStream(stream)), Some(v)) => {
-                        let data = self.val_to_bytes(Some(v))?;
-                        let mask = args.get(2).map(|m| matches!(m, Value::Bool(b) if *b)).unwrap_or(true);
-                        let frame = rak_stdlib::websocket::encode_frame(rak_stdlib::websocket::OP_TEXT, &data, mask);
-                        use std::io::Write;
-                        let n = stream.lock().unwrap().write(&frame).map_err(|e| crate::RakError::Runtime(format!("ws_send: {}", e)))?;
-                        Ok(Value::Int(n as i64))
-                    }
-                    _ => Err(crate::RakError::Runtime("ws_send(stream, data)".to_string())),
+                _ => Err(crate::RakError::Runtime("ws_handshake(stream)".to_string())),
+            },
+            "ws_send" => match (args.first(), args.get(1)) {
+                (Some(Value::TcpStream(stream)), Some(v)) => {
+                    let data = self.val_to_bytes(Some(v))?;
+                    let mask = args
+                        .get(2)
+                        .map(|m| matches!(m, Value::Bool(b) if *b))
+                        .unwrap_or(true);
+                    let frame = rak_stdlib::websocket::encode_frame(
+                        rak_stdlib::websocket::OP_TEXT,
+                        &data,
+                        mask,
+                    );
+                    use std::io::Write;
+                    let n = stream
+                        .lock()
+                        .unwrap()
+                        .write(&frame)
+                        .map_err(|e| crate::RakError::Runtime(format!("ws_send: {}", e)))?;
+                    Ok(Value::Int(n as i64))
                 }
-            }
+                _ => Err(crate::RakError::Runtime(
+                    "ws_send(stream, data)".to_string(),
+                )),
+            },
             "ws_recv" => {
                 match args.first() {
                     Some(Value::TcpStream(stream)) => {
-                        let mut reader = std::io::BufReader::new(stream.lock().unwrap().try_clone().map_err(|e| crate::RakError::Runtime(format!("ws_recv: {}", e)))?);
-                        match rak_stdlib::websocket::read_frame(&mut reader).map_err(crate::RakError::Runtime)? {
+                        let mut reader =
+                            std::io::BufReader::new(stream.lock().unwrap().try_clone().map_err(
+                                |e| crate::RakError::Runtime(format!("ws_recv: {}", e)),
+                            )?);
+                        match rak_stdlib::websocket::read_frame(&mut reader)
+                            .map_err(crate::RakError::Runtime)?
+                        {
                             Some(f) => Ok(Value::Map(HashMap::from([
                                 ("opcode".to_string(), Value::Int(f.opcode as i64)),
                                 ("payload".to_string(), Value::Bytes(f.payload)),
@@ -7192,17 +8634,23 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                     _ => Err(crate::RakError::Runtime("ws_recv(stream)".to_string())),
                 }
             }
-            "ws_close" => {
-                match args.first() {
-                    Some(Value::TcpStream(stream)) => {
-                        let frame = rak_stdlib::websocket::encode_frame(rak_stdlib::websocket::OP_CLOSE, b"", true);
-                        use std::io::Write;
-                        stream.lock().unwrap().write_all(&frame).map_err(|e| crate::RakError::Runtime(format!("ws_close: {}", e)))?;
-                        Ok(Value::Nil)
-                    }
-                    _ => Err(crate::RakError::Runtime("ws_close(stream)".to_string())),
+            "ws_close" => match args.first() {
+                Some(Value::TcpStream(stream)) => {
+                    let frame = rak_stdlib::websocket::encode_frame(
+                        rak_stdlib::websocket::OP_CLOSE,
+                        b"",
+                        true,
+                    );
+                    use std::io::Write;
+                    stream
+                        .lock()
+                        .unwrap()
+                        .write_all(&frame)
+                        .map_err(|e| crate::RakError::Runtime(format!("ws_close: {}", e)))?;
+                    Ok(Value::Nil)
                 }
-            }
+                _ => Err(crate::RakError::Runtime("ws_close(stream)".to_string())),
+            },
             // --- Inline assembly (capability `asm`) ---
             //
             // Assembly is the one escape in Rak that is not mediated by the
@@ -7227,7 +8675,11 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                 crate::caps::check_builtin("asm")?;
                 let template = match args.first() {
                     Some(v) => v.to_string(),
-                    None => return Err(crate::RakError::Runtime("asm: expected an instruction".into())),
+                    None => {
+                        return Err(crate::RakError::Runtime(
+                            "asm: expected an instruction".into(),
+                        ))
+                    }
                 };
                 let template = template.trim();
                 if template.is_empty() {
@@ -7248,7 +8700,10 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                 let value = args.get(1).and_then(|v| v.as_i64()).unwrap_or(0);
                 Ok(Value::Int(asm_intrinsic(template, value)?))
             }
-            _ => Err(crate::RakError::Runtime(format!("Unknown function: {}", name))),
+            _ => Err(crate::RakError::Runtime(format!(
+                "Unknown function: {}",
+                name
+            ))),
         }
     }
 
@@ -7256,7 +8711,9 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
         match val {
             Some(Value::String(s)) => Ok(s.clone()),
             Some(Value::Bytes(b)) => Ok(String::from_utf8_lossy(b).to_string()),
-            Some(Value::MmapSlice(h, off, n)) => Ok(String::from_utf8_lossy(&h.as_slice()[*off..off + n]).to_string()),
+            Some(Value::MmapSlice(h, off, n)) => {
+                Ok(String::from_utf8_lossy(&h.as_slice()[*off..off + n]).to_string())
+            }
             Some(Value::Mmap(h)) => Ok(String::from_utf8_lossy(h.as_slice()).to_string()),
             Some(v) => Ok(v.to_string()),
             None => Ok(String::new()),
@@ -7296,7 +8753,8 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
             _ => Err(crate::RakError::Runtime(format!(
                 "{} must be a non-negative integer, got {}",
                 what,
-                val.map(|v| v.to_string()).unwrap_or_else(|| "nothing".to_string())
+                val.map(|v| v.to_string())
+                    .unwrap_or_else(|| "nothing".to_string())
             ))),
         }
     }
@@ -7343,7 +8801,9 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
         match val {
             Some(Value::Error(e)) => Ok(e.clone()),
             Some(v) => Ok(Arc::new(crate::ErrorInfo::new(v.to_string()))),
-            None => Err(crate::RakError::Runtime("expected an error value".to_string())),
+            None => Err(crate::RakError::Runtime(
+                "expected an error value".to_string(),
+            )),
         }
     }
 
@@ -7373,16 +8833,12 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
         match &self.gui {
             Some(m) => Ok(m.clone()),
             None => Err(crate::RakError::Runtime(
-                "GUI event loop is not running; launch the program with the gui driver"
-                    .to_string(),
+                "GUI event loop is not running; launch the program with the gui driver".to_string(),
             )),
         }
     }
 
-    fn set_handle(
-        &self,
-        val: Option<&Value>,
-    ) -> crate::Result<Arc<Mutex<SetRepr<Value>>>> {
+    fn set_handle(&self, val: Option<&Value>) -> crate::Result<Arc<Mutex<SetRepr<Value>>>> {
         match val {
             Some(Value::Set(s)) => Ok(s.clone()),
             Some(v) => Err(crate::RakError::Runtime(format!(
@@ -7397,17 +8853,23 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
         match val {
             Some(Value::Stream(s)) => Ok(s.clone()),
             Some(v) => Err(crate::RakError::Runtime(format!(
-                "expected a stream, got {}", v.type_name()
+                "expected a stream, got {}",
+                v.type_name()
             ))),
             None => Err(crate::RakError::Runtime("expected a stream".to_string())),
         }
     }
 
-    fn value_to_json(&self, val: &Value) -> std::collections::HashMap<String, rak_stdlib::log::Json> {
+    fn value_to_json(
+        &self,
+        val: &Value,
+    ) -> std::collections::HashMap<String, rak_stdlib::log::Json> {
         fn conv(v: &Value) -> rak_stdlib::log::Json {
             match v {
                 Value::String(s) => rak_stdlib::log::Json::Str(s.clone()),
-                Value::Bytes(b) => rak_stdlib::log::Json::Str(String::from_utf8_lossy(b).to_string()),
+                Value::Bytes(b) => {
+                    rak_stdlib::log::Json::Str(String::from_utf8_lossy(b).to_string())
+                }
                 Value::Bool(b) => rak_stdlib::log::Json::Bool(*b),
                 Value::Nil => rak_stdlib::log::Json::Nil,
                 Value::Int(n) => rak_stdlib::log::Json::Num(*n as f64),
@@ -7493,12 +8955,25 @@ pub fn substitute_stmts(stmts: &[Stmt], bindings: &HashMap<String, Expr>) -> Vec
 pub fn substitute_stmt(stmt: &Stmt, bindings: &HashMap<String, Expr>) -> Stmt {
     match stmt {
         Stmt::Expr(e) => Stmt::Expr(Box::new(substitute_expr(e, bindings))),
-        Stmt::Let { name, pattern, mutable, value, type_hint } => Stmt::Let {
-            name: name.clone(), pattern: pattern.clone(), mutable: *mutable,
-            value: Box::new(substitute_expr(value, bindings)), type_hint: type_hint.clone(),
+        Stmt::Let {
+            name,
+            pattern,
+            mutable,
+            value,
+            type_hint,
+        } => Stmt::Let {
+            name: name.clone(),
+            pattern: pattern.clone(),
+            mutable: *mutable,
+            value: Box::new(substitute_expr(value, bindings)),
+            type_hint: type_hint.clone(),
         },
         Stmt::Return(e) => Stmt::Return(e.as_ref().map(|e| Box::new(substitute_expr(e, bindings)))),
-        Stmt::If { cond, then_branch, else_branch } => Stmt::If {
+        Stmt::If {
+            cond,
+            then_branch,
+            else_branch,
+        } => Stmt::If {
             cond: Box::new(substitute_expr(cond, bindings)),
             then_branch: substitute_stmts(then_branch, bindings),
             else_branch: else_branch.as_ref().map(|b| substitute_stmts(b, bindings)),
@@ -7512,7 +8987,12 @@ pub fn substitute_stmt(stmt: &Stmt, bindings: &HashMap<String, Expr>) -> Stmt {
             cond: Box::new(substitute_expr(cond, bindings)),
             body: substitute_stmts(body, bindings),
         },
-        Stmt::For { label, pattern, iterable, body } => Stmt::For {
+        Stmt::For {
+            label,
+            pattern,
+            iterable,
+            body,
+        } => Stmt::For {
             label: label.clone(),
             pattern: pattern.clone(),
             iterable: Box::new(substitute_expr(iterable, bindings)),
@@ -7524,7 +9004,9 @@ pub fn substitute_stmt(stmt: &Stmt, bindings: &HashMap<String, Expr>) -> Stmt {
         },
         Stmt::Dump { value, target } => Stmt::Dump {
             value: Box::new(substitute_expr(value, bindings)),
-            target: target.as_ref().map(|t| Box::new(substitute_expr(t, bindings))),
+            target: target
+                .as_ref()
+                .map(|t| Box::new(substitute_expr(t, bindings))),
         },
         Stmt::Raise(e) => Stmt::Raise(Box::new(substitute_expr(e, bindings))),
         other => other.clone(),
@@ -7533,20 +9015,48 @@ pub fn substitute_stmt(stmt: &Stmt, bindings: &HashMap<String, Expr>) -> Stmt {
 
 pub fn substitute_expr(expr: &Expr, bindings: &HashMap<String, Expr>) -> Expr {
     match expr {
-        Expr::MacroVar(name) => bindings.get(name).cloned().unwrap_or_else(|| Expr::MacroVar(name.clone())),
-        Expr::Binary(op, l, r) => Expr::Binary(op.clone(), Box::new(substitute_expr(l, bindings)), Box::new(substitute_expr(r, bindings))),
+        Expr::MacroVar(name) => bindings
+            .get(name)
+            .cloned()
+            .unwrap_or_else(|| Expr::MacroVar(name.clone())),
+        Expr::Binary(op, l, r) => Expr::Binary(
+            op.clone(),
+            Box::new(substitute_expr(l, bindings)),
+            Box::new(substitute_expr(r, bindings)),
+        ),
         Expr::Unary(op, e) => Expr::Unary(op.clone(), Box::new(substitute_expr(e, bindings))),
-        Expr::Call { callee, args, named } => Expr::Call {
+        Expr::Call {
+            callee,
+            args,
+            named,
+        } => Expr::Call {
             callee: Box::new(substitute_expr(callee, bindings)),
             args: args.iter().map(|a| substitute_expr(a, bindings)).collect(),
-            named: named.iter().map(|(n, e)| (n.clone(), substitute_expr(e, bindings))).collect(),
+            named: named
+                .iter()
+                .map(|(n, e)| (n.clone(), substitute_expr(e, bindings)))
+                .collect(),
         },
-        Expr::Index(o, i) => Expr::Index(Box::new(substitute_expr(o, bindings)), Box::new(substitute_expr(i, bindings))),
-        Expr::FieldAccess(o, f) => Expr::FieldAccess(Box::new(substitute_expr(o, bindings)), f.clone()),
-        Expr::If { cond, then_branch, else_branch } => Expr::If {
+        Expr::Index(o, i) => Expr::Index(
+            Box::new(substitute_expr(o, bindings)),
+            Box::new(substitute_expr(i, bindings)),
+        ),
+        Expr::FieldAccess(o, f) => {
+            Expr::FieldAccess(Box::new(substitute_expr(o, bindings)), f.clone())
+        }
+        Expr::If {
+            cond,
+            then_branch,
+            else_branch,
+        } => Expr::If {
             cond: Box::new(substitute_expr(cond, bindings)),
-            then_branch: then_branch.iter().map(|s| substitute_stmt(s, bindings)).collect(),
-            else_branch: else_branch.as_ref().map(|b| b.iter().map(|s| substitute_stmt(s, bindings)).collect()),
+            then_branch: then_branch
+                .iter()
+                .map(|s| substitute_stmt(s, bindings))
+                .collect(),
+            else_branch: else_branch
+                .as_ref()
+                .map(|b| b.iter().map(|s| substitute_stmt(s, bindings)).collect()),
         },
         Expr::Tuple(v) => Expr::Tuple(v.iter().map(|e| substitute_expr(e, bindings)).collect()),
         Expr::Array(v) => Expr::Array(v.iter().map(|e| substitute_expr(e, bindings)).collect()),
@@ -7580,7 +9090,13 @@ fn str_to_kind(s: &str) -> crate::ErrorKind {
 /// used by `task_group`. No args are passed.
 fn run_group_fn(f: &Value) -> crate::Result<Value> {
     match f {
-        Value::Function { params, body, closure, is_async, .. } => {
+        Value::Function {
+            params,
+            body,
+            closure,
+            is_async,
+            ..
+        } => {
             let params = params.clone();
             let body = body.clone();
             let closure = closure.clone();
@@ -7592,13 +9108,17 @@ fn run_group_fn(f: &Value) -> crate::Result<Value> {
             // Thread the raised value's message through so `catch` in the caller
             // sees a meaningful error rather than an empty one.
             match r {
-                Err(crate::RakError::Raise(msg)) => {
-                    Err(crate::RakError::Runtime(format!("group member raised: {}", msg)))
-                }
+                Err(crate::RakError::Raise(msg)) => Err(crate::RakError::Runtime(format!(
+                    "group member raised: {}",
+                    msg
+                ))),
                 other => other,
             }
         }
-        _ => Err(crate::RakError::Runtime(format!("task_group: expected a function, got {}", f.type_name()))),
+        _ => Err(crate::RakError::Runtime(format!(
+            "task_group: expected a function, got {}",
+            f.type_name()
+        ))),
     }
 }
 
@@ -7613,7 +9133,9 @@ fn parse_ws_url(url: &str) -> crate::Result<(String, u16, String)> {
     };
     let (host, port) = match authority.rsplit_once(':') {
         Some((h, p)) => {
-            let port: u16 = p.parse().map_err(|_| crate::RakError::Runtime(format!("ws_connect: bad port '{}'", p)))?;
+            let port: u16 = p
+                .parse()
+                .map_err(|_| crate::RakError::Runtime(format!("ws_connect: bad port '{}'", p)))?;
             (h.to_string(), port)
         }
         None => (authority.to_string(), 80),
@@ -7750,7 +9272,10 @@ fn provenance_to_map(v: &Value) -> Value {
         Value::Evidence { provenance, .. } => {
             let mut m: HashMap<String, Value> = HashMap::new();
             m.insert("tool".to_string(), Value::String(provenance.tool.clone()));
-            m.insert("target".to_string(), Value::String(provenance.target.clone()));
+            m.insert(
+                "target".to_string(),
+                Value::String(provenance.target.clone()),
+            );
             m.insert("ts".to_string(), Value::Int(provenance.ts as i64));
             if let Some(o) = provenance.raw_offset {
                 m.insert("raw_offset".to_string(), Value::Int(o as i64));
@@ -7759,10 +9284,13 @@ fn provenance_to_map(v: &Value) -> Value {
                 m.insert("raw_len".to_string(), Value::Int(l as i64));
             }
             if let Some(p) = &provenance.parent {
-                m.insert("parent".to_string(), provenance_to_map(&Value::Evidence {
-                    inner: Box::new(Value::Nil),
-                    provenance: p.clone(),
-                }));
+                m.insert(
+                    "parent".to_string(),
+                    provenance_to_map(&Value::Evidence {
+                        inner: Box::new(Value::Nil),
+                        provenance: p.clone(),
+                    }),
+                );
             }
             Value::Map(m)
         }
@@ -7838,7 +9366,11 @@ fn expr_str(e: &Expr) -> String {
         // Contract clauses and assert messages are almost always calls or field
         // reads, so falling through to the Debug form for these would make the
         // most important diagnostics the least readable.
-        Call { callee, args, named } => {
+        Call {
+            callee,
+            args,
+            named,
+        } => {
             // `String` is the Expr variant brought in by `use Expr::*`, so the
             // collection type has to be spelled out.
             let mut parts: Vec<std::string::String> = args.iter().map(expr_str).collect();
@@ -7862,7 +9394,12 @@ fn expr_str(e: &Expr) -> String {
         NilCoalesce(l, r) => format!("{} ?? {}", expr_str(l), expr_str(r)),
         OptField(o, f) => format!("{}?.{}", expr_str(o), f),
         Ternary { cond, then, els } => {
-            format!("{} ? {} : {}", expr_str(cond), expr_str(then), expr_str(els))
+            format!(
+                "{} ? {} : {}",
+                expr_str(cond),
+                expr_str(then),
+                expr_str(els)
+            )
         }
         Range(a, b) => match (a, b) {
             (None, None) => "..".to_string(),
@@ -7906,7 +9443,6 @@ fn is_truthy(value: &Value) -> bool {
 mod tests {
     use super::*;
 
-
     #[test]
     fn test_interpreter_hex() {
         let mut interp = Interpreter::new();
@@ -7917,7 +9453,9 @@ mod tests {
     #[test]
     fn test_interpreter_for_loop() {
         let mut interp = Interpreter::new();
-        let output = interp.run_source("let mut total = 0; for x in [1, 2, 3] { total = total + x; } dump total;").unwrap();
+        let output = interp
+            .run_source("let mut total = 0; for x in [1, 2, 3] { total = total + x; } dump total;")
+            .unwrap();
         assert!(output.iter().any(|l| l.contains("[DUMP] 6")));
     }
 
@@ -7934,7 +9472,10 @@ mod tests {
         for (src, want) in cases {
             let mut interp = Interpreter::new();
             let out = interp.run_source(src).unwrap();
-            assert!(out.iter().any(|l| l.contains(want)), "src {src:?} got {out:?}");
+            assert!(
+                out.iter().any(|l| l.contains(want)),
+                "src {src:?} got {out:?}"
+            );
         }
     }
 
@@ -7944,9 +9485,17 @@ mod tests {
         let mut interp = Interpreter::new();
         let out = interp.run_source(src).unwrap();
         assert!(out.iter().any(|l| l.contains("[DUMP] 6")), "got: {:?}", out);
-        assert!(out.iter().any(|l| l.contains("[DUMP] 20")), "got: {:?}", out);
+        assert!(
+            out.iter().any(|l| l.contains("[DUMP] 20")),
+            "got: {:?}",
+            out
+        );
         assert!(out.iter().any(|l| l.contains("[DUMP] 6")), "got: {:?}", out);
-        assert!(out.iter().any(|l| l.contains("[DUMP] 20")), "got: {:?}", out);
+        assert!(
+            out.iter().any(|l| l.contains("[DUMP] 20")),
+            "got: {:?}",
+            out
+        );
     }
 
     #[test]
@@ -7954,20 +9503,50 @@ mod tests {
         let src = "let s = \"abcdef\"\nlet arr = [10, 20, 30, 40]\ndump s[1..4]\ndump s[..3]\ndump s[3..]\ndump s[-1]\ndump arr[1..3]\ndump arr[..2]\ndump arr[-1]\nlet mut m = arr\nm[-1] = 99\ndump m[-1]";
         let mut interp = Interpreter::new();
         let out = interp.run_source(src).unwrap();
-        assert!(out.iter().any(|l| l.contains("[DUMP] bcd")), "got: {:?}", out);
-        assert!(out.iter().any(|l| l.contains("[DUMP] abc")), "got: {:?}", out);
-        assert!(out.iter().any(|l| l.contains("[DUMP] def")), "got: {:?}", out);
+        assert!(
+            out.iter().any(|l| l.contains("[DUMP] bcd")),
+            "got: {:?}",
+            out
+        );
+        assert!(
+            out.iter().any(|l| l.contains("[DUMP] abc")),
+            "got: {:?}",
+            out
+        );
+        assert!(
+            out.iter().any(|l| l.contains("[DUMP] def")),
+            "got: {:?}",
+            out
+        );
         assert!(out.iter().any(|l| l.contains("[DUMP] f")), "got: {:?}", out);
-        assert!(out.iter().any(|l| l.contains("[DUMP] [20, 30]")), "got: {:?}", out);
-        assert!(out.iter().any(|l| l.contains("[DUMP] [10, 20]")), "got: {:?}", out);
-        assert!(out.iter().any(|l| l.contains("[DUMP] 40")), "got: {:?}", out);
-        assert!(out.iter().any(|l| l.contains("[DUMP] 99")), "got: {:?}", out);
+        assert!(
+            out.iter().any(|l| l.contains("[DUMP] [20, 30]")),
+            "got: {:?}",
+            out
+        );
+        assert!(
+            out.iter().any(|l| l.contains("[DUMP] [10, 20]")),
+            "got: {:?}",
+            out
+        );
+        assert!(
+            out.iter().any(|l| l.contains("[DUMP] 40")),
+            "got: {:?}",
+            out
+        );
+        assert!(
+            out.iter().any(|l| l.contains("[DUMP] 99")),
+            "got: {:?}",
+            out
+        );
     }
 
     #[test]
     fn test_lang_slice_oob_write_raises() {
         let mut interp = Interpreter::new();
-        let err = interp.run_source("let mut arr = [1]\narr[5] = 9").unwrap_err();
+        let err = interp
+            .run_source("let mut arr = [1]\narr[5] = 9")
+            .unwrap_err();
         assert!(err.to_string().contains("index-assign"), "got: {:?}", err);
     }
 
@@ -7987,7 +9566,9 @@ mod tests {
     fn test_interpreter_md5() {
         let mut interp = Interpreter::new();
         let output = interp.run_source("dump md5(\"hello\");").unwrap();
-        assert!(output.iter().any(|l| l.contains("5d41402abc4b2a76b9719d911017c592")));
+        assert!(output
+            .iter()
+            .any(|l| l.contains("5d41402abc4b2a76b9719d911017c592")));
     }
 
     #[test]
@@ -8014,14 +9595,18 @@ mod tests {
     #[test]
     fn test_interpreter_bitwise() {
         let mut interp = Interpreter::new();
-        let output = interp.run_source("let r = 0xDEADBEEF & 0xFF00FF00; dump r;").unwrap();
+        let output = interp
+            .run_source("let r = 0xDEADBEEF & 0xFF00FF00; dump r;")
+            .unwrap();
         assert!(output.iter().any(|l| l.contains("[DUMP] 0xDE00BE00")));
     }
 
     #[test]
     fn test_interpreter_for_over_array() {
         let mut interp = Interpreter::new();
-        let output = interp.run_source("for x in [10, 20, 30] { dump x; }").unwrap();
+        let output = interp
+            .run_source("for x in [10, 20, 30] { dump x; }")
+            .unwrap();
         assert!(output.iter().any(|l| l.contains("[DUMP] 10")));
     }
 
@@ -8042,14 +9627,18 @@ mod tests {
     #[test]
     fn test_interpreter_interp() {
         let mut interp = Interpreter::new();
-        let output = interp.run_source("let name = \"Rak\"; dump f\"hello {name}!\";").unwrap();
+        let output = interp
+            .run_source("let name = \"Rak\"; dump f\"hello {name}!\";")
+            .unwrap();
         assert!(output.iter().any(|l| l.contains("[DUMP] hello Rak!")));
     }
 
     #[test]
     fn test_interpreter_if_expr() {
         let mut interp = Interpreter::new();
-        let output = interp.run_source("let x = if true { 1 } else { 2 }; dump x;").unwrap();
+        let output = interp
+            .run_source("let x = if true { 1 } else { 2 }; dump x;")
+            .unwrap();
         assert!(output.iter().any(|l| l.contains("[DUMP] 1")));
     }
 
@@ -8063,35 +9652,45 @@ mod tests {
     #[test]
     fn test_interpreter_try_question() {
         let mut interp = Interpreter::new();
-        let output = interp.run_source("let r = Ok(42); let v = r?; dump v;").unwrap();
+        let output = interp
+            .run_source("let r = Ok(42); let v = r?; dump v;")
+            .unwrap();
         assert!(output.iter().any(|l| l.contains("[DUMP] 42")));
     }
 
     #[test]
     fn test_interpreter_try_catch() {
         let mut interp = Interpreter::new();
-        let output = interp.run_source("try { raise \"boom\" } catch e { dump e }").unwrap();
+        let output = interp
+            .run_source("try { raise \"boom\" } catch e { dump e }")
+            .unwrap();
         assert!(output.iter().any(|l| l.contains("[DUMP] boom")));
     }
 
     #[test]
     fn test_interpreter_enum() {
         let mut interp = Interpreter::new();
-        let output = interp.run_source("enum Color { Red, Green, Blue } let c = Color::Red; dump c;").unwrap();
+        let output = interp
+            .run_source("enum Color { Red, Green, Blue } let c = Color::Red; dump c;")
+            .unwrap();
         assert!(output.iter().any(|l| l.contains("[DUMP] Color::Red")));
     }
 
     #[test]
     fn test_interpreter_struct_destructure() {
         let mut interp = Interpreter::new();
-        let output = interp.run_source("let Point { x, y } = p;").unwrap_or_default();
+        let output = interp
+            .run_source("let Point { x, y } = p;")
+            .unwrap_or_default();
         let _ = output;
     }
 
     #[test]
     fn test_interpreter_range() {
         let mut interp = Interpreter::new();
-        let output = interp.run_source("let mut s = 0; for i in 1..3 { s = s + i } dump s;").unwrap();
+        let output = interp
+            .run_source("let mut s = 0; for i in 1..3 { s = s + i } dump s;")
+            .unwrap();
         assert!(output.iter().any(|l| l.contains("[DUMP] 6")));
     }
 
@@ -8105,7 +9704,11 @@ mod tests {
     #[test]
     fn test_interpreter_file_write_read() {
         let mut interp = Interpreter::new();
-        let output = interp.run_source("file_write(\"test_rak.txt\", \"hello\"); dump file_read(\"test_rak.txt\");").unwrap();
+        let output = interp
+            .run_source(
+                "file_write(\"test_rak.txt\", \"hello\"); dump file_read(\"test_rak.txt\");",
+            )
+            .unwrap();
         assert!(output.iter().any(|l| l.contains("hello")));
         let _ = std::fs::remove_file("test_rak.txt");
     }
@@ -8135,7 +9738,8 @@ mod tests {
     /// it replaces.
     #[test]
     fn test_interpreter_recursive_fib() {
-        let src = "fn fib(n) { if n < 2 { return n } return fib(n - 1) + fib(n - 2) } dump fib(15);";
+        let src =
+            "fn fib(n) { if n < 2 { return n } return fib(n - 1) + fib(n - 2) } dump fib(15);";
         let owned = src.to_string();
         let handle = std::thread::Builder::new()
             .stack_size(32 * 1024 * 1024)
@@ -8174,7 +9778,8 @@ mod tests {
     #[test]
     fn test_interpreter_pipeline() {
         let mut interp = Interpreter::new();
-        let src = "fn inc(n) { return n + 1 } fn dbl(n) { return n * 2 } let r = 5 |> inc |> dbl; dump r";
+        let src =
+            "fn inc(n) { return n + 1 } fn dbl(n) { return n * 2 } let r = 5 |> inc |> dbl; dump r";
         let output = interp.run_source(src).unwrap();
         assert!(output.iter().any(|l| l.contains("[DUMP] 12")));
     }
@@ -8190,7 +9795,8 @@ mod tests {
     #[test]
     fn test_interpreter_regex_literal_methods() {
         let mut interp = Interpreter::new();
-        let src = r#"let re = /\d+/g; dump re.is_match("abc123"); dump re.find_all("a1 b22 c333");"#;
+        let src =
+            r#"let re = /\d+/g; dump re.is_match("abc123"); dump re.find_all("a1 b22 c333");"#;
         let output = interp.run_source(src).unwrap();
         assert!(output.iter().any(|l| l.contains("true")));
         // Value::Display does not quote strings inside arrays.
@@ -8234,7 +9840,11 @@ mod tests {
         let mut interp = Interpreter::new();
         let src = "struct Point { x: int, y: int } impl Display for Point { fn fmt(self) { return fmt(\"({}, {})\", self.x, self.y) } } let p = Point { x: 3, y: 4 } dump p";
         let output = interp.run_source(src).unwrap();
-        assert!(output.iter().any(|l| l.contains("[DUMP] (3, 4)")), "got: {:?}", output);
+        assert!(
+            output.iter().any(|l| l.contains("[DUMP] (3, 4)")),
+            "got: {:?}",
+            output
+        );
     }
 
     #[test]
@@ -8242,7 +9852,11 @@ mod tests {
         let mut interp = Interpreter::new();
         let src = "struct Range { lo: int, hi: int } impl Iterable for Range { fn iter(self) { let mut out = []; let mut i = self.lo; while i <= self.hi { out = push(out, i); i = i + 1 } return out } } let r = Range { lo: 1, hi: 4 }; let mut s = 0; for n in r { s = s + n } dump s";
         let output = interp.run_source(src).unwrap();
-        assert!(output.iter().any(|l| l.contains("[DUMP] 10")), "got: {:?}", output);
+        assert!(
+            output.iter().any(|l| l.contains("[DUMP] 10")),
+            "got: {:?}",
+            output
+        );
     }
 
     #[test]
@@ -8250,7 +9864,11 @@ mod tests {
         let mut interp = Interpreter::new();
         let src = "struct Vec3 { data: array } impl Index for Vec3 { fn index(self, i) { return self.data[i] } } let v = Vec3 { data: [10, 20, 30] } dump v[1]";
         let output = interp.run_source(src).unwrap();
-        assert!(output.iter().any(|l| l.contains("[DUMP] 20")), "got: {:?}", output);
+        assert!(
+            output.iter().any(|l| l.contains("[DUMP] 20")),
+            "got: {:?}",
+            output
+        );
     }
 
     // --- FFI ---
@@ -8260,7 +9878,11 @@ mod tests {
         let mut interp = Interpreter::new();
         let src = "extern \"C\" { fn abs(n: i32) -> i32 } dump abs(-42)";
         let output = interp.run_source(src).unwrap();
-        assert!(output.iter().any(|l| l.contains("[DUMP] 42")), "got: {:?}", output);
+        assert!(
+            output.iter().any(|l| l.contains("[DUMP] 42")),
+            "got: {:?}",
+            output
+        );
     }
 
     #[test]
@@ -8268,16 +9890,29 @@ mod tests {
         let mut interp = Interpreter::new();
         let src = "let buf = ffi_alloc(4); ffi_write(buf, 0, 0x41); ffi_write(buf, 1, 0x00); dump ffi_read(buf, 0); dump ffi_cstr_to_string(buf); ffi_free(buf)";
         let output = interp.run_source(src).unwrap();
-        assert!(output.iter().any(|l| l.contains("[DUMP] 65")), "got: {:?}", output);
-        assert!(output.iter().any(|l| l.contains("[DUMP] A")), "got: {:?}", output);
+        assert!(
+            output.iter().any(|l| l.contains("[DUMP] 65")),
+            "got: {:?}",
+            output
+        );
+        assert!(
+            output.iter().any(|l| l.contains("[DUMP] A")),
+            "got: {:?}",
+            output
+        );
     }
 
     #[test]
     fn test_interpreter_ffi_string_to_cstr_roundtrip() {
         let mut interp = Interpreter::new();
-        let src = "let cs = ffi_string_to_cstr(\"hello ffi\"); dump ffi_cstr_to_string(cs); ffi_free(cs)";
+        let src =
+            "let cs = ffi_string_to_cstr(\"hello ffi\"); dump ffi_cstr_to_string(cs); ffi_free(cs)";
         let output = interp.run_source(src).unwrap();
-        assert!(output.iter().any(|l| l.contains("[DUMP] hello ffi")), "got: {:?}", output);
+        assert!(
+            output.iter().any(|l| l.contains("[DUMP] hello ffi")),
+            "got: {:?}",
+            output
+        );
     }
 
     #[test]
@@ -8285,7 +9920,11 @@ mod tests {
         let mut interp = Interpreter::new();
         let src = "let p = ffi_ptr(0xDEADBEEF); dump fmt(\"0x{:08X}\", p)";
         let output = interp.run_source(src).unwrap();
-        assert!(output.iter().any(|l| l.contains("0xDEADBEEF")), "got: {:?}", output);
+        assert!(
+            output.iter().any(|l| l.contains("0xDEADBEEF")),
+            "got: {:?}",
+            output
+        );
     }
 
     #[test]
@@ -8294,14 +9933,21 @@ mod tests {
         // A function declared with no return type yields nil (void).
         let src = "extern \"C\" { fn abs(n: i32) } let r = abs(0); dump r";
         let output = interp.run_source(src).unwrap();
-        assert!(output.iter().any(|l| l.contains("[DUMP] nil")), "got: {:?}", output);
+        assert!(
+            output.iter().any(|l| l.contains("[DUMP] nil")),
+            "got: {:?}",
+            output
+        );
     }
 
     // --- Memory-mapped files ---
 
     fn write_mmap_sample(name: &str) -> std::path::PathBuf {
         let path = std::env::temp_dir().join(format!("rak_mmap_{}.bin", name));
-        let bytes: [u8; 15] = [0xD4, 0xC3, 0xB2, 0xA1, 0x0A, b'G', b'E', b'T', b' ', 0x31, 0x0A, b'x', b'y', b'z', 0x0A];
+        let bytes: [u8; 15] = [
+            0xD4, 0xC3, 0xB2, 0xA1, 0x0A, b'G', b'E', b'T', b' ', 0x31, 0x0A, b'x', b'y', b'z',
+            0x0A,
+        ];
         std::fs::write(&path, bytes).unwrap();
         path
     }
@@ -8315,9 +9961,21 @@ mod tests {
         );
         let mut interp = Interpreter::new();
         let output = interp.run_source(&src).unwrap();
-        assert!(output.iter().any(|l| l.contains("[DUMP] 15")), "got: {:?}", output);
-        assert!(output.iter().any(|l| l.contains("[DUMP] 212")), "got: {:?}", output); // 0xD4
-        assert!(output.iter().any(|l| l.contains("[DUMP] 161")), "got: {:?}", output); // 0xA1
+        assert!(
+            output.iter().any(|l| l.contains("[DUMP] 15")),
+            "got: {:?}",
+            output
+        );
+        assert!(
+            output.iter().any(|l| l.contains("[DUMP] 212")),
+            "got: {:?}",
+            output
+        ); // 0xD4
+        assert!(
+            output.iter().any(|l| l.contains("[DUMP] 161")),
+            "got: {:?}",
+            output
+        ); // 0xA1
         let _ = std::fs::remove_file(&path);
     }
 
@@ -8330,9 +9988,21 @@ mod tests {
         );
         let mut interp = Interpreter::new();
         let output = interp.run_source(&src).unwrap();
-        assert!(output.iter().any(|l| l.contains("[DUMP] 5")), "got: {:?}", output); // GET at offset 5
-        assert!(output.iter().any(|l| l.contains("[DUMP] 3")), "got: {:?}", output); // 3 lines
-        assert!(output.iter().any(|l| l.contains("[DUMP] pcap")), "got: {:?}", output);
+        assert!(
+            output.iter().any(|l| l.contains("[DUMP] 5")),
+            "got: {:?}",
+            output
+        ); // GET at offset 5
+        assert!(
+            output.iter().any(|l| l.contains("[DUMP] 3")),
+            "got: {:?}",
+            output
+        ); // 3 lines
+        assert!(
+            output.iter().any(|l| l.contains("[DUMP] pcap")),
+            "got: {:?}",
+            output
+        );
         let _ = std::fs::remove_file(&path);
     }
 
@@ -8343,7 +10013,11 @@ mod tests {
         let mut interp = Interpreter::new();
         let src = "async fn double(x) { return x * 2 } dump await double(21)";
         let output = interp.run_source(src).unwrap();
-        assert!(output.iter().any(|l| l.contains("[DUMP] 42")), "got: {:?}", output);
+        assert!(
+            output.iter().any(|l| l.contains("[DUMP] 42")),
+            "got: {:?}",
+            output
+        );
     }
 
     #[test]
@@ -8352,7 +10026,11 @@ mod tests {
         let mut interp = Interpreter::new();
         let src = "async fn sq(x) { return x * x } let f = sq(6); dump await f";
         let output = interp.run_source(src).unwrap();
-        assert!(output.iter().any(|l| l.contains("[DUMP] 36")), "got: {:?}", output);
+        assert!(
+            output.iter().any(|l| l.contains("[DUMP] 36")),
+            "got: {:?}",
+            output
+        );
     }
 
     #[test]
@@ -8360,7 +10038,11 @@ mod tests {
         let mut interp = Interpreter::new();
         let src = "dump await tcp_probe(\"127.0.0.1\", 9999, 100)";
         let output = interp.run_source(src).unwrap();
-        assert!(output.iter().any(|l| l.contains("[DUMP] false")), "got: {:?}", output);
+        assert!(
+            output.iter().any(|l| l.contains("[DUMP] false")),
+            "got: {:?}",
+            output
+        );
     }
 
     // --- Raw sockets / packet forging ---
@@ -8370,9 +10052,21 @@ mod tests {
         let mut interp = Interpreter::new();
         let src = "let pkt = net_raw_tcp_syn(\"10.0.0.5\", \"10.0.0.10\", 12345, 80); dump len(pkt); dump pkt[0]; dump pkt[9]";
         let output = interp.run_source(src).unwrap();
-        assert!(output.iter().any(|l| l.contains("[DUMP] 40")), "got: {:?}", output);
-        assert!(output.iter().any(|l| l.contains("[DUMP] 69")), "got: {:?}", output); // 0x45 = 69
-        assert!(output.iter().any(|l| l.contains("[DUMP] 6")), "got: {:?}", output);
+        assert!(
+            output.iter().any(|l| l.contains("[DUMP] 40")),
+            "got: {:?}",
+            output
+        );
+        assert!(
+            output.iter().any(|l| l.contains("[DUMP] 69")),
+            "got: {:?}",
+            output
+        ); // 0x45 = 69
+        assert!(
+            output.iter().any(|l| l.contains("[DUMP] 6")),
+            "got: {:?}",
+            output
+        );
     }
 
     #[test]
@@ -8381,7 +10075,11 @@ mod tests {
         // The IP header (with its checksum) is self-checking: csum16 == 0.
         let src = "let pkt = net_raw_ipv4(\"10.0.0.5\", \"10.0.0.10\", 6, b\"\"); dump net_raw_csum(pkt[0..20])";
         let output = interp.run_source(src).unwrap();
-        assert!(output.iter().any(|l| l.contains("[DUMP] 0")), "got: {:?}", output);
+        assert!(
+            output.iter().any(|l| l.contains("[DUMP] 0")),
+            "got: {:?}",
+            output
+        );
     }
 
     #[test]
@@ -8390,7 +10088,13 @@ mod tests {
         let src = "let pkt = net_raw_tcp_syn(\"10.0.0.5\", \"10.0.0.10\", 12345, 80); dump net_raw_send(pkt)";
         let output = interp.run_source(src).unwrap();
         // On any platform this is a Result (Ok on privileged unix, Err otherwise).
-        assert!(output.iter().any(|l| l.contains("Ok(") || l.contains("Err(")), "got: {:?}", output);
+        assert!(
+            output
+                .iter()
+                .any(|l| l.contains("Ok(") || l.contains("Err(")),
+            "got: {:?}",
+            output
+        );
     }
 
     // --- DNS ---
@@ -8400,8 +10104,16 @@ mod tests {
         let mut interp = Interpreter::new();
         let src = "let q = dns_build(\"example.com\", \"A\"); dump len(q); dump q[12]";
         let output = interp.run_source(src).unwrap();
-        assert!(output.iter().any(|l| l.contains("[DUMP] 29")), "got: {:?}", output);
-        assert!(output.iter().any(|l| l.contains("[DUMP] 7")), "got: {:?}", output); // first label len
+        assert!(
+            output.iter().any(|l| l.contains("[DUMP] 29")),
+            "got: {:?}",
+            output
+        );
+        assert!(
+            output.iter().any(|l| l.contains("[DUMP] 7")),
+            "got: {:?}",
+            output
+        ); // first label len
     }
 
     #[test]
@@ -8410,7 +10122,11 @@ mod tests {
         // A too-short input yields a clear error (caught here).
         let src = "try { let info = tls_parse_client_hello(b\"\"); dump info } catch e { dump \"short\" }";
         let output = interp.run_source(src).unwrap();
-        assert!(output.iter().any(|l| l.contains("[DUMP] short")), "got: {:?}", output);
+        assert!(
+            output.iter().any(|l| l.contains("[DUMP] short")),
+            "got: {:?}",
+            output
+        );
     }
 
     // --- Macros ---
@@ -8420,7 +10136,11 @@ mod tests {
         let mut interp = Interpreter::new();
         let src = "macro add1(x: expr) { $x + 1 } dump add1!(41)";
         let output = interp.run_source(src).unwrap();
-        assert!(output.iter().any(|l| l.contains("[DUMP] 42")), "got: {:?}", output);
+        assert!(
+            output.iter().any(|l| l.contains("[DUMP] 42")),
+            "got: {:?}",
+            output
+        );
     }
 
     #[test]
@@ -8428,7 +10148,11 @@ mod tests {
         let mut interp = Interpreter::new();
         let src = "macro add3(a: expr, b: expr, c: expr) { $a + $b + $c } dump add3!(10, 20, 30)";
         let output = interp.run_source(src).unwrap();
-        assert!(output.iter().any(|l| l.contains("[DUMP] 60")), "got: {:?}", output);
+        assert!(
+            output.iter().any(|l| l.contains("[DUMP] 60")),
+            "got: {:?}",
+            output
+        );
     }
 
     #[test]
@@ -8436,7 +10160,11 @@ mod tests {
         let mut interp = Interpreter::new();
         let src = "macro pair(a: expr, b: expr) { [$a, $b] } dump pair!(1, 2)";
         let output = interp.run_source(src).unwrap();
-        assert!(output.iter().any(|l| l.contains("[DUMP] [1, 2]")), "got: {:?}", output);
+        assert!(
+            output.iter().any(|l| l.contains("[DUMP] [1, 2]")),
+            "got: {:?}",
+            output
+        );
     }
 
     #[test]
@@ -8444,7 +10172,11 @@ mod tests {
         let mut interp = Interpreter::new();
         let src = "const MAX = 256; dump MAX";
         let output = interp.run_source(src).unwrap();
-        assert!(output.iter().any(|l| l.contains("[DUMP] 256")), "got: {:?}", output);
+        assert!(
+            output.iter().any(|l| l.contains("[DUMP] 256")),
+            "got: {:?}",
+            output
+        );
     }
 
     // --- Imports & exports ---
@@ -8464,10 +10196,26 @@ mod tests {
         let main = "import m\ndump m.PI\ndump m.add(2, 3)\nfrom m import add as plus\ndump plus(10, 20)\nfrom m import *\ndump mul(4, 5)";
         let mut interp = Interpreter::with_base_dir(dir.to_string_lossy().to_string());
         let output = interp.run_source(main).unwrap();
-        assert!(output.iter().any(|l| l.contains("[DUMP] 3.14")), "got: {:?}", output);
-        assert!(output.iter().any(|l| l.contains("[DUMP] 5")), "got: {:?}", output);
-        assert!(output.iter().any(|l| l.contains("[DUMP] 30")), "got: {:?}", output);
-        assert!(output.iter().any(|l| l.contains("[DUMP] 20")), "got: {:?}", output);
+        assert!(
+            output.iter().any(|l| l.contains("[DUMP] 3.14")),
+            "got: {:?}",
+            output
+        );
+        assert!(
+            output.iter().any(|l| l.contains("[DUMP] 5")),
+            "got: {:?}",
+            output
+        );
+        assert!(
+            output.iter().any(|l| l.contains("[DUMP] 30")),
+            "got: {:?}",
+            output
+        );
+        assert!(
+            output.iter().any(|l| l.contains("[DUMP] 20")),
+            "got: {:?}",
+            output
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -8480,8 +10228,16 @@ mod tests {
         let main = "let X = 99\nfrom m import *\ndump X\ndump Y";
         let mut interp = Interpreter::with_base_dir(dir.to_string_lossy().to_string());
         let output = interp.run_source(main).unwrap();
-        assert!(output.iter().any(|l| l.contains("[DUMP] 99")), "got: {:?}", output); // local wins
-        assert!(output.iter().any(|l| l.contains("[DUMP] 2")), "got: {:?}", output);     // imported
+        assert!(
+            output.iter().any(|l| l.contains("[DUMP] 99")),
+            "got: {:?}",
+            output
+        ); // local wins
+        assert!(
+            output.iter().any(|l| l.contains("[DUMP] 2")),
+            "got: {:?}",
+            output
+        ); // imported
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -8490,14 +10246,30 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("rak_import_pkg_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("pkg")).unwrap();
-        write_import_module(dir.join("pkg").as_path(), "init.rak", "pub let A = 7\npub fn b(x) { return x + 1 }");
+        write_import_module(
+            dir.join("pkg").as_path(),
+            "init.rak",
+            "pub let A = 7\npub fn b(x) { return x + 1 }",
+        );
         write_import_module(dir.join("pkg").as_path(), "sub.rak", "pub let C = 42");
         let main = "import pkg\ndump pkg.A\ndump pkg.b(1)\nimport pkg.sub\ndump pkg.sub.C";
         let mut interp = Interpreter::with_base_dir(dir.to_string_lossy().to_string());
         let output = interp.run_source(main).unwrap();
-        assert!(output.iter().any(|l| l.contains("[DUMP] 7")), "got: {:?}", output);
-        assert!(output.iter().any(|l| l.contains("[DUMP] 2")), "got: {:?}", output);
-        assert!(output.iter().any(|l| l.contains("[DUMP] 42")), "got: {:?}", output);
+        assert!(
+            output.iter().any(|l| l.contains("[DUMP] 7")),
+            "got: {:?}",
+            output
+        );
+        assert!(
+            output.iter().any(|l| l.contains("[DUMP] 2")),
+            "got: {:?}",
+            output
+        );
+        assert!(
+            output.iter().any(|l| l.contains("[DUMP] 42")),
+            "got: {:?}",
+            output
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -8512,7 +10284,11 @@ mod tests {
         let main = "import m\nimport m\ndump m.N";
         let mut interp = Interpreter::with_base_dir(dir.to_string_lossy().to_string());
         let output = interp.run_source(main).unwrap();
-        assert!(output.iter().any(|l| l.contains("[DUMP] 1")), "got: {:?}", output);
+        assert!(
+            output.iter().any(|l| l.contains("[DUMP] 1")),
+            "got: {:?}",
+            output
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -8543,16 +10319,45 @@ dump h2.id
 "#;
         let output = interp.run_source(src).unwrap();
         // id = 0x1234 -> displayed as 0x1234
-        assert!(output.iter().any(|l| l == "[DUMP] 0x1234"), "id got: {:?}", output);
+        assert!(
+            output.iter().any(|l| l == "[DUMP] 0x1234"),
+            "id got: {:?}",
+            output
+        );
         // ver = 1, kind = 2, len (LE 05000000) = 5 — all unsigned -> 0x... display
-        assert!(output.iter().any(|l| l == "[DUMP] 0x1"), "ver got: {:?}", output);
-        assert!(output.iter().any(|l| l == "[DUMP] 0x2"), "kind got: {:?}", output);
-        assert!(output.iter().any(|l| l == "[DUMP] 0x5"), "len got: {:?}", output);
-        assert!(output.iter().any(|l| l.contains("hello")), "rest got: {:?}", output);
+        assert!(
+            output.iter().any(|l| l == "[DUMP] 0x1"),
+            "ver got: {:?}",
+            output
+        );
+        assert!(
+            output.iter().any(|l| l == "[DUMP] 0x2"),
+            "kind got: {:?}",
+            output
+        );
+        assert!(
+            output.iter().any(|l| l == "[DUMP] 0x5"),
+            "len got: {:?}",
+            output
+        );
+        assert!(
+            output.iter().any(|l| l.contains("hello")),
+            "rest got: {:?}",
+            output
+        );
         // re-decoded id should still be 0x1234 (round-trip)
-        assert!(output.iter().filter(|l| **l == "[DUMP] 0x1234").count() >= 1, "roundtrip id got: {:?}", output);
+        assert!(
+            output.iter().filter(|l| **l == "[DUMP] 0x1234").count() >= 1,
+            "roundtrip id got: {:?}",
+            output
+        );
         // The last dump should be the re-decoded id 0x1234.
-        assert_eq!(output.last().unwrap(), "[DUMP] 0x1234", "roundtrip got: {:?}", output);
+        assert_eq!(
+            output.last().unwrap(),
+            "[DUMP] 0x1234",
+            "roundtrip got: {:?}",
+            output
+        );
     }
 
     #[test]
@@ -8578,13 +10383,38 @@ dump h2.tos
 "#;
         let output = interp.run_source(src).unwrap();
         // LSB-first: ver_ihl = low nibble (5), tos = bits 4..7 (4).
-        assert!(output.iter().any(|l| l == "[DUMP] 0x5"), "ver_ihl got: {:?}", output);
-        assert!(output.iter().any(|l| l == "[DUMP] 0x4"), "tos got: {:?}", output);
-        assert!(output.iter().any(|l| l == "[DUMP] 0x1"), "len got: {:?}", output);
+        assert!(
+            output.iter().any(|l| l == "[DUMP] 0x5"),
+            "ver_ihl got: {:?}",
+            output
+        );
+        assert!(
+            output.iter().any(|l| l == "[DUMP] 0x4"),
+            "tos got: {:?}",
+            output
+        );
+        assert!(
+            output.iter().any(|l| l == "[DUMP] 0x1"),
+            "len got: {:?}",
+            output
+        );
         // Round-trip: byte 0 re-packs to 0x45.
-        assert!(output.iter().any(|l| l == "[DUMP] 69"), "roundtrip byte got: {:?}", output);
-        assert!(output.iter().any(|l| l == "[DUMP] 3"), "roundtrip len got: {:?}", output);
-        assert_eq!(output.last().unwrap(), "[DUMP] 0x4", "re-decode tos got: {:?}", output);
+        assert!(
+            output.iter().any(|l| l == "[DUMP] 69"),
+            "roundtrip byte got: {:?}",
+            output
+        );
+        assert!(
+            output.iter().any(|l| l == "[DUMP] 3"),
+            "roundtrip len got: {:?}",
+            output
+        );
+        assert_eq!(
+            output.last().unwrap(),
+            "[DUMP] 0x4",
+            "re-decode tos got: {:?}",
+            output
+        );
     }
 
     #[test]
@@ -8603,14 +10433,34 @@ dump back[0]
 dump back[1]
 "#;
         let output = interp.run_source(src).unwrap();
-        assert!(output.iter().any(|l| l == "[DUMP] 0x7"), "tag got: {:?}", output);
-        assert!(output.iter().any(|l| l == "[DUMP] 0x1"), "inner.a got: {:?}", output);
+        assert!(
+            output.iter().any(|l| l == "[DUMP] 0x7"),
+            "tag got: {:?}",
+            output
+        );
+        assert!(
+            output.iter().any(|l| l == "[DUMP] 0x1"),
+            "inner.a got: {:?}",
+            output
+        );
         // inner.b = 0x0203 = 515 -> displayed as 0x203
-        assert!(output.iter().any(|l| l == "[DUMP] 0x203"), "inner.b got: {:?}", output);
+        assert!(
+            output.iter().any(|l| l == "[DUMP] 0x203"),
+            "inner.b got: {:?}",
+            output
+        );
         // back[0] (first byte of re-encoded packet) = 7, back[1] = 1 (bytes
         // indexing returns Int, so these display as plain decimals).
-        assert!(output.iter().any(|l| l == "[DUMP] 7"), "back[0] got: {:?}", output);
-        assert!(output.iter().any(|l| l == "[DUMP] 1"), "back[1] got: {:?}", output);
+        assert!(
+            output.iter().any(|l| l == "[DUMP] 7"),
+            "back[0] got: {:?}",
+            output
+        );
+        assert!(
+            output.iter().any(|l| l == "[DUMP] 1"),
+            "back[1] got: {:?}",
+            output
+        );
     }
 
     #[test]
@@ -8625,9 +10475,21 @@ dump r
 "#;
         let output = interp.run_source(src).unwrap();
         // The evidence displays as its inner value.
-        assert!(output.iter().any(|l| l.contains("[DUMP] 93.184.216.34")), "ip got: {:?}", output);
-        assert!(output.iter().any(|l| l.contains("tool=manual")), "report got: {:?}", output);
-        assert!(output.iter().any(|l| l.contains("Sources")), "report got: {:?}", output);
+        assert!(
+            output.iter().any(|l| l.contains("[DUMP] 93.184.216.34")),
+            "ip got: {:?}",
+            output
+        );
+        assert!(
+            output.iter().any(|l| l.contains("tool=manual")),
+            "report got: {:?}",
+            output
+        );
+        assert!(
+            output.iter().any(|l| l.contains("Sources")),
+            "report got: {:?}",
+            output
+        );
     }
 
     #[test]
@@ -8643,10 +10505,22 @@ dump r
 "#;
         let output = interp.run_source(src).unwrap();
         // The topmost provenance tool is binstruct (the last cite).
-        assert!(output.iter().any(|l| l.contains("[DUMP] binstruct")), "tool got: {:?}", output);
+        assert!(
+            output.iter().any(|l| l.contains("[DUMP] binstruct")),
+            "tool got: {:?}",
+            output
+        );
         // The report should cite both pcap (parent) and binstruct.
-        assert!(output.iter().any(|l| l.contains("pcap")), "report pcap got: {:?}", output);
-        assert!(output.iter().any(|l| l.contains("binstruct")), "report binstruct got: {:?}", output);
+        assert!(
+            output.iter().any(|l| l.contains("pcap")),
+            "report pcap got: {:?}",
+            output
+        );
+        assert!(
+            output.iter().any(|l| l.contains("binstruct")),
+            "report binstruct got: {:?}",
+            output
+        );
     }
 
     #[test]
@@ -8671,12 +10545,20 @@ dump len(q)
 "#;
         let output = interp.run_source(src).unwrap();
         // qdcount should be 1 (one question) -> displayed as 0x1.
-        assert!(output.iter().any(|l| l.contains("[DUMP] 0x1")), "qdcount got: {:?}", output);
+        assert!(
+            output.iter().any(|l| l.contains("[DUMP] 0x1")),
+            "qdcount got: {:?}",
+            output
+        );
         // len(q) is at least 12 (header) + question bytes.
-        assert!(output.iter().any(|l| {
-            let n: i64 = l.replace("[DUMP] ", "").trim().parse().unwrap_or(0);
-            n >= 12
-        }), "len got: {:?}", output);
+        assert!(
+            output.iter().any(|l| {
+                let n: i64 = l.replace("[DUMP] ", "").trim().parse().unwrap_or(0);
+                n >= 12
+            }),
+            "len got: {:?}",
+            output
+        );
     }
 
     // --- Phase 1: common-language basics ---
@@ -8691,20 +10573,29 @@ dump len(q)
     #[test]
     fn test_ternary_nested() {
         let mut interp = Interpreter::new();
-        let out = interp.run_source("let n = 2\ndump n == 1 ? 10 : n == 2 ? 20 : 30").unwrap();
-        assert!(out.iter().any(|l| l.contains("[DUMP] 20")), "got: {:?}", out);
+        let out = interp
+            .run_source("let n = 2\ndump n == 1 ? 10 : n == 2 ? 20 : 30")
+            .unwrap();
+        assert!(
+            out.iter().any(|l| l.contains("[DUMP] 20")),
+            "got: {:?}",
+            out
+        );
     }
 
     #[test]
     fn test_do_while() {
         let mut interp = Interpreter::new();
-        let out = interp.run_source("let mut i = 0\ndo {\n    i = i + 1\n} while i < 3\ndump i").unwrap();
+        let out = interp
+            .run_source("let mut i = 0\ndo {\n    i = i + 1\n} while i < 3\ndump i")
+            .unwrap();
         assert!(out.iter().any(|l| l.contains("[DUMP] 3")), "got: {:?}", out);
     }
 
     #[test]
     fn test_do_while_break() {
-        let src = "let mut i = 0\ndo {\n    i = i + 1\n    if i == 5 { break }\n} while i < 100\ndump i";
+        let src =
+            "let mut i = 0\ndo {\n    i = i + 1\n    if i == 5 { break }\n} while i < 100\ndump i";
         let mut interp = Interpreter::new();
         let out = interp.run_source(src).unwrap();
         assert!(out.iter().any(|l| l.contains("[DUMP] 5")), "got: {:?}", out);
@@ -8723,7 +10614,11 @@ dump len(q)
         let mut interp = Interpreter::new();
         let src = "let mut s = 0\nfor i, x in [10, 20, 30] {\n    s = s + i * x\n}\ndump s";
         let out = interp.run_source(src).unwrap();
-        assert!(out.iter().any(|l| l.contains("[DUMP] 80")), "got: {:?}", out);
+        assert!(
+            out.iter().any(|l| l.contains("[DUMP] 80")),
+            "got: {:?}",
+            out
+        );
     }
 
     #[test]
@@ -8731,7 +10626,11 @@ dump len(q)
         let mut interp = Interpreter::new();
         let src = "let opt = Some(42)\nif let Some(x) = opt {\n    dump x\n} else {\n    dump 0\n}";
         let out = interp.run_source(src).unwrap();
-        assert!(out.iter().any(|l| l.contains("[DUMP] 42")), "got: {:?}", out);
+        assert!(
+            out.iter().any(|l| l.contains("[DUMP] 42")),
+            "got: {:?}",
+            out
+        );
     }
 
     #[test]
@@ -8739,45 +10638,77 @@ dump len(q)
         let mut interp = Interpreter::new();
         let src = "let opt: Option<int> = None\nif let Some(x) = opt {\n    dump x\n} else {\n    dump 99\n}";
         let out = interp.run_source(src).unwrap();
-        assert!(out.iter().any(|l| l.contains("[DUMP] 99")), "got: {:?}", out);
+        assert!(
+            out.iter().any(|l| l.contains("[DUMP] 99")),
+            "got: {:?}",
+            out
+        );
     }
 
     #[test]
     fn test_nil_coalesce() {
         let mut interp = Interpreter::new();
         let out = interp.run_source("let x = nil\ndump x ?? 42").unwrap();
-        assert!(out.iter().any(|l| l.contains("[DUMP] 42")), "got: {:?}", out);
+        assert!(
+            out.iter().any(|l| l.contains("[DUMP] 42")),
+            "got: {:?}",
+            out
+        );
     }
 
     #[test]
     fn test_optional_chaining() {
         let mut interp = Interpreter::new();
-        let out = interp.run_source("let m = {a: 1}\ndump m?.a\nlet n = nil\ndump n?.b").unwrap();
+        let out = interp
+            .run_source("let m = {a: 1}\ndump m?.a\nlet n = nil\ndump n?.b")
+            .unwrap();
         assert!(out.iter().any(|l| l.contains("[DUMP] 1")), "got: {:?}", out);
-        assert!(out.iter().any(|l| l.contains("[DUMP] nil")), "got: {:?}", out);
+        assert!(
+            out.iter().any(|l| l.contains("[DUMP] nil")),
+            "got: {:?}",
+            out
+        );
     }
 
     #[test]
     fn test_optional_indexing() {
         let mut interp = Interpreter::new();
-        let out = interp.run_source("let arr = [1, 2, 3]\ndump arr?[0]\nlet n = nil\ndump n?[5]").unwrap();
+        let out = interp
+            .run_source("let arr = [1, 2, 3]\ndump arr?[0]\nlet n = nil\ndump n?[5]")
+            .unwrap();
         assert!(out.iter().any(|l| l.contains("[DUMP] 1")), "got: {:?}", out);
-        assert!(out.iter().any(|l| l.contains("[DUMP] nil")), "got: {:?}", out);
+        assert!(
+            out.iter().any(|l| l.contains("[DUMP] nil")),
+            "got: {:?}",
+            out
+        );
     }
 
     #[test]
     fn test_raw_string() {
         let mut interp = Interpreter::new();
-        let out = interp.run_source(r#"let s = r"C:\path\to\file"
-dump s"#).unwrap();
-        assert!(out.iter().any(|l| l.contains("C:\\path\\to\\file")), "got: {:?}", out);
+        let out = interp
+            .run_source(
+                r#"let s = r"C:\path\to\file"
+dump s"#,
+            )
+            .unwrap();
+        assert!(
+            out.iter().any(|l| l.contains("C:\\path\\to\\file")),
+            "got: {:?}",
+            out
+        );
     }
 
     #[test]
     fn test_underscore_literals() {
         let mut interp = Interpreter::new();
         let out = interp.run_source("dump 1_000_000").unwrap();
-        assert!(out.iter().any(|l| l.contains("[DUMP] 1000000")), "got: {:?}", out);
+        assert!(
+            out.iter().any(|l| l.contains("[DUMP] 1000000")),
+            "got: {:?}",
+            out
+        );
     }
 
     #[test]
@@ -8785,7 +10716,11 @@ dump s"#).unwrap();
         let mut interp = Interpreter::new();
         let src = "/* block comment */ dump 42 /* end */";
         let out = interp.run_source(src).unwrap();
-        assert!(out.iter().any(|l| l.contains("[DUMP] 42")), "got: {:?}", out);
+        assert!(
+            out.iter().any(|l| l.contains("[DUMP] 42")),
+            "got: {:?}",
+            out
+        );
     }
 
     #[test]
@@ -8802,8 +10737,16 @@ dump s"#).unwrap();
         let mut interp = Interpreter::new();
         let src = "let mut a = 1\nlet mut b = 2\na, b = b, a\ndump a\ndump b";
         let out = interp.run_source(src).unwrap();
-        assert!(out.iter().any(|l| l.contains("[DUMP] 2")), "a=2, got: {:?}", out);
-        assert!(out.iter().any(|l| l.contains("[DUMP] 1")), "b=1, got: {:?}", out);
+        assert!(
+            out.iter().any(|l| l.contains("[DUMP] 2")),
+            "a=2, got: {:?}",
+            out
+        );
+        assert!(
+            out.iter().any(|l| l.contains("[DUMP] 1")),
+            "b=1, got: {:?}",
+            out
+        );
     }
 
     #[test]
@@ -8812,7 +10755,8 @@ dump s"#).unwrap();
         // Assignment to an immutable `let` binding must be rejected.
         let err = interp.run_source("let imm = 10\nimm = 20").unwrap_err();
         assert!(
-            err.to_string().contains("cannot assign to immutable variable `imm`"),
+            err.to_string()
+                .contains("cannot assign to immutable variable `imm`"),
             "got: {:?}",
             err
         );
@@ -8821,10 +10765,12 @@ dump s"#).unwrap();
     #[test]
     fn test_mutability_allows_mut_assign() {
         let mut interp = Interpreter::new();
-        let out = interp
-            .run_source("let mut x = 10\nx = 20\ndump x")
-            .unwrap();
-        assert!(out.iter().any(|l| l.contains("[DUMP] 20")), "got: {:?}", out);
+        let out = interp.run_source("let mut x = 10\nx = 20\ndump x").unwrap();
+        assert!(
+            out.iter().any(|l| l.contains("[DUMP] 20")),
+            "got: {:?}",
+            out
+        );
     }
 
     #[test]
@@ -8832,7 +10778,8 @@ dump s"#).unwrap();
         let mut interp = Interpreter::new();
         let err = interp.run_source("let n = 5\nn += 3").unwrap_err();
         assert!(
-            err.to_string().contains("cannot assign to immutable variable `n`"),
+            err.to_string()
+                .contains("cannot assign to immutable variable `n`"),
             "got: {:?}",
             err
         );
@@ -8843,10 +10790,26 @@ dump s"#).unwrap();
         let mut interp = Interpreter::new();
         let src = "let c: char = 'A'\ndump c\nlet u = '\\u{03B1}'\ndump u\nlet b = 0b1010\ndump b\nlet o = 0o755\ndump o";
         let out = interp.run_source(src).unwrap();
-        assert!(out.iter().any(|l| l.contains("[DUMP] 'A'")), "got: {:?}", out);
-        assert!(out.iter().any(|l| l.contains("[DUMP] 'α'")), "got: {:?}", out);
-        assert!(out.iter().any(|l| l.contains("[DUMP] 0xA")), "got: {:?}", out);
-        assert!(out.iter().any(|l| l.contains("[DUMP] 0x1ED")), "got: {:?}", out);
+        assert!(
+            out.iter().any(|l| l.contains("[DUMP] 'A'")),
+            "got: {:?}",
+            out
+        );
+        assert!(
+            out.iter().any(|l| l.contains("[DUMP] 'α'")),
+            "got: {:?}",
+            out
+        );
+        assert!(
+            out.iter().any(|l| l.contains("[DUMP] 0xA")),
+            "got: {:?}",
+            out
+        );
+        assert!(
+            out.iter().any(|l| l.contains("[DUMP] 0x1ED")),
+            "got: {:?}",
+            out
+        );
     }
 
     #[test]
@@ -8854,11 +10817,7 @@ dump s"#).unwrap();
         let mut interp = Interpreter::new();
         // Defensive runtime type check for an explicit (and wrong) type hint.
         let err = interp.run_source("let x: char = 42").unwrap_err();
-        assert!(
-            err.to_string().contains("type mismatch"),
-            "got: {:?}",
-            err
-        );
+        assert!(err.to_string().contains("type mismatch"), "got: {:?}", err);
     }
 
     #[test]
@@ -8878,8 +10837,16 @@ dump s"#).unwrap();
         let mut interp = Interpreter::new();
         let src = "fn cleanup() { dump \"clean\" }\nfn f(x: int) -> int { defer cleanup(); return x * 2 }\ndump f(21)";
         let out = interp.run_source(src).unwrap();
-        assert!(out.iter().any(|l| l.contains("[DUMP] clean")), "got: {:?}", out);
-        assert!(out.iter().any(|l| l.contains("[DUMP] 42")), "got: {:?}", out);
+        assert!(
+            out.iter().any(|l| l.contains("[DUMP] clean")),
+            "got: {:?}",
+            out
+        );
+        assert!(
+            out.iter().any(|l| l.contains("[DUMP] 42")),
+            "got: {:?}",
+            out
+        );
     }
 
     #[test]
@@ -8934,14 +10901,22 @@ dump s"#).unwrap();
     fn test_panic_builtin() {
         let mut interp = Interpreter::new();
         let err = interp.run_source("panic(\"unreachable\")").unwrap_err();
-        assert!(err.to_string().contains("panic: unreachable"), "got: {:?}", err);
+        assert!(
+            err.to_string().contains("panic: unreachable"),
+            "got: {:?}",
+            err
+        );
     }
 
     #[test]
     fn test_assert_failure_reports_expression() {
         let mut interp = Interpreter::new();
         let err = interp.run_source("assert 1 == 2").unwrap_err();
-        assert!(err.to_string().contains("assertion failed: 1 == 2"), "got: {:?}", err);
+        assert!(
+            err.to_string().contains("assertion failed: 1 == 2"),
+            "got: {:?}",
+            err
+        );
     }
 
     #[test]
@@ -8975,7 +10950,11 @@ dump s"#).unwrap();
         let mut interp = Interpreter::new();
         let src = "let n = 5\nmatch n {\n    1..3 => { dump \"low\" },\n    4..10 => { dump \"mid\" },\n    _ => { dump \"high\" },\n}";
         let out = interp.run_source(src).unwrap();
-        assert!(out.iter().any(|l| l.contains("[DUMP] mid")), "got: {:?}", out);
+        assert!(
+            out.iter().any(|l| l.contains("[DUMP] mid")),
+            "got: {:?}",
+            out
+        );
     }
 
     #[test]
@@ -9002,7 +10981,11 @@ dump s"#).unwrap();
         let mut interp = Interpreter::new();
         let src = "fn greet(name: string, greeting: string = \"Hello\") {\n    return greeting + \", \" + name\n}\ndump greet(\"World\")\ndump greet(\"Bob\", \"Hi\")";
         let out = interp.run_source(src).unwrap();
-        assert!(out.iter().any(|l| l.contains("Hello, World")), "got: {:?}", out);
+        assert!(
+            out.iter().any(|l| l.contains("Hello, World")),
+            "got: {:?}",
+            out
+        );
         assert!(out.iter().any(|l| l.contains("Hi, Bob")), "got: {:?}", out);
     }
 
@@ -9011,7 +10994,11 @@ dump s"#).unwrap();
         let mut interp = Interpreter::new();
         let src = "fn f(a: int, b?: int) {\n    return b\n}\ndump f(1)\ndump f(1, 2)";
         let out = interp.run_source(src).unwrap();
-        assert!(out.iter().any(|l| l.contains("[DUMP] nil")), "got: {:?}", out);
+        assert!(
+            out.iter().any(|l| l.contains("[DUMP] nil")),
+            "got: {:?}",
+            out
+        );
         assert!(out.iter().any(|l| l.contains("[DUMP] 2")), "got: {:?}", out);
     }
 
@@ -9020,7 +11007,11 @@ dump s"#).unwrap();
         let mut interp = Interpreter::new();
         let src = "fn sum_all(...nums: array) {\n    let mut s = 0\n    for n in nums {\n        s = s + n\n    }\n    return s\n}\ndump sum_all(1, 2, 3, 4, 5)";
         let out = interp.run_source(src).unwrap();
-        assert!(out.iter().any(|l| l.contains("[DUMP] 15")), "got: {:?}", out);
+        assert!(
+            out.iter().any(|l| l.contains("[DUMP] 15")),
+            "got: {:?}",
+            out
+        );
     }
 
     #[test]
@@ -9028,7 +11019,11 @@ dump s"#).unwrap();
         let mut interp = Interpreter::new();
         let src = "fn create(name: string, age: int, admin: bool) {\n    return name\n}\ndump create(\"alice\", age: 30, admin: true)";
         let out = interp.run_source(src).unwrap();
-        assert!(out.iter().any(|l| l.contains("[DUMP] alice")), "got: {:?}", out);
+        assert!(
+            out.iter().any(|l| l.contains("[DUMP] alice")),
+            "got: {:?}",
+            out
+        );
     }
 
     #[test]
@@ -9053,8 +11048,15 @@ dump s"#).unwrap();
     #[test]
     fn test_hmac_sha256() {
         let mut interp = Interpreter::new();
-        let out = interp.run_source("dump hmac_sha256(\"key\", \"the quick brown fox\")").unwrap();
-        assert!(out.iter().any(|l| l.contains("[DUMP] 9119dc3209b2cc822340e7ff18d47c79")), "got: {:?}", out);
+        let out = interp
+            .run_source("dump hmac_sha256(\"key\", \"the quick brown fox\")")
+            .unwrap();
+        assert!(
+            out.iter()
+                .any(|l| l.contains("[DUMP] 9119dc3209b2cc822340e7ff18d47c79")),
+            "got: {:?}",
+            out
+        );
     }
 
     #[test]
@@ -9062,7 +11064,11 @@ dump s"#).unwrap();
         let mut interp = Interpreter::new();
         let src = "let key = b\"\\x00\\x01\\x02\\x03\\x04\\x05\\x06\\x07\\x08\\x09\\x0a\\x0b\\x0c\\x0d\\x0e\\x0f\\x10\\x11\\x12\\x13\\x14\\x15\\x16\\x17\\x18\\x19\\x1a\\x1b\\x1c\\x1d\\x1e\\x1f\"\nlet nonce = b\"\\x00\\x01\\x02\\x03\\x04\\x05\\x06\\x07\\x08\\x09\\x0a\\x0b\"\nlet ct = aes_gcm_encrypt(key, nonce, b\"secret payload\")\nlet pt = aes_gcm_decrypt(key, nonce, ct)\ndump string(pt)";
         let out = interp.run_source(src).unwrap();
-        assert!(out.iter().any(|l| l.contains("secret payload")), "got: {:?}", out);
+        assert!(
+            out.iter().any(|l| l.contains("secret payload")),
+            "got: {:?}",
+            out
+        );
     }
 
     #[test]
@@ -9070,8 +11076,16 @@ dump s"#).unwrap();
         let mut interp = Interpreter::new();
         let src = "let pair = ed25519_keypair(b\"\\x00\\x01\\x02\\x03\\x04\\x05\\x06\\x07\\x08\\x09\\x0a\\x0b\\x0c\\x0d\\x0e\\x0f\\x10\\x11\\x12\\x13\\x14\\x15\\x16\\x17\\x18\\x19\\x1a\\x1b\\x1c\\x1d\\x1e\\x1f\")\nlet pk = pair.0\nlet sk = pair.1\nlet sig = ed25519_sign(sk, b\"message\")\ndump ed25519_verify(pk, sig, b\"message\")\ndump ed25519_verify(pk, sig, b\"other\")";
         let out = interp.run_source(src).unwrap();
-        assert!(out.iter().any(|l| l.contains("[DUMP] true")), "got: {:?}", out);
-        assert!(out.iter().any(|l| l.contains("[DUMP] false")), "got: {:?}", out);
+        assert!(
+            out.iter().any(|l| l.contains("[DUMP] true")),
+            "got: {:?}",
+            out
+        );
+        assert!(
+            out.iter().any(|l| l.contains("[DUMP] false")),
+            "got: {:?}",
+            out
+        );
     }
 
     #[test]
@@ -9087,8 +11101,14 @@ dump s"#).unwrap();
         // Structured logging writes to the process stdout (not the interpreter's
         // `[DUMP]` buffer), so assert the command is dispatchable without error.
         let mut interp = Interpreter::new();
-        let out = interp.run_source("log_level(\"debug\")\ndump log_info(\"evt\", { host: \"x\" })").unwrap();
-        assert!(out.iter().any(|l| l.contains("[DUMP] nil")), "got: {:?}", out);
+        let out = interp
+            .run_source("log_level(\"debug\")\ndump log_info(\"evt\", { host: \"x\" })")
+            .unwrap();
+        assert!(
+            out.iter().any(|l| l.contains("[DUMP] nil")),
+            "got: {:?}",
+            out
+        );
     }
 
     #[test]
@@ -9097,7 +11117,11 @@ dump s"#).unwrap();
         let src = "secret_set(\"K\", \"v\")\ndump secret_get(\"K\")\nsecret_delete(\"K\")\ndump secret_get(\"K\")";
         let out = interp.run_source(src).unwrap();
         assert!(out.iter().any(|l| l.contains("[DUMP] v")), "got: {:?}", out);
-        assert!(out.iter().any(|l| l.contains("[DUMP] nil")), "got: {:?}", out);
+        assert!(
+            out.iter().any(|l| l.contains("[DUMP] nil")),
+            "got: {:?}",
+            out
+        );
     }
 
     #[test]
@@ -9105,7 +11129,11 @@ dump s"#).unwrap();
         let mut interp = Interpreter::new();
         let src = "let m = { \"Content-Type\": \"a/b\" }\ndump m[\"Content-Type\"]";
         let out = interp.run_source(src).unwrap();
-        assert!(out.iter().any(|l| l.contains("[DUMP] a/b")), "got: {:?}", out);
+        assert!(
+            out.iter().any(|l| l.contains("[DUMP] a/b")),
+            "got: {:?}",
+            out
+        );
     }
 
     #[test]
@@ -9114,7 +11142,9 @@ dump s"#).unwrap();
         // verify the stdlib accepts an IPv4 address without error by running a
         // compile/parse check on the function symbol existence.
         let mut interp = Interpreter::new();
-        let out = interp.run_source("dump len(dns_build(\"8.8.8.8\", \"PTR\"))").unwrap();
+        let out = interp
+            .run_source("dump len(dns_build(\"8.8.8.8\", \"PTR\"))")
+            .unwrap();
         assert!(out.iter().any(|l| l.contains("[DUMP]")), "got: {:?}", out);
     }
 
@@ -9136,7 +11166,15 @@ dump s"#).unwrap();
             .unwrap();
         assert_eq!(
             out,
-            vec!["[DUMP] true", "[DUMP] true", "[DUMP] true", "[DUMP] false", "[DUMP] true", "[DUMP] true", "[DUMP] true"]
+            vec![
+                "[DUMP] true",
+                "[DUMP] true",
+                "[DUMP] true",
+                "[DUMP] false",
+                "[DUMP] true",
+                "[DUMP] true",
+                "[DUMP] true"
+            ]
         );
     }
 
@@ -9144,7 +11182,11 @@ dump s"#).unwrap();
     fn test_in_operator_unsupported_rhs_errors() {
         let mut interp = Interpreter::new();
         let err = interp.run_source("dump 1 in 5;").unwrap_err();
-        assert!(format!("{}", err).contains("unsupported right-hand side"), "got: {}", err);
+        assert!(
+            format!("{}", err).contains("unsupported right-hand side"),
+            "got: {}",
+            err
+        );
     }
 
     #[test]
@@ -9170,18 +11212,27 @@ dump s"#).unwrap();
                  dump x * y;",
             )
             .unwrap();
-        assert_eq!(out, vec!["[DUMP] example.com:443", "[DUMP] 30", "[DUMP] 12"]);
+        assert_eq!(
+            out,
+            vec!["[DUMP] example.com:443", "[DUMP] 30", "[DUMP] 12"]
+        );
     }
 
     #[test]
     fn test_destructuring_let_mut_and_mismatch() {
         let mut interp = Interpreter::new();
-        let out = interp.run_source("let mut (a, b) = (1, 2); a = a + 9; dump f\"{a},{b}\";").unwrap();
+        let out = interp
+            .run_source("let mut (a, b) = (1, 2); a = a + 9; dump f\"{a},{b}\";")
+            .unwrap();
         assert_eq!(out, vec!["[DUMP] 10,2"]);
 
         let mut interp2 = Interpreter::new();
         let err = interp2.run_source("let (a, b) = (1, 2, 3);").unwrap_err();
-        assert!(format!("{}", err).contains("destructuring failed"), "got: {}", err);
+        assert!(
+            format!("{}", err).contains("destructuring failed"),
+            "got: {}",
+            err
+        );
     }
 
     #[test]
@@ -9217,7 +11268,9 @@ dump s"#).unwrap();
         let out = interp
             .run_source("dump slice([1, 2, 3, 4], 1, 3); dump slice(\"hello\", 1, 4); dump slice(b\"abcd\", 2);")
             .unwrap();
-        assert_eq!(out, vec!["[DUMP] [2, 3]", "[DUMP] ell", "[DUMP] b\"\\x63\\x64\""]);
+        assert_eq!(
+            out,
+            vec!["[DUMP] [2, 3]", "[DUMP] ell", "[DUMP] b\"\\x63\\x64\""]
+        );
     }
-
 }

@@ -1,4 +1,4 @@
-use serde_json::{Value as JsonValue};
+use serde_json::Value as JsonValue;
 
 /// Parse a JSON string into a formatted value
 pub fn json_parse(input: &str) -> anyhow::Result<JsonValue> {
@@ -14,16 +14,14 @@ pub fn json_stringify(value: &JsonValue) -> String {
 pub fn json_get(input: &str, key: &str) -> anyhow::Result<String> {
     let value: JsonValue = serde_json::from_str(input)?;
     match &value {
-        JsonValue::Object(map) => {
-            map.get(key)
-                .map(|v| v.to_string())
-                .ok_or_else(|| anyhow::anyhow!("Key '{}' not found", key))
-        }
-        JsonValue::Array(arr) => {
-            key.parse::<usize>()
-                .map(|i| arr.get(i).map(|v| v.to_string()).unwrap_or_default())
-                .map_err(|_| anyhow::anyhow!("Invalid array index"))
-        }
+        JsonValue::Object(map) => map
+            .get(key)
+            .map(|v| v.to_string())
+            .ok_or_else(|| anyhow::anyhow!("Key '{}' not found", key)),
+        JsonValue::Array(arr) => key
+            .parse::<usize>()
+            .map(|i| arr.get(i).map(|v| v.to_string()).unwrap_or_default())
+            .map_err(|_| anyhow::anyhow!("Invalid array index")),
         _ => Err(anyhow::anyhow!("Not an object or array")),
     }
 }
@@ -35,11 +33,17 @@ pub fn json_path(input: &str, path: &str) -> anyhow::Result<String> {
     for key in path.split('.') {
         match current {
             JsonValue::Object(map) => {
-                current = map.get(key).ok_or_else(|| anyhow::anyhow!("Key '{}' not found", key))?;
+                current = map
+                    .get(key)
+                    .ok_or_else(|| anyhow::anyhow!("Key '{}' not found", key))?;
             }
             JsonValue::Array(arr) => {
-                let idx: usize = key.parse().map_err(|_| anyhow::anyhow!("Invalid array index: {}", key))?;
-                current = arr.get(idx).ok_or_else(|| anyhow::anyhow!("Index {} out of bounds", idx))?;
+                let idx: usize = key
+                    .parse()
+                    .map_err(|_| anyhow::anyhow!("Invalid array index: {}", key))?;
+                current = arr
+                    .get(idx)
+                    .ok_or_else(|| anyhow::anyhow!("Index {} out of bounds", idx))?;
             }
             _ => return Err(anyhow::anyhow!("Cannot navigate into non-object/non-array")),
         }

@@ -184,7 +184,11 @@ fn module_top_level_names(items: &[Stmt]) -> Vec<String> {
             other => other,
         };
         match inner {
-            Stmt::Let { name, pattern: None, .. } => names.push(name.clone()),
+            Stmt::Let {
+                name,
+                pattern: None,
+                ..
+            } => names.push(name.clone()),
             Stmt::Const { name, .. } => names.push(name.clone()),
             _ => {}
         }
@@ -201,7 +205,7 @@ impl Compiler {
             immutable_globals: std::collections::HashSet::new(),
             scope_depth: 0,
             statement_line: 0,
-    temp_counter: 0,
+            temp_counter: 0,
             func_names: std::collections::HashSet::new(),
             func_closures: HashMap::new(),
             macros: HashMap::new(),
@@ -244,16 +248,20 @@ impl Compiler {
                         }
                         self.current_exports.push(name.clone());
                     }
-                    Stmt::Const { name, .. } | Stmt::Struct { name, .. } | Stmt::Enum { name, .. } => {
+                    Stmt::Const { name, .. }
+                    | Stmt::Struct { name, .. }
+                    | Stmt::Enum { name, .. } => {
                         self.current_exports.push(name.clone());
                     }
                     Stmt::MacroDef { name, params, body } => {
-                        self.macros.insert(name.clone(), (params.clone(), body.clone()));
+                        self.macros
+                            .insert(name.clone(), (params.clone(), body.clone()));
                     }
                     _ => {}
                 },
                 Stmt::MacroDef { name, params, body } => {
-                    self.macros.insert(name.clone(), (params.clone(), body.clone()));
+                    self.macros
+                        .insert(name.clone(), (params.clone(), body.clone()));
                 }
                 Stmt::BinStructDef { name, fields } => {
                     self.binstructs.insert(name.clone(), fields.clone());
@@ -269,13 +277,20 @@ impl Compiler {
                         self.enum_ctors.push((key, ctor));
                     }
                 }
-                Stmt::Impl { target, trait_name, methods } => {
+                Stmt::Impl {
+                    target,
+                    trait_name,
+                    methods,
+                } => {
                     // Mirror the interpreter's registration: `impl Display for
                     // Point` -> type "Point"; inherent `impl Point` -> target
                     // is the type. Methods are `Stmt::Let` fn values.
                     let type_name = trait_name.clone().unwrap_or_else(|| target.clone());
                     for m in methods {
-                        if let Stmt::Let { name: mname, value, .. } = m {
+                        if let Stmt::Let {
+                            name: mname, value, ..
+                        } = m
+                        {
                             if let Expr::Function { params, body, .. } = value.as_ref() {
                                 let key = format!("__method_{}_{}", type_name, mname);
                                 let closure = self.compile_function(&key, params, body)?;
@@ -332,7 +347,11 @@ impl Compiler {
                 }
             }
         }
-        let closures: Vec<(String, Value)> = self.func_closures.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        let closures: Vec<(String, Value)> = self
+            .func_closures
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
         for (name, closure) in closures {
             self.load_const(closure);
             let ci = self.const_str(&name);
@@ -384,7 +403,15 @@ impl Compiler {
             // globals); `Stmt::Trait` declarations are documentation-only.
             // `struct`/`enum`/`type` declarations are compile-time metadata
             // (struct literals and baked enum ctors need no runtime def).
-            let is_def = |s: &Stmt| matches!(s, Stmt::Struct { .. } | Stmt::Enum { .. } | Stmt::TypeAlias { .. } | Stmt::Impl { .. });
+            let is_def = |s: &Stmt| {
+                matches!(
+                    s,
+                    Stmt::Struct { .. }
+                        | Stmt::Enum { .. }
+                        | Stmt::TypeAlias { .. }
+                        | Stmt::Impl { .. }
+                )
+            };
             let is_def_export = matches!(stmt, Stmt::Export(inner) if is_def(inner.as_ref()));
             if is_def(stmt) || is_def_export || matches!(stmt, Stmt::Trait { .. }) {
                 continue;
@@ -405,10 +432,17 @@ impl Compiler {
             } else {
                 Path::new(&self.base_dir).join(rel)
             };
-            Ok(crate::modules::DottedResolve { init: None, leaf: full })
+            Ok(crate::modules::DottedResolve {
+                init: None,
+                leaf: full,
+            })
         } else {
             crate::modules::resolve_dotted(Path::new(&self.base_dir), &spec.path).ok_or_else(|| {
-                format!("import: cannot find module '{}' (searched: {}, packages, RAK_PATH)", spec.path.join("."), self.base_dir)
+                format!(
+                    "import: cannot find module '{}' (searched: {}, packages, RAK_PATH)",
+                    spec.path.join("."),
+                    self.base_dir
+                )
             })
         }
     }
@@ -419,7 +453,11 @@ impl Compiler {
     /// Returns the exported global names and the global holding the module's
     /// namespace handle. The two are needed separately: `import m` binds the
     /// handle (a live view), while `from m import x` reads the names (a copy).
-    fn inline_module(&mut self, leaf: PathBuf, init: Option<PathBuf>) -> Result<InlinedModule, String> {
+    fn inline_module(
+        &mut self,
+        leaf: PathBuf,
+        init: Option<PathBuf>,
+    ) -> Result<InlinedModule, String> {
         let canon = crate::modules::canonical(&leaf);
         if let Some(found) = self.module_cache.get(&canon).cloned() {
             return Ok(found);
@@ -433,9 +471,11 @@ impl Compiler {
             // `module_cache.insert` that follows it are adjacent, with nothing
             // fallible between them. An empty cell name here would make the
             // caller bind a global literally called "", so it is better to say so.
-            return Ok(self.module_cache.get(&canon).cloned().unwrap_or_else(|| {
-                (Vec::new(), String::new())
-            }));
+            return Ok(self
+                .module_cache
+                .get(&canon)
+                .cloned()
+                .unwrap_or_else(|| (Vec::new(), String::new())));
         }
         // Load the package init first.
         if let Some(init_path) = init {
@@ -445,7 +485,8 @@ impl Compiler {
         // A partial entry for cycles. The cell global is real from here on, so a
         // cyclic importer that binds the namespace gets the handle.
         let cell_global = self.next_cell_global();
-        self.module_cache.insert(canon.clone(), (Vec::new(), cell_global.clone()));
+        self.module_cache
+            .insert(canon.clone(), (Vec::new(), cell_global.clone()));
 
         let source = std::fs::read_to_string(&leaf)
             .map_err(|e| format!("import: cannot read '{}': {}", leaf.display(), e))?;
@@ -453,7 +494,9 @@ impl Compiler {
         let module = crate::parser::parse(&tokens, &source).map_err(|e| e.to_string())?;
         let saved_base = std::mem::replace(
             &mut self.base_dir,
-            leaf.parent().map(|p| p.to_string_lossy().to_string()).unwrap_or_default(),
+            leaf.parent()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_default(),
         );
         let saved_exports = std::mem::take(&mut self.current_exports);
         // Exports this module declared `pub let mut`, and which an importer may
@@ -494,7 +537,12 @@ impl Compiler {
                     }
                 }
                 Stmt::Export(inner) => match inner.as_ref() {
-                    Stmt::Let { name, value, mutable, .. } => {
+                    Stmt::Let {
+                        name,
+                        value,
+                        mutable,
+                        ..
+                    } => {
                         if let Expr::Function { params, body, .. } = value.as_ref() {
                             self.func_names.insert(name.clone());
                             let cl = self.compile_function(name, params, body)?;
@@ -506,16 +554,20 @@ impl Compiler {
                             mutable_exports.push(name.clone());
                         }
                     }
-                    Stmt::Const { name, .. } | Stmt::Struct { name, .. } | Stmt::Enum { name, .. } => {
+                    Stmt::Const { name, .. }
+                    | Stmt::Struct { name, .. }
+                    | Stmt::Enum { name, .. } => {
                         self.current_exports.push(name.clone());
                     }
                     Stmt::MacroDef { name, params, body } => {
-                        self.macros.insert(name.clone(), (params.clone(), body.clone()));
+                        self.macros
+                            .insert(name.clone(), (params.clone(), body.clone()));
                     }
                     _ => {}
                 },
                 Stmt::MacroDef { name, params, body } => {
-                    self.macros.insert(name.clone(), (params.clone(), body.clone()));
+                    self.macros
+                        .insert(name.clone(), (params.clone(), body.clone()));
                 }
                 Stmt::BinStructDef { name, fields } => {
                     self.binstructs.insert(name.clone(), fields.clone());
@@ -685,7 +737,6 @@ impl Compiler {
         self.emit_u16(gi);
     }
 
-
     /// Copy every export of an inlined module into the current scope.
     ///
     /// This is what `from m import *` and a re-export both mean: the importing
@@ -737,11 +788,15 @@ impl Compiler {
         let resolved = self.resolve_target(import)?;
         match import.kind {
             ImportKind::Whole => {
-                let (exports, cell_global) = self.inline_module(resolved.leaf.clone(), resolved.init.clone())?;
+                let (exports, cell_global) =
+                    self.inline_module(resolved.leaf.clone(), resolved.init.clone())?;
                 let bind_name = if let Some(a) = &import.alias {
                     a.clone()
                 } else if import.is_file {
-                    Path::new(&import.path[0]).file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| import.path[0].clone())
+                    Path::new(&import.path[0])
+                        .file_stem()
+                        .map(|s| s.to_string_lossy().to_string())
+                        .unwrap_or_else(|| import.path[0].clone())
                 } else {
                     import.path[0].clone()
                 };
@@ -794,10 +849,12 @@ impl Compiler {
                     // module's export belongs.
                     self.emit_op(Op::BindModule);
                     self.emit_u16(gi);
-                }                Ok(())
+                }
+                Ok(())
             }
             ImportKind::From => {
-                let (exports, _cell_global) = self.inline_module(resolved.leaf.clone(), resolved.init.clone())?;
+                let (exports, _cell_global) =
+                    self.inline_module(resolved.leaf.clone(), resolved.init.clone())?;
                 // A misspelling and a missing `pub` look identical from out here,
                 // so the diagnostic says what the module *does* export. Without
                 // that, "is not exported" on a name that is spelled correctly is
@@ -824,11 +881,17 @@ impl Compiler {
                         self.emit_copy_from_names(&exports, &import.from_names);
                         for (n, _) in &import.from_names {
                             if !names.contains(n) {
-                                let mut msg = format!("from {} import {}: '{}' is not exported (module exports: {})", import.path.join("."), n, n, exports_list);
-                        if !macro_names.is_empty() {
-                            msg.push_str(&format!("; macros: {}", macro_names.join(", ")));
-                        }
-                        return Err(msg);
+                                let mut msg = format!(
+                                    "from {} import {}: '{}' is not exported (module exports: {})",
+                                    import.path.join("."),
+                                    n,
+                                    n,
+                                    exports_list
+                                );
+                                if !macro_names.is_empty() {
+                                    msg.push_str(&format!("; macros: {}", macro_names.join(", ")));
+                                }
+                                return Err(msg);
                             }
                             if !self.current_exports.contains(n) {
                                 self.current_exports.push(n.clone());
@@ -847,7 +910,13 @@ impl Compiler {
                 }
                 for (n, alias) in &import.from_names {
                     if !names.contains(n) {
-                        return Err(format!("from {} import {}: '{}' is not exported (module exports: {})", import.path.join("."), n, n, exports_list));
+                        return Err(format!(
+                            "from {} import {}: '{}' is not exported (module exports: {})",
+                            import.path.join("."),
+                            n,
+                            n,
+                            exports_list
+                        ));
                     }
                 }
                 // Copy, with or without an alias.
@@ -864,7 +933,12 @@ impl Compiler {
         }
     }
 
-    fn compile_function(&self, name: &str, params: &[Param], body: &[Stmt]) -> Result<Value, String> {
+    fn compile_function(
+        &self,
+        name: &str,
+        params: &[Param],
+        body: &[Stmt],
+    ) -> Result<Value, String> {
         let mut sub = Compiler::new();
         sub.scope_depth = 1;
         for p in params {
@@ -946,7 +1020,10 @@ impl Compiler {
     }
 
     fn resolve_local(&self, name: &str) -> Option<u8> {
-        self.locals.iter().rposition(|(n, _)| n == name).map(|i| i as u8)
+        self.locals
+            .iter()
+            .rposition(|(n, _)| n == name)
+            .map(|i| i as u8)
     }
 
     /// True if the named local is bound and immutable.
@@ -1103,7 +1180,10 @@ impl Compiler {
         // The key is bound twice, as the interpreter does: once under the
         // tunnel's own name and once under the stable `tunnel_key` alias, so a
         // body can reach it without interpolating the name into source.
-        for (alias, src) in [(name.to_string(), psk_slot), ("tunnel_key".to_string(), psk_slot)] {
+        for (alias, src) in [
+            (name.to_string(), psk_slot),
+            ("tunnel_key".to_string(), psk_slot),
+        ] {
             self.emit_op(Op::LoadLocal);
             self.emit_byte(src);
             let slot = self.add_local(alias);
@@ -1228,7 +1308,13 @@ impl Compiler {
 
     fn compile_stmt(&mut self, stmt: &Stmt) -> Result<(), String> {
         match stmt {
-            Stmt::Let { name, pattern: Some(pattern), value, mutable, .. } => {
+            Stmt::Let {
+                name,
+                pattern: Some(pattern),
+                value,
+                mutable,
+                ..
+            } => {
                 // Destructuring let: evaluate into a temp local, pattern-match
                 // with MatchPat, and raise a clear runtime error on mismatch.
                 // Bound names live as locals (same behavior as if-let binds).
@@ -1257,7 +1343,12 @@ impl Compiler {
                 self.emit_op(Op::Throw);
                 self.patch_jump(jend);
             }
-            Stmt::Let { name, value, mutable, .. } => {
+            Stmt::Let {
+                name,
+                value,
+                mutable,
+                ..
+            } => {
                 self.compile_expr(value)?;
                 if self.scope_depth == 0 {
                     let ci = self.global_index(name);
@@ -1288,7 +1379,11 @@ impl Compiler {
                 }
                 self.emit_op(Op::Return);
             }
-            Stmt::Try { body, catch_name, catch_body } => {
+            Stmt::Try {
+                body,
+                catch_name,
+                catch_body,
+            } => {
                 // Layout:
                 //   Op::Try <handler>   [body]   Jump end
                 //   handler: [StoreLocal e | Pop]  [catch_body]  CatchEnd
@@ -1324,7 +1419,11 @@ impl Compiler {
                 self.compile_expr(expr)?;
                 self.emit_op(Op::Throw);
             }
-            Stmt::If { cond, then_branch, else_branch } => {
+            Stmt::If {
+                cond,
+                then_branch,
+                else_branch,
+            } => {
                 self.compile_expr(cond)?;
                 let jfalse = self.emit_jump(Op::JumpIfFalse);
                 self.emit_op(Op::Pop);
@@ -1345,9 +1444,15 @@ impl Compiler {
                 }
                 self.patch_jump(jend);
             }
-            Stmt::While { label, cond, body, .. } => {
+            Stmt::While {
+                label, cond, body, ..
+            } => {
                 let loop_start = self.chunk.code.len();
-                self.loop_stack.push(LoopInfo { label: label.clone(), break_jumps: Vec::new(), continue_jumps: Vec::new() });
+                self.loop_stack.push(LoopInfo {
+                    label: label.clone(),
+                    break_jumps: Vec::new(),
+                    continue_jumps: Vec::new(),
+                });
                 self.compile_expr(cond)?;
                 let jexit = self.emit_jump(Op::JumpIfFalse);
                 self.emit_op(Op::Pop);
@@ -1361,7 +1466,12 @@ impl Compiler {
                 self.emit_op(Op::Pop);
                 self.end_loop_with_continue(loop_start);
             }
-            Stmt::IfLet { pattern, value, then_branch, else_branch } => {
+            Stmt::IfLet {
+                pattern,
+                value,
+                then_branch,
+                else_branch,
+            } => {
                 self.compile_expr(value)?;
                 let v_slot = self.add_local("__iflet_v".to_string());
                 self.emit_op(Op::StoreLocal);
@@ -1394,9 +1504,17 @@ impl Compiler {
                 }
                 self.patch_jump(jend);
             }
-            Stmt::WhileLet { pattern, value, body } => {
+            Stmt::WhileLet {
+                pattern,
+                value,
+                body,
+            } => {
                 let loop_start = self.chunk.code.len();
-                self.loop_stack.push(LoopInfo { label: None, break_jumps: Vec::new(), continue_jumps: Vec::new() });
+                self.loop_stack.push(LoopInfo {
+                    label: None,
+                    break_jumps: Vec::new(),
+                    continue_jumps: Vec::new(),
+                });
                 self.compile_expr(value)?;
                 let v_slot = self.add_local("__whilelet_v".to_string());
                 self.emit_op(Op::StoreLocal);
@@ -1424,7 +1542,11 @@ impl Compiler {
             }
             Stmt::DoWhile { cond, body } => {
                 let loop_start = self.chunk.code.len();
-                self.loop_stack.push(LoopInfo { label: None, break_jumps: Vec::new(), continue_jumps: Vec::new() });
+                self.loop_stack.push(LoopInfo {
+                    label: None,
+                    break_jumps: Vec::new(),
+                    continue_jumps: Vec::new(),
+                });
                 self.begin_scope();
                 for s in body {
                     self.compile_stmt(s)?;
@@ -1443,7 +1565,11 @@ impl Compiler {
             }
             Stmt::Loop { label, body } => {
                 let loop_start = self.chunk.code.len();
-                self.loop_stack.push(LoopInfo { label: label.clone(), break_jumps: Vec::new(), continue_jumps: Vec::new() });
+                self.loop_stack.push(LoopInfo {
+                    label: label.clone(),
+                    break_jumps: Vec::new(),
+                    continue_jumps: Vec::new(),
+                });
                 self.begin_scope();
                 for s in body {
                     self.compile_stmt(s)?;
@@ -1452,7 +1578,12 @@ impl Compiler {
                 self.emit_jump_back(loop_start);
                 self.end_loop_with_continue(loop_start);
             }
-            Stmt::For { label, pattern, iterable, body } => self.compile_for(label, pattern, iterable, body)?,
+            Stmt::For {
+                label,
+                pattern,
+                iterable,
+                body,
+            } => self.compile_for(label, pattern, iterable, body)?,
             Stmt::Break(target) => self.compile_loop_jump(target, false)?,
             Stmt::Continue(target) => self.compile_loop_jump(target, true)?,
             Stmt::Const { name, value } => {
@@ -1567,7 +1698,12 @@ impl Compiler {
                     };
                     let Some(candidate) = candidate else { continue };
                     match candidate {
-                        Stmt::Let { name: n, value, mutable, .. } => {
+                        Stmt::Let {
+                            name: n,
+                            value,
+                            mutable,
+                            ..
+                        } => {
                             if let Expr::Function { params, body, .. } = value.as_ref() {
                                 let cl = self.compile_function(n, params, body)?;
                                 closures.push((n.clone(), cl));
@@ -1579,13 +1715,20 @@ impl Compiler {
                                 mutable_names.push(n.clone());
                             }
                         }
-                        Stmt::Const { name: n, .. } | Stmt::Struct { name: n, .. } | Stmt::Enum { name: n, .. } => {
+                        Stmt::Const { name: n, .. }
+                        | Stmt::Struct { name: n, .. }
+                        | Stmt::Enum { name: n, .. } => {
                             if !exports.contains(n) {
                                 exports.push(n.clone());
                             }
                         }
-                        Stmt::MacroDef { name: n, params, body } => {
-                            self.macros.insert(n.clone(), (params.clone(), body.clone()));
+                        Stmt::MacroDef {
+                            name: n,
+                            params,
+                            body,
+                        } => {
+                            self.macros
+                                .insert(n.clone(), (params.clone(), body.clone()));
                         }
                         _ => {}
                     }
@@ -1663,7 +1806,11 @@ impl Compiler {
     /// VM frame's defer stack, to be run in LIFO order when the frame returns.
     fn compile_defer_call(&mut self, expr: &Expr) -> Result<(), String> {
         match expr {
-            Expr::Call { callee, args, named } => {
+            Expr::Call {
+                callee,
+                args,
+                named,
+            } => {
                 if !named.is_empty() {
                     return Err("VM does not support named arguments in defer".to_string());
                 }
@@ -1678,7 +1825,10 @@ impl Compiler {
                 Ok(())
             }
             // Non-call defers aren't supported by the VM codegen.
-            other => Err(format!("VM does not support defer of non-call expression: {:?}", other)),
+            other => Err(format!(
+                "VM does not support defer of non-call expression: {:?}",
+                other
+            )),
         }
     }
 
@@ -1707,7 +1857,12 @@ impl Compiler {
             None => return Err(format!("undefined macro '{}!'", name)),
         };
         if args.len() != params.len() {
-            return Err(format!("macro '{}!' expects {} args, got {}", name, params.len(), args.len()));
+            return Err(format!(
+                "macro '{}!' expects {} args, got {}",
+                name,
+                params.len(),
+                args.len()
+            ));
         }
         let mut bindings: HashMap<String, Expr> = HashMap::new();
         for (p, a) in params.iter().zip(args.iter()) {
@@ -1734,7 +1889,13 @@ impl Compiler {
         Ok(())
     }
 
-    fn compile_for(&mut self, label: &Option<String>, pattern: &Pattern, iterable: &Expr, body: &[Stmt]) -> Result<(), String> {
+    fn compile_for(
+        &mut self,
+        label: &Option<String>,
+        pattern: &Pattern,
+        iterable: &Expr,
+        body: &[Stmt],
+    ) -> Result<(), String> {
         // VM support covers identifier and (k, v) tuple bindings (see
         // `bind_for_pattern`); deeper patterns run on the interpreter only.
         let name = match pattern {
@@ -1764,7 +1925,11 @@ impl Compiler {
                     self.emit_op(Op::StoreLocal);
                     self.emit_byte(hi_slot);
                     let loop_start = self.chunk.code.len();
-                    self.loop_stack.push(LoopInfo { label: label.clone(), break_jumps: Vec::new(), continue_jumps: Vec::new() });
+                    self.loop_stack.push(LoopInfo {
+                        label: label.clone(),
+                        break_jumps: Vec::new(),
+                        continue_jumps: Vec::new(),
+                    });
                     self.emit_op(Op::LoadLocal);
                     self.emit_byte(lo_slot);
                     self.emit_op(Op::LoadLocal);
@@ -1817,7 +1982,11 @@ impl Compiler {
                 self.emit_op(Op::StoreLocal);
                 self.emit_byte(idx_slot);
                 let loop_start = self.chunk.code.len();
-                self.loop_stack.push(LoopInfo { label: label.clone(), break_jumps: Vec::new(), continue_jumps: Vec::new() });
+                self.loop_stack.push(LoopInfo {
+                    label: label.clone(),
+                    break_jumps: Vec::new(),
+                    continue_jumps: Vec::new(),
+                });
                 // Loop on the *bound*, not on the element's truthiness.
                 //
                 // This used to be `IndexGet` then `JumpIfFalse`, which asked "is
@@ -2136,7 +2305,11 @@ impl Compiler {
                 self.emit_u16(ci);
                 self.emit_op(Op::NewArray);
             }
-            Expr::Call { callee, args, named } => {
+            Expr::Call {
+                callee,
+                args,
+                named,
+            } => {
                 if !named.is_empty() {
                     return Err("VM does not support named arguments".to_string());
                 }
@@ -2234,7 +2407,11 @@ impl Compiler {
                 self.emit_op(Op::Call);
                 self.emit_byte(args.len() as u8);
             }
-            Expr::If { cond, then_branch, else_branch } => {
+            Expr::If {
+                cond,
+                then_branch,
+                else_branch,
+            } => {
                 self.compile_expr(cond)?;
                 let jfalse = self.emit_jump(Op::JumpIfFalse);
                 self.emit_op(Op::Pop);
@@ -2309,7 +2486,10 @@ impl Compiler {
                 self.load_const(closure);
             }
             Expr::MacroVar(name) => {
-                return Err(format!("macro variable '${}' used outside a macro body", name));
+                return Err(format!(
+                    "macro variable '${}' used outside a macro body",
+                    name
+                ));
             }
             Expr::MacroInvoke { name, args } => {
                 self.compile_macro_invoke(name, args)?;
@@ -2426,14 +2606,23 @@ impl Compiler {
                 for (i, t) in targets.iter().enumerate() {
                     match t {
                         Expr::Ident(name) => {
-                            if self.local_is_immutable(name) || self.immutable_globals.contains(name) {
-                                return Err(format!("cannot assign to immutable variable `{}`", name));
+                            if self.local_is_immutable(name)
+                                || self.immutable_globals.contains(name)
+                            {
+                                return Err(format!(
+                                    "cannot assign to immutable variable `{}`",
+                                    name
+                                ));
                             }
                             self.emit_op(Op::LoadLocal);
                             self.emit_byte(slots[i]);
                             self.store_ident_to(name)?;
                         }
-                        _ => return Err("VM multi-assign: target must be a plain variable".to_string()),
+                        _ => {
+                            return Err(
+                                "VM multi-assign: target must be a plain variable".to_string()
+                            )
+                        }
                     }
                 }
                 self.emit_op(Op::Nil);
@@ -2466,7 +2655,10 @@ impl Compiler {
                         return Ok(());
                     }
                 }
-                return Err(format!("VM does not support path expression: {}", segs.join("::")));
+                return Err(format!(
+                    "VM does not support path expression: {}",
+                    segs.join("::")
+                ));
             }
             other => {
                 return Err(format!("VM does not support expression: {:?}", other));
@@ -2475,7 +2667,11 @@ impl Compiler {
         Ok(())
     }
 
-    fn compile_match(&mut self, value: &Expr, arms: &[(Pattern, Option<Expr>, Vec<Stmt>)]) -> Result<(), String> {
+    fn compile_match(
+        &mut self,
+        value: &Expr,
+        arms: &[(Pattern, Option<Expr>, Vec<Stmt>)],
+    ) -> Result<(), String> {
         self.compile_expr(value)?;
         let v_slot = self.add_local("__match_v".to_string());
         self.emit_op(Op::StoreLocal);
@@ -2508,7 +2704,10 @@ impl Compiler {
                 let (desc, binds) = self.structural_pattern_desc(pattern)?;
                 let di = self.emit_const(desc);
                 let bindnames = Value::Array(Arc::from(
-                    binds.iter().map(|n| Value::String(Arc::from(n.as_str()))).collect::<Vec<_>>(),
+                    binds
+                        .iter()
+                        .map(|n| Value::String(Arc::from(n.as_str())))
+                        .collect::<Vec<_>>(),
                 ));
                 let bi = self.emit_const(bindnames);
                 self.emit_op(Op::LoadConst);
@@ -2610,7 +2809,10 @@ impl Compiler {
         let binds = self.pattern_binds(pattern);
         let di = self.emit_const(desc);
         let bindnames = Value::Array(Arc::from(
-            binds.iter().map(|n| Value::String(Arc::from(n.as_str()))).collect::<Vec<_>>(),
+            binds
+                .iter()
+                .map(|n| Value::String(Arc::from(n.as_str())))
+                .collect::<Vec<_>>(),
         ));
         let bi = self.emit_const(bindnames);
         self.emit_op(Op::LoadLocal);
@@ -2645,7 +2847,11 @@ impl Compiler {
     /// when the loop ends (`continue` to its increment/start, `break` to its
     /// end). Numeric-depth targets index outward from the innermost loop; a
     /// label matches by name.
-    fn compile_loop_jump(&mut self, target: &Option<BreakTarget>, is_continue: bool) -> Result<(), String> {
+    fn compile_loop_jump(
+        &mut self,
+        target: &Option<BreakTarget>,
+        is_continue: bool,
+    ) -> Result<(), String> {
         let idx = match target {
             None => 0,
             Some(BreakTarget::Depth(n)) => (*n - 1) as usize,
@@ -2660,7 +2866,9 @@ impl Compiler {
                 found.ok_or_else(|| format!("VM loop label '{}' not found", l))?
             }
         };
-        self.loop_stack.get(idx).ok_or_else(|| "VM break/continue outside a loop".to_string())?;
+        self.loop_stack
+            .get(idx)
+            .ok_or_else(|| "VM break/continue outside a loop".to_string())?;
         let j = self.emit_jump(Op::Jump);
         if is_continue {
             self.loop_stack.get_mut(idx).unwrap().continue_jumps.push(j);
@@ -2725,9 +2933,16 @@ impl Compiler {
             Pattern::Tuple(ps) | Pattern::Array(ps) | Pattern::Or(ps) => {
                 ps.iter().flat_map(|x| self.pattern_binds(x)).collect()
             }
-            Pattern::Struct(_, fields) => fields.iter().flat_map(|(_, sub)| self.pattern_binds(sub)).collect(),
-            Pattern::EnumVariant(_, _, subs) => subs.iter().flat_map(|x| self.pattern_binds(x)).collect(),
-            Pattern::Some(inner) | Pattern::Ok(inner) | Pattern::Err(inner) => self.pattern_binds(inner),
+            Pattern::Struct(_, fields) => fields
+                .iter()
+                .flat_map(|(_, sub)| self.pattern_binds(sub))
+                .collect(),
+            Pattern::EnumVariant(_, _, subs) => {
+                subs.iter().flat_map(|x| self.pattern_binds(x)).collect()
+            }
+            Pattern::Some(inner) | Pattern::Ok(inner) | Pattern::Err(inner) => {
+                self.pattern_binds(inner)
+            }
             Pattern::Range(lo, hi) => {
                 let mut v = self.pattern_binds(lo);
                 v.extend(self.pattern_binds(hi));
@@ -2777,8 +2992,15 @@ impl Compiler {
                 arr(vec![tag("bytes"), arr(bytes), Value::Bool(rest)])
             }
             Pattern::Tuple(ps) | Pattern::Array(ps) => {
-                let subs = ps.iter().map(|x| self.pattern_descriptor(x)).collect::<Result<Vec<_>, _>>()?;
-                let kind = if matches!(p, Pattern::Tuple(_)) { "tuple" } else { "array" };
+                let subs = ps
+                    .iter()
+                    .map(|x| self.pattern_descriptor(x))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let kind = if matches!(p, Pattern::Tuple(_)) {
+                    "tuple"
+                } else {
+                    "array"
+                };
                 arr(vec![tag(kind), arr(subs)])
             }
             Pattern::Struct(name, fields) => {
@@ -2790,7 +3012,10 @@ impl Compiler {
                 arr(vec![tag("struct"), tag(name), arr(fs)])
             }
             Pattern::EnumVariant(ename, variant, subs) => {
-                let subs = subs.iter().map(|x| self.pattern_descriptor(x)).collect::<Result<Vec<_>, _>>()?;
+                let subs = subs
+                    .iter()
+                    .map(|x| self.pattern_descriptor(x))
+                    .collect::<Result<Vec<_>, _>>()?;
                 arr(vec![tag("enum"), tag(ename), tag(variant), arr(subs)])
             }
             Pattern::Range(lo, hi) => arr(vec![
@@ -2799,7 +3024,10 @@ impl Compiler {
                 self.pattern_descriptor(hi)?,
             ]),
             Pattern::Or(ps) => {
-                let subs = ps.iter().map(|x| self.pattern_descriptor(x)).collect::<Result<Vec<_>, _>>()?;
+                let subs = ps
+                    .iter()
+                    .map(|x| self.pattern_descriptor(x))
+                    .collect::<Result<Vec<_>, _>>()?;
                 arr(vec![tag("or"), arr(subs)])
             }
             Pattern::Some(inner) => arr(vec![tag("some"), self.pattern_descriptor(inner)?]),
@@ -2873,7 +3101,9 @@ fn make_regex_value(pattern: &str, flags: &str) -> Result<Value, String> {
             _ => return Err(format!("unknown regex flag '{}'", f)),
         };
     }
-    let re = b.build().map_err(|e| format!("invalid regex /{}/{}: {}", pattern, flags, e))?;
+    let re = b
+        .build()
+        .map_err(|e| format!("invalid regex /{}/{}: {}", pattern, flags, e))?;
     Ok(Value::Regex(Arc::new(crate::value::RegexValue {
         pattern: pattern.to_string(),
         flags: flags.to_string(),
@@ -2891,10 +3121,18 @@ struct ResolvedBinField {
 
 #[derive(Clone)]
 enum ResolvedBinKind {
-    Uint { bits: u8, endian: Endian },
-    Int { bits: u8, endian: Endian },
+    Uint {
+        bits: u8,
+        endian: Endian,
+    },
+    Int {
+        bits: u8,
+        endian: Endian,
+    },
     /// A non-byte-aligned unsigned bitfield, LSB-first.
-    Bits { bits: u8 },
+    Bits {
+        bits: u8,
+    },
     Bytes(usize),
     Rest,
     Ref(Vec<ResolvedBinField>),
@@ -2903,7 +3141,10 @@ enum ResolvedBinKind {
 /// Resolve a `binstruct`'s flat field list (expanding `Ref` fields recursively)
 /// into a self-contained `Vec<ResolvedBinField>`. Errors on unknown nested refs
 /// or cycles.
-fn resolve_binstruct(name: &str, all: &HashMap<String, Vec<BinField>>) -> Result<Vec<ResolvedBinField>, String> {
+fn resolve_binstruct(
+    name: &str,
+    all: &HashMap<String, Vec<BinField>>,
+) -> Result<Vec<ResolvedBinField>, String> {
     fn resolve_one(
         name: &str,
         all: &HashMap<String, Vec<BinField>>,
@@ -2918,14 +3159,23 @@ fn resolve_binstruct(name: &str, all: &HashMap<String, Vec<BinField>>) -> Result
         let mut out = Vec::with_capacity(fields.len());
         for f in fields {
             let kind = match &f.kind {
-                BinKind::Uint { bits, endian } => ResolvedBinKind::Uint { bits: *bits, endian: *endian },
-                BinKind::Int { bits, endian } => ResolvedBinKind::Int { bits: *bits, endian: *endian },
+                BinKind::Uint { bits, endian } => ResolvedBinKind::Uint {
+                    bits: *bits,
+                    endian: *endian,
+                },
+                BinKind::Int { bits, endian } => ResolvedBinKind::Int {
+                    bits: *bits,
+                    endian: *endian,
+                },
                 BinKind::Bits { bits } => ResolvedBinKind::Bits { bits: *bits },
                 BinKind::Bytes(n) => ResolvedBinKind::Bytes(*n),
                 BinKind::Rest => ResolvedBinKind::Rest,
                 BinKind::Ref(r) => ResolvedBinKind::Ref(resolve_one(r, all, seen)?),
             };
-            out.push(ResolvedBinField { name: f.name.clone(), kind });
+            out.push(ResolvedBinField {
+                name: f.name.clone(),
+                kind,
+            });
         }
         Ok(out)
     }
@@ -3003,7 +3253,11 @@ fn decode_resolved(
     match &f.kind {
         ResolvedBinKind::Rest => {
             let start = off + bit_off / 8;
-            let v = if start >= bytes.len() { Vec::new() } else { bytes[start..].to_vec() };
+            let v = if start >= bytes.len() {
+                Vec::new()
+            } else {
+                bytes[start..].to_vec()
+            };
             Ok((Value::Bytes(Arc::from(v.as_slice())), bytes.len(), 0))
         }
         ResolvedBinKind::Bytes(n) => {
@@ -3011,7 +3265,11 @@ fn decode_resolved(
             if start + n > bytes.len() {
                 return Err(format!("binstruct: field '{}' outruns buffer", f.name));
             }
-            Ok((Value::Bytes(Arc::from(&bytes[start..start + n])), start + n, 0))
+            Ok((
+                Value::Bytes(Arc::from(&bytes[start..start + n])),
+                start + n,
+                0,
+            ))
         }
         ResolvedBinKind::Uint { bits, endian } => {
             let n = (*bits as usize) / 8;
@@ -3021,8 +3279,16 @@ fn decode_resolved(
             }
             let mut acc: u64 = 0;
             match endian {
-                Big => for i in 0..n { acc = (acc << 8) | bytes[start + i] as u64; },
-                Little => for i in 0..n { acc |= (bytes[start + i] as u64) << (8 * i); },
+                Big => {
+                    for i in 0..n {
+                        acc = (acc << 8) | bytes[start + i] as u64;
+                    }
+                }
+                Little => {
+                    for i in 0..n {
+                        acc |= (bytes[start + i] as u64) << (8 * i);
+                    }
+                }
             }
             Ok((Value::Hex(acc), start + n, 0))
         }
@@ -3034,8 +3300,16 @@ fn decode_resolved(
             }
             let mut acc: u64 = 0;
             match endian {
-                Big => for i in 0..n { acc = (acc << 8) | bytes[start + i] as u64; },
-                Little => for i in 0..n { acc |= (bytes[start + i] as u64) << (8 * i); },
+                Big => {
+                    for i in 0..n {
+                        acc = (acc << 8) | bytes[start + i] as u64;
+                    }
+                }
+                Little => {
+                    for i in 0..n {
+                        acc |= (bytes[start + i] as u64) << (8 * i);
+                    }
+                }
             }
             let v = match *bits {
                 8 => bytes[start] as i8 as i64,
@@ -3100,7 +3374,12 @@ fn make_bin_encode_native(name: String, fields: Vec<ResolvedBinField>) -> Value 
             let map = match inner {
                 Value::Struct { fields, .. } => (*fields).clone(),
                 Value::Map(m) => (*m).clone(),
-                other => return Err(format!("encode expects struct/map, got {}", other.type_name())),
+                other => {
+                    return Err(format!(
+                        "encode expects struct/map, got {}",
+                        other.type_name()
+                    ))
+                }
             };
             let mut out: Vec<u8> = Vec::new();
             let mut bit = 0usize;
@@ -3146,7 +3425,9 @@ fn encode_resolved(
                 _ => vec![0u8; *n],
             };
             let mut padded = b;
-            if padded.len() < *n { padded.resize(*n, 0); }
+            if padded.len() < *n {
+                padded.resize(*n, 0);
+            }
             out.extend(padded.into_iter().take(*n));
             Ok(0)
         }
@@ -3154,8 +3435,16 @@ fn encode_resolved(
             let v = val.as_u64().unwrap_or(0);
             let n = (*bits as usize) / 8;
             match endian {
-                Big => for i in (0..n).rev() { out.push(((v >> (8 * i)) & 0xFF) as u8); },
-                Little => for i in 0..n { out.push(((v >> (8 * i)) & 0xFF) as u8); },
+                Big => {
+                    for i in (0..n).rev() {
+                        out.push(((v >> (8 * i)) & 0xFF) as u8);
+                    }
+                }
+                Little => {
+                    for i in 0..n {
+                        out.push(((v >> (8 * i)) & 0xFF) as u8);
+                    }
+                }
             }
             Ok(0)
         }
@@ -3163,8 +3452,16 @@ fn encode_resolved(
             let v = val.as_i64().unwrap_or(0) as u64;
             let n = (*bits as usize) / 8;
             match endian {
-                Big => for i in (0..n).rev() { out.push(((v >> (8 * i)) & 0xFF) as u8); },
-                Little => for i in 0..n { out.push(((v >> (8 * i)) & 0xFF) as u8); },
+                Big => {
+                    for i in (0..n).rev() {
+                        out.push(((v >> (8 * i)) & 0xFF) as u8);
+                    }
+                }
+                Little => {
+                    for i in 0..n {
+                        out.push(((v >> (8 * i)) & 0xFF) as u8);
+                    }
+                }
             }
             Ok(0)
         }
@@ -3192,7 +3489,13 @@ fn encode_resolved(
             let inner_map = match val {
                 Value::Struct { fields, .. } => (*fields).clone(),
                 Value::Map(m) => (*m).clone(),
-                other => return Err(format!("encode: nested field '{}' expects struct, got {}", f.name, other.type_name())),
+                other => {
+                    return Err(format!(
+                        "encode: nested field '{}' expects struct, got {}",
+                        f.name,
+                        other.type_name()
+                    ))
+                }
             };
             let mut bit = bit_off;
             for nf in inner {

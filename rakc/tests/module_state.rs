@@ -84,7 +84,10 @@ fn agree_on(fx: &Fixture, entry: &str) -> Vec<String> {
     }
     match parity {
         rakc::BackendParity::Agree(out) => out,
-        other => panic!("both backends failed on `{}`, so nothing was compared: {:?}", entry, other),
+        other => panic!(
+            "both backends failed on `{}`, so nothing was compared: {:?}",
+            entry, other
+        ),
     }
 }
 
@@ -125,7 +128,10 @@ dump counter.COUNT
             ),
         ],
     );
-    assert_eq!(agree_on(&fx, "main.rak"), vec!["[DUMP] 1", "[DUMP] 2", "[DUMP] 2"]);
+    assert_eq!(
+        agree_on(&fx, "main.rak"),
+        vec!["[DUMP] 1", "[DUMP] 2", "[DUMP] 2"]
+    );
 }
 
 #[test]
@@ -136,11 +142,14 @@ fn a_modules_top_level_mutable_persists_across_a_call_chain() {
     let fx = Fixture::new(
         "chain",
         &[
-            ("bank.rak", r#"
+            (
+                "bank.rak",
+                r#"
 pub let mut BALANCE = 0
 pub fn deposit(n) { BALANCE = BALANCE + n  return BALANCE }
 pub fn report() { return BALANCE }
-"#),
+"#,
+            ),
             (
                 "main.rak",
                 r#"
@@ -236,7 +245,10 @@ dump beta.bb()
             ),
         ],
     );
-    assert_eq!(agree_on(&fx, "main.rak"), vec!["[DUMP] 77", "[DUMP] 77", "[DUMP] 5"]);
+    assert_eq!(
+        agree_on(&fx, "main.rak"),
+        vec!["[DUMP] 77", "[DUMP] 77", "[DUMP] 5"]
+    );
 }
 
 #[test]
@@ -288,7 +300,10 @@ dump read_scale()
     );
     // `read_scale` is a function, so calling it runs the module's own code and
     // reads the private `scale` the importer cannot reach.
-    assert_eq!(agree_on(&fx, "main.rak"), vec!["[DUMP] counter", "[DUMP] 10"]);
+    assert_eq!(
+        agree_on(&fx, "main.rak"),
+        vec!["[DUMP] counter", "[DUMP] 10"]
+    );
 }
 
 #[test]
@@ -371,7 +386,10 @@ fn assigning_through_a_module_writes_through_a_function_argument() {
     let fx = Fixture::new(
         "writearg",
         &[
-            ("bank.rak", "pub let mut TOTAL = 0\npub fn report() { return TOTAL }\n"),
+            (
+                "bank.rak",
+                "pub let mut TOTAL = 0\npub fn report() { return TOTAL }\n",
+            ),
             (
                 "main.rak",
                 r#"
@@ -395,7 +413,10 @@ fn an_exported_let_is_not_assignable_through_the_module() {
     let fx = Fixture::new(
         "immutable",
         &[
-            ("fixed.rak", "pub let NAME = \"orig\"\npub fn get() { return NAME }\n"),
+            (
+                "fixed.rak",
+                "pub let NAME = \"orig\"\npub fn get() { return NAME }\n",
+            ),
             (
                 "main.rak",
                 r#"
@@ -505,9 +526,15 @@ dump peek.peek()
         rakc::BackendParity::AgreeOnError(message) => {
             // If this ever starts passing as agreement, the divergence is closed and
             // this test should become a plain `agree_on`.
-            panic!("the importer-global leak is fixed; convert this to agree_on: {}", message);
+            panic!(
+                "the importer-global leak is fixed; convert this to agree_on: {}",
+                message
+            );
         }
-        rakc::BackendParity::VmOnly { interp_error, vm_output } => {
+        rakc::BackendParity::VmOnly {
+            interp_error,
+            vm_output,
+        } => {
             let lowered = interp_error.to_lowercase();
             assert!(
                 lowered.contains("undefined") || lowered.contains("token"),
@@ -552,7 +579,10 @@ dump scale
         rakc::BackendParity::AgreeOnError(message) => {
             assert!(message.to_lowercase().contains("scale"), "got: {}", message);
         }
-        rakc::BackendParity::DisagreeOnError { interp_error, vm_error } => {
+        rakc::BackendParity::DisagreeOnError {
+            interp_error,
+            vm_error,
+        } => {
             for (name, err) in [("interpreter", &interp_error), ("VM", &vm_error)] {
                 let lowered = err.to_lowercase();
                 assert!(
@@ -580,14 +610,20 @@ fn two_modules_may_export_the_same_name() {
     let fx = Fixture::new(
         "collide",
         &[
-            ("a1.rak", "pub let mut shared = 0
+            (
+                "a1.rak",
+                "pub let mut shared = 0
 pub fn sa() { shared = shared + 1
   return shared }
-"),
-            ("b1.rak", "pub let mut shared = 100
+",
+            ),
+            (
+                "b1.rak",
+                "pub let mut shared = 100
 pub fn sb() { shared = shared + 1
   return shared }
-"),
+",
+            ),
             (
                 "main.rak",
                 r#"
@@ -618,7 +654,10 @@ fn a_re_export_hands_out_a_copy_not_a_second_live_view() {
     let fx = Fixture::new(
         "reexport",
         &[
-            ("inner.rak", "pub let mut V = 0\npub fn bump() { V = V + 1  return V }\n"),
+            (
+                "inner.rak",
+                "pub let mut V = 0\npub fn bump() { V = V + 1  return V }\n",
+            ),
             ("outer.rak", "pub use {bump, V} from inner\n"),
             (
                 "main.rak",
@@ -639,8 +678,14 @@ fn nested_directory_packages_share_one_namespace_in_either_order() {
     let fx = Fixture::new(
         "pkg",
         &[
-            ("pkg/init.rak", "pub let mut TOTAL = 0\npub fn add(n) { TOTAL = TOTAL + n  return TOTAL }\n"),
-            ("pkg/sub.rak", "pub let mut SUBT = 0\npub fn bump() { SUBT = SUBT + 1  return SUBT }\n"),
+            (
+                "pkg/init.rak",
+                "pub let mut TOTAL = 0\npub fn add(n) { TOTAL = TOTAL + n  return TOTAL }\n",
+            ),
+            (
+                "pkg/sub.rak",
+                "pub let mut SUBT = 0\npub fn bump() { SUBT = SUBT + 1  return SUBT }\n",
+            ),
             (
                 "pkg_first.rak",
                 r#"
@@ -711,7 +756,10 @@ fn circular_imports_resolve_on_both_backends() {
     let fx = Fixture::new(
         "cycle",
         &[
-            ("a.rak", "import b\npub let mut AV = 1\npub fn av() { return AV + b.bv() }\n"),
+            (
+                "a.rak",
+                "import b\npub let mut AV = 1\npub fn av() { return AV + b.bv() }\n",
+            ),
             ("b.rak", "import a\npub fn bv() { return a.AV }\n"),
             ("main.rak", "import a\ndump a.av()\n"),
         ],
@@ -765,7 +813,10 @@ dump counter.COUNT
 "#,
         )],
     );
-    assert_eq!(agree_on(&fx, "main.rak"), vec!["[DUMP] 1", "[DUMP] 2", "[DUMP] 2"]);
+    assert_eq!(
+        agree_on(&fx, "main.rak"),
+        vec!["[DUMP] 1", "[DUMP] 2", "[DUMP] 2"]
+    );
 }
 
 #[test]
@@ -793,7 +844,10 @@ m.FIXED = 9
                 msg
             );
         }
-        other => panic!("mod-block mutability is not enforced on both backends: {:?}", other),
+        other => panic!(
+            "mod-block mutability is not enforced on both backends: {:?}",
+            other
+        ),
     }
 }
 
@@ -822,7 +876,10 @@ from counter import COUNT, scale
                 msg
             );
         }
-        other => panic!("importing a private name was accepted or disputed: {:?}", other),
+        other => panic!(
+            "importing a private name was accepted or disputed: {:?}",
+            other
+        ),
     }
 }
 
@@ -841,14 +898,22 @@ fn the_module_state_example_runs_on_both_backends() {
         .join("module_state.rak");
     let source = std::fs::read_to_string(&entry)
         .unwrap_or_else(|e| panic!("read {}: {}", entry.display(), e));
-    let base = entry.parent().expect("example has a parent").to_str().expect("utf-8 path");
+    let base = entry
+        .parent()
+        .expect("example has a parent")
+        .to_str()
+        .expect("utf-8 path");
     let parity = rakc::run_on_both(&source, base);
     if let Some(why) = parity.divergence() {
         panic!("the shipped module example diverges:\n{}", why);
     }
     match parity {
         rakc::BackendParity::Agree(lines) => {
-            assert!(lines.len() >= 15, "the example should exercise every rule, got {} lines", lines.len());
+            assert!(
+                lines.len() >= 15,
+                "the example should exercise every rule, got {} lines",
+                lines.len()
+            );
         }
         other => panic!("the shipped module example failed: {:?}", other),
     }
@@ -894,7 +959,10 @@ dump hidden
         rakc::BackendParity::AgreeOnError(m) => {
             assert!(m.to_lowercase().contains("hidden"), "got: {}", m)
         }
-        rakc::BackendParity::DisagreeOnError { interp_error, vm_error } => {
+        rakc::BackendParity::DisagreeOnError {
+            interp_error,
+            vm_error,
+        } => {
             for (who, e) in [("interpreter", &interp_error), ("VM", &vm_error)] {
                 assert!(
                     e.to_lowercase().contains("hidden"),
@@ -915,16 +983,23 @@ dump hidden
 fn reading_a_private_name_through_the_handle_reports_it() {
     let fx = Fixture::new(
         "readprivate",
-        &[(
-            "p.rak",
-            "pub let PUBV = 1\nlet privv = 2\n",
-        ), ("main.rak", "import p\ndump p.privv\n")],
+        &[
+            ("p.rak", "pub let PUBV = 1\nlet privv = 2\n"),
+            ("main.rak", "import p\ndump p.privv\n"),
+        ],
     );
     match rakc::run_on_both(&fx.source("main.rak"), fx.base()) {
         rakc::BackendParity::AgreeOnError(m) => {
-            assert!(m.contains("privv"), "the message should name the field, got: {}", m)
+            assert!(
+                m.contains("privv"),
+                "the message should name the field, got: {}",
+                m
+            )
         }
-        rakc::BackendParity::DisagreeOnError { interp_error, vm_error } => {
+        rakc::BackendParity::DisagreeOnError {
+            interp_error,
+            vm_error,
+        } => {
             for (who, e) in [("interpreter", &interp_error), ("VM", &vm_error)] {
                 assert!(
                     e.contains("privv"),
@@ -934,7 +1009,10 @@ fn reading_a_private_name_through_the_handle_reports_it() {
                 );
             }
         }
-        other => panic!("reading a private name should not have succeeded: {:?}", other),
+        other => panic!(
+            "reading a private name should not have succeeded: {:?}",
+            other
+        ),
     }
 }
 
@@ -950,11 +1028,23 @@ fn a_misspelled_export_is_reported_rather_than_read_as_nil() {
     );
     match rakc::run_on_both(&fx.source("main.rak"), fx.base()) {
         rakc::BackendParity::AgreeOnError(m) => {
-            assert!(m.contains("COUTN"), "the message should name the field, got: {}", m)
+            assert!(
+                m.contains("COUTN"),
+                "the message should name the field, got: {}",
+                m
+            )
         }
-        rakc::BackendParity::DisagreeOnError { interp_error, vm_error } => {
+        rakc::BackendParity::DisagreeOnError {
+            interp_error,
+            vm_error,
+        } => {
             for (who, e) in [("interpreter", &interp_error), ("VM", &vm_error)] {
-                assert!(e.contains("COUTN"), "expected the {} to name COUTN, got: {}", who, e);
+                assert!(
+                    e.contains("COUTN"),
+                    "expected the {} to name COUTN, got: {}",
+                    who,
+                    e
+                );
             }
         }
         other => panic!("a typo read as a value instead of an error: {:?}", other),
