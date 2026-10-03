@@ -221,7 +221,13 @@ const INTERPRETER_STACK: usize = 64 * 1024 * 1024;
 /// `RUST_MIN_STACK` is not usable here: it only sizes threads that std spawns,
 /// and the interpreter would otherwise run on the main thread, whose stack size
 /// the process cannot change after startup.
-fn run_on_big_stack<T, F>(f: F) -> T
+/// Run `f` on a thread with [`INTERPRETER_STACK`] of stack.
+///
+/// Public because the VM needs it too. `run` used this for the interpreter and left
+/// `vm` on the main thread, so the same recursive program survived `rakc run` and
+/// killed `rakc vm` -- on Windows the main thread's default stack is 1 MiB against
+/// the 64 MiB used here.
+pub fn run_on_big_stack<T, F>(f: F) -> T
 where
     F: FnOnce() -> T + Send + 'static,
     T: Send + 'static,
@@ -470,12 +476,21 @@ pub fn eval_cli(source: &str, argv: &[String]) -> Result<(Vec<String>, i32)> {
 
 /// CLI variant of `eval_in`: resolves imports against `base_dir` and runs a
 /// `fn main(args)` if present, returning `(output, exit_code)`.
-pub fn eval_in_cli(source: &str, base_dir: &str, argv: &[String]) -> Result<(Vec<String>, i32)> {
+pub fn eval_in_cli(
+    source: &str,
+    base_dir: &str,
+    argv: &[String],
+    max_depth: Option<u32>,
+) -> Result<(Vec<String>, i32)> {
     let src = source.to_string();
     let dir = base_dir.to_string();
     let args = argv.to_vec();
     run_on_big_stack(move || {
         let mut interpreter = interpreter::Interpreter::with_base_dir(dir);
+        // A default the library does not impose, because a CLI running someone
+        // else's script should not be able to die by exhausting the native stack.
+        // See `DEFAULT_MAX_DEPTH`: the check already existed and simply never fired.
+        interpreter.set_max_depth(max_depth.unwrap_or(interpreter::DEFAULT_MAX_DEPTH));
         let output = interpreter.run_source(&src)?;
         let code = interpreter.run_main(&args);
         Ok((output, code))

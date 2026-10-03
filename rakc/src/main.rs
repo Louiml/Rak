@@ -34,6 +34,8 @@ fn print_usage() {
     eprintln!("  parse <file>   Parse and print AST");
     eprintln!("  test [file]    Run Rak tests (--filter NAME, --verbose)");
     eprintln!("  version        Print version");
+    eprintln!("
+Limits (run/vm): --max-depth N   cap function-call recursion (default 256)");
     eprintln!();
     eprintln!("Use - for file to read from stdin");
     eprintln!();
@@ -609,7 +611,12 @@ fn main() {
     while i < args.len() {
         if args[i].starts_with('-') {
             flag_slots.insert(i);
-            if args[i] == "--allow" || args[i] == "-A" {
+            // A flag whose value is the next argument. Without listing it here the
+            // flag is stripped and its value is left behind as a stray script
+            // argument -- which is exactly what happened to `--max-depth`: the
+            // scanner removed the flag, `parse_cli` never saw it, and the number
+            // was handed to the program instead.
+            if args[i] == "--allow" || args[i] == "-A" || args[i] == "--max-depth" {
                 i += 1;
                 if i < args.len() {
                     flag_slots.insert(i);
@@ -618,6 +625,24 @@ fn main() {
         }
         i += 1;
     }
+    // Read `--max-depth` straight out of `args`, here, rather than out of
+    // `script_args` further down.
+    //
+    // The scanner above has already removed the flag and its value from
+    // `script_args`, which is where `parse_cli` looks -- so anything parsed from
+    // there can never see a flag written after the filename, which is the order the
+    // usage text documents. Parsing from `args` covers both orders, since this loop
+    // scans the whole thing.
+    let mut max_depth_override: Option<u32> = None;
+    for w in args.windows(2) {
+        if w[0] == "--max-depth" {
+            match w[1].parse::<u32>() {
+                Ok(d) if d > 0 => max_depth_override = Some(d),
+                _ => eprintln!("--max-depth needs a positive number, e.g. --max-depth 512"),
+            }
+        }
+    }
+
     let file_index = match (2..args.len()).find(|i| !flag_slots.contains(i)) {
         Some(i) => i,
         None => {
@@ -639,7 +664,9 @@ fn main() {
         .collect();
 
     // Sandbox flags: --sandbox [--allow csv]. Stripped from script argv.
-    let (sandbox_on, sandbox_allow, clean_args) = rakc::caps::parse_cli(&script_args);
+    let (sandbox_on, sandbox_allow, parsed_depth, clean_args) =
+            rakc::caps::parse_cli(&script_args);
+    let max_depth = max_depth_override.or(parsed_depth);
     if sandbox_on {
         rakc::caps::enable(&sandbox_allow);
         eprintln!("sandbox: active (allow: {})", if sandbox_allow.is_empty() { "none".to_string() } else { sandbox_allow.clone() });
@@ -653,7 +680,7 @@ fn main() {
                 #[cfg(feature = "gui")]
                 let result = rakc::gui::eval_in_cli_with_gui(&source, &base_dir, &script_args);
                 #[cfg(not(feature = "gui"))]
-                let result = rakc::eval_in_cli(&source, &base_dir, &script_args);
+                let result = rakc::eval_in_cli(&source, &base_dir, &script_args, max_depth);
                 match result {
                     Ok((output, code)) => {
                         for line in &output {
@@ -808,8 +835,24 @@ fn main() {
                         Ok(ast) => {
                             match rakc::compiler::compile_module_in(&ast, &base_dir) {
                                 Ok(chunk) => {
-                                    let mut vm = rakc::vm::Vm::new();
-                                    match vm.run(&chunk) {
+                                    // On the big stack, like the interpreter.
+                                    //
+                                    // `run` has always used `run_on_big_stack` and
+                                    // `vm` has always run on the main thread, which on
+                                    // Windows defaults to 1 MiB. That made the same
+                                    // recursive program survive `rakc run` and abort
+                                    // `rakc vm` -- not a VM frame cost difference, a
+                                    // stack size difference, and it fired before the
+                                    // depth guard could turn it into an error.
+                                    let md = max_depth;
+                                    let outcome = rakc::run_on_big_stack(move || {
+                                        let mut vm = rakc::vm::Vm::new();
+                                        if let Some(d) = md {
+                                            vm.set_max_call_depth(d);
+                                        }
+                                        vm.run(&chunk)
+                                    });
+                                    match outcome {
                                         Ok(out) => {
                                             for line in &out {
                                                 println!("{}", line);

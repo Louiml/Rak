@@ -907,6 +907,21 @@ pub struct UnsafeSite {
 }
 
 /// Resource ceilings for bounded execution. Each `None` field is unlimited.
+/// Default function-call depth for the command line.
+///
+/// **Measured, not guessed.** `run_on_big_stack` gives the interpreter a 64 MiB
+/// stack, and on that stack `down(300)` completes while `down(400)` kills the
+/// process with `STATUS_STACK_OVERFLOW` -- about 200 KB of native stack per Rak
+/// frame. So the ceiling has to sit well under 400, and 256 is what `rakc verify`
+/// already used.
+///
+/// The 200 KB per frame is the more interesting problem and is not fixed here: it
+/// suggests one very large stack frame somewhere in the call path, and shrinking it
+/// would raise the depth this limit has to clamp at. Worth a separate look.
+///
+/// Override per run with `--max-depth N` on `run` and `vm`.
+pub const DEFAULT_MAX_DEPTH: u32 = 256;
+
 #[derive(Debug, Clone, Default)]
 pub struct Limits {
     /// Maximum statements before the run is declared inconclusive. Guards
@@ -1053,6 +1068,15 @@ impl Interpreter {
     }
 
     /// The `unsafe` blocks actually entered during this run, in order.
+    /// Cap function-call nesting at `depth`.
+    ///
+    /// A setter rather than a public field because `limits` is internal
+    /// accounting; a caller that wants a limit should not also be able to clear the
+    /// step and iteration budgets by accident.
+    pub fn set_max_depth(&mut self, depth: u32) {
+        self.limits.max_depth = Some(depth);
+    }
+
     pub fn unsafe_sites(&self) -> &[UnsafeSite] {
         &self.unsafe_sites
     }

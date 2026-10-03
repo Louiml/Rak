@@ -219,6 +219,13 @@ pub struct Vm {
     /// is published under)`. Built once from `Chunk::module_cells` before the
     /// first instruction runs, so `Op::StoreGlobal` costs one hash lookup and
     /// nothing at all for a global no module exports.
+    /// Current function-call nesting depth. Checked on every closure call.
+    ///
+    /// Not paranoia: without it `fn down(n) { 1 + down(n-1) }` kills the process at
+    /// a few thousand frames, on both backends, with no diagnostic.
+    call_depth: u32,
+    /// Ceiling for `call_depth`. See `interpreter::DEFAULT_MAX_DEPTH`.
+    max_call_depth: u32,
     module_publish: HashMap<String, Vec<(String, String)>>,
 }
 
@@ -460,7 +467,9 @@ impl Vm {
             debug_step: false,
             debug_handler: None,
             debug_callstack: Vec::new(),
-            module_publish: HashMap::new(),
+            call_depth: 0,
+        max_call_depth: crate::interpreter::DEFAULT_MAX_DEPTH,
+        module_publish: HashMap::new(),
         };
         vm.register_natives();
         vm
@@ -2530,6 +2539,23 @@ impl Vm {
                 frame.push(result);
             }
             Value::Closure { code, nparams, name } => {
+                    // The VM had no depth accounting, so recursive Rak exhausted the
+                    // native Rust stack exactly as the interpreter did --
+                    // `exec_frame` recurses through `call_value` -- and the release
+                    // profile's `panic = "abort"` left no diagnostic. Counting here
+                    // and decrementing on both exit paths turns a process that
+                    // vanishes into an error naming the limit.
+                    self.call_depth += 1;
+                    if self.call_depth > self.max_call_depth {
+                        self.call_depth -= 1;
+                        return Err(format!(
+                            "call depth exceeded {}; recursion is deeper than the limit. \
+                             raise it with --max-depth if that is intentional -- but note \
+                             the stack is finite, so a limit far above {} will exhaust it \
+                             rather than report this.",
+                            self.max_call_depth, self.max_call_depth
+                        ));
+                    }
                 if self.debug_enabled {
                     self.debug_callstack.push(name.to_string());
                 }
@@ -2547,7 +2573,11 @@ impl Vm {
                 for i in 0..nparams {
                     sub.locals.push(args.get(i).cloned().unwrap_or(Value::Nil));
                 }
-                self.exec_frame(&mut sub)?;
+                let stepped = self.exec_frame(&mut sub);
+                // Decrement on the error path too, or one failed deep call would
+                // poison the count for the rest of the run.
+                self.call_depth -= 1;
+                stepped?;
                 if self.debug_enabled {
                     self.debug_callstack.pop();
                 }
@@ -2556,6 +2586,11 @@ impl Vm {
             _ => return Err("cannot call non-function".to_string()),
         }
         Ok(())
+    }
+
+    /// Raise or lower the call-depth ceiling.
+    pub fn set_max_call_depth(&mut self, depth: u32) {
+        self.max_call_depth = depth;
     }
 
     /// Run an iterator builtin whose per-element step calls a Rak function

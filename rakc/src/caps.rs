@@ -170,11 +170,16 @@ pub fn check_builtin(name: &str) -> crate::Result<()> {
     check_str(name).map_err(crate::RakError::Runtime)
 }
 
-/// Parse `--sandbox` / `--allow <csv>` out of trailing CLI args, returning
-/// `(sandbox_enabled, allow_csv, remaining_args)`.
-pub fn parse_cli(rest: &[String]) -> (bool, String, Vec<String>) {
+/// Parse `--sandbox` / `--allow <csv>` / `--max-depth N` out of trailing CLI
+/// args, returning `(sandbox_enabled, allow_csv, max_depth, remaining_args)`.
+///
+/// `--max-depth` lives here rather than in `main` for one reason: this function is
+/// what removes flags from the script's own argv, so a depth flag parsed anywhere
+/// else would be handed to the program.
+pub fn parse_cli(rest: &[String]) -> (bool, String, Option<u32>, Vec<String>) {
     let mut on = false;
     let mut allow = String::new();
+    let mut max_depth: Option<u32> = None;
     let mut clean = Vec::new();
     let mut i = 0;
     while i < rest.len() {
@@ -186,11 +191,20 @@ pub fn parse_cli(rest: &[String]) -> (bool, String, Vec<String>) {
                     allow = v.clone();
                 }
             }
+            "--max-depth" => {
+                i += 1;
+                match rest.get(i).and_then(|v| v.parse::<u32>().ok()) {
+                    Some(d) if d > 0 => max_depth = Some(d),
+                    _ => eprintln!(
+                        "--max-depth needs a positive number, e.g. --max-depth 512"
+                    ),
+                }
+            }
             other => clean.push(other.to_string()),
         }
         i += 1;
     }
-    (on, allow, clean)
+    (on, allow, max_depth, clean)
 }
 
 /// List the recognized sandbox capabilities (for `--help` text).
@@ -241,7 +255,7 @@ mod tests {
             "net,ffi".to_string(),
             "world".to_string(),
         ];
-        let (on, allow, clean) = parse_cli(&args);
+        let (on, allow, _depth, clean) = parse_cli(&args);
         assert!(on);
         assert_eq!(allow, "net,ffi");
         assert_eq!(clean, vec!["hello".to_string(), "world".to_string()]);
