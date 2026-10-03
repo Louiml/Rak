@@ -64,6 +64,9 @@ const BUILTINS: &[&str] = &[
     // `file_read`/`write` are UTF-8, so these are the only way to open a binary
     // file; `bytes` builds a buffer from numbers.
     "file_read_bytes", "file_write_bytes", "file_append_bytes", "bytes",
+    // Contextual escaping. See docs/content/safety.md: each one reduces an
+    // injection, and each has a structural alternative that is better.
+    "sql_escape", "shell_escape", "html_escape", "regex_escape",
     // --- raw packet forging (0.7) ---
     "net_raw_csum", "net_raw_ipv4", "net_raw_tcp", "net_raw_udp", "net_raw_tcp_syn",
     "net_raw_send", "net_raw_recv",

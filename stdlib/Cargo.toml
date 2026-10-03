@@ -40,6 +40,12 @@ serde_json = "1.0"
 flate2 = "1.0"
 zip = { version = "0.6", default-features = false, features = ["deflate"] }
 
+[dev-dependencies]
+# Only for testing `regex_escape`: the property that matters is that the escaped
+# form matches itself and not "abc" for "a.c*", which is a claim about the regex
+# engine rather than about strings.
+regex = "1"
+
 [features]
 default = []
 # PCAP live/offline capture needs libpcap (Linux) / Npcap (Windows) installed.

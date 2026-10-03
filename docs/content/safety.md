@@ -177,7 +177,94 @@ let masked = ct_select(choice, a, b)   // branchless select
 `rakc lint` flags `==` between secret-looking names, but it cannot see that a
 value came from a computation.
 
-### Zeroization
+### Deprecated primitives
+
+`md5()`, `sha1()`, `rot13()` and `xor()` still work. They are **deprecated**: calling
+one prints a warning on stderr, once per primitive per run.
+
+```console
+$ rakc run tool.rak
+rak: warning: `md5` is deprecated: it is broken for anything adversarial. Use
+`sha256` unless you are analysing data that uses it, in which case suppress this
+with unsafe { "md5 is the subject of this analysis" { md5() } }
+```
+
+Deprecation rather than removal is deliberate. Rak exists to analyse things, and
+analysing a legacy protocol or a collision sample means calling the broken primitive
+on purpose. Removing `md5` would make Rak unable to do the job it is for, while a
+warning plus the `weak-crypto` lint tells you when you did not mean to.
+
+The warning goes to **stderr**, once per primitive, so a digest inside a loop does
+not bury the output and a pipeline reading stdout is unaffected.
+
+The supported primitives are `sha256`, `sha512`, `hmac_sha256`, `aes_gcm_encrypt`,
+`chacha20poly1305`, `ed25519_sign`, `x25519_*`, `hkdf_derive`, `rsa_*` and `p256_*`.
+
+## Escaping untrusted data
+
+Four helpers, one per context. Each is the *fallback*, not the recommendation — the
+table below says what to use instead, and the structural option is always better.
+
+| Helper | For | Use this instead |
+| --- | --- | --- |
+| `sql_escape(s)` | a value inside a `'...'` SQL literal | a parameterised query |
+| `shell_escape(s)` | one `argv` entry for a POSIX shell | `exec` with an argv array |
+| `html_escape(s)` | element text or a quoted attribute | the template layer's escaping |
+| `regex_escape(s)` | a string that must match itself | `contains` / `index_of` |
+
+```rak
+let hostile = "x'; DROP TABLE users; --"
+dump sql_escape(hostile)      // x''; DROP TABLE users; --
+dump shell_escape("$(id)")    // '$(id)'
+dump html_escape("<b>")       // &lt;b&gt;
+dump regex_escape("a.c*")     // a\.c\*
+```
+
+Notes on what each one does *not* do:
+
+* `sql_escape` does not add quotes. It escapes a value for inside a literal you have
+  already opened, because a function that added its own quotes would produce
+  `"it''s"` inside `'...'` — a syntax error at best.
+* `shell_escape` is safe for *passing* an argument. It is not safe for printing
+  something for a human to retype, which is a different problem.
+* `html_escape` escapes `'` as `&#x27;` rather than `&apos;`, so the output is safe
+  in a single-quoted attribute and decodes in XHTML.
+
+### The lint that goes with them
+
+`unescaped-interpolation` fires when an f-string builds a SQL or shell command
+around a value no `*_escape` call wraps:
+
+```rak
+let q = f"SELECT * FROM users WHERE id = {uid}"
+// warning[unescaped-interpolation]: an f-string building a sql command
+// interpolates a value that is not wrapped in `sql_escape`
+
+let q = f"SELECT * FROM users WHERE id = {sql_escape(uid)}"   // silent
+```
+
+The judgement is on the template, not the value: the same line is an injection with
+untrusted input and correct with trusted input, and only the template says which
+context the value is landing in. One finding is reported per f-string however many
+holes it has.
+
+## Bounded decompression
+
+`gunzip`, `inflate` and `zip_extract` refuse to produce more than
+**100 MiB**, and say so:
+
+```console
+$ rakc run tool.rak
+Error: Runtime error: gunzip: output exceeds the 104857600-byte limit; this looks
+like a decompression bomb rather than a 8174-byte input
+```
+
+A deflate stream can expand by a factor of a thousand, so a few dozen bytes from an
+untrusted source could otherwise exhaust memory. The bound is enforced *while*
+reading, because the allocation is the damage: checking the length afterwards would
+be measuring a heap that is already too big.
+
+## Zeroization
 
 `Vec::clear` and `drop` free memory without overwriting it, so a key in a heap
 buffer survives in freed pages until something reuses them.

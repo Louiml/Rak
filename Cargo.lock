@@ -3747,6 +3747,7 @@ dependencies = [
  "p256",
  "pcap",
  "rand 0.8.8",
+ "regex",
  "rsa",
  "scraper",
  "serde_json",

@@ -4897,8 +4897,35 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                 let v = args.first().cloned().unwrap_or(Value::Nil);
                 Ok(provenance_to_map(&v))
             }
-            "md5" => Ok(Value::String(rak_stdlib::md5(&self.val_to_bytes(args.first())?))),
-            "sha1" => Ok(Value::String(rak_stdlib::sha1(&self.val_to_bytes(args.first())?))),
+            "md5" => {
+                rak_stdlib::escape::warn_weak_crypto(
+                    "md5",
+                    "it is broken for anything adversarial",
+                    "sha256",
+                );
+                Ok(Value::String(rak_stdlib::md5(&self.val_to_bytes(args.first())?)))
+            }
+            "sha1" => {
+                rak_stdlib::escape::warn_weak_crypto(
+                    "sha1",
+                    "it is broken for collision resistance",
+                    "sha256",
+                );
+                Ok(Value::String(rak_stdlib::sha1(&self.val_to_bytes(args.first())?)))
+            }
+            "sql_escape" => Ok(Value::String(rak_stdlib::escape::sql_escape(
+                &self.val_to_string(args.first())?,
+            ))),
+            "shell_escape" => Ok(Value::String(rak_stdlib::escape::shell_escape(
+                &self.val_to_string(args.first())?,
+            ))),
+            "html_escape" => Ok(Value::String(rak_stdlib::escape::html_escape(
+                &self.val_to_string(args.first())?,
+            ))),
+            "regex_escape" => Ok(Value::String(rak_stdlib::escape::regex_escape(
+                &self.val_to_string(args.first())?,
+            ))),
+
             "sha256" => Ok(Value::String(rak_stdlib::sha256(&self.val_to_bytes(args.first())?))),
             "hmac_sha256" => Ok(Value::String(rak_stdlib::hmac_sha256(&self.val_to_bytes(args.first())?, &self.val_to_bytes(args.get(1))?))),
             "aes_gcm_encrypt" => {

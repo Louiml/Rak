@@ -628,12 +628,44 @@ impl Vm {
         self.insert_native("upper", |args| Ok(Value::String(Arc::from(native_str(args.first()).to_uppercase().as_str()))));
         self.insert_native("lower", |args| Ok(Value::String(Arc::from(native_str(args.first()).to_lowercase().as_str()))));
         self.insert_native("md5", |args| {
+            rak_stdlib::escape::warn_weak_crypto(
+                "md5",
+                "it is broken for anything adversarial",
+                "sha256",
+            );
             let data = native_bytes(args.first());
             Ok(Value::String(Arc::from(rak_stdlib::md5(&data).as_str())))
         });
         self.insert_native("sha1", |args| {
+            rak_stdlib::escape::warn_weak_crypto(
+                "sha1",
+                "it is broken for collision resistance",
+                "sha256",
+            );
             let data = native_bytes(args.first());
             Ok(Value::String(Arc::from(rak_stdlib::sha1(&data).as_str())))
+        });
+        // Contextual escaping. See docs/content/safety.md: each reduces an
+        // injection, and each has a structural alternative that is better.
+        self.insert_native("sql_escape", |args| {
+            Ok(Value::String(Arc::from(
+                rak_stdlib::escape::sql_escape(&native_str(args.first())).as_str(),
+            )))
+        });
+        self.insert_native("shell_escape", |args| {
+            Ok(Value::String(Arc::from(
+                rak_stdlib::escape::shell_escape(&native_str(args.first())).as_str(),
+            )))
+        });
+        self.insert_native("html_escape", |args| {
+            Ok(Value::String(Arc::from(
+                rak_stdlib::escape::html_escape(&native_str(args.first())).as_str(),
+            )))
+        });
+        self.insert_native("regex_escape", |args| {
+            Ok(Value::String(Arc::from(
+                rak_stdlib::escape::regex_escape(&native_str(args.first())).as_str(),
+            )))
         });
         self.insert_native("sha256", |args| {
             let data = native_bytes(args.first());

@@ -18,6 +18,9 @@
 //!   script under `--sandbox` without `ffi`.
 //! - `insecure-transport` — a WebSocket or plain TCP connection that carries
 //!   no TLS.
+//! - `unescaped-interpolation` — an f-string that builds a SQL or shell
+//!   command while interpolating a value that no `*_escape` call wraps. The value
+//!   lands in the wrong syntactic position, which is what injection is.
 //!
 //! Advisory by default (exit 0). `--deny` exits 1 when any warning fires, for
 //! CI use. Names starting with `_` silence `unused-var`. A secret-shaped name
@@ -466,7 +469,59 @@ impl Linter {
 
     /// True when an expression plausibly yields a secret: a secret-named
     /// identifier, or a call to one of the key-producing builtins.
-    fn looks_secret_expr(e: &Expr) -> bool {
+    /// Does the template read like a SQL statement?
+///
+/// Keyword matching, deliberately crude. It does not try to parse SQL: the goal is
+/// to notice `f"SELECT ... WHERE id = {x}"`, and every attempt to be cleverer gives
+/// either misses or false positives on prose that merely mentions "select".
+fn looks_like_sql(template: &str) -> bool {
+    if !template.contains('{') {
+        return false;
+    }
+    let lower = template.to_ascii_lowercase();
+    const WORDS: &[&str] = &[
+        "select ", "insert into", "update ", "delete from", " where ", " from ",
+        "values (", "order by", "union select", "drop table",
+    ];
+    WORDS.iter().any(|w| lower.contains(w))
+}
+
+/// Does the template read like a shell command?
+fn looks_like_shell(template: &str) -> bool {
+    if !template.contains('{') {
+        return false;
+    }
+    // A command word at the start. `curl` is the case worth catching: a URL or a
+    // header built into one is the common way untrusted input reaches a shell.
+    let trimmed = template.trim_start();
+    const COMMANDS: &[&str] = &[
+        "curl ", "wget ", "ssh ", "scp ", "bash ", "sh -c", "eval ", "sudo ",
+        "rm ", "cat ", "grep ", "ping ", "nc ",
+    ];
+    COMMANDS.iter().any(|c| trimmed.starts_with(c))
+}
+
+/// Is this expression already wrapped in one of the `*_escape` calls?
+fn is_wrapped_in_escape(e: &Expr) -> bool {
+    match e {
+        Expr::Call { callee, args, .. } => {
+            let escaped = match callee.as_ref() {
+                Expr::Ident(n) => n.ends_with("_escape"),
+                _ => false,
+            };
+            // Either the interpolated value is the escape call itself, or the
+            // transform happened underneath: `f"{trim(sql_escape(x))}"` is safe.
+            escaped || args.iter().any(|a| Self::is_wrapped_in_escape(a))
+        }
+        // A field access or a unary op on an escaped value still counts, because
+        // the transform already happened underneath it.
+        Expr::FieldAccess(obj, _) => Self::is_wrapped_in_escape(obj),
+        Expr::Unary(_, inner) => Self::is_wrapped_in_escape(inner),
+        _ => false,
+    }
+}
+
+fn looks_secret_expr(e: &Expr) -> bool {
         match e {
             Expr::Ident(n) => Self::is_secret_name(n),
             Expr::FieldAccess(o, f) => Self::is_secret_name(f) || Self::looks_secret_expr(o),
@@ -593,12 +648,60 @@ impl Linter {
           }
       }
 
+    /// Flag an f-string that assembles a SQL statement or a shell command from a
+    /// value that no `*_escape` call wraps.
+    ///
+    /// The judgement is on the *template*, not the value: the same
+    /// `f"SELECT * FROM t WHERE id = {uid}"` is an injection with an untrusted
+    /// `uid` and correct code with a trusted one, and only the template tells the
+    /// linter which context it is building. Where a value is wrapped in
+    /// `sql_escape` or `shell_escape` there is nothing to report, because the
+    /// correct transformation is present.
+    ///
+    /// Deliberately advisory. Escaping is the wrong tool, and this rule cannot
+    /// tell a programmer who has no better option from one who has not thought
+    /// about it, so it reports what it saw and leaves `--deny` to decide.
+    fn check_interp(&mut self, template: &str, parts: &[Expr]) {
+        let context = if Self::looks_like_sql(template) {
+            Some("sql")
+        } else if Self::looks_like_shell(template) {
+            Some("shell")
+        } else {
+            None
+        };
+        let Some(context) = context else { return };
+        let escape_for = if context == "sql" { "sql_escape" } else { "shell_escape" };
+
+        for part in parts {
+            if Self::is_wrapped_in_escape(part) {
+                continue;
+            }
+            self.findings.push(LintFinding {
+                rule: "unescaped-interpolation",
+                message: format!(
+                    "an f-string building a {context} command interpolates a value that \
+                     is not wrapped in `{escape_for}`: \"{}\"",
+                    template.trim()
+                ),
+            });
+            // One finding per f-string however many holes it has: the fix is the
+            // same for all of them, and five copies of it is five times the noise.
+            return;
+        }
+    }
+
     fn expr(&mut self, e: &Expr) {
         match e {
             // String literals used to fall through the `_ => {}` arm, so the
             // linter never looked at a single byte of user text. Every
             // security rule below depends on this arm existing.
             Expr::String(s) => self.check_string_literal(s),
+            Expr::Interp { template, parts } => {
+                self.check_interp(template, parts);
+                for p in parts {
+                    self.expr(p);
+                }
+            }
             Expr::Ident(n) => {
                 self.reads.insert(n.clone());
             }
@@ -1042,4 +1145,123 @@ mod tests {
         let out = format_audit("x.rak", &[]);
         assert!(out.contains("nothing to review"), "{}", out);
     }
+
+    // ---- unescaped-interpolation ------------------------------------
+
+    fn findings_for(src: &str) -> Vec<String> {
+        lint_source(src)
+            .unwrap_or_else(|e| panic!("lint should have parsed {:?}: {}", src, e))
+            .into_iter()
+            .map(|f| f.rule.to_string())
+            .collect()
+    }
+
+    #[test]
+    fn flags_a_sql_fstring_with_an_unescaped_value() {
+        let rules = findings_for(r#"let q = f"SELECT * FROM t WHERE id = {uid}""#);
+        assert!(
+            rules.iter().any(|r| r == "unescaped-interpolation"),
+            "expected the rule, got {:?}",
+            rules
+        );
+    }
+
+    #[test]
+    fn flags_a_shell_fstring_with_an_unescaped_value() {
+        let rules = findings_for(r#"let c = f"curl http://{host}/a""#);
+        assert!(
+            rules.iter().any(|r| r == "unescaped-interpolation"),
+            "expected the rule, got {:?}",
+            rules
+        );
+    }
+
+    #[test]
+    fn quiet_when_the_value_is_wrapped_in_the_right_escape() {
+        let rules = findings_for(r#"let q = f"SELECT * FROM t WHERE id = {sql_escape(uid)}""#);
+        assert!(
+            !rules.iter().any(|r| r == "unescaped-interpolation"),
+            "sql_escape is the mitigation, so this should be silent: {:?}",
+            rules
+        );
+    }
+
+    #[test]
+    fn quiet_when_the_escape_is_applied_underneath_the_interpolation() {
+        // `f"{trim(sql_escape(x))}"` has the transform in it, just not at the top.
+        let rules = findings_for(r#"let q = f"SELECT * FROM t WHERE id = {trim(sql_escape(uid))}""#);
+        assert!(
+            !rules.iter().any(|r| r == "unescaped-interpolation"),
+            "the transform happened underneath: {:?}",
+            rules
+        );
+    }
+
+    #[test]
+    fn quiet_on_an_fstring_with_no_sql_or_shell_context() {
+        // The rule is about the context the value lands in, not about f-strings.
+        let rules = findings_for(r#"let msg = f"hello {uid} there""#);
+        assert!(
+            !rules.iter().any(|r| r == "unescaped-interpolation"),
+            "prose is not a command: {:?}",
+            rules
+        );
+    }
+
+    #[test]
+    fn quiet_on_a_plain_string_containing_sql_words_but_no_interpolation() {
+        let rules = findings_for(r#"let doc = "SELECT * FROM t WHERE id = ?""#);
+        assert!(
+            !rules.iter().any(|r| r == "unescaped-interpolation"),
+            "a literal has no hole to inject through: {:?}",
+            rules
+        );
+    }
+
+    #[test]
+    fn one_finding_per_fstring_however_many_holes() {
+        let rules = findings_for(r#"let q = f"SELECT {a} FROM t WHERE b = {c} AND d = {e}""#);
+        assert_eq!(
+            rules.iter().filter(|r| *r == "unescaped-interpolation").count(),
+            1,
+            "five copies of the same fix is five times the noise: {:?}",
+            rules
+        );
+    }
+
+    #[test]
+    fn flags_the_usual_injection_shapes() {
+        for src in [
+            r#"let q = f"INSERT INTO t VALUES ({v})""#,
+            r#"let q = f"DELETE FROM t WHERE id = {v}""#,
+            r#"let q = f"UPDATE t SET a = {v} WHERE id = {w}""#,
+            r#"let q = f"SELECT * FROM t UNION SELECT {v}""#,
+        ] {
+            let rules = findings_for(src);
+            assert!(
+                rules.iter().any(|r| r == "unescaped-interpolation"),
+                "expected the rule for {:?}, got {:?}",
+                src,
+                rules
+            );
+        }
+    }
+
+    #[test]
+    fn flags_shell_commands_beyond_curl() {
+        for src in [
+            r#"let c = f"ssh {host} ls""#,
+            r#"let c = f"rm -rf {path}""#,
+            r#"let c = f"bash -c {script}""#,
+        ] {
+            let rules = findings_for(src);
+            assert!(
+                rules.iter().any(|r| r == "unescaped-interpolation"),
+                "expected the rule for {:?}, got {:?}",
+                src,
+                rules
+            );
+        }
+    }
+
 }

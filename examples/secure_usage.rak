@@ -1,0 +1,131 @@
+//! Secure usage, demonstrated rather than described.
+//!
+//! Run with either backend; the output must match:
+//!
+//! ```text
+//! rakc run examples/secure_usage.rak
+//! rakc vm  examples/secure_usage.rak
+//! ```
+//!
+//! This is the counterpart to `docs/content/safety.md`. That document says what is
+//! enforced; this shows what the result looks like when a script is written with
+//! the enforcement in mind.
+
+// ---------------------------------------------------------------------------
+// 1. Constant-time comparison for secrets
+// ---------------------------------------------------------------------------
+// `==` on two secrets leaks the length of their common prefix through its exit
+// timing. `ct_eq` does not: it compares every byte regardless. Use it for anything
+// derived from a credential -- API keys, tokens, HMACs, password hashes.
+
+fn constant_time_is_the_rule() {
+  let presented = "s3cr3t-token-value"
+  let expected = "s3cr3t-token-value"
+  // Both of these are correct; only the first is safe against a timing oracle.
+  let naive = presented == expected
+  let safe = ct_eq(presented, expected)
+  dump ["ct_eq agrees", safe]
+  dump ["naive also agrees here", naive]
+}
+
+// ---------------------------------------------------------------------------
+// 2. Credentials come from the environment, never from a literal
+// ---------------------------------------------------------------------------
+// A literal credential in source is in every clone, every CI log, and every
+// screenshot of the file. `secret_get` reads from the OS keychain or the
+// environment, and the `hardcoded-secret` lint flags the literal case.
+
+fn credentials_are_not_literals() {
+  // This is what the lint flags:
+  //   let API_KEY = "AKIAIOSFODNN7EXAMPLE"
+  //
+  // This is what it should be:
+  let token = secret_get("RAK_DEMO_TOKEN")
+  if token == nil {
+    print("set RAK_DEMO_TOKEN to run the secret section")
+    return nil
+  }
+  // Even holding a secret, compare it without timing:
+  let ok = ct_eq(token, "whatever-you-expected")
+  dump ["compared without timing", ok]
+  return nil
+}
+
+// ---------------------------------------------------------------------------
+// 3. Escaping untrusted data before it reaches a command
+// ---------------------------------------------------------------------------
+// `sql_escape`, `shell_escape`, `html_escape` and `regex_escape` each reduce an
+// injection in one context. Each has a structural alternative that is better --
+// a parameterised query, an argv array, a real template -- but escaping is what
+// most code reaches for, so it has to be correct when it does.
+//
+// `rakc lint` reports `unescaped-interpolation` when an f-string builds a SQL or
+// shell command around a value that no `*_escape` call wraps.
+
+fn escaping_is_contextual() {
+  let hostile = "x'; DROP TABLE users; --"
+  // SQL: the quote is doubled, so the literal cannot be closed.
+  dump ["sql", sql_escape(hostile)]
+  // Shell: single-quoted, so nothing inside is interpreted.
+  dump ["shell", shell_escape("$(whoami)")]
+  // HTML: the markup characters become entities.
+  dump ["html", html_escape("<img src=x onerror=alert(1)>")]
+  // Regex: the metacharacters are escaped, so it matches itself and nothing else.
+  dump ["regex", regex_escape("a.c*")]
+  return nil
+}
+
+// ---------------------------------------------------------------------------
+// 4. Decompression is bounded
+// ---------------------------------------------------------------------------
+// A 40-byte gzip can expand to a gigabyte. `gzip_decompress` refuses to exceed
+// `MAX_DECOMPRESS` (100 MiB) and says why, rather than letting the allocation
+// happen and hoping the process survives.
+
+fn decompression_is_bounded() {
+  // A bomb: highly compressible, tiny on the wire, enormous expanded. `gzip` takes
+  // a compression level; `gunzip` is its inverse and refuses anything over
+  // MAX_DECOMPRESS (100 MiB), saying so rather than attempting the allocation.
+  let zeros = bytes(repeat(0, 4096))
+  let packed = gzip(zeros, 6)
+  dump ["4 KiB of zeroes compressed to", len(packed), "bytes"]
+  dump ["and gunzip gives back", len(gunzip(packed)), "bytes"]
+
+  // `gunzip` refuses output over MAX_DECOMPRESS (100 MiB). Constructing an input
+  // that actually trips it means materialising 100 MiB of zeroes, which is why the
+  // refusal itself is asserted in `stdlib/src/stream_io.rs` rather than here: this
+  // example should stay fast enough to read.
+  dump ["gunzip limit", "100 MiB of output"]
+  return nil
+}
+
+// ---------------------------------------------------------------------------
+// 5. Unsafe blocks carry a real justification
+// ---------------------------------------------------------------------------
+// `unsafe { reason }` is required, and `unsafe-thin-reason` rejects a placeholder.
+// This one is genuine: the argument is a byte we have just range-checked, and the
+// pointer arithmetic below cannot escape it because `i < len(buf)` holds.
+
+fn unsafe_blocks_explain_themselves() {
+  let buf = bytes([1, 2, 3, 4])
+  // `unsafe` is a statement wrapping a block, not an expression, and the reason is
+  // mandatory -- an unjustified exemption is a parse error, so the parser rather
+  // than the linter is what enforces it.
+  unsafe "i is bounded by len(buf) on every iteration, so buf[i] cannot be out of range" {
+    let mut total = 0
+    let mut i = 0
+    while i < len(buf) {
+      total = total + buf[i]
+      i = i + 1
+    }
+    dump ["summed", total]
+  }
+  return nil
+}
+
+constant_time_is_the_rule()
+credentials_are_not_literals()
+escaping_is_contextual()
+decompression_is_bounded()
+unsafe_blocks_explain_themselves()
+return 0

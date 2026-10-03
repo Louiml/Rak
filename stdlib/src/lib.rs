@@ -1,6 +1,7 @@
 pub mod net;
 pub mod crypto;
 pub mod encoding;
+pub mod escape;
 pub mod recon;
 pub mod web;
 pub mod file;
