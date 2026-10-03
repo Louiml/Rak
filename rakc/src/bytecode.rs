@@ -148,11 +148,20 @@ pub enum Op {
     /// chars. Operand: u8 flag — 1 yields `(index, item)` pairs for
     /// arrays/strings (matching the interpreter's 2-tuple "indexed for").
     IterItems,
+    /// Replace the top of stack with its length, as an `I64`. No operands.
+    ///
+    /// This exists because `for` used to decide whether to keep going by testing
+    /// the *element's* truthiness, which ended the loop on the first `0`, `""` or
+    /// `false`. A `0x00` byte is the single most common value in a binary file,
+    /// so `for b in buffer` walked a whole buffer and then stopped dead at the
+    /// first NUL. A loop bound has to be a comparison against a length, not a
+    /// test of the value being carried.
+    Len,
 }
 
 impl Op {
     pub fn from_u8(b: u8) -> Option<Op> {
-        if (b as usize) <= Op::IterItems as usize {
+        if (b as usize) <= Op::Len as usize {
             Some(unsafe { std::mem::transmute(b) })
         } else {
             None

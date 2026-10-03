@@ -30,7 +30,7 @@ fn marshal_vm_args(args: &[Value]) -> Result<(Vec<u64>, Vec<MarshalGuardVm>), St
             Value::I32(i) => out.push(*i as u64),
             Value::U64(v) => out.push(*v),
             Value::U32(v) => out.push(*v as u64),
-            Value::Hex(h, _) => out.push(*h),
+            Value::Hex(h) => out.push(*h),
             Value::Bool(b) => out.push(if *b { 1 } else { 0 }),
             Value::ForeignPtr(p) => out.push(*p),
             Value::Nil => out.push(0),
@@ -99,7 +99,7 @@ fn marshal_vm_args_typed(args: &[Value], params: &[crate::ast::Param], varargs: 
             (Value::I32(i), _) => out.push(*i as u64),
             (Value::U64(v), _) => out.push(*v),
             (Value::U32(v), _) => out.push(*v as u64),
-            (Value::Hex(h, _), _) => out.push(*h),
+            (Value::Hex(h), _) => out.push(*h),
             (Value::Bool(b), _) => out.push(if *b { 1 } else { 0 }),
             (Value::F64(f), Some(crate::ast::Type::F64)) => out.push(f.to_bits()),
             (Value::F64(f), Some(crate::ast::Type::F32)) => out.push((*f as f32).to_bits() as u64),
@@ -112,7 +112,7 @@ fn marshal_vm_args_typed(args: &[Value], params: &[crate::ast::Param], varargs: 
                 if varargs && i >= params.len() {
                     match other {
                         Value::I64(i) => out.push(*i as u64),
-                        Value::Hex(h, _) => out.push(*h),
+                        Value::Hex(h) => out.push(*h),
                         Value::ForeignPtr(p) => out.push(*p),
                         Value::Bool(b) => out.push(if *b { 1 } else { 0 }),
                         Value::Nil => out.push(0),
@@ -306,7 +306,7 @@ fn is_numeric_vm(v: &Value) -> bool {
             | Value::U32(_)
             | Value::U16(_)
             | Value::U8(_)
-            | Value::Hex(_, _)
+            | Value::Hex(_)
             | Value::F32(_)
             | Value::F64(_)
     )
@@ -603,19 +603,13 @@ impl Vm {
         self.insert_native("all", |args| iter_pure_native("all", args));
         self.insert_native("flat_map", |args| iter_pure_native("flat_map", args));
         self.insert_native("take_while", |args| iter_pure_native("take_while", args));
-        self.insert_native("len", |args| {
-            match args.first() {
-                Some(Value::String(s)) => Ok(Value::I64(s.chars().count() as i64)),
-                Some(Value::Array(a)) => Ok(Value::I64(a.len() as i64)),
-                Some(Value::Tuple(t)) => Ok(Value::I64(t.len() as i64)),
-                Some(Value::Bytes(b)) => Ok(Value::I64(b.len() as i64)),
-                Some(Value::Map(m)) => Ok(Value::I64(m.len() as i64)),
-                _ => Err("len() requires string/array/tuple/bytes/map".to_string()),
-            }
+        self.insert_native("len", |args| match args.first().and_then(vm_len_of) {
+            Some(n) => Ok(Value::I64(n)),
+            None => Err("len() requires string/array/tuple/bytes/map/struct".to_string()),
         });
         self.insert_native("int", |args| match args.first() {
             Some(Value::I64(i)) => Ok(Value::I64(*i)),
-            Some(Value::Hex(h, _)) => Ok(Value::I64(*h as i64)),
+            Some(Value::Hex(h)) => Ok(Value::I64(*h as i64)),
             Some(Value::F64(f)) => Ok(Value::I64(*f as i64)),
             Some(Value::String(s)) => s.parse::<i64>().map(Value::I64).map_err(|_| "int() parse error".to_string()),
             Some(Value::Bool(b)) => Ok(Value::I64(if *b { 1 } else { 0 })),
@@ -1231,7 +1225,7 @@ impl Vm {
         self.insert_native("tls_parse_client_hello", |args| {
             let bytes = native_bytes(args.first());
             let info = rak_stdlib::tls::parse_client_hello(&bytes)?;
-            let ciphers: Vec<Value> = info.ciphers.into_iter().map(|c| Value::Hex(c as u64, 16)).collect();
+            let ciphers: Vec<Value> = info.ciphers.into_iter().map(|c| Value::Hex(c as u64)).collect();
             let mut out = HashMap::new();
             out.insert("sni".to_string(), Value::String(Arc::from(info.sni.as_str())));
             out.insert("ciphers".to_string(), Value::Array(Arc::from(ciphers)));
@@ -1841,6 +1835,13 @@ impl Vm {
                     }
                     frame.push(Value::Map(Arc::from(m)));
                 }
+                Op::Len => {
+                    let v = frame.pop();
+                    match vm_len_of(&v) {
+                        Some(n) => frame.push(Value::I64(n)),
+                        None => return Err("len: value has no length".to_string()),
+                    }
+                }
                 Op::IndexGet => {
                     let idx = frame.pop();
                     let obj = frame.pop();
@@ -1888,12 +1889,25 @@ impl Vm {
                             frame.push(m.get(k.as_ref()).cloned().unwrap_or(Value::Nil));
                         }
                         // A module read goes through its namespace, so `m.X` sees
-                        // what the module's own code last stored in `X`. A name
-                        // the module did not export reads as nil, matching the
-                        // interpreter's error-then-nil on the VM's nil convention.
+                        // what the module's own code last stored in `X`.
+                        //
+                        // A name the module did not export is an *error* here, as it is on
+                        // the interpreter; it used to read as nil, which made `pub` only half
+                        // true: a misspelling, a private name and a genuine nil were all
+                        // indistinguishable at the call site. That matters more than the VM's
+                        // nil-for-a-missing-key convention for maps, because a silent nil
+                        // from `m.COUNT` is a bad way to learn that `COUTN` was misspelled.
                         (Value::Module(ns), Value::String(k)) => {
-                            frame.push(ns.lock().unwrap().get(k.as_ref()).unwrap_or(Value::Nil));
-                        }
+                              let guard = ns.lock().unwrap();
+                              match guard.get(k.as_ref()) {
+                                  Some(v) => frame.push(v),
+                                  None => {
+                                      let message = guard.read_refusal(k.as_ref());
+                                      drop(guard);
+                                      return Err(message);
+                                  }
+                              }
+                          }
                         (Value::Struct { fields, .. }, Value::String(k)) => {
                             frame.push(fields.get(k.as_ref()).cloned().unwrap_or(Value::Nil));
                         }
@@ -2878,7 +2892,7 @@ fn native_bytes(v: Option<&Value>) -> Vec<u8> {
     match v {
         Some(Value::Bytes(b)) => b.to_vec(),
         Some(Value::String(s)) => s.bytes().collect(),
-        Some(Value::Hex(h, _)) => h.to_le_bytes().to_vec(),
+        Some(Value::Hex(h)) => h.to_le_bytes().to_vec(),
         Some(Value::I64(i)) => i.to_le_bytes().to_vec(),
         Some(Value::Mmap(h)) => h.as_slice().to_vec(),
         Some(Value::MmapSlice(h, off, n)) => h.as_slice()[*off..off + n].to_vec(),
@@ -2897,7 +2911,7 @@ fn vm_log(level: &rak_stdlib::log::Level, args: &[Value]) -> Result<Value, Strin
             Value::Bool(b) => rak_stdlib::log::Json::Bool(*b),
             Value::Nil => rak_stdlib::log::Json::Nil,
             Value::I64(n) => rak_stdlib::log::Json::Num(*n as f64),
-            Value::Hex(h, _) => rak_stdlib::log::Json::Num(*h as f64),
+            Value::Hex(h) => rak_stdlib::log::Json::Num(*h as f64),
             Value::F64(f) => rak_stdlib::log::Json::Num(*f),
             Value::Array(a) => rak_stdlib::log::Json::Arr(a.iter().map(conv).collect()),
             Value::Map(m) => {
@@ -3340,6 +3354,23 @@ fn build_vm_regex(pattern: &str, flags: &str) -> Result<Arc<crate::value::RegexV
     }))
 }
 
+/// Length of a value, mirroring the interpreter's `len`.
+///
+/// Shared by the `len` native and `Op::Len` so the two cannot disagree about,
+/// say, whether a struct has a length.
+fn vm_len_of(v: &Value) -> Option<i64> {
+    match v {
+        Value::String(s) => Some(s.chars().count() as i64),
+        Value::Array(a) => Some(a.len() as i64),
+        Value::Tuple(t) => Some(t.len() as i64),
+        Value::Bytes(b) => Some(b.len() as i64),
+        Value::Map(m) => Some(m.len() as i64),
+        // The VM's `len` native did not handle structs; the interpreter's did.
+        Value::Struct { fields, .. } => Some(fields.len() as i64),
+        _ => None,
+    }
+}
+
 /// Borrow the compiled regex from a `Value::Regex`, or build one from a string.
 fn vm_regex(v: Option<&Value>) -> Result<regex::Regex, String> {
     match v {
@@ -3363,15 +3394,15 @@ fn format_rak(fmt: &str, args: &[Value]) -> String {
             while let Some(c2) = chars.next() { if c2 == '}' { break; } spec.push(c2); }
             if idx < args.len() {
                 let a = &args[idx];
-                if spec.contains(":04X") {
-                    result.push_str(&format!("{:04X}", a.as_u64().unwrap_or(0)));
-                } else if spec.contains(":08X") {
-                    result.push_str(&format!("{:08X}", a.as_u64().unwrap_or(0)));
-                } else if spec.contains('X') || spec.contains('x') {
-                    result.push_str(&format!("{:X}", a.as_u64().unwrap_or(0)));
-                } else {
-                    result.push_str(&a.to_string());
-                }
+                // The same parser the interpreter uses. It previously had no
+                // float branch at all, so `fmt("{:.2f}", x)` printed the raw
+                // float here and a rounded one there.
+                result.push_str(&crate::fmt_spec::render(
+                    &spec,
+                    a.as_u64(),
+                    a.as_f64(),
+                    &a.to_string(),
+                ));
                 idx += 1;
             }
         } else if c == '}' {
@@ -3736,8 +3767,8 @@ dump h.ver
 dump h.kind
 dump len(h.rest)"#);
         assert!(out.iter().any(|l| l == "[DUMP] 0x1234"), "id got: {:?}", out);
-        assert!(out.iter().any(|l| l == "[DUMP] 0x01"), "ver got: {:?}", out);
-        assert!(out.iter().any(|l| l == "[DUMP] 0x02"), "kind got: {:?}", out);
+        assert!(out.iter().any(|l| l == "[DUMP] 0x1"), "ver got: {:?}", out);
+        assert!(out.iter().any(|l| l == "[DUMP] 0x2"), "kind got: {:?}", out);
         assert!(out.iter().any(|l| l == "[DUMP] 5"), "rest len got: {:?}", out);
     }
 
@@ -4118,7 +4149,7 @@ dump h2.ver_ihl
 dump h2.tos"#);
         assert!(out.iter().any(|l| l.contains("[DUMP] 0x5")), "ver_ihl got: {:?}", out);
         assert!(out.iter().any(|l| l.contains("[DUMP] 0x4")), "tos got: {:?}", out);
-        assert!(out.iter().any(|l| l.contains("0x0001")), "len got: {:?}", out);
+        assert!(out.iter().any(|l| l == "[DUMP] 0x1"), "len got: {:?}", out);
         assert!(out.iter().any(|l| l.contains("[DUMP] 69")), "roundtrip byte got: {:?}", out);
         assert!(out.iter().any(|l| l.contains("[DUMP] 3")), "roundtrip len got: {:?}", out);
         assert_eq!(out.last().unwrap(), "[DUMP] 0x4", "re-decode tos got: {:?}", out);

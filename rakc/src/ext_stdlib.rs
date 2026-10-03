@@ -55,7 +55,7 @@ fn to_bytes(v: Option<&Value>) -> Vec<u8> {
     match v {
         Some(Value::Bytes(b)) => b.to_vec(),
         Some(Value::String(s)) => s.as_bytes().to_vec(),
-        Some(Value::Hex(h, _)) => h.to_le_bytes().to_vec(),
+        Some(Value::Hex(h)) => h.to_le_bytes().to_vec(),
         Some(Value::Array(a)) => {
             let a: &[Value] = a.as_slice();
             let mut out = Vec::with_capacity(a.len());
@@ -383,7 +383,7 @@ fn vm_from_hex(args: &Args) -> R {
     // natural width or the same program prints a different number on each
     // backend.
     let nibbles = format!("{:X}", h).len();
-    Ok(Value::Hex(h, nibbles * 4))
+    Ok(Value::Hex(h))
 }
 
 // ---------------------------------------------------------------------------
@@ -709,7 +709,7 @@ fn value_to_json(v: &Value) -> serde_json::Value {
         Value::U16(i) => serde_json::json!(*i),
         Value::U32(i) => serde_json::json!(*i),
         Value::U64(i) => serde_json::json!(*i),
-        Value::Hex(h, _) => serde_json::json!(*h),
+        Value::Hex(h) => serde_json::json!(*h),
         Value::F32(f) => serde_json::json!(*f),
         Value::F64(f) => serde_json::json!(*f),
         Value::String(x) => J::String(x.to_string()),

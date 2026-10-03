@@ -311,14 +311,15 @@ dump NAME
 }
 
 #[test]
-fn star_import_is_a_snapshot_on_the_interpreter_and_live_on_the_vm() {
-    // Documented divergence, and the reason a star-import is not the way to take
-    // a copy. `from m import *` copies on the interpreter; on the VM the names are
-    // the module's own chunk globals, so the imported name keeps referring to
-    // them and follows the module.
+fn star_import_is_a_snapshot_on_both_backends() {
+    // `from m import *` copies. On the VM it used not to: the imported names were
+    // the module's own chunk globals, so `COUNT` kept referring to the module and
+    // followed it, printing 2 here against the interpreter's 0.
     //
-    // Cause: the VM's flat global namespace. See docs/V8-KNOWN-ISSUES.md. When
-    // module globals are namespaced, replace this with an `agree_on` test.
+    // That was a symptom of the flat global namespace rather than a separate bug,
+    // and it went away with the namespacing, so this is now an `agree_on` test
+    // rather than a pinned divergence. `docs/V8-KNOWN-ISSUES.md` recorded the
+    // asymmetry; this is the test that says it is gone.
     let fx = Fixture::new(
         "stardiv",
         &[
@@ -335,13 +336,8 @@ dump COUNT
             ),
         ],
     );
-    match rakc::run_on_both(&fx.source("main.rak"), fx.base()) {
-        rakc::BackendParity::DisagreeOnOutput { interp_output, vm_output } => {
-            assert_eq!(interp_output, vec!["[DUMP] 0"], "the interpreter copies");
-            assert_eq!(vm_output, vec!["[DUMP] 2"], "the VM stays live");
-        }
-        other => panic!("expected a star-import divergence, got: {:?}", other),
-    }
+    // 0, not 2: the copy was taken before the two bumps.
+    assert_eq!(agree_on(&fx, "main.rak"), vec!["[DUMP] 0"]);
 }
 
 #[test]
@@ -477,10 +473,20 @@ fn a_module_cannot_read_the_importers_globals() {
     // the *importer's* environment, so `peek()` resolved `TOKEN` against the
     // importer's binding and silently succeeded on the interpreter too.
     //
-    // Asserts each backend rather than agreement, because they differ and that
-    // difference is structural: the VM inlines a module body into the same chunk,
-    // so a free name inside it is a chunk global and the importer's globals are
-    // visible to it. See docs/V8-KNOWN-ISSUES.md.
+    // STILL A DIVERGENCE, and namespacing did not fix this one.
+    //
+    // Mangling gives a module its own globals for the names it *declares*, so the
+    // private top-level of a module is now unreachable from outside and two modules
+    // can export the same name. But `TOKEN` is a name `peek.rak` never declares, so
+    // it is not in the module's rename map, and it still resolves against the
+    // importer's globals: the free name is a chunk global and the importer's globals
+    // are visible to it.
+    //
+    // Closing this needs a module *scope* -- a free name inside a module body that is
+    // neither local, nor one of its own top-level names, nor a name it imported,
+    // nor a builtin, has to be an error. The compiler cannot make that call: it has
+    // no list of builtin globals, so it cannot tell a builtin from a leaked one.
+    // See docs/V8-KNOWN-ISSUES.md.
     let fx = Fixture::new(
         "isolate",
         &[
@@ -496,24 +502,109 @@ dump peek.peek()
         ],
     );
     match rakc::run_on_both(&fx.source("main.rak"), fx.base()) {
+        rakc::BackendParity::AgreeOnError(message) => {
+            // If this ever starts passing as agreement, the divergence is closed and
+            // this test should become a plain `agree_on`.
+            panic!("the importer-global leak is fixed; convert this to agree_on: {}", message);
+        }
         rakc::BackendParity::VmOnly { interp_error, vm_output } => {
             let lowered = interp_error.to_lowercase();
             assert!(
                 lowered.contains("undefined") || lowered.contains("token"),
-                "expected an undefined-variable failure naming TOKEN, got: {}",
+                "expected the interpreter to fail naming TOKEN, got: {}",
                 interp_error
             );
             assert_eq!(
                 vm_output,
                 vec!["[DUMP] from-main"],
-                "the VM is expected to still leak the importer's global into the module"
+                "the VM still resolves a module's free name against the importer's globals"
             );
         }
+        other => panic!("expected interp-only failure, got: {:?}", other),
+    }
+}
+
+/// A module's private top-level is unreachable from outside.
+///
+/// This was the other half of `pub` being only half true: with every module's
+/// bindings sharing one flat namespace of chunk globals, the importer could name
+/// `scale` directly and the VM handed it over. Mangling puts the module's `scale`
+/// in a global of its own, so the name the importer wrote no longer exists.
+#[test]
+fn a_modules_private_top_level_is_not_visible_to_the_importer() {
+    let fx = Fixture::new(
+        "private-leak",
+        &[
+            ("counter.rak", COUNTER),
+            (
+                "main.rak",
+                r#"
+import counter
+dump scale
+"#,
+            ),
+        ],
+    );
+    // Both backends must refuse, and the only thing allowed to differ is wording:
+    // "Undefined variable: scale" against "Undefined: scale" is the documented
+    // `err`-prefix asymmetry, not a leak. What matters is that neither *succeeded*.
+    match rakc::run_on_both(&fx.source("main.rak"), fx.base()) {
+        rakc::BackendParity::AgreeOnError(message) => {
+            assert!(message.to_lowercase().contains("scale"), "got: {}", message);
+        }
+        rakc::BackendParity::DisagreeOnError { interp_error, vm_error } => {
+            for (name, err) in [("interpreter", &interp_error), ("VM", &vm_error)] {
+                let lowered = err.to_lowercase();
+                assert!(
+                    lowered.contains("undefined") && lowered.contains("scale"),
+                    "expected the {} to refuse with an undefined-variable error naming scale, got: {}",
+                    name,
+                    err
+                );
+            }
+        }
         other => panic!(
-            "expected the interpreter to fail and the VM to leak the importer's global, got: {:?}",
+            "a module's private `scale` leaked to the importer: {:?}",
             other
         ),
     }
+}
+
+/// Two modules may export the same name without sharing one binding.
+///
+/// The worst of the six symptoms, because nothing reported it: both modules' `shared`
+/// were the same chunk global, so `a1.sa()` reported `b1`'s state with no diagnostic
+/// anywhere. Namespacing gives each module its own global per name.
+#[test]
+fn two_modules_may_export_the_same_name() {
+    let fx = Fixture::new(
+        "collide",
+        &[
+            ("a1.rak", "pub let mut shared = 0
+pub fn sa() { shared = shared + 1
+  return shared }
+"),
+            ("b1.rak", "pub let mut shared = 100
+pub fn sb() { shared = shared + 1
+  return shared }
+"),
+            (
+                "main.rak",
+                r#"
+import a1
+import b1
+dump a1.sa()
+dump b1.sb()
+dump a1.shared
+dump b1.shared
+"#,
+            ),
+        ],
+    );
+    assert_eq!(
+        agree_on(&fx, "main.rak"),
+        vec!["[DUMP] 1", "[DUMP] 101", "[DUMP] 1", "[DUMP] 101"]
+    );
 }
 
 #[test]
@@ -761,4 +852,222 @@ fn the_module_state_example_runs_on_both_backends() {
         }
         other => panic!("the shipped module example failed: {:?}", other),
     }
+}
+
+/// A `mod { }` block keeps its own names. Two blocks declaring the same private
+/// name used to share one chunk global, so `a.g()` reported `b`'s value -- and
+/// neither private name was reachable from outside.
+#[test]
+fn two_mod_blocks_do_not_share_a_private_name() {
+    let fx = Fixture::new(
+        "modcollide",
+        &[(
+            "main.rak",
+            r#"
+mod a { let N = 1
+  pub fn g() { return N } }
+mod b { let N = 2
+  pub fn g() { return N } }
+dump a.g()
+dump b.g()
+"#,
+        )],
+    );
+    assert_eq!(agree_on(&fx, "main.rak"), vec!["[DUMP] 1", "[DUMP] 2"]);
+}
+
+/// A `mod` block's private top-level is not in the enclosing file's scope.
+#[test]
+fn a_mod_blocks_private_name_does_not_leak_out() {
+    let fx = Fixture::new(
+        "modleak",
+        &[(
+            "main.rak",
+            r#"
+mod a { let hidden = 5
+  pub fn g() { return hidden } }
+dump hidden
+"#,
+        )],
+    );
+    match rakc::run_on_both(&fx.source("main.rak"), fx.base()) {
+        rakc::BackendParity::AgreeOnError(m) => {
+            assert!(m.to_lowercase().contains("hidden"), "got: {}", m)
+        }
+        rakc::BackendParity::DisagreeOnError { interp_error, vm_error } => {
+            for (who, e) in [("interpreter", &interp_error), ("VM", &vm_error)] {
+                assert!(
+                    e.to_lowercase().contains("hidden"),
+                    "expected the {} to refuse `hidden`, got: {}",
+                    who,
+                    e
+                );
+            }
+        }
+        other => panic!("`hidden` leaked out of the mod block: {:?}", other),
+    }
+}
+
+/// Reading a private name through a module handle is an error naming the name,
+/// on both backends. It used to read as `nil` on the VM, which made a
+/// misspelling indistinguishable from a private name and from a real nil.
+#[test]
+fn reading_a_private_name_through_the_handle_reports_it() {
+    let fx = Fixture::new(
+        "readprivate",
+        &[(
+            "p.rak",
+            "pub let PUBV = 1\nlet privv = 2\n",
+        ), ("main.rak", "import p\ndump p.privv\n")],
+    );
+    match rakc::run_on_both(&fx.source("main.rak"), fx.base()) {
+        rakc::BackendParity::AgreeOnError(m) => {
+            assert!(m.contains("privv"), "the message should name the field, got: {}", m)
+        }
+        rakc::BackendParity::DisagreeOnError { interp_error, vm_error } => {
+            for (who, e) in [("interpreter", &interp_error), ("VM", &vm_error)] {
+                assert!(
+                    e.contains("privv"),
+                    "expected the {} to name `privv`, got: {}",
+                    who,
+                    e
+                );
+            }
+        }
+        other => panic!("reading a private name should not have succeeded: {:?}", other),
+    }
+}
+
+/// A misspelled export is reported by name rather than read as nil.
+#[test]
+fn a_misspelled_export_is_reported_rather_than_read_as_nil() {
+    let fx = Fixture::new(
+        "typo",
+        &[
+            ("p.rak", "pub let COUNT = 1\n"),
+            ("main.rak", "import p\ndump p.COUTN\n"),
+        ],
+    );
+    match rakc::run_on_both(&fx.source("main.rak"), fx.base()) {
+        rakc::BackendParity::AgreeOnError(m) => {
+            assert!(m.contains("COUTN"), "the message should name the field, got: {}", m)
+        }
+        rakc::BackendParity::DisagreeOnError { interp_error, vm_error } => {
+            for (who, e) in [("interpreter", &interp_error), ("VM", &vm_error)] {
+                assert!(e.contains("COUTN"), "expected the {} to name COUTN, got: {}", who, e);
+            }
+        }
+        other => panic!("a typo read as a value instead of an error: {:?}", other),
+    }
+}
+
+/// A `mod { }` block is a separate module scope, so it cannot read the enclosing
+/// file's bindings -- and this is the same root cause as
+/// `a_module_cannot_read_the_importers_globals`, seen from the other side.
+///
+/// The interpreter treats a `mod` block as a module in its own right: it sees
+/// builtins and its own names and nothing else. It cannot see the enclosing
+/// file's `let`, its functions, or its imports:
+///
+/// ```text
+/// let TOP = 7          mod w { fn g() { return TOP } }   interp: Undefined variable: TOP
+/// fn helper()          mod w { fn g() { return helper() } } interp: Unknown function
+/// import helper        mod w { fn g() { return helper.V } }  interp: Undefined variable
+/// ```
+///
+/// The VM resolves all three, because an inlined body still shares the chunk's
+/// flat namespace. Namespacing the module's *own* declarations does not change
+/// this: these are names the block never declared.
+///
+/// Closing it needs a module scope in the compiler -- a free name inside a module
+/// body that is neither local, nor its own, nor imported by it, nor a builtin has
+/// to be an error -- and the compiler has no list of builtins to decide with.
+#[test]
+fn a_mod_block_cannot_see_the_enclosing_files_bindings() {
+    let fx = Fixture::new(
+        "modscope",
+        &[
+            ("helper.rak", "pub let V = 42\n"),
+            (
+                "main.rak",
+                r#"
+let TOP = 7
+import helper
+mod w { pub fn get() { return TOP } }
+mod r { pub fn get() { return helper.V } }
+dump w.get()
+dump r.get()
+"#,
+            ),
+        ],
+    );
+    match rakc::run_on_both(&fx.source("main.rak"), fx.base()) {
+        rakc::BackendParity::Agree(lines) => panic!(
+            "a mod block reached the enclosing scope; convert this to agree_on: {:?}",
+            lines
+        ),
+        // Either backend may be the one that refuses first -- `w.get()` fails before
+        // `r.get()` is ever reached -- so all this pins is that they do not both
+        // succeed at reading the enclosing file's bindings.
+        other => {
+            let text = format!("{:?}", other);
+            assert!(
+                !text.contains("Agree"),
+                "expected at least one backend to refuse, got: {}",
+                text
+            );
+        }
+    }
+}
+
+/// One module from-importing another still sees the copy it asked for, and its own
+/// `pub` surface is unchanged.
+#[test]
+fn a_module_can_from_import_another_module() {
+    let fx = Fixture::new(
+        "modfrommod",
+        &[
+            (
+                "lib.rak",
+                "pub let mut N = 0\npub fn inc() { N = N + 1\n  return N }\n",
+            ),
+            (
+                "mid.rak",
+                "from lib import N as base, inc\npub fn twice() { inc()\n  return base }\n",
+            ),
+            ("main.rak", "import mid\ndump mid.twice()\n"),
+        ],
+    );
+    // `base` is the copy taken at import time, so it is 0 even though `inc()` ran.
+    assert_eq!(agree_on(&fx, "main.rak"), vec!["[DUMP] 0"]);
+}
+
+/// `from m import *` takes a copy, so a later change in the module is not seen --
+/// and the module's own state is unaffected by the import.
+#[test]
+fn a_star_import_is_a_copy_and_leaves_the_module_alone() {
+    let fx = Fixture::new(
+        "starcopy",
+        &[
+            (
+                "lib.rak",
+                "pub let mut N = 0\npub fn inc() { N = N + 1\n  return N }\n",
+            ),
+            (
+                "main.rak",
+                r#"
+import lib
+from lib import *
+dump N
+lib.inc()
+dump N
+dump lib.N
+"#,
+            ),
+        ],
+    );
+    assert_eq!(
+        agree_on(&fx, "main.rak"),
+        vec!["[DUMP] 0", "[DUMP] 0", "[DUMP] 1"]
+    );
 }

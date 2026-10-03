@@ -185,110 +185,161 @@ The full spike, including why `-Zsanitizer=cfi` cannot be used here, is in
 single codegen unit, a rebuilt `std`, and a CFI-clean dependency graph — and it
 is not supported for the Windows target at all.
 
-## The VM's module globals are not namespaced
+## A `for` loop stopped at the first falsy element on the VM
 
-**Severity: medium.** Six symptoms, one cause. The interpreter gives each module
-its own `Env`, so a module's top-level bindings live in a cell of its own and a
-name in a module means what that module's file says it means. The VM compiles a
-module's body into the *same chunk*, so a module's top-level bindings are ordinary
-chunk globals in one flat namespace with the importer's.
-
-What does work on both: `import m` binds a live namespace, `m.X` tracks the
-module's state, `pub` blocks *writes* through the handle, `pub let mut` blocks them
-too, `from m import x as y` copies, `m.X = v` reaches the module's real state, and
-`import pkg.sub` composes with `import pkg` in either order. The headline semantics
-do not depend on any of what follows.
-
-### 1. A module can read the importer's globals
+**Severity: high, fixed in this release.** Recorded because it was silent, it
+affected every container rather than only bytes, and no diagnostic pointed at it.
 
 ```
-rakc run:  Error: Runtime error: Undefined variable: TOKEN
-rakc vm:   [DUMP] from-main
+let buf = bytes([0, 15, 16, 255])
+let mut n = 0
+for b in buf { n = n + 1 }
+dump n            // interp: 4    vm (before): 0
 ```
 
-`peek.rak` is `pub fn peek() { return TOKEN }` and `TOKEN` is declared only in
-the importing file.
+**Cause.** The VM's `for` loop decided whether to continue by testing the *element's*
+truthiness rather than the loop bound: `IndexGet`, then `JumpIfFalse`. `0`, `""` and
+`false` are all falsy, so iteration ended at the first of them. `0x00` is the most
+common byte in a binary file, so `for b in buffer` walked a buffer and then stopped
+dead at the first NUL, with no error at all. A buffer of `[0]` iterated zero times.
 
-### 2. A module's private top-level is visible to the importer
+**Fix.** Added `Op::Len` and made the loop test `idx < len`. A loop bound has to be a
+comparison against a length, not a test of the value being carried.
 
-The same cause, seen from the other side. With `collide.rak` holding
-`let shared = 100` (no `pub`) and the importer doing `dump shared`, the interpreter
-reports an undefined variable and the VM prints `100`. This is the reason the
-`pub` guarantee below is only half true.
+**Why it went unnoticed.** The only test covering byte iteration used `bytes([1, 2])`,
+which has no falsy byte in it.
 
-### 3. Reading a private name through the handle differs
+## `Hex` values rendered zero-padded on the VM
+
+**Severity: low, fixed in this release.** Kept because the padding shipped, and
+because a value that prints as `0x0000000000001234` looks like it carries
+information it does not.
+
+```
+rakc vm:   [DUMP] 0x0000000000001234
+rakc run:  [DUMP] 0x1234
+```
+
+**Cause.** The VM's `Hex` value carried a digit-width field, and `Display` printed
+`width / 4` digits. Nothing ever populated it from the source -- the compiler
+hardcoded `Value::Hex(h, 64)` for every hex literal -- so all 16 slots were used.
+The interpreter has no width field and prints the minimum via `0x{:X}`.
+
+**Fix.** Removed the field. It had exactly one reader, the `Display` arm.
+
+**Not a comparison bug.** `Hex(0) == 0` was true on both backends throughout:
+`Value`'s `PartialEq` has a cross-representation numeric fallback for
+`Hex`/`Int`/`Float`, and `Op::Eq` routes straight through it. An earlier draft of
+this entry claimed otherwise and was wrong.
+
+## The VM's module globals were not namespaced
+
+**Severity: medium. Mostly fixed in this release; one symptom remains.** Kept as a
+single entry because six of the seven symptoms had one cause, and because the one
+that is left is the interesting half.
+
+The interpreter gives each module its own `Env`, so a module's top-level bindings
+live in a cell of its own and a name in a module means what that module's file says
+it means. The VM compiles a module's body into the *same chunk*, so those bindings
+used to be ordinary chunk globals in one flat namespace with the importer's.
+
+**The fix.** Each inlined module's top-level names are mangled per module
+(`__rak_modcell_3$COUNT`), and the mangled name is recorded as the *backing* global
+in `ModuleCell.exports`, which already existed to map an exported name to the global
+behind it. `pub X` stays spelled `X` for the namespace and for `m.X`; the mangled
+name is only ever a chunk-global detail. No bytecode format change and no VM
+instruction was needed for that part.
+
+Two things had to be threaded through the compiler for it to hold, and both were
+misses rather than design:
+
+* `compile_function` builds a fresh sub-compiler for a closure body. It copies
+  `func_names`, `func_closures`, `macros` and `base_dir`; a module's functions read
+  their module's own top-level names, so it has to copy the rename map too.
+* `compile_expr` had a **second, independent implementation** of identifier loading,
+  alongside `compile_ident_load`. `return scale` went through that one, so it
+  compiled to a load of the unmangled global while every *declaration* went to the
+  mangled one -- `Undefined: __rak_modcell_1$scale`, or, in the other direction, a
+  value read from the importer's globals. Two implementations of the same thing was
+  the bug.
+
+### Fixed
+
+**2. A module's private top-level is no longer visible to the importer.** The
+importer's `scale` no longer resolves, because the module's `scale` is in a global of
+its own.
+
+**3. Reading a private name through the handle reports it.** `p.privv` is an error
+naming `privv` on both backends; it used to read as `nil` on the VM, which made a
+misspelling, a private name and a genuine nil indistinguishable at the call site. A
+misspelled export is now named too. This deliberately breaks with the VM's
+nil-for-a-missing-key convention for maps, because a silent `nil` out of `m.COUNT` is
+a bad way to learn that `COUTN` was misspelled.
+
+**4. Two modules may export the same name.** This was the worst of the six, because
+nothing reported it: both modules' `shared` were one chunk global, so `a1.sa()`
+reported `b1`'s state with no diagnostic anywhere.
+
+**5. `from m import x` is a copy with or without an alias**, and so is
+`from m import *`. The unaliased form used to bind *nothing*, on the reasoning that
+the global was "already present (inlined)" -- true while every module shared one flat
+namespace, and false as soon as they did not. That made the unaliased `from` *live*
+on this backend while copying on the interpreter, which is the opposite of what the
+same line does everywhere else.
+
+**6. `mod { }` blocks are namespaced.** Two blocks declaring the same private name
+no longer share it, and a block's private name is not in the enclosing file's scope.
+
+### Still open: a module body sees names it never declared
 
 ```rak
-// p.rak
-pub let PUBV = 1
-let privv = 2
+// peek.rak
+pub fn peek() { return TOKEN }
 ```
 ```rak
-import p
-dump p.privv          // interp: error    vm: nil
+let TOKEN = "from-main"
+import peek
+dump peek.peek()      // interp: Undefined variable: TOKEN    vm: "from-main"
 ```
 
-The VM's field-read convention is nil for a missing key, so the diagnostic is lost.
-The *write* side does report, on both.
+Mangling gives a module its own globals for the names it **declares**. `TOKEN` is not
+one of them, so it is not in the rename map and it still resolves against the
+importer's globals.
 
-### 4. Two modules exporting the same name share one binding
-
-The worst of the six, because nothing reports it.
+The same root cause shows from the other side inside a `mod { }` block, where the
+interpreter is the stricter one -- it cannot see the enclosing file's `let`, its
+functions, or its imports, while the VM resolves all three:
 
 ```rak
-// a1.rak                              // b1.rak
-pub let mut shared = 0                 pub let mut shared = 100
-pub fn sa() { shared = shared + 1      pub fn sb() { shared = shared + 1
-              return shared }                          return shared }
-```
-```rak
-import a1
-import b1
-dump a1.sa()      // interp: 1    vm: 101
-dump b1.sb()      // interp: 101  vm: 102
-dump a1.shared    // interp: 1    vm: 102
+let TOP = 7
+mod w { pub fn g() { return TOP } }    // interp: Undefined variable: TOP   vm: 7
 ```
 
-Both modules' `shared` are the same chunk global, so `a1` reports `b1`'s state.
+**Why it is not fixed.** Closing it needs a module *scope* in the compiler: a free
+name inside a module body that is neither local, nor one of its own top-level names,
+nor a name it imported, nor a builtin, has to be an error. The compiler cannot make
+that call, because it has no list of builtin globals -- the VM registers those at
+startup -- so it cannot tell `len` (fine) from `TOKEN` (leaked). Guessing would break
+every module that calls a builtin.
 
-### 5. `from m import x` without an alias stays live
+What it needs is a compile-time table of the names the runtime provides, which is a
+real piece of work rather than a tweak. Until then, a module that references a name
+it does not declare is a latent leak: the interpreter will refuse it and the VM will
+find the importer's binding if there happens to be one by that name.
 
-`import m; m.X` is live on both, and `from m import x as y` copies on both. Only
-the unaliased `from` differs:
+`rakc/tests/module_state.rs` pins this: the tests that assert a *fixed* symptom now
+assert agreement, and `a_module_cannot_read_the_importers_globals` fails loudly with
+"convert this to agree_on" if the divergence ever closes, so it cannot be forgotten.
 
-```
-rakc run:  [DUMP] 0     (the snapshot you asked for)
-rakc vm:   [DUMP] 10    (the module's live global)
-```
+### Not covered
 
-`from m import *` is the same case by another name: a snapshot on the interpreter,
-live on the VM.
-
-**Workaround.** Alias it — `from bank import BALANCE as opening_balance` — which
-copies on both backends and is the form to reach for whenever the value is meant
-to be yours. Do not rely on two modules being unable to see each other's names, or
-on a private top-level staying private.
-
-### 6. `mod { }` blocks are inlined into the enclosing namespace
-
-A `mod` block is a module on the interpreter and a set of ordinary globals on the
-VM, so its private names leak and two blocks declaring the same name collide:
-
-```rak
-mod a { let hidden = 5  pub fn g() { return hidden } }
-mod b { let mut N = 100  pub fn g() { return N } }
-dump hidden        // interp: error   vm: 5
-dump a.g()          // interp: N from a   vm: N from b
-```
-
-**Fix.** Namespace the VM's module globals: give each inlined module's top-level
-bindings a mangled prefix, so a module's free names are its own. This is a
-compiler change rather than a one-line fix — the renaming has to reach the closure
-chunks that `compile_function` emits separately, and `compile_function` builds a
-fresh sub-compiler — and it would close all six at once.
-
-`rakc/tests/module_state.rs` asserts today's behaviour for the ones that are
-observable from a program (1, 3, 5), so a change here cannot land unnoticed.
+Namespacing a module's declarations does **not** namespace the compiler-generated
+globals keyed by name rather than by module: `__method_<Type>_<name>` from `impl`
+blocks, `__bin_decode_<Name>` / `__bin_encode_<Name>`, and
+`__enum_new_<Enum>_<Variant>`. Two modules that add a method to the same type, or
+define a binstruct of the same name, still collide, and nothing reports it. That is
+pre-existing and unchanged by this work; it is the same class of bug and would need
+the same treatment applied to those tables.
 
 ## `import pkg.sub` requires the files on disk
 

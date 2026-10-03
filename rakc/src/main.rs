@@ -457,6 +457,10 @@ fn cmd_run_debug(file: &str, source: &str) {
                             rakc::bytecode::Op::LoadLocal
                             | rakc::bytecode::Op::StoreLocal
                             | rakc::bytecode::Op::Call
+                            // `IterItems` has a 1-byte "indexed for" flag. Leaving
+                            // it out made `:dis` resync by one byte and print
+                            // nonsense for every instruction after a `for` loop.
+                            | rakc::bytecode::Op::IterItems
                             | rakc::bytecode::Op::BuildModule => 1,
                             // The module opcodes carry a const-index operand, so
                             // leaving them out of this table made `:dis` decode

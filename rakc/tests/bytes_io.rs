@@ -16,12 +16,11 @@
 //!
 //! ## Hex literals are avoided on purpose
 //!
-//! `0x00` and `0` are different values in Rak, and the two backends disagree about
-//! how a `Hex` renders and compares - `Hex(0, 64)` prints as 16 hex digits on the
-//! VM and as `0x0` on the interpreter. That is pre-existing and unrelated to
-//! binary I/O, so using hex literals here would make these tests fail for a reason
-//! that has nothing to do with what they check. `docs/V8-KNOWN-ISSUES.md` records
-//! it; the fix is separate.
+//! `0x00` and `0` are different *types* in Rak (`type_of` reports `hex` and `int`),
+//! even though they compare equal on both backends. They also used to *render*
+//! differently -- the VM padded every hex literal to 16 digits, which is fixed as
+//! of this release. Writing bytes in decimal keeps these tests about binary I/O
+//! rather than about literal syntax.
 //!
 //! ## Error text is not asserted
 //!
@@ -77,6 +76,22 @@ fn agree_with_file(tag: &str, scratch: &Scratch, path: &str, source: &str) -> Ve
     }
 }
 
+/// Run `source` on both backends, requiring identical output. For the tests that
+/// need no file on disk.
+fn agree(source: &str) -> Vec<String> {
+    let parity = rakc::run_on_both(source, ".");
+    if let Some(why) = parity.divergence() {
+        panic!(
+            "backend divergence:\n{}\n--- source ---\n{}",
+            why, source
+        );
+    }
+    match parity {
+        rakc::BackendParity::Agree(out) => out,
+        other => panic!("both backends failed, so nothing was compared: {:?}", other),
+    }
+}
+
 #[test]
 fn a_buffer_can_be_built_from_numbers_and_written_byte_exactly() {
     let scratch = Scratch::new("roundtrip");
@@ -100,6 +115,42 @@ dump back == buf
         out,
         vec!["[DUMP] 00ff41420a0d", "[DUMP] true", "[DUMP] 6", "[DUMP] 00ff41420a0d", "[DUMP] true"]
     );
+}
+
+/// A `for` loop used to keep going while the *element* was truthy, so a NUL byte
+/// ended iteration. `0x00` is the most common byte in a binary file, which made
+/// this the single most damaging bug found while building the hex editor: a buffer
+/// walk silently stopped at the first zero byte instead of reaching the end.
+#[test]
+fn iteration_does_not_stop_at_a_nul_byte() {
+    let out = agree(
+        r#"
+let row = bytes([0, 15, 16, 255])
+let mut s = ""
+for b in row { s = s + fmt("{:02X}", b) }
+dump s
+let mut n = 0
+for b in row { n = n + 1 }
+dump n
+"#,
+    );
+    assert_eq!(out, vec!["[DUMP] 000F10FF", "[DUMP] 4"]);
+}
+
+/// A buffer that is *entirely* NULs is the degenerate case: the old truthiness test
+/// never entered the loop at all.
+#[test]
+fn an_all_nul_buffer_still_iterates_every_byte() {
+    let out = agree(
+        r#"
+let z = bytes([0, 0, 0, 0])
+let mut n = 0
+for b in z { n = n + 1 }
+dump n
+dump len(z)
+"#,
+    );
+    assert_eq!(out, vec!["[DUMP] 4", "[DUMP] 4"]);
 }
 
 #[test]

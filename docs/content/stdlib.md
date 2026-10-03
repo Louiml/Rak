@@ -181,6 +181,7 @@ Building and editing a buffer:
 | `b1 + b2` | join two buffers |
 | `buf[a..b]` | slice to a new buffer |
 | `hex_encode(buf)` | one lowercase hex string for the whole buffer |
+| `fmt(spec, x)` | format one value; see below |
 
 ```rak
 let buf = file_read_bytes("firmware.bin")
@@ -192,6 +193,35 @@ mmap_write(m, 0x100, 0x90)
 dump m[0x100]
 ```
 
+### Format specs
+
+`fmt` parses `[[fill]align][+][#][0][width][.precision][type]`, where `type` is one of
+`x` `X` `b` `o` `d` for integers and `f` `e` `E` for floats. A spec with no type
+renders the value and applies only width and alignment. Placeholders are filled in
+order -- `{1}` is *not* a positional index -- and `{{` / `}}` are literal braces.
+
+| Spec | `-42` | `255` | `"ab"` |
+| --- | --- | --- | --- |
+| `{}` | `-42` | `255` | `ab` |
+| `{:05}` | `-0042` | `00255` | |
+| `{:x}` / `{:X}` | | `ff` / `FF` | |
+| `{:#x}` | | `0xff` | |
+| `{:b}` / `{:o}` | | `11111111` / `377` | |
+| `{:>6}` / `{:<6}` / `{:^6}` | `    -42` | | `ab    ` |
+| `{:*^6}` | | | `**ab**` |
+| `{:+}` | `-42` | `+255` | |
+
+The width counts the sign, matching Rust, Python and Go.
+
+**Before this release** the spec was matched by asking whether the text merely
+*contained* `04X`, `08X`, `x` or `X`. Two widths worked, no other type did, and
+`{:02X}` -- the width a hex dump wants -- silently fell through to the default
+rendering and printed `5`. The VM's copy had no float branch at all, so
+`fmt("{:.2f}", x)` printed a rounded value on the interpreter and the raw float on
+the VM. Both are now one shared parser (`rakc/src/fmt_spec.rs`), and
+`rakc/tests/fmt_specs.rs` runs a table of specs through both backends so the two
+cannot drift apart again.
+
 `mmap_write` needs `mmap_open(path, "rw")`. The mapping is the file, so a write needs
 no flush and no second handle, which is why it beats a seek-and-write on a path. It
 refuses a read-only mapping and an out-of-range offset *by name*, and a multi-byte
@@ -199,10 +229,11 @@ write that would run past the end applies none of its bytes.
 
 The three writers are gated by the `fs_write` capability, alongside `file_write`.
 
-Hex-editor code has one trap here: `0x00` and `0` are different values in Rak and
-the VM renders and compares `Hex` differently from the interpreter. Write byte
-values in decimal where a byte is meant. See
-[docs/V8-KNOWN-ISSUES.md](../V8-KNOWN-ISSUES.md).
+Hex-editor code has one trap here, and it is a value trap rather than a backend
+one: `0x00` and `0` are *different types* in Rak (`type_of` says `hex` and `int`),
+though they compare equal on both backends. Anything that branches on
+`type_of`, or that concatenates a hex value into a string, will notice. Byte
+values written as decimal are the least surprising thing to put in a buffer.
 
 ## Misc
 

@@ -7363,17 +7363,14 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                     }
                     if arg_idx < args.len() {
                         let arg = &args[arg_idx];
-                        if spec.contains(":04X") {
-                            result.push_str(&format!("{:04X}", arg.as_u64().unwrap_or(0)));
-                        } else if spec.contains(":08X") {
-                            result.push_str(&format!("{:08X}", arg.as_u64().unwrap_or(0)));
-                        } else if spec.contains('X') || spec.contains('x') {
-                            result.push_str(&format!("{:X}", arg.as_u64().unwrap_or(0)));
-                        } else if spec.contains('.') && (spec.contains('f') || spec.contains('e')) {
-                            result.push_str(&format!("{}", arg.as_f64().unwrap_or(0.0)));
-                        } else {
-                            result.push_str(&arg.to_string());
-                        }
+                        // One shared parser, so a spec cannot mean one thing on
+                        // the interpreter and another on the VM.
+                        result.push_str(&crate::fmt_spec::render(
+                            &spec,
+                            arg.as_u64(),
+                            arg.as_f64(),
+                            &arg.to_string(),
+                        ));
                         arg_idx += 1;
                     }
                 }

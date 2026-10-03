@@ -49,6 +49,25 @@ pub struct Compiler {
     /// Counter behind `next_cell_global`, so each inlined module gets one
     /// private namespace-handle global.
     cell_counter: u32,
+    /// Top-level names of the module currently being inlined, mapped to the
+    /// mangled chunk global that actually holds each one.
+    ///
+    /// The VM compiles an imported module's body into the *same chunk*, so without
+    /// this a module's top-level bindings were ordinary globals in one flat
+    /// namespace with the importer's. Six symptoms followed, all from that one
+    /// cause: a module could read the importer's globals, a module's private
+    /// top-level was visible to the importer, two modules exporting the same name
+    /// silently shared one binding, `from m import x` (no alias) stayed live
+    /// instead of copying, and `mod { }` blocks leaked into each other.
+    ///
+    /// The interpreter needs none of this: a module gets its own `Env`, so a name
+    /// in a module means what that module's file says. This map is the VM's way
+    /// of earning the same guarantee.
+    ///
+    /// Keyed by the *source* name, so `compile_ident_load` can translate a
+    /// reference the programmer wrote into the global that holds it. Empty
+    /// outside a module body, which is the common case and costs one branch.
+    rename: HashMap<String, String>,
     /// Modules currently being inlined (circular-import detection).
     compiling: std::collections::HashSet<std::path::PathBuf>,
     /// Base directory for resolving name-based imports of the current module.
@@ -66,7 +85,60 @@ struct LoopInfo {
 
 /// What `inline_module` produced for one module file: the names it exports, and
 /// the chunk global holding its namespace handle.
-type InlinedModule = (Vec<String>, String);
+/// Each name a module exports, paired with the chunk global that holds it, and
+/// the global holding the module's namespace handle.
+///
+/// The backing global is usually the same string as the export, but not for an
+/// inlined module: its top-level bindings are mangled (`__rak_modcell_3$COUNT`) so
+/// that two modules exporting `COUNT` cannot share one binding. The pair is what
+/// lets a `from m import x` copy reach the right global while `pub x` stays spelled
+/// the way the programmer wrote it.
+type InlinedModule = (Vec<(String, String)>, String);
+
+/// The exported names of an inlined module, without their backing globals.
+fn plain_exports(exports: &[(String, String)]) -> Vec<String> {
+    exports.iter().map(|(n, _)| n.clone()).collect()
+}
+
+/// The chunk global backing one export of an inlined module.
+fn backing_of(exports: &[(String, String)], name: &str) -> String {
+    exports
+        .iter()
+        .find(|(n, _)| n == name)
+        .map(|(_, g)| g.clone())
+        .unwrap_or_else(|| name.to_string())
+}
+
+/// The mangled chunk global for a module's top-level `name`.
+///
+/// `$` separates the two halves and cannot appear in a Rak identifier, so no
+/// user-written name can collide with a mangled one. The cell prefix is what keeps
+/// two modules that both declare `COUNT` apart.
+fn mangled_global(cell_global: &str, name: &str) -> String {
+    format!("{}${}", cell_global, name)
+}
+
+/// The top-level names a module's own items bind.
+///
+/// These are the ones that become chunk globals and so need mangling.
+/// Destructuring forms (`let (a, b) = ...`) are skipped: their names bind through
+/// a pattern rather than the plain `name` field, and a half-mangled destructuring
+/// target would be worse than an unmangled one.
+fn module_top_level_names(items: &[Stmt]) -> Vec<String> {
+    let mut names = Vec::new();
+    for stmt in items {
+        let inner = match stmt {
+            Stmt::Export(inner) => inner.as_ref(),
+            other => other,
+        };
+        match inner {
+            Stmt::Let { name, pattern: None, .. } => names.push(name.clone()),
+            Stmt::Const { name, .. } => names.push(name.clone()),
+            _ => {}
+        }
+    }
+    names
+}
 
 impl Compiler {
     pub fn new() -> Self {
@@ -89,6 +161,7 @@ impl Compiler {
             current_exports: Vec::new(),
             module_cache: HashMap::new(),
             cell_counter: 0,
+            rename: HashMap::new(),
             compiling: std::collections::HashSet::new(),
             base_dir: ".".to_string(),
         }
@@ -336,6 +409,24 @@ impl Compiler {
         // re-export is a copy and stays fixed, whichever module it came from.
         let mut mutable_exports: Vec<String> = Vec::new();
 
+        // Namespace this module's top-level names, for as long as its body is being
+        // compiled. Restored on both the success and the failure path below, like
+        // `base_dir` and `current_exports`.
+        //
+        // Without this the module's `let`s became ordinary chunk globals in one flat
+        // namespace with the importer's, which is the single cause of all six
+        // documented VM/interpreter differences.
+        let saved_rename = std::mem::replace(
+            &mut self.rename,
+            module_top_level_names(&module.items)
+                .into_iter()
+                .map(|n| {
+                    let g = mangled_global(&cell_global, &n);
+                    (n, g)
+                })
+                .collect(),
+        );
+
         // Pre-pass for this imported module: collect fns (incl. pub fn), macros,
         // externs. Exported names are recorded in `self.current_exports`.
         let mut local_closures: Vec<(String, Value)> = Vec::new();
@@ -397,13 +488,13 @@ impl Compiler {
 
             for (n, cl) in &local_closures {
                 self.load_const(cl.clone());
-                let ci = self.const_str(n);
+                let ci = self.global_index(n);
                 self.emit_op(Op::StoreGlobal);
                 self.emit_u16(ci);
             }
             for (n, nf) in &local_foreigns {
                 self.load_const(nf.clone());
-                let ci = self.const_str(n);
+                let ci = self.global_index(n);
                 self.emit_op(Op::StoreGlobal);
                 self.emit_u16(ci);
             }
@@ -460,22 +551,29 @@ impl Compiler {
             // Capture this module's exports (including re-exports added during
             // import processing) and restore the parent's export list.
             let local_exports = std::mem::take(&mut self.current_exports);
+            // Pair each exported name with the global that holds it. `pub x` stays
+            // spelled `x` for the namespace and for `m.x`; the mangled name is only
+            // ever a chunk-global detail, reached through `ModuleCell`.
+            let export_pairs: Vec<(String, String)> = local_exports
+                .iter()
+                .map(|n| (n.clone(), self.global_for(n)))
+                .collect();
             self.module_cache
-                .insert(canon.clone(), (local_exports.clone(), cell_global.clone()));
+                .insert(canon.clone(), (export_pairs.clone(), cell_global.clone()));
 
             // Now that the export list is final, tell the VM which of this module's
             // globals are readable from outside, and record the mapping so
             // `Op::StoreGlobal` can keep republishing them.
             let cell = crate::bytecode::ModuleCell {
                 global: cell_global.clone(),
-                exports: local_exports.iter().map(|n| (n.clone(), n.clone())).collect(),
+                exports: export_pairs.clone(),
                 mutable: mutable_exports.clone(),
             };
             self.chunk.module_cells.push(cell);
             for n in &local_exports {
                 self.emit_module_publish(&cell_global, n, mutable_exports.contains(n));
             }
-            Ok((local_exports, cell_global))
+            Ok((export_pairs, cell_global))
         })();
         // Restored on both paths. A module that failed to compile used to
         // leave `base_dir` pointing inside its own directory and leave itself
@@ -483,6 +581,7 @@ impl Compiler {
         // cycle.
         self.base_dir = saved_base;
         self.current_exports = saved_exports;
+        self.rename = saved_rename;
         self.compiling.remove(&canon);
         result
     }
@@ -535,6 +634,53 @@ impl Compiler {
     }
 
 
+    /// Copy every export of an inlined module into the current scope.
+    ///
+    /// This is what `from m import *` and a re-export both mean: the importing
+    /// module gets its own plain global per name, holding the value at this moment.
+    fn emit_copy_exports(&mut self, exports: &[(String, String)]) {
+        for (name, backing) in exports.iter() {
+            // A re-export of a name this module also binds locally would be
+            // overwritten by the local declaration that follows, which is the
+            // module author's business, not a reason to skip the copy.
+            if backing == name {
+                continue;
+            }
+            self.emit_copy_global(backing, name);
+        }
+    }
+
+    /// Copy the named exports of an inlined module into the current scope,
+    /// honouring any alias. `alias: None` copies onto the plain name.
+    fn emit_copy_from_names(
+        &mut self,
+        exports: &[(String, String)],
+        from_names: &[(String, Option<String>)],
+    ) {
+        for (name, alias) in from_names {
+            let backing = backing_of(exports, name);
+            let target = alias.clone().unwrap_or_else(|| name.clone());
+            self.emit_copy_global(&backing, &target);
+        }
+    }
+
+    /// `target = load backing`, as two instructions.
+    ///
+    /// A load and a store rather than an alias, because Rak's `from ... import` is a
+    /// copy on the interpreter and a copy is what has to be reproduced here. Emitting
+    /// a single `BindGlobal` would make it live and reintroduce the difference.
+    fn emit_copy_global(&mut self, backing: &str, target: &str) {
+        if backing == target {
+            return;
+        }
+        let bi = self.const_str(backing);
+        self.emit_op(Op::LoadGlobal);
+        self.emit_u16(bi);
+        let ti = self.const_str(target);
+        self.emit_op(Op::StoreGlobal);
+        self.emit_u16(ti);
+    }
+
     fn compile_import(&mut self, import: &Import) -> Result<(), String> {
         let resolved = self.resolve_target(import)?;
         match import.kind {
@@ -549,7 +695,9 @@ impl Compiler {
                 };
                 if import.reexport {
                     // Re-export all of the module's exports from the current module.
-                    for n in &exports {
+                    let names = plain_exports(&exports);
+                    self.emit_copy_exports(&exports);
+                    for n in &names {
                         if !self.current_exports.contains(n) {
                             self.current_exports.push(n.clone());
                         }
@@ -602,7 +750,8 @@ impl Compiler {
                 // so the diagnostic says what the module *does* export. Without
                 // that, "is not exported" on a name that is spelled correctly is
                 // a dead end.
-                let mut sorted = exports.clone();
+                let names = plain_exports(&exports);
+                let mut sorted = names.clone();
                 sorted.sort();
                 let exports_list = sorted.join(", ");
                 // Macros are exported too, and `from m import <macro>` is not
@@ -612,14 +761,17 @@ impl Compiler {
                 macro_names.sort();
                 if import.reexport {
                     if import.star {
-                        for n in &exports {
+                        let names = plain_exports(&exports);
+                        self.emit_copy_exports(&exports);
+                        for n in &names {
                             if !self.current_exports.contains(n) {
                                 self.current_exports.push(n.clone());
                             }
                         }
                     } else {
+                        self.emit_copy_from_names(&exports, &import.from_names);
                         for (n, _) in &import.from_names {
-                            if !exports.contains(n) {
+                            if !names.contains(n) {
                                 let mut msg = format!("from {} import {}: '{}' is not exported (module exports: {})", import.path.join("."), n, n, exports_list);
                         if !macro_names.is_empty() {
                             msg.push_str(&format!("; macros: {}", macro_names.join(", ")));
@@ -634,23 +786,27 @@ impl Compiler {
                     return Ok(());
                 }
                 if import.star {
-                    // All exported globals are already inlined; nothing to copy.
+                    // A star-import is a *copy* on the interpreter, so it has to be one
+                    // here. It used not to be: the names were left inlined, so a later
+                    // reference read the module's live global instead of the value the
+                    // program asked for.
+                    self.emit_copy_exports(&exports);
                     return Ok(());
                 }
                 for (n, alias) in &import.from_names {
-                    if !exports.contains(n) {
+                    if !names.contains(n) {
                         return Err(format!("from {} import {}: '{}' is not exported (module exports: {})", import.path.join("."), n, n, exports_list));
                     }
-                    if let Some(a) = alias {
-                        let ci = self.const_str(n);
-                        self.emit_op(Op::LoadGlobal);
-                        self.emit_u16(ci);
-                        let ai = self.const_str(a);
-                        self.emit_op(Op::StoreGlobal);
-                        self.emit_u16(ai);
-                    }
-                    // No alias: the global `n` is already present (inlined).
                 }
+                // Copy, with or without an alias.
+                //
+                // The unaliased form used to be skipped entirely, on the reasoning
+                // that the global was "already present (inlined)". That was true when
+                // every module shared one flat namespace and false as soon as they did
+                // not -- and it made `from m import x` *live* on this backend while
+                // copying on the interpreter, which is the opposite of what the same
+                // line does elsewhere.
+                self.emit_copy_from_names(&exports, &import.from_names);
                 Ok(())
             }
         }
@@ -667,6 +823,9 @@ impl Compiler {
         sub.macros = self.macros.clone();
         sub.module_cache = self.module_cache.clone();
         sub.base_dir = self.base_dir.clone();
+        // A module's functions must resolve the module's own top-level names,
+        // which live in mangled globals.
+        sub.rename = self.rename.clone();
         for s in body {
             sub.compile_stmt(s)?;
         }
@@ -768,11 +927,37 @@ impl Compiler {
             self.emit_op(Op::LoadLocal);
             self.emit_byte(slot);
         } else {
-            let ci = self.const_str(name);
+            let global = self.global_for(name);
+            let ci = self.const_str(&global);
             self.emit_op(Op::LoadGlobal);
             self.emit_u16(ci);
         }
         Ok(())
+    }
+
+    /// The chunk global that holds `name`.
+    ///
+    /// A name declared at the top level of an inlined module lives in a mangled
+    /// global, so every reference to it has to be translated. A name with no entry
+    /// -- a local, a builtin, an import binding -- is its own global name.
+    fn global_for(&self, name: &str) -> String {
+        match self.rename.get(name) {
+            Some(mangled) => mangled.clone(),
+            None => name.to_string(),
+        }
+    }
+
+    /// Const index for the global holding `name`, honouring module mangling.
+    ///
+    /// Every emission of a `StoreGlobal` for a *user-declared* name has to go
+    /// through here. A few sites bypassed `store_ident_to` -- the module's function
+    /// closures and foreigns were the ones that bit -- and a store that skips the
+    /// translation puts the value in one global while every reference to it compiles
+    /// to a load of another, which surfaces as
+    /// `Undefined: __rak_modcell_1$add`.
+    fn global_index(&mut self, name: &str) -> u16 {
+        let global = self.global_for(name);
+        self.const_str(&global)
     }
 
     /// Emit a store of the top-of-stack value to the named variable.
@@ -781,7 +966,8 @@ impl Compiler {
             self.emit_op(Op::StoreLocal);
             self.emit_byte(slot);
         } else {
-            let ci = self.const_str(name);
+            let global = self.global_for(name);
+            let ci = self.const_str(&global);
             self.emit_op(Op::StoreGlobal);
             self.emit_u16(ci);
         }
@@ -1022,7 +1208,7 @@ impl Compiler {
             Stmt::Let { name, value, mutable, .. } => {
                 self.compile_expr(value)?;
                 if self.scope_depth == 0 {
-                    let ci = self.const_str(name);
+                    let ci = self.global_index(name);
                     self.emit_op(Op::StoreGlobal);
                     self.emit_u16(ci);
                     if !mutable {
@@ -1222,7 +1408,7 @@ impl Compiler {
                 // at the call site and bound; immutable by convention).
                 self.compile_expr(value)?;
                 if self.scope_depth == 0 {
-                    let ci = self.const_str(name);
+                    let ci = self.global_index(name);
                     self.emit_op(Op::StoreGlobal);
                     self.emit_u16(ci);
                 } else {
@@ -1240,7 +1426,7 @@ impl Compiler {
                     Stmt::Let { name, value, .. } => {
                         self.compile_expr(value)?;
                         if self.scope_depth == 0 {
-                            let ci = self.const_str(name);
+                            let ci = self.global_index(name);
                             self.emit_op(Op::StoreGlobal);
                             self.emit_u16(ci);
                         } else {
@@ -1252,7 +1438,7 @@ impl Compiler {
                     Stmt::Const { name, value } => {
                         self.compile_expr(value)?;
                         if self.scope_depth == 0 {
-                            let ci = self.const_str(name);
+                            let ci = self.global_index(name);
                             self.emit_op(Op::StoreGlobal);
                             self.emit_u16(ci);
                         } else {
@@ -1308,6 +1494,20 @@ impl Compiler {
                 let mut exports: Vec<String> = Vec::new();
                 let mut mutable_names: Vec<String> = Vec::new();
                 let mut closures: Vec<(String, crate::value::Value)> = Vec::new();
+                // Claim the cell first: the block's own names are mangled with it, and
+                // the closures below are compiled before the body, so the rename map has
+                // to be in place before either.
+                let cell_global = self.next_cell_global();
+                let saved_rename = std::mem::replace(
+                    &mut self.rename,
+                    module_top_level_names(items)
+                        .into_iter()
+                        .map(|n| {
+                            let g = mangled_global(&cell_global, &n);
+                            (n, g)
+                        })
+                        .collect(),
+                );
                 for stmt in items {
                     let candidate = match stmt {
                         Stmt::Export(inner) => Some(inner.as_ref()),
@@ -1339,11 +1539,10 @@ impl Compiler {
                     }
                 }
 
-                let cell_global = self.next_cell_global();
                 self.emit_make_module(&cell_global);
                 for (n, cl) in &closures {
                     self.load_const(cl.clone());
-                    let ci = self.const_str(n);
+                    let ci = self.global_index(n);
                     self.emit_op(Op::StoreGlobal);
                     self.emit_u16(ci);
                 }
@@ -1368,15 +1567,30 @@ impl Compiler {
                     }
                     self.compile_stmt(stmt)?;
                 }
+                // Restore the enclosing scope before recording the cell, so the
+                // `exports` mapping and the block's own binding are resolved in the
+                // right scope. `self.global_for` then names the mangled globals.
+                let export_pairs: Vec<(String, String)> = exports
+                    .iter()
+                    .map(|n| (n.clone(), self.global_for(n)))
+                    .collect();
                 self.chunk.module_cells.push(crate::bytecode::ModuleCell {
                     global: cell_global.clone(),
-                    exports: exports.iter().map(|n| (n.clone(), n.clone())).collect(),
+                    exports: export_pairs,
                     mutable: mutable_names.clone(),
                 });
+                self.rename = saved_rename;
                 for n in &exports {
                     self.emit_module_publish(&cell_global, n, mutable_names.contains(n));
                 }
-                self.emit_bind_module(&cell_global, name);
+                // The block's *name* is a binding in the enclosing scope, so it goes
+                // through the enclosing rename map.
+                let gi = self.global_index(name);
+                let ci = self.const_str(&cell_global);
+                self.emit_op(Op::LoadGlobal);
+                self.emit_u16(ci);
+                self.emit_op(Op::BindModule);
+                self.emit_u16(gi);
             }
             other => {
                 return Err(format!("VM does not support statement: {:?}", other));
@@ -1552,13 +1766,32 @@ impl Compiler {
                 self.emit_byte(idx_slot);
                 let loop_start = self.chunk.code.len();
                 self.loop_stack.push(LoopInfo { label: label.clone(), break_jumps: Vec::new(), continue_jumps: Vec::new() });
+                // Loop on the *bound*, not on the element's truthiness.
+                //
+                // This used to be `IndexGet` then `JumpIfFalse`, which asked "is
+                // this element truthy?" and so ended the loop on the first `0`,
+                // `""` or `false`. `for b in bytes([0, 15, 16, 255])` iterated
+                // zero times on the VM -- and a NUL byte is the most common value
+                // in a binary file, so this stopped a buffer walk dead at the
+                // first one. The interpreter iterates all four bytes, so this was
+                // a silent backend divergence too.
+                //
+                // Stack across the test: [arr, len, idx] -> [arr, bool] -> [arr].
+                // `Gt` (not `LtEq`) because the operands are pushed length-first:
+                // `l > r` here reads as `idx < len`, the bound. `LtEq` on this
+                // stack would read `len <= idx` and the loop would never run.
                 self.emit_op(Op::LoadLocal);
                 self.emit_byte(arr_slot);
+                self.emit_op(Op::Dup);
+                self.emit_op(Op::Len);
+                self.emit_op(Op::LoadLocal);
+                self.emit_byte(idx_slot);
+                self.emit_op(Op::Gt);
+                let jexit = self.emit_jump(Op::JumpIfFalse);
+                self.emit_op(Op::Pop);
                 self.emit_op(Op::LoadLocal);
                 self.emit_byte(idx_slot);
                 self.emit_op(Op::IndexGet);
-                let jexit = self.emit_jump(Op::JumpIfFalse);
-                // item is truthy and still on the stack; store it into the loop var.
                 let item_slot = self.add_local("__for_item".to_string());
                 self.emit_op(Op::StoreLocal);
                 self.emit_byte(item_slot);
@@ -1578,7 +1811,9 @@ impl Compiler {
                 self.emit_byte(idx_slot);
                 self.emit_jump_back(loop_start);
                 self.patch_jump(jexit);
-                // JumpIfFalse left the (falsy) item on the stack; pop it.
+                // `JumpIfFalse` does not pop, so the bound result is still there,
+                // and `arr` was left underneath it. Clear both.
+                self.emit_op(Op::Pop);
                 self.emit_op(Op::Pop);
                 self.end_loop_with_continue(inc_target);
                 Ok(())
@@ -1652,17 +1887,17 @@ impl Compiler {
                 self.emit_u16(ci);
             }
             Expr::Hex(h) => {
-                let ci = self.emit_const(Value::Hex(*h, 64));
+                let ci = self.emit_const(Value::Hex(*h));
                 self.emit_op(Op::LoadConst);
                 self.emit_u16(ci);
             }
             Expr::BinLit(b) => {
-                let ci = self.emit_const(Value::Hex(*b, 64));
+                let ci = self.emit_const(Value::Hex(*b));
                 self.emit_op(Op::LoadConst);
                 self.emit_u16(ci);
             }
             Expr::OctLit(o) => {
-                let ci = self.emit_const(Value::Hex(*o, 64));
+                let ci = self.emit_const(Value::Hex(*o));
                 self.emit_op(Op::LoadConst);
                 self.emit_u16(ci);
             }
@@ -1697,16 +1932,7 @@ impl Compiler {
             Expr::Nil => {
                 self.emit_op(Op::Nil);
             }
-            Expr::Ident(name) => {
-                if let Some(slot) = self.resolve_local(name) {
-                    self.emit_op(Op::LoadLocal);
-                    self.emit_byte(slot);
-                } else {
-                    let ci = self.const_str(name);
-                    self.emit_op(Op::LoadGlobal);
-                    self.emit_u16(ci);
-                }
-            }
+            Expr::Ident(name) => self.compile_ident_load(name)?,
             Expr::Unary(op, e) => {
                 self.compile_expr(e)?;
                 match op {
@@ -1765,7 +1991,7 @@ impl Compiler {
                     self.emit_op(Op::StoreLocal);
                     self.emit_byte(slot);
                 } else {
-                    let ci = self.const_str(name);
+                    let ci = self.global_index(name);
                     self.emit_op(Op::StoreGlobal);
                     self.emit_u16(ci);
                 }
@@ -1793,7 +2019,7 @@ impl Compiler {
                     self.emit_op(Op::StoreLocal);
                     self.emit_byte(slot);
                 } else {
-                    let ci = self.const_str(name);
+                    let ci = self.global_index(name);
                     self.emit_op(Op::StoreGlobal);
                     self.emit_u16(ci);
                 }
@@ -1866,7 +2092,7 @@ impl Compiler {
                 }
                 if let Expr::Ident(name) = callee.as_ref() {
                     if self.func_names.contains(name) {
-                        let ci = self.const_str(name);
+                        let ci = self.global_index(name);
                         self.emit_op(Op::LoadGlobal);
                         self.emit_u16(ci);
                         for a in args {
@@ -2395,7 +2621,7 @@ impl Compiler {
                 Ok(None)
             }
             Pattern::Hex(h) => {
-                self.load_const(Value::Hex(*h, 64));
+                self.load_const(Value::Hex(*h));
                 self.emit_op(Op::Eq);
                 Ok(None)
             }
@@ -2731,7 +2957,7 @@ fn decode_resolved(
                 Big => for i in 0..n { acc = (acc << 8) | bytes[start + i] as u64; },
                 Little => for i in 0..n { acc |= (bytes[start + i] as u64) << (8 * i); },
             }
-            Ok((Value::Hex(acc, *bits as usize), start + n, 0))
+            Ok((Value::Hex(acc), start + n, 0))
         }
         ResolvedBinKind::Int { bits, endian } => {
             let n = (*bits as usize) / 8;
@@ -2768,7 +2994,7 @@ fn decode_resolved(
                 acc |= (bit as u64) << j;
             }
             let new_bit = bit_off + width;
-            Ok((Value::Hex(acc, width), off + new_bit / 8, new_bit % 8))
+            Ok((Value::Hex(acc), off + new_bit / 8, new_bit % 8))
         }
         ResolvedBinKind::Ref(inner) => {
             let mut map: HashMap<String, Value> = HashMap::new();

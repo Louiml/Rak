@@ -143,6 +143,21 @@ impl<V> ModuleNamespace<V> {
 
     /// Why a `set` was refused, so the caller can say which rule applied instead
     /// of reporting one catch-all.
+    /// Why a read of `name` through a module handle is refused.
+    ///
+    /// Separate from `refusal`, which is about assignment: reading a name the module
+    /// did not export has nothing to do with `let` versus `let mut`, and reusing the
+    /// assignment message would blame the wrong rule.
+    pub fn read_refusal(&self, name: &str) -> String {
+        if self.is_public(name) {
+            // Public, so it is present; the caller reached here only because the
+            // value is somehow absent. Say what is actually true rather than
+            // claiming it is unexported.
+            return format!("'{}' is exported but has no value yet", name);
+        }
+        format!("'{}' is not exported from this module", name)
+    }
+
     pub fn refusal(&self, name: &str) -> String {
         if !self.is_public(name) {
             return format!("'{}' is not exported from this module, so it cannot be assigned", name);

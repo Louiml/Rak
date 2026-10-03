@@ -726,6 +726,19 @@ buf` yields the bytes as ints, and `b1 + b2` joins buffers. `mmap_write` refuses
 read-only mapping and an out-of-range offset by name, and a rejected multi-byte
 write applies none of its bytes.
 
+`fmt` takes real format specs, so a hex column is a loop and a `fmt`:
+
+```rak
+for b in row { dump fmt("{:02X}", b) }   // 0F, not 0
+dump fmt("{:#x}", 255)                  // 0xff
+dump fmt("[{:>4}]", n)                   // right-aligned, width 4
+dump fmt("{:.2f}", ratio)                // two decimals, on both backends
+```
+
+`[[fill]align][+][#][0][width][.precision][type]`, with `x X b o d` and `f e E`.
+The width counts the sign, so `{:05}` of `-42` is `-0042`. One spec means the same
+thing on both backends.
+
 ### OSINT (where it started)
 
 ```rak

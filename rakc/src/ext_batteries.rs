@@ -445,7 +445,7 @@ fn vs_i64(v: Option<&VV>, what: &str) -> Result<i64, String> {
     match v {
         Some(VV::I64(i)) => Ok(*i),
         Some(VV::F64(f)) => Ok(*f as i64),
-        Some(VV::Hex(h, _)) => Ok(*h as i64),
+        Some(VV::Hex(h)) => Ok(*h as i64),
         Some(VV::U64(u)) => Ok(*u as i64),
         _ => Err(format!("{} expects an int", what)),
     }

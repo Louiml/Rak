@@ -18,6 +18,7 @@ pub mod lsp;
 #[cfg(feature = "bindgen")]
 pub mod bindgen;
 pub mod fmt;
+pub mod fmt_spec;
 pub mod lint;
 pub mod caps;
 pub mod fuzz;

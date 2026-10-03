@@ -22,7 +22,7 @@ pub enum Value {
     U64(u64),
     F32(f32),
     F64(f64),
-    Hex(u64, usize),
+    Hex(u64),
     String(Arc<str>),
     Char(char),
     Bytes(Arc<[u8]>),
@@ -153,7 +153,7 @@ impl Value {
             Value::U64(_) => "u64",
             Value::F32(_) => "f32",
             Value::F64(_) => "f64",
-            Value::Hex(_, _) => "hex",
+            Value::Hex(_) => "hex",
             Value::String(_) => "string",
             Value::Char(_) => "char",
             Value::Bytes(_) => "bytes",
@@ -198,7 +198,7 @@ impl Value {
             Value::U64(v) => Some(*v as i64),
             Value::F32(v) => Some(*v as i64),
             Value::F64(v) => Some(*v as i64),
-            Value::Hex(v, _) => Some(*v as i64),
+            Value::Hex(v) => Some(*v as i64),
             Value::Char(c) => Some(*c as i64),
             Value::ForeignPtr(p) => Some(*p as i64),
             Value::Evidence { inner, .. } => inner.as_i64(),
@@ -208,7 +208,7 @@ impl Value {
 
     pub fn as_u64(&self) -> Option<u64> {
         match self {
-            Value::Hex(v, _) => Some(*v),
+            Value::Hex(v) => Some(*v),
             Value::ForeignPtr(p) => Some(*p),
             Value::Evidence { inner, .. } => inner.as_u64(),
             _ => self.as_i64().map(|v| v as u64),
@@ -227,7 +227,7 @@ impl Value {
             Value::U16(v) => Some(*v as f64),
             Value::U32(v) => Some(*v as f64),
             Value::U64(v) => Some(*v as f64),
-            Value::Hex(v, _) => Some(*v as f64),
+            Value::Hex(v) => Some(*v as f64),
             Value::Char(c) => Some(*c as i64 as f64),
             _ => None,
         }
@@ -248,7 +248,7 @@ impl Value {
                 | Value::U64(_)
                 | Value::F32(_)
                 | Value::F64(_)
-                | Value::Hex(_, _)
+                | Value::Hex(_)
         )
     }
 
@@ -257,7 +257,7 @@ impl Value {
             Value::Bool(b) => *b,
             Value::Nil => false,
             Value::I64(0) | Value::I32(0) | Value::U64(0) | Value::U32(0) => false,
-            Value::Hex(0, _) => false,
+            Value::Hex(0) => false,
             Value::String(s) => !s.is_empty(),
             Value::Char(_) => true,
             Value::Bytes(b) => !b.is_empty(),
@@ -288,7 +288,7 @@ impl PartialEq for Value {
             (Value::U64(a), Value::U64(b)) => a == b,
             (Value::F32(a), Value::F32(b)) => a == b,
             (Value::F64(a), Value::F64(b)) => a == b,
-            (Value::Hex(a, _), Value::Hex(b, _)) => a == b,
+            (Value::Hex(a), Value::Hex(b)) => a == b,
             (Value::String(a), Value::String(b)) => a == b,
             (Value::Char(a), Value::Char(b)) => a == b,
             (Value::Bytes(a), Value::Bytes(b)) => a == b,
@@ -333,7 +333,12 @@ impl fmt::Display for Value {
             Value::U64(v) => write!(f, "{}", v),
             Value::F32(v) => write!(f, "{}", v),
             Value::F64(v) => write!(f, "{}", v),
-            Value::Hex(h, w) => write!(f, "0x{:0width$X}", h, width = w / 4),
+            // Minimal digits, the way the interpreter's `0x{:X}` prints. This used to
+            // pad to a width carried on the value, but nothing ever set that width
+            // from the source -- the compiler hardcoded 64 -- so every hex literal
+            // rendered as 16 digits and captured output (a dump, a log line, a
+            // saved file) carried the padding.
+            Value::Hex(h) => write!(f, "0x{:X}", h),
             Value::String(s) => write!(f, "{}", s),
             Value::Char(c) => write!(f, "'{}'", c),
             Value::Bytes(b) => {
