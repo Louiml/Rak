@@ -57,6 +57,10 @@ const BUILTINS: &[&str] = &[
     "gzip", "gunzip", "deflate", "inflate", "zip_archive", "zip_list", "zip_extract",
     // --- FFI and memory-mapped files (0.7) ---
     "ffi_load", "ffi_ptr", "ffi_alloc", "ffi_free", "ffi_write", "ffi_read",
+    // Declare a library-owned region before reading or writing through it. Without
+    // this, every access through a `ffi_ptr` address is refused: the escape hatch is
+    // supposed to be discoverable.
+    "ffi_trust",
     "ffi_read_i32", "ffi_cstr_to_string", "ffi_string_to_cstr", "ffi_call",
     "mmap_open", "mmap_slice", "mmap_size", "mmap_close", "mmap_find",
     "mmap_lines", "mmap_lines_off", "mmap_write",

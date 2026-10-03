@@ -854,7 +854,11 @@ pub struct Interpreter {
     /// Tracked native allocations made by `ffi_alloc` / `ffi_string_to_cstr`,
     /// keyed by raw pointer address → byte length, so `ffi_free` can release
     /// them with the correct `Vec::from_raw_parts` layout.
-    ffi_allocs: HashMap<u64, usize>,
+    /// Regions Rak may touch through a raw pointer.
+    ///
+    /// Replaces a bare `HashMap<u64, usize>` so the bounds logic lives in one tested
+    /// place rather than being re-implemented at each of four call sites.
+    ffi_allocs: rak_stdlib::ffi::Allocations,
     /// `macro name(params) { body }` definitions, keyed by macro name.
     macros: HashMap<String, crate::ast::Stmt>,
     /// `binstruct Name { ... }` definitions, keyed by struct name.
@@ -1103,7 +1107,7 @@ impl Interpreter {
             methods: HashMap::new(),
             foreign_fns: HashMap::new(),
             foreign_default_lib: None,
-            ffi_allocs: HashMap::new(),
+            ffi_allocs: rak_stdlib::ffi::Allocations::new(),
             macros: HashMap::new(),
             binstructs: HashMap::new(),
             module_cache: HashMap::new(),
@@ -1136,7 +1140,7 @@ impl Interpreter {
             methods: HashMap::new(),
             foreign_fns: HashMap::new(),
             foreign_default_lib: None,
-            ffi_allocs: HashMap::new(),
+            ffi_allocs: rak_stdlib::ffi::Allocations::new(),
             macros: HashMap::new(),
             binstructs: HashMap::new(),
             module_cache: HashMap::new(),
@@ -5936,7 +5940,7 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                 let mut v = vec![0u8; n];
                 let ptr = v.as_mut_ptr() as u64;
                 std::mem::forget(v);
-                self.ffi_allocs.insert(ptr, n);
+                self.ffi_allocs.record(ptr, n);
                 Ok(Value::ForeignPtr(ptr))
             }
             "ffi_free" => {
@@ -5944,42 +5948,84 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                     Some(Value::ForeignPtr(p)) => *p,
                     _ => return Err(crate::RakError::Runtime("ffi_free(ptr) requires a ptr".to_string())),
                 };
-                match self.ffi_allocs.remove(&ptr) {
+                match self.ffi_allocs.release(ptr) {
                     Some(n) => {
                         unsafe { let _ = Vec::from_raw_parts(ptr as *mut u8, n, n); }
                         Ok(Value::Nil)
                     }
-                    None => Err(crate::RakError::Runtime("ffi_free: pointer was not allocated by ffi_alloc/ffi_string_to_cstr".to_string())),
+                    None => Err(crate::RakError::Runtime("ffi_free: pointer was not allocated by ffi_alloc/ffi_string_to_cstr, or was already freed".to_string())),
                 }
             }
             "ffi_write" => {
                 let ptr = args.first().and_then(|v| match v { Value::ForeignPtr(p) => Some(*p), _ => None }).ok_or_else(|| crate::RakError::Runtime("ffi_write(ptr, off, byte)".to_string()))?;
-                let off = args.get(1).and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                let off = args.get(1).and_then(|v| v.as_u64()).unwrap_or(0);
                 let byte = args.get(2).and_then(|v| v.as_u64()).unwrap_or(0) as u8;
-                unsafe { *((ptr as usize + off) as *mut u8) = byte; }
+                // The check that was missing. Without it this was an arbitrary
+                // write: `ffi_ptr` builds a pointer from any integer, and nothing
+                // tied `off` to the allocation.
+                self.ffi_allocs
+                    .check(ptr, off, 1)
+                    .map_err(crate::RakError::Runtime)?;
+                unsafe { *((ptr as usize).wrapping_add(off as usize) as *mut u8) = byte; }
                 Ok(Value::Nil)
             }
             "ffi_read" => {
                 let ptr = args.first().and_then(|v| match v { Value::ForeignPtr(p) => Some(*p), _ => None }).ok_or_else(|| crate::RakError::Runtime("ffi_read(ptr, off)".to_string()))?;
-                let off = args.get(1).and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-                let b = unsafe { *((ptr as usize + off) as *const u8) };
+                let off = args.get(1).and_then(|v| v.as_u64()).unwrap_or(0);
+                self.ffi_allocs
+                    .check(ptr, off, 1)
+                    .map_err(crate::RakError::Runtime)?;
+                let b = unsafe { *((ptr as usize).wrapping_add(off as usize) as *const u8) };
                 Ok(Value::Int(b as i64))
             }
             "ffi_read_i32" => {
                 let ptr = args.first().and_then(|v| match v { Value::ForeignPtr(p) => Some(*p), _ => None }).ok_or_else(|| crate::RakError::Runtime("ffi_read_i32(ptr, off)".to_string()))?;
-                let off = args.get(1).and_then(|v| v.as_u64()).unwrap_or(0) as isize;
+                let off = args.get(1).and_then(|v| v.as_u64()).unwrap_or(0);
+                // Four bytes, and the check accounts for all four: `off` inside the
+                // allocation is not enough if it runs three bytes past the end.
+                self.ffi_allocs
+                    .check(ptr, off, 4)
+                    .map_err(crate::RakError::Runtime)?;
                 let v = unsafe { *((ptr as usize).wrapping_add(off as usize) as *const i32) };
                 Ok(Value::Int(v as i64))
             }
             "ffi_cstr_to_string" => {
-                let ptr = args.first().and_then(|v| match v { Value::ForeignPtr(p) => Some(*p), _ => None }).ok_or_else(|| crate::RakError::Runtime("ffi_cstr_to_string(ptr)".to_string()))? as usize;
+                let ptr = args.first().and_then(|v| match v { Value::ForeignPtr(p) => Some(*p), _ => None }).ok_or_else(|| crate::RakError::Runtime("ffi_cstr_to_string(ptr)".to_string()))?;
+                // Bounded by the allocation. The old loop had no bound at all: a
+                // buffer with no NUL in it walked off the end into unmapped memory
+                // and killed the process, which is a denial of service reachable
+                // from a pointer that came out of a network response.
+                let cap = self.ffi_allocs.cstr_cap(ptr, 0).map_err(crate::RakError::Runtime)?;
+                let base = ptr as usize;
                 let s = unsafe {
                     let mut len = 0usize;
-                    while *(ptr as *const u8).add(len) != 0 { len += 1; }
-                    let slice = std::slice::from_raw_parts(ptr as *const u8, len);
+                    while len < cap && *((base + len) as *const u8) != 0 { len += 1; }
+                    if len == cap {
+                        return Err(crate::RakError::Runtime(format!(
+                            "ffi_cstr_to_string: no NUL terminator within the {} bytes Rak \
+                             owns at {ptr:#x}; this is not a C string",
+                            cap
+                        )));
+                    }
+                    let slice = std::slice::from_raw_parts(base as *const u8, len);
                     String::from_utf8_lossy(slice).into_owned()
                 };
                 Ok(Value::String(s))
+            }
+            // The escape hatch, made explicit. A library-owned address has to be
+            // declared before Rak will read or write through it, so an unchecked
+            // access is an assertion in the source rather than an accident.
+            "ffi_trust" => {
+                let ptr = args.first().and_then(|v| match v { Value::ForeignPtr(p) => Some(*p), _ => None })
+                    .ok_or_else(|| crate::RakError::Runtime("ffi_trust(ptr, len)".to_string()))?;
+                let len = args.get(1).and_then(|v| v.as_u64()).unwrap_or(0);
+                if len == 0 || len > (1u64 << 32) {
+                    return Err(crate::RakError::Runtime(
+                        "ffi_trust: length must be 1..=4294967296".to_string()));
+                }
+                self.ffi_allocs.record(ptr, len as usize);
+                // Returned rather than nil, so `let p = ffi_trust(...)` works.
+                Ok(Value::ForeignPtr(ptr))
             }
             "ffi_string_to_cstr" => {
                 let s = self.val_to_string(args.first())?;
@@ -5990,7 +6036,7 @@ Expr::BinLit(b) => Ok(Value::Hex(*b)),
                 let len = bytes.len();
                 let ptr = bytes.as_ptr() as u64;
                 std::mem::forget(bytes);
-                self.ffi_allocs.insert(ptr, len);
+                self.ffi_allocs.record(ptr, len);
                 Ok(Value::ForeignPtr(ptr))
             }
             "ffi_call" => {

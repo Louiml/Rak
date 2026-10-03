@@ -1002,12 +1002,28 @@ impl Vm {
         self.insert_native("ffi_ptr", |args| {
             Ok(Value::ForeignPtr(args.first().and_then(|v| v.as_u64()).unwrap_or(0)))
         });
+        // The escape hatch: declare a library-owned region before touching it.
+        self.insert_native("ffi_trust", |args| {
+            let ptr = match args.first() {
+                Some(Value::ForeignPtr(p)) => *p,
+                _ => return Err("ffi_trust(ptr, len)".to_string()),
+            };
+            let len = args.get(1).and_then(|v| v.as_u64()).unwrap_or(0);
+            if len == 0 || len > (1u64 << 32) {
+                return Err("ffi_trust: length must be 1..=4294967296".to_string());
+            }
+            ffi_regions().record(ptr, len as usize);
+            // Returned rather than nil so `let p = ffi_trust(ffi_ptr(n), len)`
+            // works: the alternative binds nil and the next call fails on the
+            // argument shape instead of on the trust.
+            Ok(Value::ForeignPtr(ptr))
+        });
         self.insert_native("ffi_alloc", |args| {
             let n = args.first().and_then(|v| v.as_u64()).unwrap_or(0) as usize;
             let v = vec![0u8; n];
             let ptr = v.as_ptr() as u64;
             std::mem::forget(v);
-            FFI_ALLOC.lock().unwrap().get_or_insert_with(HashMap::new).insert(ptr, n);
+            ffi_regions().record(ptr, n);
             Ok(Value::ForeignPtr(ptr))
         });
         self.insert_native("ffi_free", |args| {
@@ -1015,23 +1031,30 @@ impl Vm {
                 Some(Value::ForeignPtr(p)) => *p,
                 _ => return Err("ffi_free(ptr) requires a ptr".to_string()),
             };
-            let mut tbl = FFI_ALLOC.lock().unwrap();
-            if let Some(tbl) = tbl.as_mut() {
-                if let Some(n) = tbl.remove(&ptr) {
+            match ffi_regions().release(ptr) {
+                Some(n) => {
                     unsafe { let _ = Vec::from_raw_parts(ptr as *mut u8, n, n); }
-                    return Ok(Value::Nil);
+                    Ok(Value::Nil)
                 }
+                None => Err(
+                    "ffi_free: pointer was not allocated by ffi_alloc/ffi_string_to_cstr, \
+                     or was already freed"
+                        .to_string(),
+                ),
             }
-            Err("ffi_free: pointer was not allocated by ffi_alloc/ffi_string_to_cstr".to_string())
         });
         self.insert_native("ffi_write", |args| {
             let ptr = match args.first() {
                 Some(Value::ForeignPtr(p)) => *p as usize,
                 _ => return Err("ffi_write(ptr, off, byte)".to_string()),
             };
-            let off = args.get(1).and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+            let off = args.get(1).and_then(|v| v.as_u64()).unwrap_or(0);
             let byte = args.get(2).and_then(|v| v.as_u64()).unwrap_or(0) as u8;
-            unsafe { *((ptr + off) as *mut u8) = byte; }
+            // The check that was missing. Without it this was an arbitrary write,
+            // because `ffi_ptr` builds a pointer from any integer and nothing tied
+            // `off` to an allocation.
+            ffi_regions().check(ptr as u64, off, 1)?;
+            unsafe { *((ptr as usize).wrapping_add(off as usize) as *mut u8) = byte; }
             Ok(Value::Nil)
         });
         self.insert_native("ffi_read", |args| {
@@ -1039,8 +1062,9 @@ impl Vm {
                 Some(Value::ForeignPtr(p)) => *p as usize,
                 _ => return Err("ffi_read(ptr, off)".to_string()),
             };
-            let off = args.get(1).and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-            let b = unsafe { *((ptr + off) as *const u8) };
+            let off = args.get(1).and_then(|v| v.as_u64()).unwrap_or(0);
+            ffi_regions().check(ptr as u64, off, 1)?;
+            let b = unsafe { *((ptr as usize).wrapping_add(off as usize) as *const u8) };
             Ok(Value::I64(b as i64))
         });
         self.insert_native("ffi_cstr_to_string", |args| {
@@ -1048,10 +1072,21 @@ impl Vm {
                 Some(Value::ForeignPtr(p)) => *p as usize,
                 _ => return Err("ffi_cstr_to_string(ptr)".to_string()),
             };
+            // Bounded by the allocation: the old loop had no bound at all, so a
+            // buffer with no NUL in it walked off the end and killed the process.
+            let cap = ffi_regions().cstr_cap(ptr as u64, 0)?;
             let s = unsafe {
+                let base = ptr as usize;
                 let mut len = 0usize;
-                while *(ptr as *const u8).add(len) != 0 { len += 1; }
-                let slice = std::slice::from_raw_parts(ptr as *const u8, len);
+                while len < cap && *((base + len) as *const u8) != 0 { len += 1; }
+                if len == cap {
+                    return Err(format!(
+                        "ffi_cstr_to_string: no NUL terminator within the {} bytes Rak \
+                         owns; this is not a C string",
+                        cap
+                    ));
+                }
+                let slice = std::slice::from_raw_parts(base as *const u8, len);
                 String::from_utf8_lossy(slice).into_owned()
             };
             Ok(Value::String(Arc::from(s.as_str())))
@@ -1065,7 +1100,7 @@ impl Vm {
             let len = bytes.len();
             let ptr = bytes.as_ptr() as u64;
             std::mem::forget(bytes);
-            FFI_ALLOC.lock().unwrap().get_or_insert_with(HashMap::new).insert(ptr, len);
+            ffi_regions().record(ptr, len);
             Ok(Value::ForeignPtr(ptr))
         });
         self.insert_native("ffi_call", |args| {
@@ -3436,6 +3471,16 @@ fn vm_len_of(v: &Value) -> Option<i64> {
         Value::Struct { fields, .. } => Some(fields.len() as i64),
         _ => None,
     }
+}
+
+/// The VM's FFI provenance table.
+///
+/// Process-global because the VM's natives are plain `Fn(&[Value])` closures with no
+/// access to the `Vm`, so they cannot carry a per-instance table the way the
+/// interpreter's field can.
+fn ffi_regions() -> &'static rak_stdlib::ffi::Allocations {
+    static REGIONS: std::sync::OnceLock<rak_stdlib::ffi::Allocations> = std::sync::OnceLock::new();
+    REGIONS.get_or_init(rak_stdlib::ffi::Allocations::new)
 }
 
 /// Borrow the compiled regex from a `Value::Regex`, or build one from a string.
