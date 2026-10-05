@@ -46,6 +46,23 @@ jobs:
           rustc -vV
           cargo -vV
 
+      - name: Install Linux dependencies
+        # The workspace includes the Tauri IDE crate, which links against GTK
+        # and WebKitGTK. Without these the build script for `glib-sys` fails
+        # with "Package glib-2.0 was not found in the pkg-config search path",
+        # and because the test job runs `--workspace` that took down the whole
+        # Linux run before a single test executed. The release workflow has
+        # always installed these; this workflow did not.
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf
+
       - name: Cache cargo
         uses: actions/cache@v4
         with:
@@ -72,7 +89,18 @@ jobs:
         # the equivalent protection is cargo's own per-test timeout, and the
         # runner is disposable, so a runaway process costs minutes rather than
         # the machine.
-        run: cargo test --workspace --lib --tests --no-fail-fast -- --test-threads=1
+        #
+        # `--workspace --exclude app`: `app` is the Tauri IDE crate. It has no
+        # tests, and it cannot be built here at all -- tauri.conf.json declares
+        # `resources/rakc*` as bundled resources, and tauri-build fails the build
+        # when such a glob matches nothing, which it does on a clean checkout
+        # with no prebuilt compiler. Excluding it here costs no coverage (the
+        # release workflow still compiles and bundles the IDE before every tag);
+        # naming the crates explicitly keeps this from silently drifting back to
+        # `--workspace` and re-breaking the run.
+        run: >-
+          cargo test --workspace --exclude app
+          --lib --tests --no-fail-fast -- --test-threads=1
 
       - name: Summarise the test results
         # Re-runs nothing; reads what is already in the log. GitHub collapses
