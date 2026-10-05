@@ -11091,7 +11091,16 @@ dump s"#,
     #[test]
     fn test_process_capture() {
         let mut interp = Interpreter::new();
-        let src = "let pid = process_spawn(\"cmd\", [\"/c\", \"echo\", \"raktoken\"])\nprocess_wait(pid)\ndump process_stdout(pid)";
+        // The command has to be the platform's own shell. Spawning `cmd /c`
+        // works on Windows and nowhere else, which made this a Windows-only
+        // test that failed on every other platform. It went unnoticed
+        // because the Linux CI job died in glib-sys's build script, before
+        // any test ran.
+        let src = if cfg!(windows) {
+            "let pid = process_spawn(\"cmd\", [\"/c\", \"echo\", \"raktoken\"])\nprocess_wait(pid)\ndump process_stdout(pid)"
+        } else {
+            "let pid = process_spawn(\"sh\", [\"-c\", \"echo raktoken\"])\nprocess_wait(pid)\ndump process_stdout(pid)"
+        };
         let out = interp.run_source(src).unwrap();
         assert!(out.iter().any(|l| l.contains("raktoken")), "got: {:?}", out);
     }
