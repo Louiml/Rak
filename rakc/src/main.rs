@@ -90,7 +90,12 @@ fn cmd_verify(args: &[String]) -> i32 {
                     .unwrap_or(max_iters);
             }
             "--quiet" | "-q" => quiet = true,
-            other if !other.starts_with('-') && file.is_none() => file = Some(other.to_string()),
+            // A bare `-` is the stdin filename, not a flag: it starts with `-`, so
+//     classifying by prefix alone made `rakc run -` unreachable.
+            //     `is_stdin_marker` is the single place that decides.
+            other if !is_flag_token(other) && file.is_none() => {
+                file = Some(other.to_string())
+            }
             _ => {}
         }
         i += 1;
@@ -171,7 +176,7 @@ fn cmd_test(args: &[String]) {
                 i += 1;
                 sandbox_allow = args.get(i).cloned().unwrap_or_default();
             }
-            a if a.starts_with('-') => {
+            a if is_flag_token(a) => {
                 eprintln!("Unknown test flag: {}", a);
                 std::process::exit(1);
             }
@@ -273,6 +278,25 @@ fn cmd_test(args: &[String]) {
     if total_failed > 0 {
         std::process::exit(1);
     }
+}
+
+/// True for a command-line *flag*, false for the stdin filename `-`.
+///
+/// The usage text documents `Use - for file to read from stdin`, and
+/// `read_source` implements it, but the argument scanner classified anything
+/// starting with `-` as a flag. `-` starts with `-`, so `rakc run -` consumed
+/// the only filename candidate and failed with "Missing file argument (only
+/// flags were given)" -- the documented stdin path was unreachable, and with it
+/// any way to pipe a script into `run`, `check`, `vm`, `lint` or `fmt`.
+///
+/// Length is the discriminator, not the character: `--` and `-x` are flags,
+/// the single character `-` is not.
+fn is_stdin_marker(arg: &str) -> bool {
+    arg == "-"
+}
+
+fn is_flag_token(arg: &str) -> bool {
+    arg.starts_with('-') && !is_stdin_marker(arg)
 }
 
 fn read_source(arg: &str) -> String {
@@ -644,7 +668,7 @@ fn main() {
     let mut flag_slots: std::collections::HashSet<usize> = std::collections::HashSet::new();
     let mut i = 2;
     while i < args.len() {
-        if args[i].starts_with('-') {
+        if is_flag_token(&args[i]) {
             flag_slots.insert(i);
             // A flag whose value is the next argument. Without listing it here the
             // flag is stripped and its value is left behind as a stray script

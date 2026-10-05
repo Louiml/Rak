@@ -28,7 +28,7 @@ rustyline = "15"
 # LSP
 tower-lsp = { version = "0.20", optional = true }
 # Async event loop (always on; powers http_get_async / tcp_probe / await).
-tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "macros", "time", "sync"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "io-std", "macros", "time", "sync"] }
 
 # Bindgen
 bindgen = { version = "0.70", optional = true }

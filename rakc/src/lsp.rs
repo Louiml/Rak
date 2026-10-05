@@ -603,15 +603,44 @@ fn completion_item(label: &str, kind: CompletionItemKind, detail: &str) -> Compl
     }
 }
 
+/// Byte offset within `line` for a column expressed in UTF-16 code units.
+///
+/// LSP counts a position's `character` in UTF-16 code units, so it is not a byte
+/// index and not a `char` count: an astral-plane character is one code unit to
+/// the editor and four bytes on disk. Converting by accumulating `len_utf16`
+/// is what keeps the result on a character boundary, which the callers rely on
+/// because they slice the source with it.
+///
+/// A column past the end of the line clamps to the line end rather than
+/// wrapping, so a stale position cannot produce an offset inside the next
+/// line.
+fn utf16_column_to_byte(line: &str, character: usize) -> usize {
+    let mut units = 0usize;
+    for (byte_index, ch) in line.char_indices() {
+        if units >= character {
+            return byte_index;
+        }
+        units += ch.len_utf16();
+    }
+    line.len()
+}
+
+/// Convert an LSP `Position` to a byte offset in `source`.
+///
+/// The column is UTF-16 code units (see `utf16_column_to_byte`), not bytes.
+/// Treating it as bytes is what used to make `hover` and `goto_definition`
+/// panic on any line containing a non-ASCII character: the offset landed inside
+/// a multi-byte sequence and `&source[..offset]` is only defined on a char
+/// boundary.
 fn position_to_offset(source: &str, pos: Position) -> usize {
-    let mut offset = 0;
+    let mut line_start = 0usize;
     for (i, line) in source.lines().enumerate() {
         if i == pos.line as usize {
-            return offset + (pos.character as usize).min(line.len());
+            return line_start + utf16_column_to_byte(line, pos.character as usize);
         }
-        offset += line.len() + 1;
+        line_start += line.len() + 1;
     }
-    offset
+    source.len()
 }
 
 fn parse_error_to_diagnostic(source: &str, err: &str) -> Vec<Diagnostic> {
@@ -652,17 +681,25 @@ fn lex_error_to_diagnostic(source: &str, err: &str) -> Vec<Diagnostic> {
     }]
 }
 
+/// Pull a 1-based `at line N, col M` out of a parser or lexer error, and
+/// convert it to the 0-based coordinates LSP positions use.
+///
+/// The conversion is the point. These values went straight into
+/// `Diagnostic.range`, whose `line` and `character` are 0-based, so every
+/// published diagnostic pointed one line above the real error and an editor
+/// underlined the wrong line. `saturating_sub` keeps a malformed `at line 0`
+/// at 0 instead of wrapping to a huge index.
 fn extract_line_col(source: &str, err: &str) -> (usize, usize) {
     if let Some(rest) = err.split("at line ").nth(1) {
         let parts: Vec<&str> = rest.split(", col ").collect();
         if parts.len() == 2 {
             let line = parts[0].trim().parse::<usize>().unwrap_or(1);
             let col = parts[1].trim().parse::<usize>().unwrap_or(1);
-            return (line, col);
+            return (line.saturating_sub(1), col.saturating_sub(1));
         }
     }
     let _ = source;
-    (1, 1)
+    (0, 0)
 }
 
 pub async fn start() {
@@ -673,4 +710,89 @@ pub async fn start() {
         docs: std::sync::Mutex::new(std::collections::HashMap::new()),
     });
     Server::new(stdin, stdout, socket).serve(service).await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pos(line: u32, character: u32) -> Position {
+        Position { line, character }
+    }
+
+    /// The column is a UTF-16 code-unit offset, not a byte offset. Slicing with
+    /// a byte offset into a line containing a multi-byte character produced an
+    /// index that was not on a char boundary, and every caller slices, so the
+    /// server panicked instead of returning a wrong answer.
+    #[test]
+    fn position_to_offset_handles_multibyte_characters() {
+        // "héllo" -- the é is two bytes but one UTF-16 unit. Asking for the
+        // offset of the final 'o' means column 4 in UTF-16 units, byte 5.
+        let src = "héllo\n";
+        let off = position_to_offset(src, pos(0, 4));
+        assert_eq!(&src[off..off + 1], "o");
+        // And the slice really is on a char boundary for every column.
+        for character in 0..=6 {
+            let off = position_to_offset(src, pos(0, character));
+            assert!(src.is_char_boundary(off), "column {} -> {}", character, off);
+        }
+    }
+
+    /// A character outside the BMP is one UTF-16 code unit (a surrogate pair is
+    /// two) and four bytes. Mixing those up is exactly what the old code did.
+    #[test]
+    fn position_to_offset_handles_astral_characters() {
+        let src = "a\u{1F600}b\n"; // U+1F600, four bytes, two UTF-16 units
+        // 'a' is column 0 -> byte 0.
+        assert_eq!(position_to_offset(src, pos(0, 0)), 0);
+        // 'b' is at UTF-16 column 3 (a=1, emoji=2) -> byte 5.
+        let off = position_to_offset(src, pos(0, 3));
+        assert_eq!(&src[off..off + 1], "b");
+    }
+
+    /// A column past the end of the line clamps to the line end rather than
+    /// running into the next line, so a stale client position cannot return an
+    /// offset belonging to a different line.
+    #[test]
+    fn position_to_offset_clamps_a_column_past_end_of_line() {
+        let src = "ab\ncd\n";
+        assert_eq!(position_to_offset(src, pos(0, 99)), 2);
+        // A line past the end of the document clamps to the end of the source.
+        assert_eq!(position_to_offset(src, pos(99, 0)), src.len());
+    }
+
+    #[test]
+    fn position_to_offset_finds_the_second_line() {
+        let src = "one\ntwo\nthree\n";
+        assert_eq!(&src[position_to_offset(src, pos(1, 0))..][..3], "two");
+        assert_eq!(&src[position_to_offset(src, pos(2, 1))..][..1], "h");
+    }
+
+    /// Parser and lexer errors report a 1-based line and column; LSP positions
+    /// are 0-based. Passing the parser's numbers straight through put every
+    /// diagnostic one line above the real error.
+    #[test]
+    fn extract_line_col_converts_to_zero_based() {
+        let (line, col) = extract_line_col("", "Lexer error: bad at line 7, col 3");
+        assert_eq!((line, col), (6, 2));
+    }
+
+    /// A malformed or absent position must not wrap to a huge index.
+    #[test]
+    fn extract_line_col_never_wraps() {
+        assert_eq!(extract_line_col("", "no position here"), (0, 0));
+        assert_eq!(extract_line_col("", "at line 0, col 0"), (0, 0));
+    }
+
+    /// The end of a diagnostic range has to stay on the same line as its start,
+    /// which is what makes an editor underline one character.
+    #[test]
+    fn diagnostic_range_stays_on_one_line() {
+        let diags = parse_error_to_diagnostic("", "Lexer error: bad at line 7, col 3");
+        assert_eq!(diags.len(), 1);
+        let range = diags[0].range;
+        assert_eq!(range.start.line, range.end.line);
+        assert_eq!(range.start.line, 6);
+        assert!(range.end.character > range.start.character);
+    }
 }

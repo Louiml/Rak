@@ -446,6 +446,38 @@ fn now_secs() -> u64 {
         .unwrap_or(0)
 }
 
+/// `a << b` / `a >> b`, with the shift count range-checked.
+///
+/// These were the only arithmetic operators that reached a raw Rust `<<`/`>>`,
+/// which panics on a negative count or one at or past the width. The release
+/// profile sets `panic = "abort"`, so `dump 1 << 64` did not raise a catchable
+/// Rak error -- it aborted the whole process, and `try` could not intercept it.
+/// A shift count arrives from parsed input all the time (bitfield widths in a
+/// `binstruct` header, a length field in a PCAP record), so this was reachable
+/// from exactly the data Rak exists to read.
+///
+/// The compiler's constant folder already guarded this (`compiler.rs`,
+/// `BinOp::Shl`); only the runtime paths did not.
+fn shift(lhs: i64, count: i64, left: bool) -> crate::Result<i64> {
+    if !(0..64).contains(&count) {
+        return Err(crate::RakError::Runtime(format!(
+            "Shift count {} is out of range for a 64-bit integer (expected 0..64)",
+            count
+        )));
+    }
+    let shifted = if left {
+        lhs.checked_shl(count as u32)
+    } else {
+        lhs.checked_shr(count as u32)
+    };
+    shifted.ok_or_else(|| {
+        crate::RakError::Runtime(format!(
+            "Shift count {} is out of range for a 64-bit integer (expected 0..64)",
+            count
+        ))
+    })
+}
+
 /// Membership test behind `x in collection` and the `contains(coll, x)`
 /// builtin: substring/char checks for strings, equality for arrays/tuples,
 /// key presence for maps, byte / subsequence search for bytes.
@@ -5325,8 +5357,8 @@ impl Interpreter {
                     BinOp::BitAnd => l & r,
                     BinOp::BitOr => l | r,
                     BinOp::BitXor => l ^ r,
-                    BinOp::Shl => l << r,
-                    BinOp::Shr => l >> r,
+                    BinOp::Shl => shift(l, r, true)?,
+                    BinOp::Shr => shift(l, r, false)?,
                     // Handled before the numeric fast path; unreachable here.
                     BinOp::In => return contains_member(right, left).map(Value::Bool),
                     BinOp::Eq => return Ok(Value::Bool(l == r)),

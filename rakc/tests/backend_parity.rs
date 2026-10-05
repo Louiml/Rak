@@ -640,6 +640,33 @@ if add(1, 1) > 1 { dump "ab" + "c" }
     );
 }
 
+/// Shift counts must be range-checked, identically, on both backends.
+///
+/// `1 << 64` used to reach a raw Rust `<<`, which panics, and the release
+/// profile sets `panic = "abort"` -- so it killed the process instead of
+/// raising a catchable error, and `try` could not intercept it. A shift count
+/// comes straight out of parsed input all the time (a bitfield width in a
+/// `binstruct` header, a length field in a PCAP record), so this was reachable
+/// from exactly the data Rak exists to read.
+///
+/// Written through `try` so the assertion is that the error is *catchable*,
+/// which is the property that was missing: an abort cannot be caught, so this
+/// test could not even have been written before the fix.
+#[test]
+fn parity_shift_overflow_is_a_catchable_error() {
+    agree(
+        "shift count range",
+        r#"
+dump 1 << 3
+dump 256 >> 4
+try { dump 1 << 64 } catch e { dump "caught" }
+try { dump 1 >> 64 } catch e { dump "caught" }
+try { dump 1 << -1 } catch e { dump "caught" }
+try { dump 1 >> -1 } catch e { dump "caught" }
+"#,
+    );
+}
+
 /// The stdlib surface both backends share today.
 ///
 /// This is `#[ignore]`d rather than passing because it is not yet true. The VM

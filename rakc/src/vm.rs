@@ -2255,8 +2255,8 @@ impl Vm {
                     let v = frame.pop();
                     frame.push(Value::I64(!(v.as_i64().unwrap_or(0))));
                 }
-                Op::Shl => bin_int(frame, |a, b| a << b, |_, _| 0.0),
-                Op::Shr => bin_int(frame, |a, b| a >> b, |_, _| 0.0),
+                Op::Shl => bin_int_shift(frame, true)?,
+                Op::Shr => bin_int_shift(frame, false)?,
                 Op::Eq => self.binop_compare(frame, CompareOp::Eq)?,
                 Op::NotEq => self.binop_compare(frame, CompareOp::NotEq)?,
                 Op::Lt => self.binop_compare(frame, CompareOp::Lt)?,
@@ -3568,6 +3568,53 @@ impl<'a> Frame<'a> {
     fn peek(&self) -> &Value {
         self.stack.last().unwrap_or(&Value::Nil)
     }
+}
+
+/// `<<` and `>>` for the VM, with the shift count range-checked.
+///
+/// `bin_int` cannot be used here: it takes an infallible closure, and the raw
+/// Rust `<<` these used to call panics on a negative count or one at or past
+/// the width. With `panic = "abort"` that killed the process instead of
+/// producing a catchable error, on both backends.
+///
+/// Non-integer operands are an error rather than a float result, matching the
+/// interpreter, which reports "Invalid operand types for binary operation"
+/// (shifting a float has no meaning). Keeping the two identical matters:
+/// `tests/backend_parity.rs` runs every program on both and requires the same
+/// output.
+fn bin_int_shift(frame: &mut Frame, left: bool) -> Result<(), String> {
+    let r = frame.pop();
+    let l = frame.pop();
+    let (a, b) = match (&l, &r) {
+        (Value::I64(a), Value::I64(b)) => (*a, *b),
+        (Value::Hex(a), Value::I64(b)) => (*a as i64, *b),
+        (Value::I64(a), Value::Hex(b)) => (*a, *b as i64),
+        (Value::Hex(a), Value::Hex(b)) => (*a as i64, *b as i64),
+        _ => return Err("Invalid operand types for binary operation".to_string()),
+    };
+    if !(0..64).contains(&b) {
+        return Err(format!(
+            "Shift count {} is out of range for a 64-bit integer (expected 0..64)",
+            b
+        ));
+    }
+    let shifted = if left {
+        a.checked_shl(b as u32)
+    } else {
+        a.checked_shr(b as u32)
+    };
+    let out = shifted.ok_or_else(|| {
+        format!(
+            "Shift count {} is out of range for a 64-bit integer (expected 0..64)",
+            b
+        )
+    })?;
+    frame.push(if matches!(l, Value::Hex(_)) {
+        Value::Hex(out as u64)
+    } else {
+        Value::I64(out)
+    });
+    Ok(())
 }
 
 fn bin_int(frame: &mut Frame, fi: impl Fn(i64, i64) -> i64, ff: impl Fn(f64, f64) -> f64) {
