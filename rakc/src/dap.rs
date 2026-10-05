@@ -151,148 +151,162 @@ fn spawn_worker(
         .unwrap_or_else(|| ".".to_string());
     let source = source.to_string();
 
-    std::thread::spawn(move || {
-        let tokens = match crate::lexer::tokenize(&source) {
-            Ok(t) => t,
-            Err(e) => {
-                let mut s = state.lock().unwrap();
-                s.done = true;
-                s.error = Some(format!("Lexer error: {}", e));
-                drop(s);
-                writer.event(
-                    "output",
-                    json!({"category": "stderr", "output": format!("Lexer error: {}\n", e)}),
-                );
-                writer.event("terminated", json!({"restart": false}));
-                return;
-            }
-        };
-        let ast = match crate::parser::parse(&tokens, &source) {
-            Ok(a) => a,
-            Err(e) => {
-                let mut s = state.lock().unwrap();
-                s.done = true;
-                s.error = Some(format!("Parser error: {}", e));
-                drop(s);
-                writer.event(
-                    "output",
-                    json!({"category": "stderr", "output": format!("Parser error: {}\n", e)}),
-                );
-                writer.event("terminated", json!({"restart": false}));
-                return;
-            }
-        };
-        let chunk = match crate::compiler::compile_module_in(&ast, &base_dir) {
-            Ok(c) => c,
-            Err(e) => {
-                let mut s = state.lock().unwrap();
-                s.done = true;
-                s.error = Some(format!("Compile error: {}", e));
-                drop(s);
-                writer.event(
-                    "output",
-                    json!({"category": "stderr", "output": format!("Compile error: {}\n", e)}),
-                );
-                writer.event("terminated", json!({"restart": false}));
-                return;
-            }
-        };
-
-        let mut vm = Vm::new();
-        let st = state.clone();
-        let cv_in = cvar.clone();
-        let w_stopped = writer.clone();
-        vm.debugger(HashSet::new(), move |line, locals, globals, _callstack| {
-            let mut s = st.lock().unwrap();
-            // Pause once per source line: a breakpoint (or a requested step)
-            // only fires when `line` differs from the line we last paused on,
-            // so later opcodes of the same line don't re-trigger.
-            let fresh_line = line != s.last_hit_line;
-            let on_bp = fresh_line && s.breakpoints.contains(&line);
-            let on_step = s.step && fresh_line;
-            if !on_bp && !on_step {
-                s.running = true;
-                drop(s);
-                return VmDebugAction::Continue;
-            }
-            s.step = false;
-            s.last_hit_line = line;
-            s.paused = Some(Paused {
-                line,
-                locals: locals
-                    .iter()
-                    .map(|(k, v)| (k.clone(), val_to_str(v)))
-                    .collect(),
-                globals: {
-                    let mut g: Vec<(String, String)> = globals
-                        .iter()
-                        .map(|(k, v)| (k.clone(), val_to_str(v)))
-                        .collect();
-                    g.sort_by(|a, b| a.0.cmp(&b.0));
-                    g
-                },
-            });
-            s.running = false;
-            s.cmd = Cmd::Noop;
-            drop(s);
-            w_stopped.event(
-                "stopped",
-                json!({"reason": "breakpoint", "threadId": 1, "allThreadsStopped": true}),
-            );
-            let mut s = st.lock().unwrap();
-            // Park until the reader sends a resume command.
-            while !s.done && s.cmd == Cmd::Noop {
-                s = cv_in.wait(s).unwrap();
-            }
-            let cmd = s.cmd;
-            s.cmd = Cmd::Noop;
-            s.paused = None;
-            s.running = true;
-            drop(s);
-            match cmd {
-                Cmd::Continue => {
-                    // Clear any stale step request.
-                    st.lock().unwrap().step = false;
-                    VmDebugAction::Continue
-                }
-                Cmd::Next => {
-                    // Pause at the very next source line.
-                    st.lock().unwrap().step = true;
-                    VmDebugAction::Step
-                }
-                Cmd::Quit => VmDebugAction::Quit,
-                Cmd::Noop => VmDebugAction::Continue,
-            }
-        });
-
-        let result = vm.run(&chunk);
-
-        let mut s = state.lock().unwrap();
-        match result {
-            Ok(lines) => {
-                s.output = lines;
-                for line in &s.output {
+    // A big stack and a call-depth cap, like every other entry point. A bare
+    // `std::thread::spawn` gets the default ~2 MiB stack and no cap, so a
+    // recursive program being debugged overflowed the stack and killed the
+    // session instead of reporting the depth limit.
+    std::thread::Builder::new()
+        .name("rak-dap-target".to_string())
+        .stack_size(crate::INTERPRETER_STACK)
+        .spawn(move || {
+            let tokens = match crate::lexer::tokenize(&source) {
+                Ok(t) => t,
+                Err(e) => {
+                    let mut s = state.lock().unwrap();
+                    s.done = true;
+                    s.error = Some(format!("Lexer error: {}", e));
+                    drop(s);
                     writer.event(
                         "output",
-                        json!({"category": "stdout", "output": format!("{}\n", line)}),
+                        json!({"category": "stderr", "output": format!("Lexer error: {}\n", e)}),
                     );
+                    writer.event("terminated", json!({"restart": false}));
+                    return;
                 }
+            };
+            let ast = match crate::parser::parse(&tokens, &source) {
+                Ok(a) => a,
+                Err(e) => {
+                    let mut s = state.lock().unwrap();
+                    s.done = true;
+                    s.error = Some(format!("Parser error: {}", e));
+                    drop(s);
+                    writer.event(
+                        "output",
+                        json!({"category": "stderr", "output": format!("Parser error: {}\n", e)}),
+                    );
+                    writer.event("terminated", json!({"restart": false}));
+                    return;
+                }
+            };
+            let chunk = match crate::compiler::compile_module_in(&ast, &base_dir) {
+                Ok(c) => c,
+                Err(e) => {
+                    let mut s = state.lock().unwrap();
+                    s.done = true;
+                    s.error = Some(format!("Compile error: {}", e));
+                    drop(s);
+                    writer.event(
+                        "output",
+                        json!({"category": "stderr", "output": format!("Compile error: {}\n", e)}),
+                    );
+                    writer.event("terminated", json!({"restart": false}));
+                    return;
+                }
+            };
+
+            let mut vm = Vm::new();
+            vm.set_max_call_depth(crate::interpreter::DEFAULT_MAX_DEPTH);
+            let st = state.clone();
+            let cv_in = cvar.clone();
+            let w_stopped = writer.clone();
+            vm.debugger(HashSet::new(), move |line, locals, globals, _callstack| {
+                let mut s = st.lock().unwrap();
+                // Pause once per source line: a breakpoint (or a requested step)
+                // only fires when `line` differs from the line we last paused on,
+                // so later opcodes of the same line don't re-trigger.
+                let fresh_line = line != s.last_hit_line;
+                let on_bp = fresh_line && s.breakpoints.contains(&line);
+                let on_step = s.step && fresh_line;
+                if !on_bp && !on_step {
+                    s.running = true;
+                    drop(s);
+                    return VmDebugAction::Continue;
+                }
+                s.step = false;
+                s.last_hit_line = line;
+                s.paused = Some(Paused {
+                    line,
+                    locals: locals
+                        .iter()
+                        .map(|(k, v)| (k.clone(), val_to_str(v)))
+                        .collect(),
+                    globals: {
+                        let mut g: Vec<(String, String)> = globals
+                            .iter()
+                            .map(|(k, v)| (k.clone(), val_to_str(v)))
+                            .collect();
+                        g.sort_by(|a, b| a.0.cmp(&b.0));
+                        g
+                    },
+                });
+                s.running = false;
+                s.cmd = Cmd::Noop;
+                drop(s);
+                w_stopped.event(
+                    "stopped",
+                    json!({"reason": "breakpoint", "threadId": 1, "allThreadsStopped": true}),
+                );
+                let mut s = st.lock().unwrap();
+                // Park until the reader sends a resume command.
+                while !s.done && s.cmd == Cmd::Noop {
+                    s = cv_in.wait(s).unwrap();
+                }
+                let cmd = s.cmd;
+                s.cmd = Cmd::Noop;
+                s.paused = None;
+                s.running = true;
+                drop(s);
+                match cmd {
+                    Cmd::Continue => {
+                        // Clear any stale step request.
+                        st.lock().unwrap().step = false;
+                        VmDebugAction::Continue
+                    }
+                    Cmd::Next => {
+                        // Pause at the very next source line.
+                        st.lock().unwrap().step = true;
+                        VmDebugAction::Step
+                    }
+                    Cmd::Quit => VmDebugAction::Quit,
+                    Cmd::Noop => VmDebugAction::Continue,
+                }
+            });
+
+            let result = vm.run(&chunk);
+
+            let mut s = state.lock().unwrap();
+            match result {
+                Ok(lines) => {
+                    s.output = lines;
+                    for line in &s.output {
+                        writer.event(
+                            "output",
+                            json!({"category": "stdout", "output": format!("{}\n", line)}),
+                        );
+                    }
+                }
+                Err(e) => s.error = Some(e),
             }
-            Err(e) => s.error = Some(e),
-        }
-        s.done = true;
-        s.running = false;
-        s.paused = None;
-        if let Some(e) = &s.error {
-            writer.event(
-                "output",
-                json!({"category": "stderr", "output": format!("{}\n", e)}),
-            );
-        }
-        drop(s);
-        cvar.notify_all();
+            s.done = true;
+            s.running = false;
+            s.paused = None;
+            if let Some(e) = &s.error {
+                writer.event(
+                    "output",
+                    json!({"category": "stderr", "output": format!("{}\n", e)}),
+                );
+            }
+            drop(s);
+            cvar.notify_all();
         writer.event("terminated", json!({"restart": false}));
     })
+    // A spawn failure cannot be reported through the captured state -- that
+    // has already moved into the closure -- and returning a handle to a
+    // thread that never ran would leave the reader waiting forever. Hand
+    // back an already-finished thread instead: `join` returns immediately
+    // and the session simply has no target to wait for.
+    .unwrap_or_else(|_| std::thread::spawn(|| {}))
 }
 
 /// Run the DAP server for `source` (already read from `file`) on stdio.

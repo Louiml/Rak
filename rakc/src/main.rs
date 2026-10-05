@@ -241,13 +241,23 @@ fn cmd_test(args: &[String]) {
             .parent()
             .map(|p| p.to_string_lossy().to_string())
             .unwrap_or_else(|| ".".to_string());
-        let mut interp = rakc::interpreter::Interpreter::with_base_dir(base_dir);
-        if let Err(e) = interp.run_source(&source) {
+        // On the big stack, with the same depth cap every other entry point
+        // applies. This used to run on the main thread with
+        // `Limits::default()`, which is all-`None`: on Windows the main
+        // thread's stack is 1 MiB, so a recursive test died with
+        // STATUS_STACK_OVERFLOW instead of the clean "recursion depth
+        // exceeded" error that `run`, `vm` and `verify` give.
+        let (run_result, results) = rakc::run_on_big_stack(move || {
+            let mut interp = rakc::interpreter::Interpreter::with_base_dir(base_dir);
+            interp.set_max_depth(rakc::interpreter::DEFAULT_MAX_DEPTH);
+            let run = interp.run_source(&source);
+            (run, interp.run_collected_tests())
+        });
+        if let Err(e) = run_result {
             eprintln!("error in {}: {}", f, e);
             total_failed += 1;
             continue;
         }
-        let results = interp.run_collected_tests();
         let file_stem = std::path::Path::new(f)
             .file_stem()
             .map(|s| s.to_string_lossy().to_string())
@@ -415,146 +425,153 @@ fn cmd_run_debug(file: &str, source: &str) {
     // The disassembler needs the compiled chunk; share it via Arc.
     let chunk_arc = std::sync::Arc::new(chunk);
 
-    let mut vm = Vm::new();
-    let bps = breakpoints.clone();
-    let stp = stepping.clone();
-    let chunk_d = chunk_arc.clone();
-    vm.debugger(std::collections::HashSet::new(), move |line, locals, _globals, callstack| {
-        // Fast path: don't pause unless stepping or on a breakpoint.
-        if !*stp.lock().unwrap() && !bps.lock().unwrap().contains(&line) {
-            return VmDebugAction::Continue;
-        }
-        *stp.lock().unwrap() = false;
-        println!("\n[stopped] line {}", line);
-        loop {
-            print!("dbg> ");
-            use std::io::Write as _;
-            let _ = std::io::stdout().flush();
-            let mut input = String::new();
-            if std::io::stdin().read_line(&mut input).unwrap_or(0) == 0 {
-                // EOF on stdin: run to completion.
+    // On the big stack, with the same call-depth cap `rakc vm` applies.
+    // This used to run on the main thread uncapped, so stepping into a
+    // recursive program took the debugger down with it -- the same bug
+    // `main.rs` documents for `vm` and fixes there.
+    let result = rakc::run_on_big_stack(move || {
+        let mut vm = Vm::new();
+        vm.set_max_call_depth(rakc::interpreter::DEFAULT_MAX_DEPTH);
+        let bps = breakpoints.clone();
+        let stp = stepping.clone();
+        let chunk_d = chunk_arc.clone();
+        vm.debugger(std::collections::HashSet::new(), move |line, locals, _globals, callstack| {
+            // Fast path: don't pause unless stepping or on a breakpoint.
+            if !*stp.lock().unwrap() && !bps.lock().unwrap().contains(&line) {
                 return VmDebugAction::Continue;
             }
-            let trimmed = input.trim().to_string();
-            if trimmed.is_empty() {
-                for (k, v) in &locals {
-                    println!("  {} = {}", k, v);
-                }
-                continue;
-            }
-            let lower = trimmed.to_lowercase();
-            match lower.as_str() {
-                ":help" | "help" | "h" => {
-                    println!("break <line|file:line> | continue/c | step/s | next/n | finish | locals | stack/bt | backtrace | print <name> | disassemble | frame | quit/q");
-                    continue;
-                }
-                "c" | "continue" => return VmDebugAction::Continue,
-                "s" | "step" | "n" | "next" => {
-                    *stp.lock().unwrap() = true;
-                    return VmDebugAction::Step;
-                }
-                "finish" => {
-                    // Run until the next breakpoint or program end.
+            *stp.lock().unwrap() = false;
+            println!("\n[stopped] line {}", line);
+            loop {
+                print!("dbg> ");
+                use std::io::Write as _;
+                let _ = std::io::stdout().flush();
+                let mut input = String::new();
+                if std::io::stdin().read_line(&mut input).unwrap_or(0) == 0 {
+                    // EOF on stdin: run to completion.
                     return VmDebugAction::Continue;
                 }
-                "locals" => {
-                    if locals.is_empty() {
-                        println!("(no locals)");
-                    }
+                let trimmed = input.trim().to_string();
+                if trimmed.is_empty() {
                     for (k, v) in &locals {
                         println!("  {} = {}", k, v);
                     }
                     continue;
                 }
-                "stack" | "bt" | "backtrace" => {
-                    println!("  #0 <main> (line {})", line);
-                    for (i, name) in callstack.iter().enumerate() {
-                        println!("  #{} {}", i + 1, name);
+                let lower = trimmed.to_lowercase();
+                match lower.as_str() {
+                    ":help" | "help" | "h" => {
+                        println!("break <line|file:line> | continue/c | step/s | next/n | finish | locals | stack/bt | backtrace | print <name> | disassemble | frame | quit/q");
+                        continue;
                     }
-                    if callstack.is_empty() {
-                        println!("  (no nested calls)");
+                    "c" | "continue" => return VmDebugAction::Continue,
+                    "s" | "step" | "n" | "next" => {
+                        *stp.lock().unwrap() = true;
+                        return VmDebugAction::Step;
                     }
-                    continue;
+                    "finish" => {
+                        // Run until the next breakpoint or program end.
+                        return VmDebugAction::Continue;
+                    }
+                    "locals" => {
+                        if locals.is_empty() {
+                            println!("(no locals)");
+                        }
+                        for (k, v) in &locals {
+                            println!("  {} = {}", k, v);
+                        }
+                        continue;
+                    }
+                    "stack" | "bt" | "backtrace" => {
+                        println!("  #0 <main> (line {})", line);
+                        for (i, name) in callstack.iter().enumerate() {
+                            println!("  #{} {}", i + 1, name);
+                        }
+                        if callstack.is_empty() {
+                            println!("  (no nested calls)");
+                        }
+                        continue;
+                    }
+                    "frame" => {
+                        println!("current line {}, stack depth {}", line, callstack.len() + 1);
+                        continue;
+                    }
+                    "quit" | "q" => return VmDebugAction::Quit,
+                    _ => {}
                 }
-                "frame" => {
-                    println!("current line {}, stack depth {}", line, callstack.len() + 1);
-                    continue;
-                }
-                "quit" | "q" => return VmDebugAction::Quit,
-                _ => {}
-            }
-            if let Some(rest) = lower.strip_prefix("break ") {
-                // Accept both `break 42` and `break file.rak:42`.
-                let num_part = rest.trim().rsplit(':').next().unwrap_or(rest.trim());
-                if let Ok(l) = num_part.trim().parse::<u32>() {
-                    bps.lock().unwrap().insert(l);
-                    println!("breakpoint set at line {}", l);
-                } else {
-                    println!("break <line|file:line> expects a number");
-                }
-                continue;
-            }
-            if let Some(rest) = trimmed.strip_prefix("print ") {
-                let name = rest.trim().to_string();
-                match locals.iter().find(|(k, _)| *k == name) {
-                    Some((_, v)) => println!("{}", v),
-                    None => println!("(no such local '{}'; try 'locals')", name),
-                }
-                continue;
-            }
-            if lower == "disassemble" || lower == "dis" {
-                println!("bytecode: {} bytes, {} constants, {} line markers", chunk_d.code.len(), chunk_d.constants.len(), chunk_d.lines.len());
-                let mut off = 0usize;
-                while off < chunk_d.code.len() {
-                    if let Some(op) = rakc::bytecode::Op::from_u8(chunk_d.code[off]) {
-                        let l = chunk_d.lines.get(off).copied().unwrap_or(0);
-                        let width = match op {
-                            rakc::bytecode::Op::LoadConst
-                            | rakc::bytecode::Op::LoadGlobal
-                            | rakc::bytecode::Op::StoreGlobal
-                            | rakc::bytecode::Op::Jump
-                            | rakc::bytecode::Op::JumpIfFalse
-                            | rakc::bytecode::Op::JumpIfTrue => 2,
-                            rakc::bytecode::Op::LoadLocal
-                            | rakc::bytecode::Op::StoreLocal
-                            | rakc::bytecode::Op::Call
-                            // `IterItems` has a 1-byte "indexed for" flag. Leaving
-                            // it out made `:dis` resync by one byte and print
-                            // nonsense for every instruction after a `for` loop.
-                            | rakc::bytecode::Op::IterItems
-                            | rakc::bytecode::Op::BuildModule => 1,
-                            // The module opcodes carry a const-index operand, so
-                            // leaving them out of this table made `:dis` decode
-                            // their operands as opcodes and print nonsense for
-                            // every instruction after the first import.
-                            rakc::bytecode::Op::MakeModule
-                            | rakc::bytecode::Op::BindModule => 2,
-                            // Two const indices (the namespace's global, then the
-                            // exported name) plus a 1-byte mutability flag.
-                            rakc::bytecode::Op::ModulePublish => 5,
-                            _ => 0,
-                        };
-                        let operand = if width == 2 {
-                            format!("{}", chunk_d.read_u16(off + 1))
-                        } else if width == 1 {
-                            format!("{}", chunk_d.code[off + 1])
-                        } else {
-                            String::new()
-                        };
-                        println!("  {:04}  line {:>3}  {:?} {}", off, l, op, operand);
-                        off += 1 + width;
+                if let Some(rest) = lower.strip_prefix("break ") {
+                    // Accept both `break 42` and `break file.rak:42`.
+                    let num_part = rest.trim().rsplit(':').next().unwrap_or(rest.trim());
+                    if let Ok(l) = num_part.trim().parse::<u32>() {
+                        bps.lock().unwrap().insert(l);
+                        println!("breakpoint set at line {}", l);
                     } else {
-                        println!("  {:04}  <bad opcode> {}", off, chunk_d.code[off]);
-                        off += 1;
+                        println!("break <line|file:line> expects a number");
                     }
+                    continue;
                 }
-                continue;
+                if let Some(rest) = trimmed.strip_prefix("print ") {
+                    let name = rest.trim().to_string();
+                    match locals.iter().find(|(k, _)| *k == name) {
+                        Some((_, v)) => println!("{}", v),
+                        None => println!("(no such local '{}'; try 'locals')", name),
+                    }
+                    continue;
+                }
+                if lower == "disassemble" || lower == "dis" {
+                    println!("bytecode: {} bytes, {} constants, {} line markers", chunk_d.code.len(), chunk_d.constants.len(), chunk_d.lines.len());
+                    let mut off = 0usize;
+                    while off < chunk_d.code.len() {
+                        if let Some(op) = rakc::bytecode::Op::from_u8(chunk_d.code[off]) {
+                            let l = chunk_d.lines.get(off).copied().unwrap_or(0);
+                            let width = match op {
+                                rakc::bytecode::Op::LoadConst
+                                | rakc::bytecode::Op::LoadGlobal
+                                | rakc::bytecode::Op::StoreGlobal
+                                | rakc::bytecode::Op::Jump
+                                | rakc::bytecode::Op::JumpIfFalse
+                                | rakc::bytecode::Op::JumpIfTrue => 2,
+                                rakc::bytecode::Op::LoadLocal
+                                | rakc::bytecode::Op::StoreLocal
+                                | rakc::bytecode::Op::Call
+                                // `IterItems` has a 1-byte "indexed for" flag. Leaving
+                                // it out made `:dis` resync by one byte and print
+                                // nonsense for every instruction after a `for` loop.
+                                | rakc::bytecode::Op::IterItems
+                                | rakc::bytecode::Op::BuildModule => 1,
+                                // The module opcodes carry a const-index operand, so
+                                // leaving them out of this table made `:dis` decode
+                                // their operands as opcodes and print nonsense for
+                                // every instruction after the first import.
+                                rakc::bytecode::Op::MakeModule
+                                | rakc::bytecode::Op::BindModule => 2,
+                                // Two const indices (the namespace's global, then the
+                                // exported name) plus a 1-byte mutability flag.
+                                rakc::bytecode::Op::ModulePublish => 5,
+                                _ => 0,
+                            };
+                            let operand = if width == 2 {
+                                format!("{}", chunk_d.read_u16(off + 1))
+                            } else if width == 1 {
+                                format!("{}", chunk_d.code[off + 1])
+                            } else {
+                                String::new()
+                            };
+                            println!("  {:04}  line {:>3}  {:?} {}", off, l, op, operand);
+                            off += 1 + width;
+                        } else {
+                            println!("  {:04}  <bad opcode> {}", off, chunk_d.code[off]);
+                            off += 1;
+                        }
+                    }
+                    continue;
+                }
+                println!("unknown command '{}' (:help)", input);
             }
-            println!("unknown command '{}' (:help)", input);
-        }
-    });
+        });
 
-    let result = vm.run(&chunk_arc);
+        vm.run(&chunk_arc)
+    });
     match result {
         Ok(out) => {
             for l in &out {

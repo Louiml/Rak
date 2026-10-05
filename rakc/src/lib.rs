@@ -214,7 +214,7 @@ pub fn compile_with_file(source: &str, file: &str) -> Result<()> {
 /// the depth cap in `verify` still does that, and it does so without waiting
 /// for a crash. This just means a legitimately deep recursive program runs
 /// instead of taking the process down.
-const INTERPRETER_STACK: usize = 64 * 1024 * 1024;
+pub const INTERPRETER_STACK: usize = 64 * 1024 * 1024;
 
 /// Run `f` on a thread with a large explicit stack and return its result.
 ///
