@@ -246,9 +246,17 @@ pub fn interactive(offline: Option<PathBuf>) -> Result<Config> {
 /// Resolve the GitHub release download URL for a given (already-suffixed) asset
 /// name on the latest release.
 pub fn download_url(asset: &str) -> String {
+    download_url_from(crate::REPO, asset)
+}
+
+/// The release asset URL for a component, from whichever repository publishes it.
+///
+/// Split out from `download_url` because the components do not all come from
+/// this repository: `oyvey` is released from its own. `download_url` keeps
+/// meaning "an asset from the Rak repository" so the IDE path is unchanged.
+pub fn download_url_from(repo: &str, asset: &str) -> String {
     format!(
         "https://github.com/{}/releases/latest/download/{}",
-        crate::REPO,
-        asset
+        repo, asset
     )
 }

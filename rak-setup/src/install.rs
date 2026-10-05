@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use crate::manifest::{Action, Manifest};
 use crate::platform;
-use crate::wizard::download_url;
+use crate::wizard::{download_url_from, download_url};
 use crate::{asset_name, ide_archive_name, status, Component, Config, Scope};
 
 /// Run the install for the given `Config`.
@@ -131,7 +131,8 @@ fn fetch_or_bundle(cfg: &Config, name: &str) -> Result<Vec<u8>> {
         return extract_from_bundle(bundle, name);
     }
     let asset = asset_name(name)?;
-    let url = download_url(&asset);
+    // Per-component, so `oyvey` is fetched from its own repository.
+    let url = download_url_from(crate::repo_for(name), &asset);
     status(&format!("downloading {}", url));
     let resp = ureq::get(&url)
         .call()

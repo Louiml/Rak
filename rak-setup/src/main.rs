@@ -27,6 +27,24 @@ mod uninstall;
 mod wizard;
 
 const REPO: &str = "Louiml/Rak";
+
+/// Where the package manager's release assets are published.
+///
+/// `oyvey` is a separate repository with its own release workflow. It used to be
+/// built from this one, so it used to be found here too -- and after the split it
+/// was not, which made the installer's oyvey component a guaranteed 404.
+const OYVEY_REPO: &str = "Louiml/oyvey";
+
+/// The repository that publishes a component's release assets.
+///
+/// Per component rather than per run, so one install can take rakc and the IDE
+/// from Rak and oyvey from its own repository.
+pub fn repo_for(component: &str) -> &'static str {
+    match component {
+        "oyvey" => OYVEY_REPO,
+        _ => REPO,
+    }
+}
 const SETUP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// The set of installable components.
@@ -293,6 +311,29 @@ fn status(msg: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The package manager ships from its own repository, so its asset URL must
+    /// not be built against Rak. Getting this wrong is a 404 at install time,
+    /// not a build failure, which is why it needs a test.
+    #[test]
+    fn oyvey_is_fetched_from_its_own_repository() {
+        assert_eq!(repo_for("oyvey"), OYVEY_REPO);
+        assert_eq!(repo_for("rakc"), REPO);
+
+        let oyvey = crate::wizard::download_url_from(repo_for("oyvey"), "oyvey-linux-x86_64");
+        assert!(
+            oyvey.starts_with("https://github.com/Louiml/oyvey/releases/latest/download/"),
+            "unexpected oyvey URL: {}",
+            oyvey
+        );
+
+        let rakc = crate::wizard::download_url_from(repo_for("rakc"), "rakc-linux-x86_64");
+        assert!(
+            rakc.starts_with("https://github.com/Louiml/Rak/releases/latest/download/"),
+            "unexpected rakc URL: {}",
+            rakc
+        );
+    }
 
     #[test]
     fn asset_suffix_is_x86_64_on_this_host() {
