@@ -18,9 +18,31 @@ serde_json = "1"
 anyhow = "1"
 dirs = "5"
 
+# The GUI is native Rust, not a web view: egui draws with `glow`, so the whole
+# installer ships as one static-ish executable with no HTML, JS or WebView
+# runtime. `wgpu` is deliberately left out -- it would add a large Vulkan/Metal
+# dependency tree for no visible gain in an installer that only needs buttons
+# and a text log. `x11`/`wayland` are the two backends the Linux CI builds need.
+eframe = { version = "0.31", default-features = false, features = [
+    "default_fonts",
+    "glow",
+    "x11",
+    "wayland",
+] }
+# Decodes the embedded logo PNG into an `egui::ColorImage`.
+image = { version = "0.25", default-features = false, features = ["png"] }
+
 [target.'cfg(not(windows))'.dependencies]
 flate2 = "1"
 tar = "0.4"
 
 [target.'cfg(windows)'.dependencies]
 zip = "0.6"
+# Hides the console window in GUI mode and reports a failure to open the window
+# through a message box. Pinned to a version already in the lockfile (eframe and
+# winit pull it in), so this adds no new dependency tree.
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_System_Console",
+    "Win32_UI_WindowsAndMessaging",
+] }

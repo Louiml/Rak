@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use crate::manifest::{Action, Manifest};
 use crate::platform;
-use crate::wizard::{download_url_from, download_url};
+use crate::wizard::{download_url, download_url_from};
 use crate::{asset_name, ide_archive_name, status, Component, Config, Scope};
 
 /// Run the install for the given `Config`.
@@ -97,7 +97,10 @@ fn remove_obsolete_rakpkg(cfg: &Config, manifest: &mut Manifest) -> Result<()> {
     if !path.is_file() {
         return Ok(());
     }
-    status(&format!("removing obsolete {} (replaced by oyvey)", path.display()));
+    status(&format!(
+        "removing obsolete {} (replaced by oyvey)",
+        path.display()
+    ));
     fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))?;
     manifest.record(Action::File { path });
     Ok(())
@@ -134,15 +137,46 @@ fn fetch_or_bundle(cfg: &Config, name: &str) -> Result<Vec<u8>> {
     // Per-component, so `oyvey` is fetched from its own repository.
     let url = download_url_from(crate::repo_for(name), &asset);
     status(&format!("downloading {}", url));
-    let resp = ureq::get(&url)
-        .call()
-        .map_err(|e| anyhow!("download failed for {}: {}", asset, e))?;
-    let mut buf = Vec::new();
-    resp.into_reader().read_to_end(&mut buf)?;
-    Ok(buf)
+    download(&url, &asset)
 }
 
 use std::io::Read;
+
+/// Download `url`, reporting progress as it goes.
+///
+/// Reads in chunks rather than with one `read_to_end` so the GUI can show a
+/// real progress bar: these are multi-megabyte downloads, and a single call
+/// reports nothing until the last byte lands. `total` is `None` when the
+/// response is chunked and sends no `Content-Length`, which the GUI renders
+/// as an indeterminate bar.
+fn download(url: &str, what: &str) -> Result<Vec<u8>> {
+    let resp = ureq::get(url)
+        .call()
+        .map_err(|e| anyhow!("download failed for {}: {}", what, e))?;
+    // ureq 2.x has no `content_length()`; read the header.
+    let total = resp
+        .header("Content-Length")
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|n| *n > 0);
+
+    let mut buf = Vec::with_capacity(total.unwrap_or(1 << 20) as usize);
+    let mut reader = resp.into_reader();
+    let mut chunk = [0u8; 64 * 1024];
+    let mut done = 0u64;
+    loop {
+        let n = reader.read(&mut chunk)?;
+        if n == 0 {
+            break;
+        }
+        buf.extend_from_slice(&chunk[..n]);
+        done += n as u64;
+        crate::progress(done, total);
+    }
+    // A final tick so the bar lands on 100% instead of stalling at the
+    // last chunk boundary.
+    crate::progress(done, total);
+    Ok(buf)
+}
 
 /// Install the IDE from the portable archive into the configured IDE dir.
 fn install_ide(cfg: &Config, manifest: &mut Manifest) -> Result<()> {
@@ -158,11 +192,7 @@ fn install_ide(cfg: &Config, manifest: &mut Manifest) -> Result<()> {
         let asset = ide_archive_name()?;
         let url = download_url(&asset);
         status(&format!("downloading {}", url));
-        let resp = ureq::get(&url)
-            .call()
-            .map_err(|e| anyhow!("IDE download failed: {}", e))?;
-        let mut buf = Vec::new();
-        resp.into_reader().read_to_end(&mut buf)?;
+        let buf = download(&url, "Rak IDE")?;
         extract_ide_archive(&buf, &cfg.ide_dir)?;
     }
     Ok(())
@@ -234,8 +264,7 @@ fn extract_ide_from_bundle(bundle: &Path, dst: &Path) -> Result<()> {
         for i in 0..za.len() {
             let mut zf = za.by_index(i)?;
             let name = zf.name().to_string();
-            if name.starts_with("ide/") {
-                let rel = &name["ide/".len()..];
+            if let Some(rel) = name.strip_prefix("ide/") {
                 let out = dst.join(rel);
                 if name.ends_with('/') {
                     fs::create_dir_all(&out)?;

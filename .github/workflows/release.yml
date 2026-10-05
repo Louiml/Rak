@@ -66,6 +66,8 @@ jobs:
           node-version: 20
 
       - name: Install Linux dependencies
+        # The xkbcommon/wayland/x11 packages are for the eframe-based installer
+        # GUI built below; winit's build script fails without `xkbcommon`.
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -73,6 +75,12 @@ jobs:
             libgtk-3-dev \
             libayatana-appindicator3-dev \
             librsvg2-dev \
+            libxkbcommon-dev \
+            libwayland-dev \
+            libx11-dev \
+            libxcursor-dev \
+            libxrandr-dev \
+            libxi-dev \
             patchelf
 
       - name: Build rakc (with GUI)

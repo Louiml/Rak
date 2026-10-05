@@ -64,17 +64,17 @@ pub fn run(yes: bool) -> Result<i32> {
             return Ok(0);
         }
     };
-    if !yes {
-        if !confirm(
+    if !yes
+        && !confirm(
             &format!(
                 "Uninstall Rak v{} ({} actions)?",
                 manifest.version,
                 manifest.actions.len()
             ),
             false,
-        ) {
-            return Err(anyhow::anyhow!("cancelled"));
-        }
+        )
+    {
+        return Err(anyhow::anyhow!("cancelled"));
     }
     uninstall_manifest(&manifest, Scope::User)
 }

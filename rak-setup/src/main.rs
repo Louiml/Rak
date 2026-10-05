@@ -9,8 +9,8 @@
 //! pages + shell completions. A `~/.rak/manifest.json` records every action
 //! for clean uninstall/upgrade.
 //!
-//! Run with no flags for the interactive wizard, or use flags for
-//! non-interactive use (CI/scripts):
+//! Run with no flags to open the native GUI. Flags select the headless
+//! paths, which is what CI and scripts use:
 //!   rak-setup --yes --install rakc,oyvey,ide --scope user
 //!   rak-setup --uninstall --yes
 //!   rak-setup --offline ./rak-bundle-linux-x86_64.tar.gz
@@ -19,11 +19,15 @@ use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use std::env;
 use std::path::PathBuf;
+use std::sync::mpsc::Sender;
+use std::sync::{Arc, Mutex};
 
+mod gui;
 mod install;
 mod manifest;
 mod platform;
 mod uninstall;
+mod update;
 mod wizard;
 
 const REPO: &str = "Louiml/Rak";
@@ -250,6 +254,12 @@ fn run(args: &[String]) -> Result<i32> {
     if uninstall {
         return uninstall::run(yes);
     }
+    // No arguments at all: the GUI is the default. Flags still reach the
+    // CLI paths so scripts and CI keep working unchanged.
+    if args.len() == 1 {
+        return gui::run().map(|_| 0);
+    }
+
     // install
     let cfg = if yes {
         wizard::config_from_flags(
@@ -273,7 +283,7 @@ fn print_help() {
     );
     println!();
     println!("USAGE:");
-    println!("  rak-setup                      # interactive wizard (multi-select components)");
+    println!("  rak-setup                      # native GUI installer");
     println!("  rak-setup --yes --install rakc,oyvey,ide --scope user");
     println!("  rak-setup --uninstall --yes");
     println!("  rak-setup --list               # show what's installed");
@@ -303,10 +313,55 @@ fn confirm(prompt: &str, default: bool) -> bool {
         .unwrap_or(default)
 }
 
-/// Print a status line.
-fn status(msg: &str) {
+/// Where `status()` output goes when a GUI is running.
+///
+/// `None` means the CLI path, where the text goes to stdout as it always has.
+/// The GUI sets this to a channel because its log pane is the only place a
+/// user can see progress -- nobody is watching the terminal behind the window.
+static LOG_SINK: Mutex<Option<Sender<String>>> = Mutex::new(None);
+
+/// Download progress callback: `(bytes_so_far, total_if_known)`.
+///
+/// A chunked HTTP response sends no `Content-Length`, so the total is optional
+/// and the GUI shows an indeterminate bar when it is absent.
+pub type ProgressHook = Arc<dyn Fn(u64, Option<u64>) + Send + Sync>;
+
+static PROGRESS_HOOK: Mutex<Option<ProgressHook>> = Mutex::new(None);
+
+/// Point the installer at the GUI instead of stdout. Called once, at startup.
+pub fn attach_sinks(log: Sender<String>, progress: ProgressHook) {
+    if let Ok(mut g) = LOG_SINK.lock() {
+        *g = Some(log);
+    }
+    if let Ok(mut g) = PROGRESS_HOOK.lock() {
+        *g = Some(progress);
+    }
+}
+
+/// Report download progress. A no-op in CLI mode.
+pub fn progress(done: u64, total: Option<u64>) {
+    let hook = PROGRESS_HOOK.lock().ok().and_then(|g| g.clone());
+    if let Some(h) = hook {
+        h(done, total);
+    }
+}
+
+/// Print a status line, or hand it to the GUI if one is listening.
+pub fn status(msg: &str) {
+    // Falls back to stdout if the window has gone away, so output is never
+    // silently dropped.
+    if let Some(tx) = LOG_SINK.lock().ok().and_then(|g| g.clone()) {
+        if tx.send(msg.to_string()).is_ok() {
+            return;
+        }
+    }
     println!("[rak-setup] {}", msg);
 }
+
+// Suppress unused-import warnings for platform-specific helpers re-exported
+// through submodules; the public surface is the wizard/install entry points.
+#[allow(unused_imports)]
+use platform::{home, rak_root};
 
 #[cfg(test)]
 mod tests {
@@ -371,8 +426,3 @@ mod tests {
         }
     }
 }
-
-// Suppress unused-import warnings for platform-specific helpers re-exported
-// through submodules; the public surface is the wizard/install entry points.
-#[allow(unused_imports)]
-use platform::{home, rak_root};

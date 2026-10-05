@@ -53,6 +53,11 @@ jobs:
         # and because the test job runs `--workspace` that took down the whole
         # Linux run before a single test executed. The release workflow has
         # always installed these; this workflow did not.
+        #
+        # The xkbcommon/wayland/x11 packages are for the eframe-based installer
+        # GUI. It builds the `x11` and `wayland` backends so the window works on a
+        # plain X11 session as well as under Wayland, and winit fails its build
+        # script without `xkbcommon` present at link time.
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
@@ -61,6 +66,12 @@ jobs:
             libgtk-3-dev \
             libayatana-appindicator3-dev \
             librsvg2-dev \
+            libxkbcommon-dev \
+            libwayland-dev \
+            libx11-dev \
+            libxcursor-dev \
+            libxrandr-dev \
+            libxi-dev \
             patchelf
 
       - name: Cache cargo

@@ -135,8 +135,7 @@ pub fn interactive(offline: Option<PathBuf>) -> Result<Config> {
         return Err(anyhow!("cancelled"));
     }
 
-    let needs_bin =
-        components.contains(&Component::Rakc) || components.contains(&Component::Oyvey);
+    let needs_bin = components.contains(&Component::Rakc) || components.contains(&Component::Oyvey);
     let ide_mode = if components.contains(&Component::Ide) {
         let items = ["portable dir", "system location"];
         let idx = Select::new()
