@@ -548,3 +548,142 @@ fn vm_compile_failure_exits_non_zero() {
         out
     );
 }
+
+/// `break` with no loop of its own must not break the caller's loop.
+///
+/// `loop_signal` is interpreter-global. With nothing counting open loops, a `break`
+/// in a function stopped whatever loop happened to be running outside it -- `n` came
+/// out 0 instead of 3, and the program reported success.
+#[test]
+fn break_in_a_function_does_not_leak_into_the_callers_loop() {
+    let (out, ok) = run_with_stdin(
+        &["run", "-"],
+        "fn f() { break }\nlet mut n = 0\nfor i in [1,2,3] { f()  n = n + 1 }\ndump n\n",
+    );
+    assert!(!ok, "a `break` with no loop to leave must fail");
+    assert!(
+        out.contains("outside a loop"),
+        "expected a clear diagnostic, got: {:?}",
+        out
+    );
+}
+
+/// `continue` has the same problem, and it is harder to notice: the loop just stops
+/// repeating.
+#[test]
+fn continue_in_a_function_does_not_leak_into_the_callers_loop() {
+    let (out, ok) = run_with_stdin(
+        &["run", "-"],
+        "fn f() { continue }\nlet mut n = 0\nfor i in [1,2,3] { f()  n = n + 1 }\ndump n\n",
+    );
+    assert!(!ok, "a `continue` with no loop to continue must fail");
+    assert!(
+        out.contains("outside a loop"),
+        "expected a clear diagnostic, got: {:?}",
+        out
+    );
+}
+
+/// A `break` at the top level has no loop at all.
+#[test]
+fn break_at_the_top_level_is_an_error() {
+    let (out, ok) = run_with_stdin(&["run", "-"], "break\n");
+    assert!(!ok);
+    assert!(out.contains("outside a loop"), "got: {:?}", out);
+}
+
+/// A label that names no open loop must be reported, not resolved to the innermost.
+///
+/// Silently breaking the wrong loop is worse than an error: the program compiles,
+/// runs, and computes something the author never asked for.
+#[test]
+fn an_unknown_loop_label_is_reported() {
+    let (out, ok) = run_with_stdin(
+        &["run", "-"],
+        "let mut n = 0\nfor i in [1,2,3] { n = n + 1  break 'nope }\ndump n\n",
+    );
+    assert!(
+        !ok,
+        "an unknown label must not silently break the innermost loop"
+    );
+    assert!(out.contains("no loop labelled 'nope'"), "got: {:?}", out);
+}
+
+/// The diagnostic is an ordinary runtime error, so `try` catches it.
+#[test]
+fn an_out_of_loop_break_is_catchable() {
+    let (out, ok) = run_with_stdin(
+        &["run", "-"],
+        "try { break } catch e { dump \"caught\" }\ndump \"alive\"\n",
+    );
+    assert!(ok, "a caught out-of-loop break should not fail the program");
+    assert!(out.contains("[DUMP] caught"), "not caught; got: {:?}", out);
+    assert!(out.contains("[DUMP] alive"), "got: {:?}", out);
+}
+
+/// Every real loop form still allows `break` and `continue`.
+///
+/// The counter is only worth having if it does not reject the cases that are supposed
+/// to work, so all five forms are pinned here.
+#[test]
+fn real_loops_still_allow_break_and_continue() {
+    for (src, want) in [
+        (
+            "let mut n = 0\nfor i in [1,2,3] { if i == 2 { break }  n = n + 1 }\ndump n",
+            "[DUMP] 1",
+        ),
+        (
+            "let mut n = 0\nfor i in [1,2,3] { if i == 2 { continue }  n = n + 1 }\ndump n",
+            "[DUMP] 2",
+        ),
+        (
+            "let mut n = 0\n'outer: for i in [1,2,3] { for j in [1,2,3] { if j == 2 { break 'outer }  n = n + 1 } }\ndump n",
+            "[DUMP] 1",
+        ),
+        (
+            "let mut i = 0\nwhile i < 10 { i = i + 1  if i == 3 { break } }\ndump i",
+            "[DUMP] 3",
+        ),
+        (
+            "let mut i = 0\nloop { i = i + 1  if i == 4 { break } }\ndump i",
+            "[DUMP] 4",
+        ),
+        (
+            "let mut i = 0\ndo { i = i + 1  if i == 5 { break } } while i < 100\ndump i",
+            "[DUMP] 5",
+        ),
+        (
+            "let mut n = 0\nfor i in [1,2] { for j in [1,2] { n = n + 1  break 2 } }\ndump n",
+            "[DUMP] 1",
+        ),
+        (
+            "fn f() { let mut i = 0  while i < 5 { i = i + 1  if i == 3 { break } }  return i }\ndump f()",
+            "[DUMP] 3",
+        ),
+    ] {
+        let (out, ok) = run_with_stdin(&["run", "-"], &format!("{}\n", src));
+        assert!(ok, "{:?} should succeed; got: {:?}", src, out);
+        assert!(
+            out.contains(want),
+            "{:?} should print {:?}; got: {:?}",
+            src,
+            want,
+            out
+        );
+    }
+}
+
+/// A caught error inside a loop must not leave the depth stale.
+///
+/// The depth is restored on the error path precisely so this holds: a leaked count
+/// would make a later `break` look like it had a loop to leave, or make a legitimate
+/// one look out of scope.
+#[test]
+fn a_caught_error_in_a_loop_does_not_corrupt_the_depth() {
+    let (out, ok) = run_with_stdin(
+        &["run", "-"],
+        "fn boom() { raise \"x\" }\nlet mut n = 0\nfor i in [1,2,3] { try { boom() } catch e { }  n = n + 1 }\ndump n\n",
+    );
+    assert!(ok, "got: {:?}", out);
+    assert!(out.contains("[DUMP] 3"), "got: {:?}", out);
+}

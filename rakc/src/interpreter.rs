@@ -983,6 +983,14 @@ pub struct Interpreter {
     /// Pending loop control raised by `break`/`continue` (with optional label
     /// or numeric depth). Loops consume it via `resolve_loop_signal`.
     loop_signal: Option<LoopSignal>,
+    /// How many loop bodies are executing, and the labels of those loops.
+    ///
+    /// Behind `Rc`/`Cell` so the `LoopGuard` a loop installs can hold its own
+    /// handle and so does not borrow `self` -- which the loop body needs
+    /// mutably. Plain fields would force the depth to be leaked on any `?`,
+    /// since nothing guarantees the decrement runs.
+    loop_depth: std::rc::Rc<std::cell::Cell<u32>>,
+    loop_labels: std::rc::Rc<std::cell::RefCell<Vec<String>>>,
     /// LIFO stack of deferred calls for the current function. `defer expr()`
     /// pushes a call here; it is drained (in reverse order) when the current
     /// function returns or the top-level scope exits.
@@ -1158,6 +1166,26 @@ struct ForeignFnDecl {
     lib: Arc<Mutex<rak_stdlib::ffi::LibHandle>>,
 }
 
+/// Decrements the loop depth when a loop body finishes, however it finishes.
+///
+/// A plain increment/decrement around the body would leak on any `?`, since an error
+/// can be caught further up and execution continues with a stale count -- the same
+/// defect `call_depth` had.
+struct LoopGuard {
+    depth: std::rc::Rc<std::cell::Cell<u32>>,
+    labels: std::rc::Rc<std::cell::RefCell<Vec<String>>>,
+    labelled: bool,
+}
+
+impl Drop for LoopGuard {
+    fn drop(&mut self) {
+        self.depth.set(self.depth.get().saturating_sub(1));
+        if self.labelled {
+            self.labels.borrow_mut().pop();
+        }
+    }
+}
+
 impl Interpreter {
     /// Install resource ceilings for bounded execution. Passing
     /// `Limits::default()` restores unlimited execution.
@@ -1218,6 +1246,8 @@ impl Interpreter {
             module_cache: HashMap::new(),
             loading_modules: Vec::new(),
             loop_signal: None,
+            loop_depth: std::rc::Rc::new(std::cell::Cell::new(0)),
+            loop_labels: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
             tests: Vec::new(),
             defers: Vec::new(),
         }
@@ -1252,6 +1282,8 @@ impl Interpreter {
             loading_modules: Vec::new(),
             tests: Vec::new(),
             loop_signal: None,
+            loop_depth: std::rc::Rc::new(std::cell::Cell::new(0)),
+            loop_labels: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
             defers: Vec::new(),
         }
     }
@@ -1904,6 +1936,7 @@ impl Interpreter {
                 }
             }
             Stmt::Loop { label, body } => {
+                let _loop = self.enter_loop(label.as_deref());
                 let mut iter: u64 = 0;
                 loop {
                     iter += 1;
@@ -1930,6 +1963,7 @@ impl Interpreter {
                 }
             }
             Stmt::While { label, cond, body } => {
+                let _loop = self.enter_loop(label.as_deref());
                 let mut iter: u64 = 0;
                 while is_truthy(&self.eval_expr(cond)?) {
                     iter += 1;
@@ -1956,6 +1990,7 @@ impl Interpreter {
                 }
             }
             Stmt::DoWhile { cond, body } => {
+                let _loop = self.enter_loop(None);
                 let mut iter: u64 = 0;
                 loop {
                     iter += 1;
@@ -2029,6 +2064,7 @@ impl Interpreter {
                 iterable,
                 body,
             } => {
+                let _loop = self.enter_loop(label.as_deref());
                 let iter = self.eval_expr(iterable)?;
                 let tn = iter.type_name();
                 let mut for_iter: u64 = 0;
@@ -2176,6 +2212,12 @@ impl Interpreter {
                 self.output.push(format!("[TRACE] {}", s));
             }
             Stmt::Break(target) => {
+                // Validated before anything else: `loop_signal` is interpreter-global,
+                // so a `break` with no loop to leave used to unwind the *caller's*
+
+                // loop -- `fn f() { break }` called from a `for` stopped that loop.
+
+                self.check_loop_control("break", target)?;
                 let target = target.clone();
                 let (label, depth) = match target {
                     Some(BreakTarget::Label(l)) => (Some(l), 1u32),
@@ -2185,6 +2227,12 @@ impl Interpreter {
                 self.loop_signal = Some(LoopSignal::Break { label, depth });
             }
             Stmt::Continue(target) => {
+                // Validated before anything else: `loop_signal` is interpreter-global,
+                // so a `break` with no loop to leave used to unwind the *caller's*
+
+                // loop -- `fn f() { break }` called from a `for` stopped that loop.
+
+                self.check_loop_control("continue", target)?;
                 let target = target.clone();
                 let (label, depth) = match target {
                     Some(BreakTarget::Label(l)) => (Some(l), 1u32),
@@ -2517,6 +2565,50 @@ impl Interpreter {
     /// Consume (or propagate) the pending loop-control signal for the loop with
     /// the given label. Unlabeled `break`/`continue` target the innermost loop;
     /// `break N` pops N levels; a labeled break targets the loop with that label.
+    /// Mark the start of a loop body, so `break` and `continue` can tell whether they
+    /// are inside one.
+    fn enter_loop(&mut self, label: Option<&str>) -> LoopGuard {
+        self.loop_depth.set(self.loop_depth.get() + 1);
+        if let Some(l) = label {
+            self.loop_labels.borrow_mut().push(l.to_string());
+        }
+        LoopGuard {
+            depth: self.loop_depth.clone(),
+            labels: self.loop_labels.clone(),
+            labelled: label.is_some(),
+        }
+    }
+
+    /// Reject a `break` / `continue` that has no loop to belong to.
+    ///
+    /// `loop_signal` is interpreter-global, so without this a `break` in a function
+    /// unwinds the caller's loop: `fn f() { break }` called from a `for` stopped that
+    /// loop, and a `break 'nope` naming a label that does not exist broke the
+    /// innermost loop instead of being reported. Both read as working code.
+    fn check_loop_control(&self, kind: &str, target: &Option<BreakTarget>) -> crate::Result<()> {
+        if self.loop_depth.get() == 0 {
+            return Err(crate::RakError::Runtime(format!(
+                "`{}` outside a loop: it has no loop to leave",
+                kind
+            )));
+        }
+        if let Some(BreakTarget::Label(name)) = target {
+            let open = self.loop_labels.borrow().clone();
+            if !open.iter().any(|l| l == name) {
+                return Err(crate::RakError::Runtime(format!(
+                    "no loop labelled '{}' is open here (open: {})",
+                    name,
+                    if open.is_empty() {
+                        "none".to_string()
+                    } else {
+                        open.join(", ")
+                    }
+                )));
+            }
+        }
+        Ok(())
+    }
+
     fn resolve_loop_signal(&mut self, label: &Option<String>) -> LoopCtrl {
         let Some(sig) = self.loop_signal.take() else {
             return LoopCtrl::Next;
@@ -4396,6 +4488,11 @@ impl Interpreter {
         self.returning = false;
         let saved_env = self.env.clone();
         let saved_defers = std::mem::take(&mut self.defers);
+        // The loop depth is interpreter-global, so a function called from inside a
+        // loop would inherit the caller's depth and a `break` in its body would
+        // break the *caller's* loop. Cleared here and restored on the way out.
+        let saved_loop_depth = self.loop_depth.replace(0);
+        let saved_loop_labels = std::mem::take(&mut *self.loop_labels.borrow_mut());
         self.env = (**closure).clone();
         self.env.push_scope();
         let bound = self.bind_params(params, &arg_vals, &named_vals)?;
@@ -4413,6 +4510,8 @@ impl Interpreter {
             self.env = saved_env;
             self.returning = saved_returning;
             self.defers = saved_defers;
+            self.loop_depth.set(saved_loop_depth);
+            *self.loop_labels.borrow_mut() = saved_loop_labels;
             return Err(e);
         }
         // Unbounded recursion exhausts the native stack, and the release profile
@@ -4425,6 +4524,8 @@ impl Interpreter {
                 self.env = saved_env;
                 self.returning = saved_returning;
                 self.defers = saved_defers;
+                self.loop_depth.set(saved_loop_depth);
+                *self.loop_labels.borrow_mut() = saved_loop_labels;
                 return Err(crate::RakError::Runtime(
                     LimitHit::Depth {
                         used: self.call_depth,
@@ -4492,6 +4593,8 @@ impl Interpreter {
         // this function call). Done before any `?` so no early return can drop
         // them again.
         self.defers = saved_defers;
+        self.loop_depth.set(saved_loop_depth);
+        *self.loop_labels.borrow_mut() = saved_loop_labels;
 
         // The body's own failure is what the caller needs to hear about, so it is
         // reported ahead of a defer that may also have failed.
