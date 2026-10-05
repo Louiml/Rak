@@ -999,13 +999,41 @@ impl Compiler {
         pos
     }
 
+    /// The current code length as a 16-bit jump target, range-checked.
+    ///
+    /// Jump targets and `try` handler offsets are 16-bit. The bare cast this
+    /// replaces wrapped past a 64 KiB chunk, so a loop or a branch silently
+    /// jumped somewhere else in the chunk and the program produced the wrong
+    /// answer with no diagnostic anywhere. Stopping at compile time names the
+    /// limit instead.
+    fn code_len_u16(&self) -> u16 {
+        let len = self.chunk.code.len();
+        assert!(
+            len <= crate::bytecode::MAX_CHUNK_LEN,
+            "chunk is {} bytes, past the {} that a 16-bit jump target can address; \
+             the jump would silently target the wrong instruction. Split the \
+             program into modules with `import`.",
+            len,
+            crate::bytecode::MAX_CHUNK_LEN
+        );
+        len as u16
+    }
+
     fn patch_jump(&mut self, pos: usize) {
-        let target = self.chunk.code.len() as u16;
+        let target = self.code_len_u16();
         self.chunk.code[pos] = (target >> 8) as u8;
         self.chunk.code[pos + 1] = (target & 0xFF) as u8;
     }
 
     fn add_local(&mut self, name: String) -> u8 {
+        // Locals are addressed by an 8-bit slot. Wrapping aliased two locals
+        // onto one, which reads as the wrong variable's value rather than as a
+        // failure.
+        assert!(
+            self.locals.len() < crate::bytecode::MAX_LOCALS,
+            "too many locals in one scope: at most {}. Factor the scope out.",
+            crate::bytecode::MAX_LOCALS
+        );
         let slot = self.locals.len() as u8;
         self.locals.push((name, self.scope_depth));
         self.immutable_locals.push(false);
@@ -1397,7 +1425,7 @@ impl Compiler {
                 }
                 let jend = self.emit_jump(Op::Jump);
                 // Handler: patch the Try operand to point here.
-                let handler = self.chunk.code.len() as u16;
+                let handler = self.code_len_u16();
                 self.chunk.code[try_pos] = (handler >> 8) as u8;
                 self.chunk.code[try_pos + 1] = (handler & 0xFF) as u8;
                 if let Some(cn) = catch_name {

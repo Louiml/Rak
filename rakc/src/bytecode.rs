@@ -211,6 +211,17 @@ pub struct Chunk {
     pub module_cells: Vec<ModuleCell>,
 }
 
+/// The largest a constant pool or code stream can be.
+///
+/// Both are addressed by 16-bit operands -- a constant index, a jump target, a
+/// `try` handler offset -- so 65535 is a hard ceiling, not an estimate. Exceeding
+/// it used to wrap silently and produce a chunk that ran and gave wrong answers;
+/// `add_const` and the compiler's offset helpers now stop with a message instead.
+pub const MAX_CHUNK_LEN: usize = u16::MAX as usize;
+
+/// The largest number of locals a chunk can declare, addressed by an 8-bit slot.
+pub const MAX_LOCALS: usize = u8::MAX as usize;
+
 /// One imported module's namespace: the global that will hold its handle, and
 /// which chunk globals back each of its exported names.
 #[derive(Clone, Debug, Default)]
@@ -262,6 +273,14 @@ impl Chunk {
                 return i as u16;
             }
         }
+        // The pool is addressed by a 16-bit index. Wrapping would make later
+        // loads read the wrong constant, silently, so stop here instead.
+        assert!(
+            self.constants.len() < MAX_CHUNK_LEN,
+            "constant pool overflow: a chunk may hold at most {} constants. \
+             Split the program into modules with `import`.",
+            MAX_CHUNK_LEN
+        );
         let idx = self.constants.len() as u16;
         self.constants.push(value);
         idx
@@ -269,5 +288,49 @@ impl Chunk {
 
     pub fn read_u16(&self, offset: usize) -> u16 {
         ((self.code[offset] as u16) << 8) | (self.code[offset + 1] as u16)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The constant pool is addressed by a 16-bit index. Filling it to the
+    /// ceiling must still work, and one past it must fail loudly -- wrapping
+    /// here means every later `LoadConst` reads the wrong entry, with no
+    /// diagnostic.
+    #[test]
+    fn constant_pool_stops_at_the_16_bit_ceiling() {
+        let mut chunk = Chunk::default();
+        for i in 0..MAX_CHUNK_LEN {
+            // Distinct values, so nothing dedups and the pool really grows.
+            let v = crate::value::Value::I64(i as i64);
+            let idx = chunk.add_const(v);
+            assert_eq!(idx as usize, i);
+        }
+        assert_eq!(chunk.constants.len(), MAX_CHUNK_LEN);
+
+        let before = chunk.constants.len();
+        let overflow = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            chunk.add_const(crate::value::Value::I64(-1));
+        }));
+        assert!(overflow.is_err(), "the pool should refuse to grow past the limit");
+        assert_eq!(
+            chunk.constants.len(),
+            before,
+            "a refused add must not have pushed anything"
+        );
+    }
+
+    /// Dedup must still work at scale, or the ceiling would be reached by a
+    /// program that reuses one constant a few thousand times.
+    #[test]
+    fn constant_pool_still_dedups() {
+        let mut chunk = Chunk::default();
+        let first = chunk.add_const(crate::value::Value::I64(7));
+        for _ in 0..1000 {
+            assert_eq!(chunk.add_const(crate::value::Value::I64(7)), first);
+        }
+        assert_eq!(chunk.constants.len(), 1);
     }
 }
