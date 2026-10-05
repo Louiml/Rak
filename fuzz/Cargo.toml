@@ -3,7 +3,7 @@ name = "rak-fuzz"
 version = "0.0.0"
 publish = false
 edition = "2021"
-description = "libFuzzer/cargo-fuzz targets for Rak (lexer, parser, protocol decoders, manifest parser)"
+description = "libFuzzer/cargo-fuzz targets for Rak (lexer, parser, protocol decoders)"
 
 # cargo-fuzz needs these settings.
 [package.metadata]
@@ -23,9 +23,6 @@ path = "../rakc"
 [dependencies.rak-stdlib]
 path = "../stdlib"
 
-[dependencies.rakpkg]
-path = "../rakpkg"
-
 [[bin]]
 name = "lexer"
 path = "fuzz_targets/lexer.rs"
@@ -41,12 +38,6 @@ doc = false
 [[bin]]
 name = "eval"
 path = "fuzz_targets/eval.rs"
-test = false
-doc = false
-
-[[bin]]
-name = "manifest"
-path = "fuzz_targets/manifest.rs"
 test = false
 doc = false
 

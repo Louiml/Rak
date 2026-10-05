@@ -1190,7 +1190,7 @@ deps, compile on Windows.
 
 ---
 
-## Part 6 � v0.7: Async, streaming, CLI, errors, data processing, rakpkg  **[SHIPPED]**
+## Part 6 � v0.7: Async, streaming, CLI, errors, data processing, the package manager  **[SHIPPED]**
 
 All features below are implemented, tested, and verified working (`cargo test`
 green). Nothing here is aspirational.
@@ -1241,9 +1241,10 @@ green). Nothing here is aspirational.
   `zip_extract`, `parse_csv_line`, and lazy `stream_csv(path, opts)` and
   `stream_jsonl(path)` (never fully load files into memory).
 
-### 6.6 rakpkg ugrade  **[SHIPPED]**
-- `rakpkg` (0.7.0) adds version/rev constraints (`user/repo@^1.2`, `#rev`),
-  a `rakpkg.lock` (resolved rev + manifest SHA-256 checksum), and commands:
+### 6.6 Package manager upgrade  **[SHIPPED]**
+- The package manager (0.7.0, now `oyvey`) adds version/rev constraints
+  (`user/repo@^1.2`, `#rev`), a lockfile (resolved rev + manifest SHA-256
+  checksum), and commands:
   `add/remove/install/update/lock/tree/audit/publish/run/build/list`.
 - `tree` prints the recursive dependency graph (cycle-safe); `audit` verifies
   installed checksums against the lockfile.
@@ -1285,11 +1286,12 @@ green). Nothing here is aspirational.
   MSVC doesn't support). See `fuzz/README.md`. The proptest harnesses in 6.7
   run continuously on stable CI; the fuzz pack performs deeper coverage-guided
   campaigns on nightly.
-- `rakpkg` is now a lib+bin so `parse_manifest_str` is fuzzable and reusable.
+- The package manager is a lib+bin so `parse_manifest_str` is fuzzable and
+  reusable.
 
 ### Verification
 - `cargo test -p rakc` (327 lib tests) + `--test proptest_harness` (8) green, and `cargo test -p rak-stdlib` (72).
-- `cargo test -p rak-stdlib` (21) and `cargo test -p rakpkg` (4) green.
+- `cargo test -p rak-stdlib` (21) and `cargo test -p oyvey` green.
 - `fuzz/` type-checks (`cargo check`) with 0 errors; `rakc debug` verified
   end-to-end for break/step/continue/locals/stack/print/disassemble.
 - `examples/async_orchestration.rak`, `examples/streaming.rak`,
@@ -1619,4 +1621,4 @@ with a wider blast radius.
   unification item).
 - New example files run on `rakc run` **and** `rakc vm`.
 - `lsp.rs::BUILTINS` updated for every new builtin.
-- `cargo test -p rak-stdlib` / `-p rakpkg` stay green.
+- `cargo test -p rak-stdlib` / `-p oyvey` stay green.

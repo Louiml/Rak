@@ -105,36 +105,97 @@ over stdio (VS Code and similar editors): line breakpoints, continue/step,
 stack/locals/globals inspection, and `evaluate`. Program output streams as DAP
 `output` events. See the VM docs for the session walkthrough.
 
-## rakpkg
+## oyvey
 
 ```text
-rakpkg init [name]       Create a new package (package.rak + lib.rak)
-rakpkg add <user/repo>   Add a package from GitHub (supports @version, #rev)
-rakpkg install           Install all dependencies (writes rakpkg.lock)
-rakpkg update            Update deps within constraints
-rakpkg lock              Resolve deps -> rakpkg.lock (rev + SHA-256 checksum)
-rakpkg tree              Print the recursive dependency graph (cycle-safe)
-rakpkg audit             Verify installed checksums against the lockfile
-rakpkg publish           Publish package metadata
-rakpkg run               Run the entry point via rakc run
-rakpkg build             Build to a standalone executable via rakc build
-rakpkg list              List installed packages
-rakpkg remove <name>     Remove a package
+oyvey new <project>       Generate a new Rak project (manifest, entry, tests)
+oyvey init                Initialize an existing directory as a project
+oyvey add <github-repo>   Add a GitHub package dependency (supports @version, #rev)
+oyvey remove <package>    Remove a dependency
+oyvey install             Resolve + install dependencies (writes oyvey.lock)
+oyvey update              Re-resolve dependencies within constraints
+oyvey build               Compile the project through rakc
+oyvey run                 Run the entry point via rakc
+oyvey test                Run the project's tests via rakc
+oyvey clean               Remove the built executable
+oyvey list                List installed packages
+oyvey tree                Print the resolved dependency tree (cycle-safe)
+oyvey audit               Verify installed checksums against the lockfile
+oyvey lock                Write oyvey.lock without installing
 ```
 
-Dependency constraints (0.7): `user/repo@^1.2`, `user/repo@1.2.3`,
-`user/repo#<rev>`. `rakpkg.lock` records the resolved rev and a SHA-256
-checksum of each manifest, which `audit` verifies.
+`oyvey` is the official Rak package manager and build system. It is
+Cargo-inspired: a `package.rak` manifest declares the project and its
+dependencies, an `oyvey.lock` records the exact resolved revision and checksum
+of every dependency, and a global git cache (`~/.oyvey`, override with
+`OYVEY_HOME`) keeps clones so builds are reproducible.
+
+### The manifest
 
 The manifest is a Rak file:
 
 ```rak
 let name = "mylib"
 let version = "0.1.0"
-let deps = { net: "user/rak-net", crypto: "user/rak-crypto" }
-let entry = "lib.rak"
+let description = "A Rak package"
+let license = "MIT"
+let entry = "src/main.rak"
+let deps = {
+    net: "user/rak-net",
+    crypto: "user/rak-crypto@^1.0"
+}
 ```
 
+### Dependency specs
+
+| Spec | Meaning |
+|------|---------|
+| `user/repo` | track the default branch (HEAD) |
+| `user/repo@^1.2` | caret - compatible with `1.2` |
+| `user/repo@~1.2` | tilde - compatible with `1.2.x` |
+| `user/repo@1.2.3` | exact version |
+| `user/repo@*` | any version |
+| `user/repo#<rev>` | pin to an exact git revision (tag, branch, or commit) |
+| `https://host/user/repo` | an explicit URL (self-hosted Git, mirrors) |
+
+A `#rev` may be combined with a constraint (`user/repo@^1.2#deadbeef`); the
+revision wins. Transitive dependencies are resolved automatically. Two
+different sources claiming the same package name is reported as a conflict
+rather than resolved silently one way.
+
+### The lockfile
+
+`oyvey.lock` is Cargo-style TOML. Every package records the exact revision it
+was built from and a SHA-256 checksum of its manifest, which `oyvey audit`
+verifies:
+
+```toml
+version = 1
+
+[[package]]
+name = "rak-net"
+version = "0.2.1"
+source = "git+https://github.com/user/rak-net#0123456789abcdef0123456789abcdef01234567"
+checksum = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+```
+
+`oyvey install` reuses the revisions in the lockfile when they still satisfy the
+manifest constraints, so an install is reproducible; `oyvey update` re-resolves
+to the newest matching versions.
+
+### How packages reach the compiler
+
+Installed packages are vendored into `<project>/packages/`, which is the
+directory the compiler's `import` already searches. When `oyvey run`, `build`,
+or `test` invoke `rakc`, they prepend that directory to `RAK_PATH`, so
+`import <pkg>` resolves regardless of where the entry point lives:
+
+```rak
+import mylib                // -> packages/mylib (or packages/mylib/init.rak)
+```
+
+`oyvey build` and `oyvey run` drive the existing `rakc` compiler - Oyvey does
+not duplicate any compiler functionality.
 ## Entry point (writing CLIs in Rak, 0.7)
 
 `fn main(argv) -> int` is an optional entry point: top-level code runs first,

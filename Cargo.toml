@@ -3,7 +3,6 @@ members = [
     "rakc",
     "ide/src-tauri",
     "stdlib",
-    "rakpkg",
     "rak-setup",
 ]
 resolver = "2"

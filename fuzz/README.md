@@ -17,7 +17,6 @@ standard `cargo build` / `cargo test` stay on stable.
 | `lexer` | `rakc::lexer::tokenize` |
 | `parser` | `tokenize` + `rakc::parser::parse` |
 | `eval` | full interpreter (`rakc::eval`) on capped input |
-| `manifest` | `rakpkg::parse_manifest_str` (package manifest) |
 | `dns` | `dns::parse_response` |
 | `tls` | `tls::parse_client_hello` + `parse_cert_chain` |
 | `json` | `js::json_parse` + stringify + `json_keys/get/path/find_all` |

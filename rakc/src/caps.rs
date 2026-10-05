@@ -2,7 +2,7 @@
 //!
 //! When the sandbox is enabled, dangerous builtin families are denied unless
 //! explicitly re-granted with `--allow`. This exists so investigators can run
-//! scripts fetched with `rakpkg add <user/repo>` (or received from a third
+//! scripts fetched with `oyvey add <user/repo>` (or received from a third
 //! party) without giving the script network, process, FFI, raw-socket, GUI,
 //! secrets, or filesystem-write access by default.
 //!

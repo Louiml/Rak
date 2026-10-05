@@ -14,7 +14,7 @@ fn main() {
     let _ = fs::create_dir_all(&res_dir);
 
     let rakc_src = manifest_dir.join(format!("../../target/release/rakc{}", ext));
-    let rakpkg_src = manifest_dir.join(format!("../../target/release/rakpkg{}", ext));
+    let oyvey_src = manifest_dir.join(format!("../../target/release/oyvey{}", ext));
 
     if rakc_src.exists() {
         match fs::copy(&rakc_src, res_dir.join("rakc")) {
@@ -28,15 +28,15 @@ fn main() {
         );
     }
 
-    if rakpkg_src.exists() {
-        match fs::copy(&rakpkg_src, res_dir.join("rakpkg")) {
-            Ok(_) => println!("cargo:warning=Copied rakpkg to resources/"),
-            Err(e) => println!("cargo:warning=Failed to copy rakpkg: {}", e),
+    if oyvey_src.exists() {
+        match fs::copy(&oyvey_src, res_dir.join("oyvey")) {
+            Ok(_) => println!("cargo:warning=Copied oyvey to resources/"),
+            Err(e) => println!("cargo:warning=Failed to copy oyvey: {}", e),
         }
     } else {
         println!(
-            "cargo:warning=rakpkg binary not found at {}",
-            rakpkg_src.display()
+            "cargo:warning=oyvey binary not found at {}",
+            oyvey_src.display()
         );
     }
 }

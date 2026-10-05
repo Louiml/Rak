@@ -373,7 +373,7 @@ useEffect(() => {
     { target: 'run', title: 'Run', body: 'Run the current file with Ctrl+R (or F5). Stop a running script with the Stop button.' },
     { target: 'mode', title: 'Run mode', body: 'Switch between Interpreter (tree-walker), VM (bytecode, ~6x faster), and Bench to compare both.' },
     { target: 'console', onEnter: () => setConsoleOpen(true), title: 'Console', body: 'Program output is printed here. Toggle it with Ctrl+J. Lines are colour-coded by [DUMP]/[SCAN]/[FETCH]/[TRACE].' },
-    { target: 'terminal', onEnter: () => setTerminalOpen(true), title: 'Terminal', body: 'A built-in shell for running rakc, rakpkg, or system commands. Toggle with Ctrl+Shift+T.' },
+    { target: 'terminal', onEnter: () => setTerminalOpen(true), title: 'Terminal', body: 'A built-in shell for running rakc, oyvey, or system commands. Toggle with Ctrl+Shift+T.' },
     { target: 'examples', title: 'Examples', body: 'Open example scripts — including the new pipeline, regex, binary patterns, and traits demos.' },
     { title: 'Commands', body: 'Ctrl+Shift+P opens the command palette. Ctrl+P is quick file open. Ctrl+B toggles the sidebar. Find Settings or Show Tutorial here any time.' },
     { title: "You're ready", body: 'That\u2019s the tour. Re-open it any time from the command palette (Show Tutorial) or Settings. Happy hacking.' },

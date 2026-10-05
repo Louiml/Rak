@@ -15,7 +15,7 @@ pub struct DottedResolve {
 }
 
 /// The ordered list of directories searched for a module name: the importing
-/// file's own directory, `./packages/` (rakpkg deps), then any `RAK_PATH`
+/// file's own directory, `./packages/` (oyvey deps), then any `RAK_PATH`
 /// entries (`;` on Windows, `:` on Unix).
 pub fn search_dirs(importer_dir: &Path) -> Vec<PathBuf> {
     let mut dirs = vec![importer_dir.to_path_buf()];

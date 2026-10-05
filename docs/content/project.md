@@ -20,7 +20,6 @@ Rak/
 ├── stdlib/            Rust native stdlib (net, crypto, encoding, recon, web,
 │                      file, json, log, process, secrets, http_server,
 │                      websocket, tunnel, stream_io)
-├── rakpkg/            Package manager CLI (lib + bin, lockfile, constraints)
 ├── rak-setup/         Custom interactive installer (TUI wizard: net-install +
 │                      offline bundle, multi-select components, append-only PATH)
 ├── dist/              One-liner bootstraps (install.sh / install.ps1), man
@@ -31,6 +30,10 @@ Rak/
 ├── examples/          See the Examples page
 └── .github/workflows/ CI (Linux .deb + AppImage builds, proptest suites)
 ```
+
+The package manager, **oyvey**, lives in its own repository:
+[github.com/Louiml/oyvey](https://github.com/Louiml/oyvey). It replaced the
+`rakpkg` crate that used to live here.
 
 ## Tech stack
 

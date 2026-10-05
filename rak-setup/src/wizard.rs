@@ -24,7 +24,7 @@ pub fn config_from_flags(
                     Some(c) => out.push(c),
                     None => {
                         return Err(anyhow!(
-                            "--install: unknown component '{}' (use: rakc,rakpkg,ide,rakpath,shortcuts,man)",
+                            "--install: unknown component '{}' (use: rakc,oyvey,ide,rakpath,shortcuts,man)",
                             k
                         ))
                     }
@@ -36,7 +36,7 @@ pub fn config_from_flags(
     };
     if comps.is_empty() {
         return Err(anyhow!(
-            "--install: no valid components (use rakc,rakpkg,ide,rakpath,shortcuts,man)"
+            "--install: no valid components (use rakc,oyvey,ide,rakpath,shortcuts,man)"
         ));
     }
     let scope = match scope.as_deref() {
@@ -95,7 +95,7 @@ pub fn interactive(offline: Option<PathBuf>) -> Result<Config> {
         .collect();
     let preselected: Vec<bool> = Component::all()
         .iter()
-        .map(|c| matches!(c, Component::Rakc | Component::Rakpkg))
+        .map(|c| matches!(c, Component::Rakc | Component::Oyvey))
         .collect();
     let selection = MultiSelect::new()
         .with_prompt("Components to install (↑/↓ move, <space> toggle, <enter> confirm)")
@@ -136,7 +136,7 @@ pub fn interactive(offline: Option<PathBuf>) -> Result<Config> {
     }
 
     let needs_bin =
-        components.contains(&Component::Rakc) || components.contains(&Component::Rakpkg);
+        components.contains(&Component::Rakc) || components.contains(&Component::Oyvey);
     let ide_mode = if components.contains(&Component::Ide) {
         let items = ["portable dir", "system location"];
         let idx = Select::new()
@@ -157,7 +157,7 @@ pub fn interactive(offline: Option<PathBuf>) -> Result<Config> {
     let bin_dir: PathBuf = if needs_bin {
         let default_bin = platform::default_bin_dir(scope)?;
         Input::new()
-            .with_prompt("Bin directory (rakc, rakpkg)")
+            .with_prompt("Bin directory (rakc, oyvey)")
             .default(default_bin.to_string_lossy().to_string())
             .interact_text()?
             .into()

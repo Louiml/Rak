@@ -4,7 +4,7 @@
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/Louiml/Rak/main/dist/install.sh | bash
 #
-# Passes any extra args through to rak-setup (e.g. `| bash -s -- --yes --install rakc,rakpkg`).
+# Passes any extra args through to rak-setup (e.g. `| bash -s -- --yes --install rakc,oyvey`).
 set -euo pipefail
 
 ARCH="$(uname -m)"

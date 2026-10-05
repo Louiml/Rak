@@ -1,9 +1,9 @@
 //! Custom interactive installer for the Rak programming language.
 //!
-//! `rak-setup` is a self-contained TUI wizard that installs `rakc`, `rakpkg`,
+//! `rak-setup` is a self-contained TUI wizard that installs `rakc`, `oyvey`,
 //! and the Rak IDE on Linux and Windows, in either net-install (downloads
 //! from the latest GitHub release) or offline-bundle mode. The component
-//! picker is a multi-select (any combination of rakc / rakpkg / IDE / ...).
+//! picker is a multi-select (any combination of rakc / oyvey / IDE / ...).
 //! It edits PATH append-only (existing entries are never touched),
 //! sets `RAK_PATH`, creates shortcuts + `.rak` associations, and installs man
 //! pages + shell completions. A `~/.rak/manifest.json` records every action
@@ -11,7 +11,7 @@
 //!
 //! Run with no flags for the interactive wizard, or use flags for
 //! non-interactive use (CI/scripts):
-//!   rak-setup --yes --install rakc,rakpkg,ide --scope user
+//!   rak-setup --yes --install rakc,oyvey,ide --scope user
 //!   rak-setup --uninstall --yes
 //!   rak-setup --offline ./rak-bundle-linux-x86_64.tar.gz
 
@@ -33,7 +33,7 @@ const SETUP_VERSION: &str = env!("CARGO_PKG_VERSION");
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum Component {
     Rakc,
-    Rakpkg,
+    Oyvey,
     Ide,
     RakPath,
     Shortcuts,
@@ -44,7 +44,7 @@ impl Component {
     fn all() -> &'static [Component] {
         &[
             Component::Rakc,
-            Component::Rakpkg,
+            Component::Oyvey,
             Component::Ide,
             Component::RakPath,
             Component::Shortcuts,
@@ -54,7 +54,7 @@ impl Component {
     fn label(&self) -> &'static str {
         match self {
             Component::Rakc => "rakc compiler -> bin + PATH",
-            Component::Rakpkg => "rakpkg package manager -> bin + PATH",
+            Component::Oyvey => "oyvey package manager -> bin + PATH",
             Component::Ide => "Rak IDE -> portable dir",
             Component::RakPath => "Set RAK_PATH env (package lookup)",
             Component::Shortcuts => "Shortcuts + .rak file association",
@@ -64,7 +64,7 @@ impl Component {
     fn key(&self) -> &'static str {
         match self {
             Component::Rakc => "rakc",
-            Component::Rakpkg => "rakpkg",
+            Component::Oyvey => "oyvey",
             Component::Ide => "ide",
             Component::RakPath => "rakpath",
             Component::Shortcuts => "shortcuts",
@@ -256,7 +256,7 @@ fn print_help() {
     println!();
     println!("USAGE:");
     println!("  rak-setup                      # interactive wizard (multi-select components)");
-    println!("  rak-setup --yes --install rakc,rakpkg,ide --scope user");
+    println!("  rak-setup --yes --install rakc,oyvey,ide --scope user");
     println!("  rak-setup --uninstall --yes");
     println!("  rak-setup --list               # show what's installed");
     println!("  rak-setup --offline ./rak-bundle-<os>-x86_64.tar.gz --yes");
@@ -265,7 +265,7 @@ fn print_help() {
     println!("  --yes / -y             non-interactive (use flags below)");
     println!("  --uninstall            uninstall existing install (reads manifest)");
     println!("  --list                 list installed components from manifest");
-    println!("  --install <a,b,..>     components: rakc,rakpkg,ide,rakpath,shortcuts,man");
+    println!("  --install <a,b,..>     components: rakc,oyvey,ide,rakpath,shortcuts,man");
     println!("  --scope <s>            user | system");
     println!("  --bin-dir <path>       bin install dir");
     println!("  --ide-dir <path>       IDE install dir");

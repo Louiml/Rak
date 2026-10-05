@@ -77,10 +77,6 @@ jobs:
 
       - name: Build rakc (with GUI)
         run: cargo build --release --bin rakc --features gui
-
-      - name: Build rakpkg
-        run: cargo build --release --bin rakpkg
-
       - name: Build rak-setup
         run: cargo build --release --bin rak-setup
 
@@ -94,15 +90,13 @@ jobs:
         run: |
           python dist/verify_hardening.py \
             target/release/rakc \
-            target/release/rakpkg \
             target/release/rak-setup
 
       - name: Copy binaries for IDE bundling
         run: |
           mkdir -p ide/src-tauri/resources
           cp target/release/rakc ide/src-tauri/resources/rakc
-          cp target/release/rakpkg ide/src-tauri/resources/rakpkg
-          chmod +x ide/src-tauri/resources/rakc ide/src-tauri/resources/rakpkg
+          chmod +x ide/src-tauri/resources/rakc
 
       - name: Install IDE dependencies
         run: cd ide && npm install
@@ -117,20 +111,17 @@ jobs:
           set -e
           mkdir -p staging
           cp target/release/rakc            staging/rakc-linux-x86_64
-          cp target/release/rakpkg          staging/rakpkg-linux-x86_64
           cp target/release/rak-setup       staging/rak-setup-linux-x86_64
           chmod +x staging/*
           # Portable IDE archive: the raw Tauri app binary (cargo bin name is
           # `app`) + bundled resources, renamed to `rak-ide`.
           mkdir -p ide-portable
           cp target/release/app ide-portable/rak-ide || cp target/release/rak-ide ide-portable/rak-ide
-          cp ide/src-tauri/resources/rakc ide/src-tauri/resources/rakpkg ide-portable/ 2>/dev/null || true
           chmod +x ide-portable/rak-ide
           tar -czf staging/rak-ide-linux-x86_64.tar.gz -C ide-portable .
-          # Offline bundle: rakc + rakpkg + ide/ (single tar.gz for `--offline`).
+          # Offline bundle: rakc + ide/ (single tar.gz for `--offline`).
           mkdir -p bundle/ide
           tar -xzf staging/rak-ide-linux-x86_64.tar.gz -C bundle/ide
-          cp staging/rakc-linux-x86_64 staging/rakpkg-linux-x86_64 bundle/
           tar -czf staging/rak-bundle-linux-x86_64.tar.gz -C bundle .
 
       - name: Upload rakc to release
@@ -138,13 +129,6 @@ jobs:
         with:
           files: staging/rakc-linux-x86_64
           tag_name: ${{ needs.create-release.outputs.tag }}
-
-      - name: Upload rakpkg to release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: staging/rakpkg-linux-x86_64
-          tag_name: ${{ needs.create-release.outputs.tag }}
-
       - name: Upload rak-setup to release
         uses: softprops/action-gh-release@v2
         with:
@@ -199,10 +183,6 @@ jobs:
 
       - name: Build rakc (with GUI)
         run: cargo build --release --bin rakc --features gui
-
-      - name: Build rakpkg
-        run: cargo build --release --bin rakpkg
-
       - name: Build rak-setup
         run: cargo build --release --bin rak-setup
 
@@ -216,14 +196,12 @@ jobs:
         run: |
           python dist/verify_hardening.py `
             target\release\rakc.exe `
-            target\release\rakpkg.exe `
             target\release\rak-setup.exe
 
       - name: Copy binaries for IDE bundling
         run: |
           New-Item -ItemType Directory -Force -Path ide/src-tauri/resources
           Copy-Item target/release/rakc.exe ide/src-tauri/resources/rakc.exe
-          Copy-Item target/release/rakpkg.exe ide/src-tauri/resources/rakpkg.exe
 
       - name: Install IDE dependencies
         run: cd ide && npm install
@@ -238,7 +216,6 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path staging | Out-Null
           Copy-Item target/release/rakc.exe        staging/rakc-windows-x86_64.exe
-          Copy-Item target/release/rakpkg.exe      staging/rakpkg-windows-x86_64.exe
           Copy-Item target/release/rak-setup.exe   staging/rak-setup-windows-x86_64.exe
           # Portable IDE archive: the raw Tauri app exe (cargo bin name is
           # `app`) + bundled resources, renamed to `rak-ide.exe`.
@@ -250,12 +227,10 @@ jobs:
           } else {
             throw "IDE binary not found (expected target/release/app.exe or rak-ide.exe)"
           }
-          Copy-Item -Path ide/src-tauri/resources/rakc.exe,ide/src-tauri/resources/rakpkg.exe -Destination ide-portable\ -ErrorAction SilentlyContinue
           Compress-Archive -Path ide-portable\* -DestinationPath staging/rak-ide-windows-x86_64.zip -Force
           # Offline bundle (zip).
           New-Item -ItemType Directory -Force -Path bundle\ide | Out-Null
           Expand-Archive -Path staging/rak-ide-windows-x86_64.zip -DestinationPath bundle\ide -Force
-          Copy-Item -Path staging/rakc-windows-x86_64.exe,staging/rakpkg-windows-x86_64.exe -Destination bundle\
           Compress-Archive -Path bundle\* -DestinationPath staging/rak-bundle-windows-x86_64.zip -Force
 
       - name: Upload rakc.exe to release
@@ -263,13 +238,6 @@ jobs:
         with:
           files: staging/rakc-windows-x86_64.exe
           tag_name: ${{ needs.create-release.outputs.tag }}
-
-      - name: Upload rakpkg.exe to release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: staging/rakpkg-windows-x86_64.exe
-          tag_name: ${{ needs.create-release.outputs.tag }}
-
       - name: Upload rak-setup.exe to release
         uses: softprops/action-gh-release@v2
         with:

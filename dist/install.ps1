@@ -4,7 +4,7 @@
 #   iwr -useb https://raw.githubusercontent.com/Louiml/Rak/main/dist/install.ps1 | iex
 #
 # Pass extra args via $args, e.g.:
-#   & ([scriptblock]::Create((iwr -useb <url>).Content)) --yes --install rakc,rakpkg
+#   & ([scriptblock]::Create((iwr -useb <url>).Content)) --yes --install rakc,oyvey
 
 $ErrorActionPreference = 'Stop'
 

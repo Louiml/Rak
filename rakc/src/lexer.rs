@@ -441,6 +441,12 @@ fn parse_char(s: &str) -> Option<char> {
 }
 
 pub fn tokenize(source: &str) -> crate::Result<Vec<(Token, usize)>> {
+    // Skip a leading UTF-8 BOM. Editors on Windows (and PowerShell's
+    // `Out-File -Encoding utf8`) prepend one, and logos has no rule for U+FEFF,
+    // so an otherwise-valid file failed to lex with "Unexpected character at
+    // line 1, col 1". Only a *leading* BOM is dropped: a U+FEFF elsewhere is a
+    // zero-width no-break space and stays a lexer error.
+    let source = source.strip_prefix('\u{feff}').unwrap_or(source);
     let mut lex = Token::lexer(source);
     // Collect logos output as `Option<Token>`: `None` marks a span that logos
     // could not match (a "gap"). Gaps that fall inside a regex literal are
@@ -605,6 +611,24 @@ pub fn offset_to_line_col(source: &str, offset: usize) -> (usize, usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn leading_utf8_bom_is_skipped() {
+        // Editors on Windows and PowerShell's `Out-File -Encoding utf8`
+        // prepend a BOM. Without stripping it, a valid file fails to lex
+        // with "Unexpected character at line 1, col 1".
+        let plain = tokenize("dump 1").unwrap();
+        let bommed = tokenize("\u{feff}dump 1").unwrap();
+        assert_eq!(plain.len(), bommed.len());
+        assert_eq!(plain[0].0, bommed[0].0);
+    }
+
+    #[test]
+    fn bom_is_only_skipped_at_the_start() {
+        // A U+FEFF elsewhere is a zero-width no-break space, not a BOM, and
+        // must stay a lexer error rather than being silently dropped.
+        assert!(tokenize("dump 1\n\u{feff}dump 2").is_err());
+    }
 
     #[test]
     fn test_hex_token() {

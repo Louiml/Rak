@@ -2,7 +2,7 @@
 
 ## The rak-setup installer
 
-The custom installer is an interactive TUI wizard that installs `rakc`, `rakpkg`,
+The custom installer is an interactive TUI wizard that installs `rakc`, `oyvey`,
 and the Rak IDE. It edits PATH (append-only — your existing PATH entries are
 never touched), sets `RAK_PATH`, creates shortcuts + `.rak` associations, and
 installs man pages + shell completions. Every action is recorded to
@@ -12,7 +12,7 @@ installs man pages + shell completions. Every action is recorded to
 every component; toggle each with `<space>` and confirm with `<enter>`:
 
 - `rakc compiler -> bin + PATH`
-- `rakpkg package manager -> bin + PATH`
+- `oyvey package manager -> bin + PATH`
 - `Rak IDE -> portable dir`
 - `Set RAK_PATH env (package lookup)`
 - `Shortcuts + .rak file association`
@@ -27,7 +27,7 @@ offline-bundle mode (`--offline ./rak-bundle-<os>-x86_64.tar.gz`).
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Louiml/Rak/main/dist/install.sh | bash
 # non-interactive:
-curl -fsSL https://raw.githubusercontent.com/Louiml/Rak/main/dist/install.sh | bash -s -- --yes --install rakc,rakpkg,ide --scope user
+curl -fsSL https://raw.githubusercontent.com/Louiml/Rak/main/dist/install.sh | bash -s -- --yes --install rakc,oyvey,ide --scope user
 ```
 
 ### Windows (PowerShell)
@@ -44,14 +44,14 @@ Or download the setup binary directly from the
 
 ```text
 rak-setup                      # interactive wizard (multi-select components)
-rak-setup --yes --install rakc,rakpkg,ide --scope user
+rak-setup --yes --install rakc,oyvey,ide --scope user
 rak-setup --uninstall --yes
 rak-setup --list               # show what's installed
 rak-setup --offline ./rak-bundle-<os>-x86_64.tar.gz --yes
 ```
 
 `--install` accepts a comma-separated list of components:
-`rakc,rakpkg,ide,rakpath,shortcuts,man`. Unknown names are rejected.
+`rakc,oyvey,ide,rakpath,shortcuts,man`. Unknown names are rejected.
 
 ### How PATH is edited (safety)
 
@@ -73,7 +73,7 @@ the release page for IDE-only users who want the OS-native installer.
 ```bash
 git clone https://github.com/Louiml/Rak.git
 cd Rak
-cargo build --release                        # rakc + rakpkg
+cargo build --release                        # rakc + oyvey
 cargo build --release -p rakc --features gui # rakc with GUI support
 cd ide && npm install && npx tauri build     # IDE
 ```

@@ -4,7 +4,7 @@ version.workspace = true
 edition = "2021"
 authors = ["Ryuzaki"]
 license = "MIT OR Apache-2.0"
-description = "Custom interactive installer for the Rak programming language (rakc, rakpkg, IDE)."
+description = "Custom interactive installer for the Rak programming language (rakc, oyvey, IDE)."
 
 [[bin]]
 name = "rak-setup"

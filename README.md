@@ -61,14 +61,14 @@ Hex is a first-class type. The bytecode VM runs about 6x faster than the tree-wa
 
 ## Install
 
-The custom installer is an interactive TUI wizard that installs `rakc`, `rakpkg`, and the Rak IDE, edits PATH, sets `RAK_PATH`, creates shortcuts + `.rak` associations, and installs man pages + shell completions. It runs in net-install (downloads the latest release) or offline-bundle mode, and supports `--uninstall` / `--list` / `--yes` for scripting.
+The custom installer is an interactive TUI wizard that installs `rakc`, `oyvey`, and the Rak IDE, edits PATH, sets `RAK_PATH`, creates shortcuts + `.rak` associations, and installs man pages + shell completions. It runs in net-install (downloads the latest release) or offline-bundle mode, and supports `--uninstall` / `--list` / `--yes` for scripting.
 
 **Linux:**
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Louiml/Rak/main/dist/install.sh | bash
 # non-interactive:
-curl -fsSL https://raw.githubusercontent.com/Louiml/Rak/main/dist/install.sh | bash -s -- --yes --install rakc,rakpkg,ide --scope user
+curl -fsSL https://raw.githubusercontent.com/Louiml/Rak/main/dist/install.sh | bash -s -- --yes --install rakc,oyvey,ide --scope user
 ```
 
 **Windows (PowerShell):**
@@ -79,7 +79,7 @@ iwr -useb https://raw.githubusercontent.com/Louiml/Rak/main/dist/install.ps1 | i
 
 Or download the setup binary directly from the [latest release](https://github.com/Louiml/Rak/releases/latest) (`rak-setup-linux-x86_64` or `rak-setup-windows-x86_64.exe`) and run it.
 
-Menu items: `rakc → bin + PATH`, `rakpkg → bin + PATH`, `IDE → portable dir / system location`, `Set RAK_PATH`, `Shortcuts + .rak association`, `Man pages + shell completions`. Install scope: `user` (default, no privileges) or `system`. A `~/.rak/manifest.json` records every action for clean uninstall/upgrade.
+Menu items: `rakc → bin + PATH`, `oyvey → bin + PATH`, `IDE → portable dir / system location`, `Set RAK_PATH`, `Shortcuts + .rak association`, `Man pages + shell completions`. Install scope: `user` (default, no privileges) or `system`. A `~/.rak/manifest.json` records every action for clean uninstall/upgrade.
 
 The Tauri installers (NSIS/MSI on Windows, `.deb`/AppImage on Linux) remain on the release page for IDE-only users who want the OS-native installer.
 
@@ -133,7 +133,7 @@ annotations and non-exhaustive matches before you run anything.
 
 **GUI windows.** With `--features gui`, Rak scripts open native desktop windows rendering HTML, CSS and JS, on Windows and Linux. Windows can be updated, retitled and closed; JavaScript calls back into Rak through `rak_call`, and a callback's return value reaches the page. Closing a window no longer ends the process. See [GUI windows](#gui-windows).
 
-**Package manager.** `rakpkg` is a CLI for Git-based shareable Rak packages. Initialize, add dependencies from GitHub repos, install, run, and build. The manifest is a Rak file with `let` bindings.
+**Package manager and build system.** `oyvey` is the official Rak package manager: a Cargo-style toolchain with a `package.rak` manifest, an `oyvey.lock` recording the exact revision and checksum of every dependency, transitive resolution, a global git cache, and `build` / `run` / `test` driven through `rakc`.
 
 **Foreign Function Interface (FFI).** Call native C functions in `.so`/`.dll`/`.dylib` libraries. Declare bindings with `extern "C" { ... }` (resolved against the platform default C library, or an explicit `from "path"`) or load dynamically with `ffi_load` and `lib.call`. Marshal raw memory with `ffi_alloc`/`ffi_write`/`ffi_read`/`ffi_cstr_to_string`/`ffi_string_to_cstr`/`ffi_free`. Works on both the interpreter and the bytecode VM.
 
@@ -320,14 +320,17 @@ Also worth knowing: a function body without an explicit `return` evaluates to
 
 ## Package manager
 
+`oyvey` is the official Rak package manager and build system.
+
 ```bash
-rakpkg init mylib           # creates package.rak + lib.rak
-rakpkg add user/repo        # git clone into .rak/packages/
-rakpkg install              # install all deps from package.rak
-rakpkg run                  # run the entry point via rakc run
-rakpkg build                # build to standalone executable via rakc build
-rakpkg list                 # list installed packages
-rakpkg remove mylib         # remove a package
+oyvey new mylib              # generate a project (manifest, src/main.rak, tests)
+oyvey add user/repo          # add a GitHub dependency (vendored into packages/)
+oyvey install                # resolve + install deps from package.rak
+oyvey run                    # run the entry point via rakc run
+oyvey build                  # build a standalone executable via rakc build
+oyvey test                   # run the project's tests
+oyvey list                   # list installed packages
+oyvey remove mylib           # remove a dependency
 ```
 
 The manifest is a Rak file:
@@ -335,8 +338,13 @@ The manifest is a Rak file:
 ```rak
 let name = "mylib"
 let version = "0.1.0"
-let deps = { net: "user/rak-net", crypto: "user/rak-crypto" }
-let entry = "lib.rak"
+let description = "A Rak package"
+let license = "MIT"
+let entry = "src/main.rak"
+let deps = {
+    net: "user/rak-net",
+    crypto: "user/rak-crypto@^1.0"
+}
 ```
 
 Import installed packages by file path or by name (Python-style). See the
@@ -884,13 +892,17 @@ rakc lsp            Start the language server (stdio)
 rakc bindgen <h>    Generate Rak bindings from a C header
 rakc --version
 
-rakpkg init [name]       Create a new package
-rakpkg add <user/repo>   Add a package from GitHub
-rakpkg install           Install all dependencies
-rakpkg run               Run the entry point
-rakpkg build             Build to a standalone executable
-rakpkg list              List installed packages
-rakpkg remove <name>     Remove a package
+oyvey new <project>      Generate a new Rak project
+oyvey init               Initialize an existing directory as a project
+oyvey add <user/repo>    Add a GitHub package dependency
+oyvey remove <package>   Remove a dependency
+oyvey install            Resolve and install dependencies
+oyvey update             Re-resolve dependencies within constraints
+oyvey run                Run the entry point
+oyvey build              Build a standalone executable
+oyvey test               Run the project's tests
+oyvey clean              Remove build artifacts
+oyvey list               List installed packages
 ```
 
 ## Tooling
@@ -951,7 +963,7 @@ Rak/
 │       ├── lsp.rs         Language server
 │       └── bindgen.rs     C header bindgen
 ├── stdlib/            Rust native stdlib (net, crypto, encoding, recon, web, file, json, log, process, secrets, http_server, websocket)
-├── rakpkg/            Package manager CLI
+├── oyvey/             Package manager + build system
 ├── rak-setup/        Custom interactive installer (TUI wizard: net-install + offline)
 ├── dist/              One-liner bootstraps (install.sh / install.ps1), man pages, completions
 ├── ide/               Tauri + Next.js IDE
@@ -994,7 +1006,7 @@ Rak/
 ```bash
 git clone https://github.com/Louiml/Rak.git
 cd Rak
-cargo build --release                    # rakc + rakpkg
+cargo build --release                    # rakc + oyvey
 cargo build --release -p rakc --features gui   # rakc with GUI support
 cd ide && npm install && npx tauri build # IDE
 ```

@@ -24,8 +24,9 @@ Both share one parser, and `rakc bench file.rak` compares them on the same scrip
   stdin/stdout builtins, and a structured `parse_args(spec, argv)` flag parser.
 - **Data processing** — lazy `stream_csv`/`stream_jsonl`, plus
   `gzip`/`gunzip`/`deflate`/`inflate` and `zip_archive`/`zip_list`/`zip_extract`.
-- **rakpkg** — version/rev constraints, `rakpkg.lock` (rev + SHA-256 checksum),
-  and `update`/`tree`/`audit`/`publish`.
+- **oyvey** - the Cargo-style package manager and build system: `package.rak`
+  manifest, `oyvey.lock` (exact rev + SHA-256 checksum), transitive resolution,
+  a global git cache, and `build`/`run`/`test` driven through `rakc`.
 - **Debugger** — `rakc debug program.rak` (break/continue/step/locals/stack/
   print/disassemble) powered by the bytecode VM with statement-to-bytecode
   line mapping.

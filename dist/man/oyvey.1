@@ -1,0 +1,173 @@
+.TH OYVEY 1 "2026-10-05" "oyvey 0.8.4" "Rak package manager and build system"
+.SH NAME
+oyvey \- Git-based package manager and build system for the Rak language
+.SH SYNOPSIS
+.B oyvey
+.I <command>
+.RI [ <args> ]
+.SH DESCRIPTION
+.B oyvey
+is the official package manager and build system for Rak. It resolves GitHub
+dependencies into a reproducible lockfile, vendors them where the
+.B rakc
+compiler can find them, and drives the compiler for
+.BR build ,
+.BR run ,
+and
+.BR test .
+.SH COMMANDS
+.TP
+.B new <project>
+Generate a new Rak project: a manifest, a
+.BR src/main.rak
+entry point, a
+.B tests/
+directory, a
+.BR .gitignore ,
+and a README. The result is immediately buildable with
+.B oyvey build
+and runnable with
+.BR "oyvey run" .
+Use
+.B \-\-lib
+for a library project.
+.TP
+.B init
+Initialize an existing directory as a project. Writes a manifest and an entry
+point if they are missing, and never overwrites either.
+.TP
+.B add <github-repo>
+Add a GitHub package dependency. Clones the repository, reads the package name
+from its manifest, records it in
+.BR deps ","
+and installs it.
+.TP
+.B remove <package>
+Remove a dependency, its vendored copy, and its lockfile entry.
+.TP
+.B install
+Resolve and install every dependency in the manifest, transitively. Writes
+.BR oyvey.lock .
+Reuses the revisions already recorded there when they still satisfy the
+manifest constraints.
+.TP
+.B update
+Re-resolve dependencies within their constraints, picking the newest matching
+version, and rewrite
+.BR oyvey.lock .
+.TP
+.B build
+Compile the project through
+.BR "rakc build" ,
+producing a standalone executable.
+.TP
+.B run
+Run the entry point through
+.BR "rakc run" .
+.TP
+.B test
+Run the project's tests through
+.BR "rakc test" .
+.TP
+.B clean
+Remove the executable produced by
+.BR "oyvey build" .
+.TP
+.B list
+List installed packages with their versions and locked revisions.
+.TP
+.B tree
+Print the resolved dependency tree, cycle-safe.
+.TP
+.B audit
+Verify that every package in
+.B oyvey.lock
+is installed and that its manifest checksum matches. Exits non-zero on a
+mismatch.
+.TP
+.B lock
+Resolve dependencies and write
+.B oyvey.lock
+without vendoring.
+.TP
+.B version
+Print the version.
+.TP
+.B help [<command>]
+Show help, or help for one command.
+.SH DEPENDENCY SPECS
+.TP
+.B user/repo
+Track the default branch.
+.TP
+.BI user/repo@ ^1.2
+Caret constraint: compatible with 1.2.
+.TP
+.BI user/repo@ ~1.2
+Tilde constraint: compatible with 1.2.x.
+.TP
+.BI user/repo@ 1.2.3
+Exact version.
+.TP
+.BI user/repo# rev
+Pin to an exact git revision (tag, branch, or commit). May be combined with a
+constraint; the revision wins.
+.PP
+A spec that is already a URL
+.RB ( https:// ", " ssh:// ", " file:// )
+is used verbatim, which allows a self-hosted Git server.
+.SH MANIFEST
+The manifest is a Rak file named
+.BR package.rak :
+.PP
+.RS
+.nf
+let name = "mylib"
+let version = "0.1.0"
+let description = "A Rak package"
+let license = "MIT"
+let entry = "src/main.rak"
+let deps = {
+    net: "user/rak-net",
+    crypto: "user/rak-crypto@^1.0"
+}
+.fi
+.RE
+.SH LOCKFILE
+.B oyvey.lock
+is Cargo-style TOML. Each package records the exact git revision it was built
+from and a SHA-256 checksum of its manifest:
+.PP
+.RS
+.nf
+version = 1
+
+[[package]]
+name = "rak-net"
+version = "0.2.1"
+source = "git+https://github.com/user/rak-net#0123456789abcdef0123456789abcdef01234567"
+checksum = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+.fi
+.RE
+.SH CACHE
+Downloads are kept in a global cache under
+.B ~/.oyvey
+(override with
+.BR OYVEY_HOME ),
+as bare clones plus one checkout per locked revision. Installed packages are
+vendored into
+.B <project>/packages/
+so that
+.B "import <pkg>"
+resolves through the compiler's normal module search.
+.SH ENVIRONMENT
+.TP
+.B OYVEY_HOME
+Global cache location (default: \fB~/.oyvey\fR).
+.TP
+.B RAK_PATH
+Extra module search path. When invoking the compiler, oyvey prepends
+.B <project>/packages
+to it.
+.SH SEE ALSO
+.BR rakc (1)

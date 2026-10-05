@@ -35,15 +35,22 @@ pub fn run(cfg: &Config, _yes: bool) -> Result<i32> {
         path: cfg.bin_dir.clone(),
     });
 
-    // rakc + rakpkg -> bin + PATH
+    // Retire the package manager that oyvey replaced. An install made before
+    // this migration leaves a `rakpkg` binary in the bin dir that nothing else
+    // would ever remove, and it would shadow nothing but still confuse anyone
+    // who finds it. Recorded as an action so `rak-setup --uninstall` still
+    // reverses it on a fresh install of this version.
+    remove_obsolete_rakpkg(cfg, &mut manifest)?;
+
+    // rakc + oyvey -> bin + PATH
     if cfg.components.contains(&Component::Rakc) {
         install_binary(cfg, "rakc", &mut manifest)?;
     }
-    if cfg.components.contains(&Component::Rakpkg) {
-        install_binary(cfg, "rakpkg", &mut manifest)?;
+    if cfg.components.contains(&Component::Oyvey) {
+        install_binary(cfg, "oyvey", &mut manifest)?;
     }
     // PATH edit
-    if cfg.components.contains(&Component::Rakc) || cfg.components.contains(&Component::Rakpkg) {
+    if cfg.components.contains(&Component::Rakc) || cfg.components.contains(&Component::Oyvey) {
         add_to_path(cfg, &mut manifest)?;
     }
     // IDE -> dir
@@ -70,8 +77,8 @@ pub fn run(cfg: &Config, _yes: bool) -> Result<i32> {
     ));
     if cfg.components.contains(&Component::Rakc) {
         println!("\nNext: open a new shell and run `rakc --version`.");
-    } else if cfg.components.contains(&Component::Rakpkg) {
-        println!("\nNext: open a new shell and run `rakpkg --version`.");
+    } else if cfg.components.contains(&Component::Oyvey) {
+        println!("\nNext: open a new shell and run `oyvey --version`.");
     }
     if cfg.scope == Scope::System {
         println!("(system install: you may need to log out/in for PATH changes to take effect)");
@@ -79,7 +86,24 @@ pub fn run(cfg: &Config, _yes: bool) -> Result<i32> {
     Ok(0)
 }
 
-/// Install a single binary (rakc or rakpkg) into the bin dir.
+/// Remove a leftover `rakpkg` binary from the bin dir, if one is there.
+fn remove_obsolete_rakpkg(cfg: &Config, manifest: &mut Manifest) -> Result<()> {
+    let name = if platform::is_windows() {
+        "rakpkg.exe"
+    } else {
+        "rakpkg"
+    };
+    let path = cfg.bin_dir.join(name);
+    if !path.is_file() {
+        return Ok(());
+    }
+    status(&format!("removing obsolete {} (replaced by oyvey)", path.display()));
+    fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))?;
+    manifest.record(Action::File { path });
+    Ok(())
+}
+
+/// Install a single binary (rakc or oyvey) into the bin dir.
 fn install_binary(cfg: &Config, name: &str, manifest: &mut Manifest) -> Result<()> {
     let dst = cfg.bin_dir.join(if platform::is_windows() {
         format!("{}.exe", name)
@@ -403,7 +427,7 @@ fn create_shortcuts(cfg: &Config, manifest: &mut Manifest) -> Result<()> {
 /// Install man pages + shell completions (embedded via include_str!).
 fn install_man_and_completions(cfg: &Config, manifest: &mut Manifest) -> Result<()> {
     let man1 = include_str!("../../dist/man/rakc.1");
-    let man2 = include_str!("../../dist/man/rakpkg.1");
+    let man2 = include_str!("../../dist/man/oyvey.1");
     let (man_dir, comp_dir) = match cfg.scope {
         Scope::User => (
             platform::home()?.join(".local/share/man/man1"),
@@ -419,9 +443,9 @@ fn install_man_and_completions(cfg: &Config, manifest: &mut Manifest) -> Result<
     manifest.record(Action::File {
         path: man_dir.join("rakc.1"),
     });
-    fs::write(man_dir.join("rakpkg.1"), man2)?;
+    fs::write(man_dir.join("oyvey.1"), man2)?;
     manifest.record(Action::File {
-        path: man_dir.join("rakpkg.1"),
+        path: man_dir.join("oyvey.1"),
     });
 
     #[cfg(not(target_os = "windows"))]
@@ -432,6 +456,11 @@ fn install_man_and_completions(cfg: &Config, manifest: &mut Manifest) -> Result<
         manifest.record(Action::File {
             path: comp_dir.join("rakc"),
         });
+        let oyvey_bash = include_str!("../../dist/completions/oyvey.bash");
+        fs::write(comp_dir.join("oyvey"), oyvey_bash)?;
+        manifest.record(Action::File {
+            path: comp_dir.join("oyvey"),
+        });
         let zsh = include_str!("../../dist/completions/rakc.zsh");
         let zsh_dir = match cfg.scope {
             Scope::User => platform::home()?.join(".local/share/zsh/site-functions"),
@@ -441,6 +470,11 @@ fn install_man_and_completions(cfg: &Config, manifest: &mut Manifest) -> Result<
         fs::write(zsh_dir.join("_rakc"), zsh)?;
         manifest.record(Action::File {
             path: zsh_dir.join("_rakc"),
+        });
+        let oyvey_zsh = include_str!("../../dist/completions/oyvey.zsh");
+        fs::write(zsh_dir.join("_oyvey"), oyvey_zsh)?;
+        manifest.record(Action::File {
+            path: zsh_dir.join("_oyvey"),
         });
     }
     #[cfg(target_os = "windows")]
