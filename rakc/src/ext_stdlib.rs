@@ -361,14 +361,53 @@ fn vm_url_decode(args: &Args) -> R {
 // Arrays
 // ---------------------------------------------------------------------------
 
+/// A value as a number, for `sort`.
+///
+/// Accepts the same spellings the language does: a decimal or hex literal, and a
+/// float. `None` for anything else, which is how `sort` decides an array is not
+/// numeric and should fall back to comparing rendered values.
+fn numeric_value(v: &Value) -> Option<f64> {
+    match v {
+        Value::I8(i) => Some(*i as f64),
+        Value::I16(i) => Some(*i as f64),
+        Value::I32(i) => Some(*i as f64),
+        Value::I64(i) => Some(*i as f64),
+        Value::U8(i) => Some(*i as f64),
+        Value::U16(i) => Some(*i as f64),
+        Value::U32(i) => Some(*i as f64),
+        Value::U64(i) => Some(*i as f64),
+        Value::Hex(h) => Some(*h as f64),
+        Value::F32(f) => Some(*f as f64),
+        Value::F64(f) => Some(*f),
+        _ => None,
+    }
+}
+
 fn vm_sort(args: &Args) -> R {
     match args.first() {
         Some(Value::Array(a)) => {
-            // Sorted by rendered value, matching the interpreter. It is a
-            // string sort, so it is total and stable across runs — unlike map
-            // iteration, which is not.
+            // Numerically when every element is a number, by rendered value
+            // otherwise -- the same rule the interpreter uses, so the two agree.
+            //
+            // It used to sort by rendered value on both sides, which made
+            // `sort([10, 9, 100, 1])` give `[1, 10, 100, 9]`: numbers ordered as
+            // text. The old comment claimed that made it "stable across runs -
+            // unlike map iteration", which had it exactly backwards. It was the
+            // *map* rendering that varied between runs, and sorting by string had
+            // nothing to do with that.
             let mut items = a.to_vec();
-            items.sort_by(|x, y| x.to_string().cmp(&y.to_string()));
+            let all_numeric = items.iter().all(|v| numeric_value(v).is_some());
+            if all_numeric {
+                // `total_cmp` rather than `partial_cmp(..).unwrap_or(..)`: floats
+                // have no `Ord`, and collapsing a NaN to "equal" is not a total order.
+                items.sort_by(|x, y| {
+                    numeric_value(x)
+                        .unwrap()
+                        .total_cmp(&numeric_value(y).unwrap())
+                });
+            } else {
+                items.sort_by_key(|v| v.to_string());
+            }
             Ok(arr(items))
         }
         _ => Err("sort() requires an array".to_string()),

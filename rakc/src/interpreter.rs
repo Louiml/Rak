@@ -718,7 +718,17 @@ impl fmt::Display for Value {
                 write!(f, "[{}]", parts.join(", "))
             }
             Value::Map(map) => {
-                let parts: Vec<String> = map.iter().map(|(k, v)| format!("{}: {}", k, v)).collect();
+                // Sorted by key, like `Set` below: a `HashMap` iterates in a
+                // per-process order, so the same program printed differently between
+                // runs. That made every `dump` of a map irreproducible, and made
+                // `run_on_both` -- which byte-compares the two backends' output --
+                // flaky for reasons that had nothing to do with the program.
+                let mut entries: Vec<(&String, &Value)> = map.iter().collect();
+                entries.sort_by(|a, b| a.0.cmp(b.0));
+                let parts: Vec<String> = entries
+                    .iter()
+                    .map(|(k, v)| format!("{}: {}", k, v))
+                    .collect();
                 write!(f, "{{{}}}", parts.join(", "))
             }
             // Renders in insertion order, which is the whole point of
@@ -730,7 +740,11 @@ impl fmt::Display for Value {
                 write!(f, "{{{}}}", parts.join(", "))
             }
             Value::Struct { name, fields } => {
-                let parts: Vec<String> = fields
+                // Sorted by field name for the same reason `Map` is above: field
+                // order came from a `HashMap`, so two runs of one program disagreed.
+                let mut entries: Vec<(&String, &Value)> = fields.iter().collect();
+                entries.sort_by(|a, b| a.0.cmp(b.0));
+                let parts: Vec<String> = entries
                     .iter()
                     .map(|(k, v)| format!("{}: {}", k, v))
                     .collect();
@@ -7004,7 +7018,29 @@ impl Interpreter {
             "sort" => {
                 if let Some(Value::Array(a)) = args.first().cloned() {
                     let mut a = a;
-                    a.sort_by(|x, y| x.to_string().cmp(&y.to_string()));
+                    // Numerically when every element is a number, by rendered string
+                    // otherwise.
+                    //
+                    // It used to always compare the rendered strings, so
+                    // `sort([10, 9, 100, 1])` gave `[1, 10, 100, 9]` -- numbers
+                    // ordered as text. A mixed array has no single right answer, so
+                    // rather than silently doing the wrong thing for numbers this
+                    // checks whether the whole array is numeric and falls back
+                    // otherwise.
+                    let all_numeric = a.iter().all(|v| Self::numeric_value(v).is_some());
+                    if all_numeric {
+                        // `total_cmp` rather than `partial_cmp(..).unwrap_or(..)`:
+                        // floats have no `Ord`, and collapsing a NaN to "equal"
+                        // is not a total order, so a NaN would be treated as
+                        // interchangeable with anything it is compared against.
+                        a.sort_by(|x, y| {
+                            Self::numeric_value(x)
+                                .unwrap()
+                                .total_cmp(&Self::numeric_value(y).unwrap())
+                        });
+                    } else {
+                        a.sort_by_key(|v| v.to_string());
+                    }
                     Ok(Value::Array(a))
                 } else {
                     Err(crate::RakError::Runtime(
@@ -8968,6 +9004,19 @@ impl Interpreter {
                 val.map(|v| v.to_string())
                     .unwrap_or_else(|| "nothing".to_string())
             ))),
+        }
+    }
+
+    /// A value as a number, for `sort` and for numeric comparison.
+    ///
+    /// Accepts the same spellings the language does: a decimal or hex literal, and a float.
+    /// `None` for anything else, which is how `sort` decides an array is not numeric.
+    fn numeric_value(v: &Value) -> Option<f64> {
+        match v {
+            Value::Int(i) => Some(*i as f64),
+            Value::Hex(h) => Some(*h as f64),
+            Value::Float(f) => Some(*f),
+            _ => None,
         }
     }
 

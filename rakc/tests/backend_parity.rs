@@ -729,6 +729,77 @@ dump 6 * 7
     );
 }
 
+/// `sort` must order numbers numerically, not as text.
+///
+/// It compared the rendered strings, so `sort([10, 9, 100, 1])` gave
+/// `[1, 10, 100, 9]`. Both backends did it, so this was not a divergence -- it was
+/// the same wrong answer twice, which is why it survived.
+#[test]
+fn parity_sort_is_numeric() {
+    agree(
+        "sort orders numbers numerically",
+        r#"
+dump sort([10, 9, 100, 1])
+dump sort([5, 3, 8, 1])
+dump sort([-2, 10, -30])
+"#,
+    );
+}
+
+/// Floats sort numerically too, and a mixed array falls back rather than mixing
+/// the two rules silently.
+#[test]
+fn parity_sort_handles_floats_and_mixed_arrays() {
+    agree(
+        "sort is numeric for floats and falls back for a mixed array",
+        r#"
+dump sort([2.5, 1.5, 10.0])
+dump sort(["pear", "apple", "fig"])
+dump sort(["b", 1, "a"])
+"#,
+    );
+}
+
+/// A map must print the same way every time.
+///
+/// `HashMap` iteration order varies per process, so the same program printed
+/// differently between runs. That makes any user-visible `dump` irreproducible, and
+/// `run_on_both` -- which byte-compares the two backends -- flaky for reasons that had
+/// nothing to do with the program under test.
+#[test]
+fn parity_map_rendering_is_deterministic() {
+    agree(
+        "maps print in key order",
+        r#"
+dump { x: 1, y: 2, z: 3, w: 4 }
+dump { delta: 1, alpha: 2, charlie: 3, bravo: 4 }
+"#,
+    );
+}
+
+/// Struct fields print in name order, for the same reason.
+#[test]
+fn parity_struct_rendering_is_deterministic() {
+    agree(
+        "struct fields print in name order",
+        r#"
+struct P { a: int, b: int, c: int, d: int }
+dump P { a: 1, b: 2, c: 3, d: 4 }
+"#,
+    );
+}
+
+/// Nested maps and structs sort at every level, not just the top.
+#[test]
+fn parity_nested_rendering_is_deterministic() {
+    agree(
+        "nested containers print in key order too",
+        r#"
+dump { outer: { z: 1, a: 2 }, other: { y: 3, b: 4 } }
+"#,
+    );
+}
+
 #[test]
 fn parity_sets() {
     // Sets are spec 7A.11. The insertion order matters as much as the

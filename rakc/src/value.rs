@@ -362,7 +362,15 @@ impl fmt::Display for Value {
                 write!(f, "[{}]", parts.join(", "))
             }
             Value::Map(map) => {
-                let parts: Vec<String> = map.iter().map(|(k, v)| format!("{}: {}", k, v)).collect();
+                // Sorted by key. A `HashMap` iterates in a per-process order, so the
+                // same program printed differently between runs -- and differently
+                // from the interpreter, which sorts.
+                let mut entries: Vec<(&String, &Value)> = map.iter().collect();
+                entries.sort_by(|a, b| a.0.cmp(b.0));
+                let parts: Vec<String> = entries
+                    .iter()
+                    .map(|(k, v)| format!("{}: {}", k, v))
+                    .collect();
                 write!(f, "{{{}}}", parts.join(", "))
             }
             Value::Set(set) => {
@@ -371,7 +379,10 @@ impl fmt::Display for Value {
                 write!(f, "{{{}}}", parts.join(", "))
             }
             Value::Struct { name, fields } => {
-                let parts: Vec<String> = fields
+                // Sorted by field name, for the same reason `Map` is above.
+                let mut entries: Vec<(&String, &Value)> = fields.iter().collect();
+                entries.sort_by(|a, b| a.0.cmp(b.0));
+                let parts: Vec<String> = entries
                     .iter()
                     .map(|(k, v)| format!("{}: {}", k, v))
                     .collect();
