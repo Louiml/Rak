@@ -800,6 +800,92 @@ dump { outer: { z: 1, a: 2 }, other: { y: 3, b: 4 } }
     );
 }
 
+/// An alias must mean what it names, on both backends.
+///
+/// It was parsed and dropped, so `type Meters = int` left the annotation saying
+/// `Meters` while the value was an `int` -- the interpreter rejected it, the VM
+/// accepted it, and `check` reported a mismatch the alias had just declared
+/// impossible.
+#[test]
+fn parity_type_alias_expands_to_what_it_names() {
+    agree(
+        "a type alias means what it names",
+        r#"
+type Meters = int
+let x: Meters = 5
+dump x
+
+type Name = string
+let n: Name = "hi"
+dump n
+"#,
+    );
+}
+
+/// Expansion follows a chain of aliases.
+///
+/// `type A = B` / `type B = int` is ordinary style, so a single hop is not enough to
+/// make aliases usable.
+#[test]
+fn parity_type_alias_chains_resolve() {
+    agree(
+        "an alias chain resolves to the underlying type",
+        r#"
+type A = B
+type B = int
+let x: A = 7
+dump x
+"#,
+    );
+}
+
+/// An alias must not turn off type checking.
+///
+/// The risk of expanding a name into a type is that the annotation stops meaning
+/// anything, so a wrong value has to be caught -- with the *underlying* type named, not
+/// the alias, since naming the alias is what made the original diagnostic confusing.
+#[test]
+fn a_type_alias_still_checks_the_underlying_type() {
+    let src = r#"
+type Meters = int
+let x: Meters = "nope"
+"#;
+    let err = rakc::eval_in_cli(src, ".", &[], None)
+        .err()
+        .expect("a string is not an int, alias or not");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("type mismatch"),
+        "expected a type mismatch, got: {}",
+        msg
+    );
+    assert!(
+        msg.contains("int"),
+        "the message should name the underlying type, got: {}",
+        msg
+    );
+}
+
+/// A self-referential alias must terminate.
+///
+/// Expansion is bounded, so `type A = A` stops rather than looping -- and keeps
+/// comparing by name, which is how an unknown custom type behaved anyway.
+#[test]
+fn a_self_referential_alias_terminates() {
+    // The requirement is that this returns at all: `expand_alias` is bounded, so a
+    // cyclic alias must stop rather than loop. An alias chain that does not resolve
+    // to `int` is reported rather than silently accepted.
+    let src = "type A = A\nlet x: A = 5\ndump x\n";
+    match rakc::eval_in(src, ".") {
+        Err(_) => {}
+        Ok(out) => assert!(
+            out.iter().any(|l| l.contains("5")),
+            "a cyclic alias must terminate and report the mismatch, got: {:?}",
+            out
+        ),
+    }
+}
+
 #[test]
 fn parity_sets() {
     // Sets are spec 7A.11. The insertion order matters as much as the

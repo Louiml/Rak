@@ -79,6 +79,14 @@ impl Scope {
 
 /// The type-checker state. It holds the source for snippet rendering, the
 /// current file name, an environment stack, and collected diagnostics.
+/// How many alias hops [`TypeChecker::expand_alias`] will follow.
+///
+/// Long enough for any sane chain (`type A = B`, `type B = int`) and short
+/// enough that a cycle terminates. Reaching the limit is not an error: the
+/// alias is simply left unexpanded and keeps comparing by name, which is what
+/// happened before aliases were recorded at all.
+const ALIAS_EXPANSION_LIMIT: usize = 16;
+
 pub struct TypeChecker<'a> {
     source: &'a str,
     file: &'a str,
@@ -89,6 +97,13 @@ pub struct TypeChecker<'a> {
     funcs: HashMap<String, (Vec<Type>, Type)>,
     /// Enum definitions: name → (variant name → number of payload fields).
     enums: HashMap<String, Vec<(String, usize)>>,
+    /// `type X = T` declarations, name → aliased type.
+    ///
+    /// Collected so an alias can be expanded when two types are compared.
+    /// Without this an alias stayed a bare `Type::Custom`, which `compatible`
+    /// does not consider a numeric type -- so `type Meters = int` made
+    /// `let x: Meters = 5` a type error while the VM accepted the same program.
+    aliases: HashMap<String, Type>,
     /// Trait method names usable via `.method(...)`.
     pub diagnostics: Vec<Diagnostic>,
     /// Current line being checked (best-effort).
@@ -108,6 +123,7 @@ impl<'a> TypeChecker<'a> {
             globals: Scope::new(),
             funcs: HashMap::new(),
             enums: HashMap::new(),
+            aliases: HashMap::new(),
             diagnostics: Vec::new(),
             line: 1,
             permissive_let: false,
@@ -232,9 +248,39 @@ impl<'a> TypeChecker<'a> {
 
     /// Check that `ty` is assignable to `expected` (numeric compatibility plus
     /// exact matches). Returns true if compatible.
+    /// Expand a `type` alias to what it names, transitively.
+    ///
+    /// Bounded by [`ALIAS_EXPANSION_LIMIT`] so a self-referential alias (`type A = A`,
+    /// or a cycle of two) terminates instead of recursing; such an alias simply stops
+    /// expanding and is left as a custom name.
+    fn expand_alias(&self, ty: &Type) -> Type {
+        let mut cur = ty.clone();
+        for _ in 0..ALIAS_EXPANSION_LIMIT {
+            let Type::Custom(name) = &cur else {
+                break;
+            };
+            match self.aliases.get(name) {
+                Some(next) => cur = next.clone(),
+                None => break,
+            }
+        }
+        cur
+    }
+
+    /// Record a `type X = T` declaration so later annotations can expand it.
+    fn record_alias(&mut self, name: &str, alias: &Type) {
+        self.aliases.insert(name.to_string(), alias.clone());
+    }
+
     fn compatible(&self, expected: &Type, actual: &Type) -> bool {
         use Type::*;
-        match (expected, actual) {
+        // Expand aliases first, so `type Meters = int` compares as `int` rather than
+        // as an unrelated custom name. Without this the annotation said `Meters`, the
+        // alias meant `int`, and nothing consulted the alias -- so the interpreter
+        // rejected a value the VM accepted.
+        let expected = self.expand_alias(expected);
+        let actual = self.expand_alias(actual);
+        match (&expected, &actual) {
             // Exact matches.
             (a, b) if a == b => true,
             // Numeric compatibility: any int/float/hex form is mutually ok.
@@ -262,6 +308,9 @@ impl<'a> TypeChecker<'a> {
 
     fn exec_stmt(&mut self, stmt: &Stmt) {
         match stmt {
+            // Record the alias so annotations naming it expand. The body is still
+            // walked below, since a `type` statement can appear inside a block.
+            Stmt::TypeAlias { name, alias } => self.record_alias(name, alias),
             Stmt::Let {
                 name,
                 value,

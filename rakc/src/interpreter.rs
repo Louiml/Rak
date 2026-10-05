@@ -561,6 +561,14 @@ pub struct RegexValue {
     pub re: regex::Regex,
 }
 
+/// How many alias hops `Interpreter::expand_alias` will follow.
+///
+/// Long enough for any sane chain (`type A = B`, `type B = int`) and short enough
+/// that a cycle terminates. Reaching the limit is not an error: the alias is left
+/// unexpanded and keeps comparing by name, which is how it behaved before aliases
+/// were recorded at all.
+const TYPE_ALIAS_EXPANSION_LIMIT: usize = 16;
+
 #[derive(Clone)]
 pub enum Value {
     Hex(u64),
@@ -997,6 +1005,13 @@ pub struct Interpreter {
     /// Pending loop control raised by `break`/`continue` (with optional label
     /// or numeric depth). Loops consume it via `resolve_loop_signal`.
     loop_signal: Option<LoopSignal>,
+    /// `type X = T` declarations, name → aliased type.
+    ///
+    /// Recorded so an annotation naming an alias is checked against what the
+    /// alias means. They used to be parsed and dropped, which made
+    /// `type Meters = int` unusable: `let x: Meters = 5` failed with
+    /// "expected Meters, found int" while the VM accepted it.
+    type_aliases: HashMap<String, Type>,
     /// How many loop bodies are executing, and the labels of those loops.
     ///
     /// Behind `Rc`/`Cell` so the `LoopGuard` a loop installs can hold its own
@@ -1260,6 +1275,7 @@ impl Interpreter {
             module_cache: HashMap::new(),
             loading_modules: Vec::new(),
             loop_signal: None,
+            type_aliases: HashMap::new(),
             loop_depth: std::rc::Rc::new(std::cell::Cell::new(0)),
             loop_labels: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
             tests: Vec::new(),
@@ -1296,6 +1312,7 @@ impl Interpreter {
             loading_modules: Vec::new(),
             tests: Vec::new(),
             loop_signal: None,
+            type_aliases: HashMap::new(),
             loop_depth: std::rc::Rc::new(std::cell::Cell::new(0)),
             loop_labels: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
             defers: Vec::new(),
@@ -2452,7 +2469,13 @@ impl Interpreter {
                 self.env.define("__raised__", val.clone());
                 return Err(crate::RakError::Raise(val.to_string()));
             }
-            Stmt::TypeAlias { name: _, alias: _ } => {}
+            Stmt::TypeAlias { name, alias } => {
+                // Recorded rather than discarded. Dropping it made an alias
+                // unusable as a type: the annotation said `Meters`, the alias meant
+                // `int`, and nothing consulted the alias -- so the interpreter
+                // rejected values the VM accepted, and both disagreed with `check`.
+                self.type_aliases.insert(name.clone(), alias.clone());
+            }
             Stmt::Use { .. } => {}
             Stmt::Async(body) => {
                 for s in body {
@@ -5355,8 +5378,33 @@ impl Interpreter {
     /// Numeric types are mutually compatible; strings, chars, bools, bytes and
     /// containers are checked structurally. The static type checker normally
     /// rejects mismatches at compile time; this is a runtime backstop.
+    /// Expand a `type` alias to what it names, transitively.
+    ///
+    /// Bounded so a self-referential alias (`type A = A`) terminates; such an alias
+    /// simply stops expanding and stays a custom name, which is how it behaved before
+    /// aliases were recorded at all.
+    fn expand_alias(&self, ty: &Type) -> Type {
+        let mut cur = ty.clone();
+        for _ in 0..TYPE_ALIAS_EXPANSION_LIMIT {
+            let Type::Custom(name) = &cur else {
+                break;
+            };
+            match self.type_aliases.get(name) {
+                Some(next) => cur = next.clone(),
+                None => break,
+            }
+        }
+        cur
+    }
+
     fn check_value_type(&self, v: &Value, ty: &Type) -> crate::Result<()> {
         use Type::*;
+        // Expand a `type` alias before checking, so `type Meters = int` accepts an
+        // int. Without this the annotation named the alias and the value did not, so
+        // the check reported "expected Meters, found int" -- complaining about a
+        // mismatch that the alias itself had just declared impossible.
+        let expanded = self.expand_alias(ty);
+        let ty = &expanded;
         let ok = match ty {
             Int | I8 | I16 | I32 | I64 | U8 | U16 | U32 | U64 | F32 | F64 | Hex(_) => {
                 matches!(v, Value::Int(_) | Value::Hex(_) | Value::Float(_))
