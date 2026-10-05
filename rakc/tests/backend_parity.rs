@@ -640,45 +640,92 @@ dump "survived"
     );
 }
 
-/// The unwinding restructure must not have stopped the interpreter enforcing
-/// postconditions on the success path.
+/// Postconditions: the interpreter checks them, the VM refuses the program.
 ///
-/// Not an `agree` test, and deliberately so: it asserts the current behaviour of
-/// each backend separately because they currently DISAGREE. The interpreter
-/// enforces `ensures`; the VM ignores it completely.
+/// Not an `agree` test, and deliberately so. The VM has no way to evaluate a clause
+/// against the callee's frame -- `compiler.rs` compiles a function without ever
+/// looking at `ensures` -- so rather than accept a program whose promise would go
+/// unchecked, it reports the construct and names the backend that does check it.
+///
+/// Rejecting is not the same as supporting, but it is the difference between a
+/// promise nobody keeps and an honest "not on this backend". When the VM grows
+/// `ensures` support this test fails, which is the signal to delete it rather than
+/// flip it.
 #[test]
-fn postcondition_enforcement_differs_between_backends() {
+fn postconditions_are_enforced_by_run_and_rejected_by_vm() {
     let src = r#"
 fn f(x) { return x } ensures result > 0
 f(-5)
 "#;
 
-    // The interpreter must still reject the call. This is the half that the
-    // unwinding restructure could plausibly have broken.
+    // The interpreter must still reject the violated postcondition.
     //
-    // A violated postcondition is a runtime error, so it arrives on the `Err` arm.
-    // (`eval_in_cli`'s exit code is for a program that ran to completion and chose
-    // a non-zero code, which is a different thing entirely.)
+    // A violation is a runtime error, so it arrives on the `Err` arm -- the exit
+    // code in `eval_in_cli` is for a program that ran to completion and chose a
+    // code, which is a different thing.
     let err = rakc::eval_in_cli(src, ".", &[], None)
         .err()
-        .expect("a violated postcondition must fail the call");
+        .expect("the interpreter must reject a violated postcondition");
     assert!(
         err.to_string().contains("postcondition failed"),
         "expected a postcondition diagnostic, got: {}",
         err
     );
 
-    // The VM currently does not enforce postconditions at all. This is a real bug,
-    // recorded rather than papered over: a contract that holds on one backend and
-    // is silently ignored on the other is exactly the class of divergence this
-    // file exists to catch. When the VM grows `ensures` support this assertion
-    // fails -- invert it to `agree` at that point, and the failure is the
-    // reminder to do so.
-    let vm = rakc::eval_vm_in(src, ".").expect("VM compiles and runs");
-    assert!(
-        vm.is_empty(),
-        "the VM now enforces postconditions; update this test to `agree` -- got: {:?}",
-        vm
+    // The VM must refuse the program rather than silently ignore the clause.
+    match rakc::eval_vm_in(src, ".") {
+        Ok(_) => {
+            panic!("the VM now accepts postconditions; delete this test and use `agree` instead")
+        }
+        Err(e) => assert!(
+            e.contains("does not support postconditions"),
+            "expected a clear unsupported-construct error, got: {}",
+            e
+        ),
+    }
+}
+
+/// `fn main` must run on both backends.
+///
+/// The VM never called it, so `rakc vm` executed only top-level statements: a
+/// program whose logic lived in `main` -- the shape every `oyvey new` scaffold
+/// generates -- printed nothing and exited 0. Both backends are meant to be two
+/// implementations of one language, so this belongs in the parity suite.
+#[test]
+fn parity_main_is_invoked_by_both_backends() {
+    agree(
+        "`fn main` runs on both backends",
+        r#"
+fn main(argv) {
+  dump "main ran"
+  return 0
+}
+"#,
+    );
+}
+
+/// The program's argv must reach `main` on both backends.
+#[test]
+fn parity_main_receives_arguments_on_both_backends() {
+    agree(
+        "`fn main` receives argv on both backends",
+        r#"
+fn main(argv) {
+  dump argv
+  return 0
+}
+"#,
+    );
+}
+
+/// A program with no `main` must still run its top level on both backends.
+#[test]
+fn parity_program_without_main_still_runs() {
+    agree(
+        "top-level statements run when there is no `main`",
+        r#"
+dump 6 * 7
+"#,
     );
 }
 
@@ -785,7 +832,7 @@ fn parity_core_language() {
     agree(
         "core language surface",
         r#"
-fn add(a, b) { return a + b } requires a >= 0 ensures result == a + b
+fn add(a, b) { return a + b } requires a >= 0
 dump add(2, 3)
 let xs = [1, 2, 3]
 dump xs[0]

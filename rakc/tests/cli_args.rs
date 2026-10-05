@@ -507,3 +507,44 @@ fn separator_alone_is_not_treated_as_the_filename() {
     let (_, ok) = run_with_stdin(&["run", "--"], ECHO_ARGV);
     assert!(!ok, "`--` is not a file, so this should be rejected");
 }
+
+/// `rakc vm` must call `fn main` and honour its return value as the exit code.
+///
+/// It did neither. The VM had no notion of an entry point, so `rakc vm` ran only
+/// top-level statements and exited 0: every program whose logic lived in `main`
+/// did nothing under `vm` while working perfectly under `run`.
+#[test]
+fn vm_invokes_main_and_uses_its_exit_code() {
+    let (out, ok) = run_with_stdin(
+        &["vm", "-"],
+        "fn main(argv) -> int {\n  dump \"vm main ran\"\n  return 7\n}\n",
+    );
+    assert!(
+        out.contains("[DUMP] vm main ran"),
+        "`rakc vm` did not run `fn main`; got: {:?}",
+        out
+    );
+    assert!(
+        !ok,
+        "`main` returned 7, so the process should exit non-zero"
+    );
+}
+
+/// A lex/parse/compile failure under `vm` must exit non-zero.
+///
+/// The handlers only printed the diagnostic and `main` returns `()`, so a program
+/// that failed to compile exited 0 -- which in CI reads as a pass for a program
+/// that never ran.
+#[test]
+fn vm_compile_failure_exits_non_zero() {
+    let (out, ok) = run_with_stdin(
+        &["vm", "-"],
+        "fn f(x) { return x } ensures result > 0\ndump f(5)\n",
+    );
+    assert!(!ok, "a compile error must not exit 0");
+    assert!(
+        out.contains("does not support postconditions"),
+        "expected the unsupported-construct message, got: {:?}",
+        out
+    );
+}

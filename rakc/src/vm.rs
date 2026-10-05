@@ -2086,6 +2086,53 @@ impl Vm {
         Ok(std::mem::take(&mut self.output))
     }
 
+    /// Run a module as a program: execute the top level, then call `fn main(argv)`
+    /// if the chunk defined one, and return `(output, exit_code)`.
+    ///
+    /// `fn main` used to be ignored entirely by this backend, so `rakc vm f.rak`
+    /// ran only top-level statements and a program that was correct under `rakc run`
+    /// silently did nothing. Mirrors `Interpreter::run_main`: the `int` return
+    /// value becomes the process exit code, a non-int return is 0, and no `main`
+    /// at all is 0.
+    ///
+    /// `call_value` already handles `Value::Closure`, so this is an entry point
+    /// rather than new machinery. The argument is always the argv array, matching
+    /// what `oyvey new` scaffolds.
+    pub fn run_cli(
+        &mut self,
+        chunk: &Chunk,
+        argv: &[String],
+    ) -> Result<(Vec<String>, i32), String> {
+        let mut output = self.run(chunk)?;
+        let Some(main_val) = self.globals.get("main").cloned() else {
+            return Ok((output, 0));
+        };
+        let args = Value::Array(Arc::new(
+            argv.iter()
+                .map(|s| Value::String(Arc::from(s.as_str())))
+                .collect(),
+        ));
+        // A frame to call into. `call_value` pushes the callee's result here; the
+        // IP is never advanced because there is no call site to return to.
+        let mut frame = Frame {
+            code: chunk,
+            ip: 0,
+            stack: Vec::new(),
+            locals: Vec::new(),
+            defers: Vec::new(),
+            catches: Vec::new(),
+        };
+        self.call_value(&mut frame, main_val, vec![args])?;
+        let code = match frame.pop().as_i64() {
+            Some(n) => n.clamp(i32::MIN as i64, i32::MAX as i64) as i32,
+            None => 0,
+        };
+        // `run` drains `self.output`, so anything `main` printed is sitting there
+        // again and has to be collected too.
+        output.append(&mut self.output);
+        Ok((output, code))
+    }
+
     /// Execute a frame, catching errors and unwinding to the nearest `try`
     /// handler in this frame. Frames without a handler propagate the error to
     /// the caller (which may have its own handler). A frame that fully unwinds

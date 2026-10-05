@@ -987,17 +987,27 @@ fn main() {
                                     // stack size difference, and it fired before the
                                     // depth guard could turn it into an error.
                                     let md = max_depth;
+                                    // `run_cli`, not `run`: the VM has to find and
+                                    // call `fn main(argv)` the way the interpreter
+                                    // does. It used to call `run`, which executes only
+                                    // top-level statements -- so a program that is
+                                    // correct under `rakc run` printed nothing and did
+                                    // nothing under `vm`, with no error either way.
+                                    let argv_for_vm = script_args.clone();
                                     let outcome = rakc::run_on_big_stack(move || {
                                         let mut vm = rakc::vm::Vm::new();
                                         if let Some(d) = md {
                                             vm.set_max_call_depth(d);
                                         }
-                                        vm.run(&chunk)
+                                        vm.run_cli(&chunk, &argv_for_vm)
                                     });
                                     match outcome {
-                                        Ok(out) => {
+                                        Ok((out, code)) => {
                                             for line in &out {
                                                 println!("{}", line);
+                                            }
+                                            if code != 0 {
+                                                std::process::exit(code);
                                             }
                                         }
                                         Err(e) => {
@@ -1006,13 +1016,27 @@ fn main() {
                                         }
                                     }
                                 }
-                                Err(e) => eprintln!("Compile error: {}", e),
+                                // Exits 1: a compile failure is not a successful run.
+                                // These three handlers only printed, and `main`
+                                // returns `()`, so `rakc vm` exited 0 on a program
+                                // that never ran -- which in CI reads as a pass.
+                                // The `run` arm has always exited 1 here.
+                                Err(e) => {
+                                    eprintln!("Compile error: {}", e);
+                                    std::process::exit(1);
+                                }
                             }
                         }
-                        Err(e) => eprintln!("Parser error: {}", e),
+                        Err(e) => {
+                            eprintln!("Parser error: {}", e);
+                            std::process::exit(1);
+                        }
                     }
                 }
-                Err(e) => eprintln!("Lexer error: {}", e),
+                Err(e) => {
+                    eprintln!("Lexer error: {}", e);
+                    std::process::exit(1);
+                }
             }
         }
         "bench" => {

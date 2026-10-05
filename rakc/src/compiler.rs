@@ -233,17 +233,17 @@ impl Compiler {
             self.statement_line = (idx + 1) as u32;
             match stmt {
                 Stmt::Let { name, value, .. } => {
-                    if let Expr::Function { params, body, .. } = value.as_ref() {
+                    if let Expr::Function { .. } = value.as_ref() {
                         self.func_names.insert(name.clone());
-                        let closure = self.compile_function(name, params, body)?;
+                        let closure = self.compile_function(name, value.as_ref())?;
                         self.func_closures.insert(name.clone(), closure);
                     }
                 }
                 Stmt::Export(inner) => match inner.as_ref() {
                     Stmt::Let { name, value, .. } => {
-                        if let Expr::Function { params, body, .. } = value.as_ref() {
+                        if let Expr::Function { .. } = value.as_ref() {
                             self.func_names.insert(name.clone());
-                            let closure = self.compile_function(name, params, body)?;
+                            let closure = self.compile_function(name, value.as_ref())?;
                             self.func_closures.insert(name.clone(), closure);
                         }
                         self.current_exports.push(name.clone());
@@ -291,9 +291,9 @@ impl Compiler {
                             name: mname, value, ..
                         } = m
                         {
-                            if let Expr::Function { params, body, .. } = value.as_ref() {
+                            if let Expr::Function { .. } = value.as_ref() {
                                 let key = format!("__method_{}_{}", type_name, mname);
-                                let closure = self.compile_function(&key, params, body)?;
+                                let closure = self.compile_function(&key, value.as_ref())?;
                                 self.method_closures.push((key, closure));
                             }
                         }
@@ -529,9 +529,9 @@ impl Compiler {
         for stmt in &module.items {
             match stmt {
                 Stmt::Let { name, value, .. } => {
-                    if let Expr::Function { params, body, .. } = value.as_ref() {
+                    if let Expr::Function { .. } = value.as_ref() {
                         self.func_names.insert(name.clone());
-                        let cl = self.compile_function(name, params, body)?;
+                        let cl = self.compile_function(name, value.as_ref())?;
                         self.func_closures.insert(name.clone(), cl.clone());
                         local_closures.push((name.clone(), cl));
                     }
@@ -543,9 +543,9 @@ impl Compiler {
                         mutable,
                         ..
                     } => {
-                        if let Expr::Function { params, body, .. } = value.as_ref() {
+                        if let Expr::Function { .. } = value.as_ref() {
                             self.func_names.insert(name.clone());
-                            let cl = self.compile_function(name, params, body)?;
+                            let cl = self.compile_function(name, value.as_ref())?;
                             self.func_closures.insert(name.clone(), cl.clone());
                             local_closures.push((name.clone(), cl));
                         }
@@ -933,12 +933,30 @@ impl Compiler {
         }
     }
 
-    fn compile_function(
-        &self,
-        name: &str,
-        params: &[Param],
-        body: &[Stmt],
-    ) -> Result<Value, String> {
+    fn compile_function(&self, declared_name: &str, f: &Expr) -> Result<Value, String> {
+        // Takes the whole expression rather than `(name, params, body)` so a call
+        // site cannot leave the `ensures` clauses out -- which is precisely how
+        // they came to be silently unchecked: the signature never mentioned them,
+        // so no caller was able to supply them.
+        let Expr::Function {
+            params,
+            body,
+            ensures,
+            ..
+        } = f
+        else {
+            return Err("internal: compile_function given a non-function".to_string());
+        };
+
+        // Postconditions are not evaluated on this backend.
+        if !ensures.is_empty() {
+            return Err(format!(
+                "VM does not support postconditions: `fn {}` declares `ensures`. \
+                 Run this program with `rakc run` (the interpreter), which checks them.",
+                declared_name
+            ));
+        }
+
         let mut sub = Compiler::new();
         sub.scope_depth = 1;
         for p in params {
@@ -961,7 +979,7 @@ impl Compiler {
         Ok(Value::Closure {
             code: Arc::from(sub_chunk),
             nparams: params.len(),
-            name: Arc::from(name),
+            name: Arc::from(declared_name),
         })
     }
 
@@ -1732,8 +1750,8 @@ impl Compiler {
                             mutable,
                             ..
                         } => {
-                            if let Expr::Function { params, body, .. } = value.as_ref() {
-                                let cl = self.compile_function(n, params, body)?;
+                            if let Expr::Function { .. } = value.as_ref() {
+                                let cl = self.compile_function(n, value.as_ref())?;
                                 closures.push((n.clone(), cl));
                             }
                             if !exports.contains(n) {
@@ -2507,10 +2525,10 @@ impl Compiler {
                 self.compile_expr(inner)?;
                 self.emit_op(Op::Await);
             }
-            Expr::Function { params, body, .. } => {
+            f @ Expr::Function { .. } => {
                 // Compile a function literal to a closure constant (used by
                 // `pub fn` inlining and nested function values).
-                let closure = self.compile_function("<anon>", params, body)?;
+                let closure = self.compile_function("<anon>", f)?;
                 self.load_const(closure);
             }
             Expr::MacroVar(name) => {
