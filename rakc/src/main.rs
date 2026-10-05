@@ -5,7 +5,9 @@ use std::path::PathBuf;
 
 use rakc::verify_bounded;
 
-const VERSION: &str = "0.8.4";
+// From the manifest, so the banner cannot drift from what was built -- the
+// copy of this string was a literal here and drifted at least once.
+const VERSION: &str = env!("CARGO_PKG_VERSION");
 const PAYLOAD_MAGIC: u64 = 0x52414B5F50434B; // "RAK_PCK" as u64
 
 fn print_usage() {
