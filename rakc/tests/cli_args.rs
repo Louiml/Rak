@@ -55,6 +55,25 @@ fn run_with_stdin(args: &[&str], source: &str) -> (String, bool) {
     (text, code == Some(0))
 }
 
+/// Run the type checker over `src` and return its diagnostics, rendered.
+///
+/// This mirrors what the `check` subcommand does in `main.rs` -- the checker reports a
+/// list and the CLI renders and prints it -- so the tests assert on the same text a user
+/// would see. A lexer or parser failure is returned as a one-element list rather than
+/// panicking, so a malformed fixture fails an assertion instead of the harness.
+fn check_diags(src: &str) -> Vec<String> {
+    let tokens = match rakc::lexer::tokenize(src) {
+        Ok(t) => t,
+        Err(e) => return vec![e.to_string()],
+    };
+    let ast = match rakc::parser::parse(&tokens, src) {
+        Ok(a) => a,
+        Err(e) => return vec![e.to_string()],
+    };
+    let mut tc = rakc::typecheck::TypeChecker::new(src, "test.rak");
+    tc.check_module(&ast).iter().map(|d| d.render()).collect()
+}
+
 #[test]
 fn run_reads_a_script_from_stdin() {
     let (out, ok) = run_with_stdin(&["run", "-"], "dump \"from stdin\"\n");
@@ -686,4 +705,172 @@ fn a_caught_error_in_a_loop_does_not_corrupt_the_depth() {
     );
     assert!(ok, "got: {:?}", out);
     assert!(out.contains("[DUMP] 3"), "got: {:?}", out);
+}
+
+/// An `impl` that misspells a trait method is reported at both ends.
+///
+/// The typo leaves the real method unimplemented, so a single error naming the stray
+/// method is not enough -- the required one has to be named too, or the reader has to
+/// connect the two themselves.
+#[test]
+fn trait_typo_is_reported() {
+    let src = r#"
+trait Greet { fn hi(self) -> string; }
+struct P { v: int }
+impl Greet for P { fn h1(self) -> string { return "x" } }
+"#;
+    let diags = check_diags(src);
+    assert!(
+        diags.iter().any(|d| d.contains("is not a method of trait")),
+        "expected the stray `h1` to be reported, got: {:#?}",
+        diags
+    );
+    assert!(
+        diags.iter().any(|d| d.contains("does not implement `hi`")),
+        "expected the missing `hi` to be reported, got: {:#?}",
+        diags
+    );
+    assert!(
+        diags.iter().any(|d| d.contains("did you mean `hi`?")),
+        "expected a suggestion for the typo, got: {:#?}",
+        diags
+    );
+}
+
+/// A trait that is never implemented is reported where the `impl` is.
+#[test]
+fn trait_missing_method_is_reported() {
+    let diags = check_diags(
+        r#"
+trait Greet { fn hi(self) -> string; }
+struct P { v: int }
+impl Greet for P { }
+"#,
+    );
+    assert!(
+        diags.iter().any(|d| d.contains("does not implement `hi`")),
+        "got: {:#?}",
+        diags
+    );
+}
+
+/// Implementing a trait that was never declared is an error, not a silent no-op.
+#[test]
+fn undeclared_trait_is_reported() {
+    let diags = check_diags(
+        r#"
+struct P { v: int }
+impl NotATrait for P { fn hi(self) -> string { return "x" } }
+"#,
+    );
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.contains("trait `NotATrait` is not declared")),
+        "got: {:#?}",
+        diags
+    );
+}
+
+/// Arity is compared, and the receiver counts toward it.
+///
+/// `fn hi(self, x)` is arity 2, so an impl declaring `fn hi(self)` is a mismatch. A
+/// wrong parameter *name* at the same arity is not -- only the count is compared, since
+/// impl methods are stored as closures.
+#[test]
+fn trait_method_arity_is_checked() {
+    let diags = check_diags(
+        r#"
+trait Greet { fn hi(self, x: int) -> string; }
+struct P { v: int }
+impl Greet for P { fn hi(self) -> string { return "x" } }
+"#,
+    );
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.contains("takes 1 parameter(s) here but the trait expects 2")),
+        "got: {:#?}",
+        diags
+    );
+}
+
+/// Valid programs must stay clean -- including the shapes that could plausibly break.
+///
+/// An inherent `impl` names no trait and so has nothing to validate; an `impl` may
+/// precede its `trait` because traits are collected in a pre-pass; and a trait with more
+/// than one method must accept a complete impl.
+#[test]
+fn valid_trait_declarations_stay_clean() {
+    for (label, src) in [
+        (
+            "well-formed trait impl",
+            r#"
+trait Greet { fn hi(self) -> string; }
+struct P { v: int }
+impl Greet for P { fn hi(self) -> string { return "hello" } }
+"#,
+        ),
+        (
+            "inherent impl names no trait",
+            r#"
+struct P { v: int }
+impl P { fn hi(self) -> string { return "hello" } }
+"#,
+        ),
+        (
+            "impl before trait",
+            r#"
+struct P { v: int }
+impl Greet for P { fn hi(self) -> string { return "hello" } }
+trait Greet { fn hi(self) -> string; }
+"#,
+        ),
+        (
+            "multi-method trait, all implemented",
+            r#"
+trait Both { fn a(self) -> int; fn b(self) -> int; }
+struct P { v: int }
+impl Both for P { fn a(self) -> int { return 1 } fn b(self) -> int { return 2 } }
+"#,
+        ),
+        (
+            "wrong parameter name at the same arity is not an error",
+            r#"
+trait Greet { fn hi(self) -> string; }
+struct P { v: int }
+impl Greet for P { fn hi(me) -> string { return "x" } }
+"#,
+        ),
+    ] {
+        let diags = check_diags(src);
+        assert!(
+            diags.is_empty(),
+            "{}: unexpected diagnostics {:#?}",
+            label,
+            diags
+        );
+    }
+}
+
+/// A trait impl has to actually dispatch, not merely type-check.
+///
+/// The trait and impl both declare `hi`, and the call goes through `p.hi()` with the
+/// receiver passed implicitly -- which is why every method above spells its receiver.
+#[test]
+fn trait_impl_dispatches_at_runtime() {
+    let out = rakc::eval(
+        r#"
+trait Greet { fn hi(self) -> string; }
+struct P { v: int }
+impl Greet for P { fn hi(self) -> string { return "hello" } }
+dump P { v: 1 }.hi()
+"#,
+    )
+    .expect("a well-formed trait impl must run");
+    assert!(
+        out.iter().any(|l| l.contains("hello")),
+        "expected the trait method to run, got: {:?}",
+        out
+    );
 }

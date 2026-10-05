@@ -79,6 +79,59 @@ impl Scope {
 
 /// The type-checker state. It holds the source for snippet rendering, the
 /// current file name, an environment stack, and collected diagnostics.
+/// Nearest method name in a trait, for "did you mean" hints.
+///
+/// Cheap on purpose: a distance bound plus a case-insensitive prefix fallback, which
+/// between them cover the realistic mistakes (`h1` for `hi`, `iter` for `items`,
+/// `Fmt` for `fmt`) without pulling in a metric.
+fn suggest_trait_method(required: &[(String, usize)], given: &str) -> Option<String> {
+    // Never suggest the name that was already given. That reads as a non sequitur --
+    // "does not implement `hi` / help: did you mean `hi`?" -- which is what the
+    // missing-method case would otherwise produce, since it passes the method it just
+    // named as the thing being misspelled.
+    let lower = given.to_ascii_lowercase();
+    if let Some((n, _)) = required
+        .iter()
+        .find(|(n, _)| n.to_ascii_lowercase() == lower && n != given)
+    {
+        return Some(format!("did you mean `{}`?", n));
+    }
+    let mut best: Option<(usize, &str)> = None;
+    for (n, _) in required {
+        if n == given {
+            continue;
+        }
+        let d = edit_distance(n, given);
+        if d > given.len() / 3 + 1 {
+            continue;
+        }
+        if best.is_none_or(|(bd, _)| d < bd) {
+            best = Some((d, n));
+        }
+    }
+    best.map(|(_, n)| format!("did you mean `{}`?", n))
+}
+
+/// Levenshtein distance, single-row. Only used to size up a "did you mean" hint.
+fn edit_distance(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    if a.is_empty() {
+        return b.len();
+    }
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    let mut cur = vec![0usize; b.len() + 1];
+    for i in 1..=a.len() {
+        cur[0] = i;
+        for j in 1..=b.len() {
+            let cost = if a[i - 1] == b[j - 1] { 0 } else { 1 };
+            cur[j] = (prev[j] + 1).min(cur[j - 1] + 1).min(prev[j - 1] + cost);
+        }
+        std::mem::swap(&mut prev, &mut cur);
+    }
+    prev[b.len()]
+}
+
 /// How many alias hops [`TypeChecker::expand_alias`] will follow.
 ///
 /// Long enough for any sane chain (`type A = B`, `type B = int`) and short
@@ -104,6 +157,11 @@ pub struct TypeChecker<'a> {
     /// does not consider a numeric type -- so `type Meters = int` made
     /// `let x: Meters = 5` a type error while the VM accepted the same program.
     aliases: HashMap<String, Type>,
+    /// `trait` declarations, name → (method name → arity).
+    ///
+    /// Arity includes the receiver, which a method declares as its own first
+    /// parameter, so `fn hi(self)` is arity 1.
+    traits: HashMap<String, Vec<(String, usize)>>,
     /// Trait method names usable via `.method(...)`.
     pub diagnostics: Vec<Diagnostic>,
     /// Current line being checked (best-effort).
@@ -124,6 +182,7 @@ impl<'a> TypeChecker<'a> {
             funcs: HashMap::new(),
             enums: HashMap::new(),
             aliases: HashMap::new(),
+            traits: HashMap::new(),
             diagnostics: Vec::new(),
             line: 1,
             permissive_let: false,
@@ -137,6 +196,10 @@ impl<'a> TypeChecker<'a> {
         let mut first_pass = TypeChecker::new(self.source, self.file);
         first_pass.collect_fns(&module.items);
         self.funcs = first_pass.funcs;
+        // Traits are collected here too, for the same reason: an `impl` can name a
+        // trait declared further down the file, and a diagnostic about the `impl`
+        // should not depend on the order of the two declarations.
+        self.traits = first_pass.traits.clone();
 
         self.scopes.push(Scope::new());
         for stmt in &module.items {
@@ -168,6 +231,15 @@ impl<'a> TypeChecker<'a> {
                     let ret = return_type.clone().unwrap_or(Type::Nil);
                     self.funcs.insert(name.clone(), (params_t, ret));
                 }
+            }
+            Stmt::Trait { name, methods } => {
+                self.traits.insert(
+                    name.clone(),
+                    methods
+                        .iter()
+                        .map(|m| (m.name.clone(), m.params.len()))
+                        .collect(),
+                );
             }
             Stmt::Mod { items, .. } => self.collect_fns(items),
             Stmt::Export(inner) => self.collect_fn_stmt(inner),
@@ -303,6 +375,101 @@ impl<'a> TypeChecker<'a> {
             // Custom types match by name only.
             (Custom(a), Custom(b)) => a == b,
             _ => false,
+        }
+    }
+
+    /// Report an `impl Trait for Type` that does not match `Trait`.
+    ///
+    /// Three things can go wrong, and each is worth naming precisely:
+    ///
+    /// - the trait is not declared at all, which usually means a typo in the name or
+    ///   a missing `use`;
+    /// - the impl provides a method the trait does not declare, which is almost
+    ///   always a typo, and silently leaves the real method unimplemented;
+    /// - the impl omits a method the trait requires, which otherwise surfaces as a
+    ///   `No method ...` runtime error at an unrelated call site.
+    ///
+    /// Comparison is by name and arity. The receiver counts toward arity because a
+    /// method declares it as its own first parameter (`fn hi(self)` is arity 1), so
+    /// a trait method written with `self` must be implemented with `self`.
+    fn check_impl_covers_trait(&mut self, trait_name: &str, type_name: &str, methods: &[Stmt]) {
+        let Some(required) = self.traits.get(trait_name).cloned() else {
+            self.report(
+                "E0410",
+                &format!(
+                    "`impl {} for {}`: trait `{}` is not declared",
+                    trait_name, type_name, trait_name
+                ),
+                None,
+                None,
+                Some(format!(
+                    "declare `trait {}` before implementing it",
+                    trait_name
+                )),
+                Some(trait_name),
+            );
+            return;
+        };
+
+        // The parser stores an `impl` body as `let <name> = fn ...` bindings, which
+        // is why the interpreter reads its methods out of `Stmt::Let`.
+        let mut provided: HashMap<&str, usize> = HashMap::new();
+        for m in methods {
+            if let Stmt::Let {
+                name: mname, value, ..
+            } = m
+            {
+                if let Expr::Function { params, .. } = value.as_ref() {
+                    provided.insert(mname.as_str(), params.len());
+                }
+            }
+        }
+
+        for (mname, marity) in &provided {
+            let Some(&(_, rarity)) = required.iter().find(|(n, _)| n == mname) else {
+                self.report(
+                    "E0411",
+                    &format!(
+                        "`impl {} for {}`: `{}` is not a method of trait `{}`",
+                        trait_name, type_name, mname, trait_name
+                    ),
+                    Some("a method declared by the trait".to_string()),
+                    Some(format!("`{}`", mname)),
+                    suggest_trait_method(&required, mname),
+                    Some(mname),
+                );
+                continue;
+            };
+            if *marity != rarity {
+                self.report(
+                    "E0412",
+                    &format!(
+                        "`impl {} for {}`: `{}` takes {} parameter(s) here but the trait expects {}",
+                        trait_name, type_name, mname, marity, rarity
+                    ),
+                    Some(format!("{} parameter(s)", rarity)),
+                    Some(format!("{} parameter(s)", marity)),
+                    Some("the receiver is a parameter too: `fn hi(self)` is arity 1".to_string()),
+                    Some(mname),
+                );
+            }
+        }
+
+        for (rname, _) in &required {
+            if provided.contains_key(rname.as_str()) {
+                continue;
+            }
+            self.report(
+                "E0413",
+                &format!(
+                    "`impl {} for {}` does not implement `{}`",
+                    trait_name, type_name, rname
+                ),
+                Some(format!("`{}`", rname)),
+                None,
+                suggest_trait_method(&required, rname),
+                Some(rname),
+            );
         }
     }
 
@@ -454,6 +621,26 @@ impl<'a> TypeChecker<'a> {
                 let ty = self.infer(value);
                 self.declare(name, ty, false);
             }
+            Stmt::Impl {
+                target,
+                trait_name,
+                methods,
+            } => {
+                // The parser stores `impl <A> for <B>` with the trait in `target`
+                // and the type in `trait_name`, which reads backwards; an inherent
+                // `impl <Type>` has no `trait_name`.
+                let (trait_str, type_name) = match trait_name {
+                    Some(ty) => (target.clone(), ty.clone()),
+                    None => (String::new(), target.clone()),
+                };
+                if !trait_str.is_empty() {
+                    self.check_impl_covers_trait(&trait_str, &type_name, methods);
+                }
+                for m in methods {
+                    self.exec_stmt(m);
+                }
+            }
+            Stmt::Trait { .. } => {}
             _ => {}
         }
     }
