@@ -377,7 +377,11 @@ pub fn eval_in_cli_with_gui(
             interpreter.attach_gui(for_worker.clone());
             let output = interpreter.run_source(&src);
             let code = match &output {
-                Ok(_) => interpreter.run_main(&args),
+                // Unwrap rather than propagate: this is a worker thread whose
+                // only channel to the user is the output pane, so an error here
+                // becomes an exit code with the message dropped -- exactly the
+                // silent failure just fixed on the CLI path.
+                Ok(_) => interpreter.run_main(&args).unwrap_or(1),
                 // The script failed, so there is no `main` to run and no point
                 // leaving a window up for a program that has already stopped.
                 Err(_) => 1,
@@ -386,7 +390,11 @@ pub fn eval_in_cli_with_gui(
             // never calls a GUI builtin would hang the event loop forever,
             // because nothing would ever set `ControlFlow::Exit`.
             for_worker.notify_script_done();
-            output.map(|o| (o, code))
+            // Collected after `main`, not from `run_source`'s return value, which
+            // is a snapshot taken before `main` ran -- so a GUI program's own
+            // output was discarded. Output produced before a failure is kept,
+            // which is why this is `map` and not `and_then`.
+            output.map(|_| (interpreter.take_output(), code))
         });
 
     let mut script = match script {

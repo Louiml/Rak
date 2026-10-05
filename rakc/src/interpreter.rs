@@ -1329,20 +1329,25 @@ impl Interpreter {
     /// After executing a script, if a `fn main(args)` is defined, call it with
     /// the given command-line args and return its `int` result as the exit code
     /// (defaults to 0 when no `main` is present).
-    pub fn run_main(&mut self, argv: &[String]) -> i32 {
+    pub fn run_main(&mut self, argv: &[String]) -> crate::Result<i32> {
         self.program_argv = argv.to_vec();
         let main_val = self.main_entry.clone().or_else(|| self.env.get("main"));
-        match main_val {
-            Some(main_val) => {
-                let args = Value::Array(argv.iter().map(|s| Value::String(s.clone())).collect());
-                match self.call_function_with_values(main_val, vec![args]) {
-                    Ok(Value::Int(n)) => n.clamp(i32::MIN as i64, i32::MAX as i64) as i32,
-                    Ok(_) => 0,
-                    Err(_) => 1,
-                }
-            }
-            None => 0,
-        }
+        let Some(main_val) = main_val else {
+            return Ok(0);
+        };
+        let args = Value::Array(argv.iter().map(|s| Value::String(s.clone())).collect());
+        // Errors propagate instead of becoming a bare exit code. `Err(_) => 1`
+        // discarded the message, so an uncaught `raise` inside `main` exited 1
+        // with nothing on stderr explaining why.
+        Ok(
+            match self.call_function_with_values(main_val, vec![args])? {
+                Value::Int(n) => n.clamp(i32::MIN as i64, i32::MAX as i64) as i32,
+                // A `fn main` that returns nothing still exits 0: rejecting it would
+                // fail programs that merely omit the `return`, which is a style
+                // question rather than a correctness one.
+                _ => 0,
+            },
+        )
     }
 
     /// Run tests collected by a prior `run_source`/`run` call and return per-
@@ -4429,31 +4434,70 @@ impl Interpreter {
                 ));
             }
         }
-        for s in body {
-            self.exec_stmt(s)?;
-            if self.returning {
-                break;
+        // The body's result is captured rather than propagated with `?`. A `?`
+        // here used to return straight out of this function, skipping every step
+        // of the unwinding below it: `call_depth` stayed incremented, and -- far
+        // worse -- the interpreter kept the *callee's* environment instead of the
+        // caller's, so a caught exception made the caller's own locals vanish.
+        // This function's `defer`s were skipped too, and the caller's pending
+        // defers were dropped with them.
+        let body_result = (|| -> crate::Result<()> {
+            for s in body {
+                self.exec_stmt(s)?;
+                if self.returning {
+                    break;
+                }
             }
-        }
+            Ok(())
+        })();
+
         self.call_depth -= 1;
         let ret = if self.returning {
             std::mem::replace(&mut self.return_value, Value::Nil)
         } else {
             Value::Nil
         };
-        // Run this function's deferred calls in LIFO order (after restoring
-        // the environment so defers can reference function locals).
+        // `catch` recovers the raised value from `__raised__`, which `raise`
+        // writes into the environment of the frame that raised. Restoring the
+        // environment would drop that binding along with the callee's scope, and
+        // the handler would bind `nil` instead of the error -- so carry it across.
+        // Read before the restore, and only when the body actually failed, so a
+        // stale value from an earlier caught error is never carried forward.
+        let raised = if body_result.is_err() {
+            self.env.get("__raised__")
+        } else {
+            None
+        };
+        // Restore the environment before running defers, so a defer can reference
+        // this function's locals -- on the error path as well as the success path.
         self.env = saved_env.clone();
+        if let Some(v) = raised {
+            self.env.define("__raised__", v);
+        }
         self.returning = saved_returning;
-        self.run_defers()?;
-        // Postconditions are checked after defers have run, so a deferred
-        // cleanup that repairs the return value is accounted for rather than
-        // reported as a broken promise. Parameters are re-bound for the check
-        // because the caller's environment has already been restored.
-        self.check_ensures(ensures, name, &ret, &bound_params)?;
-        // Restore the caller's defers (defers registered in a caller must
-        // outlive this function call).
+        // Deferred calls run in LIFO order however the function leaves. A function
+        // that raises still owes its caller the cleanup it registered.
+        let defer_result = self.run_defers();
+        // Postconditions are checked after defers have run, so a deferred cleanup
+        // that repairs the return value is accounted for rather than reported as a
+        // broken promise. Parameters are re-bound for the check because the
+        // caller's environment has already been restored. Skipped when the body
+        // failed: there is no return value left to hold to a promise.
+        let ensures_result = if body_result.is_ok() {
+            self.check_ensures(ensures, name, &ret, &bound_params)
+        } else {
+            Ok(())
+        };
+        // Restore the caller's defers (defers registered in a caller must outlive
+        // this function call). Done before any `?` so no early return can drop
+        // them again.
         self.defers = saved_defers;
+
+        // The body's own failure is what the caller needs to hear about, so it is
+        // reported ahead of a defer that may also have failed.
+        body_result?;
+        defer_result?;
+        ensures_result?;
         Ok(ret)
     }
 
@@ -6814,12 +6858,45 @@ impl Interpreter {
             }
             "substr" => {
                 let s = self.val_to_string(args.first())?;
-                let start = args.get(1).and_then(|v| v.as_i64()).unwrap_or(0) as usize;
-                let length = args.get(2).and_then(|v| v.as_i64()).unwrap_or(0) as usize;
+                let start = args.get(1).and_then(|v| v.as_i64()).unwrap_or(0);
+                let length = args.get(2).and_then(|v| v.as_i64()).unwrap_or(0);
+                // A negative bound used to be cast straight to `usize`, becoming
+                // `usize::MAX`, and then overflowed the addition below. Release
+                // builds set `overflow-checks = true` together with
+                // `panic = "abort"`, so that was not a catchable panic but a
+                // process abort: `substr("abc", -1, 2)` killed the host, and
+                // `try`/`catch` around it did not help. Any script could reach it.
+                //
+                // Rejecting the value is clearer than guessing. `substr` takes a
+                // length, so a negative length has no sensible reading.
+                // `slice`, which does take a range, keeps its own documented
+                // negative-bound behaviour -- it is a different builtin with a
+                // different argument shape, and it was never affected.
+                if start < 0 {
+                    return Err(crate::RakError::Runtime(format!(
+                        "substr: start must not be negative (got {})",
+                        start
+                    )));
+                }
+                if length < 0 {
+                    return Err(crate::RakError::Runtime(format!(
+                        "substr: length must not be negative (got {})",
+                        length
+                    )));
+                }
                 let chars: Vec<char> = s.chars().collect();
-                let end = (start + length).min(chars.len());
-                let s2 = start.min(chars.len());
-                Ok(Value::String(chars[s2..end].iter().collect()))
+                let from = start as usize;
+                let length = length as usize;
+                // `saturating_add`, not `+`: the checks above make an overflow
+                // unreachable, and a debug/release difference on a slicing builtin
+                // is not worth the risk of reintroducing.
+                let end = from
+                    .saturating_add(length)
+                    .min(chars.len())
+                    .max(from.min(chars.len()));
+                Ok(Value::String(
+                    chars[from.min(chars.len())..end].iter().collect(),
+                ))
             }
             "sort" => {
                 if let Some(Value::Array(a)) = args.first().cloned() {

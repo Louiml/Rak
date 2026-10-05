@@ -299,14 +299,14 @@ fn spawn_worker(
             }
             drop(s);
             cvar.notify_all();
-        writer.event("terminated", json!({"restart": false}));
-    })
-    // A spawn failure cannot be reported through the captured state -- that
-    // has already moved into the closure -- and returning a handle to a
-    // thread that never ran would leave the reader waiting forever. Hand
-    // back an already-finished thread instead: `join` returns immediately
-    // and the session simply has no target to wait for.
-    .unwrap_or_else(|_| std::thread::spawn(|| {}))
+            writer.event("terminated", json!({"restart": false}));
+        })
+        // A spawn failure cannot be reported through the captured state -- that
+        // has already moved into the closure -- and returning a handle to a
+        // thread that never ran would leave the reader waiting forever. Hand
+        // back an already-finished thread instead: `join` returns immediately
+        // and the session simply has no target to wait for.
+        .unwrap_or_else(|_| std::thread::spawn(|| {}))
 }
 
 /// Run the DAP server for `source` (already read from `file`) on stdio.

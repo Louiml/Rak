@@ -301,11 +301,30 @@ fn vm_find(args: &Args) -> R {
 
 fn vm_substr(args: &Args) -> R {
     let subject = to_str(args.first());
-    let start = args.get(1).and_then(|v| v.as_i64()).unwrap_or(0) as usize;
-    let length = args.get(2).and_then(|v| v.as_i64()).unwrap_or(0) as usize;
+    let start = args.get(1).and_then(|v| v.as_i64()).unwrap_or(0);
+    let length = args.get(2).and_then(|v| v.as_i64()).unwrap_or(0);
+    // Matches the interpreter, which rejects these rather than casting to `usize`.
+    // The VM used `saturating_add` and so never aborted, but it returned the empty
+    // string for a negative start -- a different wrong answer for the same input.
+    // See the interpreter's `substr` for why an error is the right answer.
+    if start < 0 {
+        return Err(format!(
+            "substr: start must not be negative (got {})",
+            start
+        ));
+    }
+    if length < 0 {
+        return Err(format!(
+            "substr: length must not be negative (got {})",
+            length
+        ));
+    }
     let chars: Vec<char> = subject.chars().collect();
-    let end = start.saturating_add(length).min(chars.len());
-    let from = start.min(chars.len());
+    let from = (start as usize).min(chars.len());
+    let end = (start as usize)
+        .saturating_add(length as usize)
+        .min(chars.len())
+        .max(from);
     Ok(s_owned(chars[from..end].iter().collect()))
 }
 

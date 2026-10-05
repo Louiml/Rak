@@ -523,6 +523,165 @@ dump md5("abc")
     );
 }
 
+/// The two backends must agree that a negative `substr` bound is an error.
+///
+/// They disagreed in a way no registration test could see: the interpreter
+/// aborted the process, while the VM -- which used `saturating_add` and so did not
+/// crash -- quietly returned the empty string. Both now report the same error, so
+/// a script can rely on `try` catching it either way.
+#[test]
+fn parity_substr_negative_bounds() {
+    agree(
+        "substr rejects negative bounds identically",
+        r#"
+  try { dump substr("abc", -1, 2) } catch e { dump "caught" }
+  try { dump substr("abc", 0, -1) } catch e { dump "caught too" }
+  "#,
+    );
+}
+
+/// A caught exception must leave the caller's scope intact.
+///
+/// The interpreter returned from the function body with `?`, so the environment
+/// was never restored and the interpreter was left holding the *callee's* scope.
+/// The caller's own locals then read as undefined. The VM was always correct here.
+#[test]
+fn parity_caught_error_preserves_caller_scope() {
+    agree(
+        "a caught error leaves the caller's locals readable",
+        r#"
+fn boom() { raise "kaboom" }
+fn g() {
+  let local = "caller-local"
+  try { boom() } catch e { dump e }
+  dump local
+}
+g()
+"#,
+    );
+}
+
+/// The value a `catch` binds must survive the trip out of the raising frame.
+///
+/// `catch` recovers it from a `__raised__` binding in the raising frame's
+/// environment. The interpreter bound `nil` while the VM bound the message, so
+/// error handling was unusable on the default backend: the code ran, the message
+/// was gone, and nothing said so.
+#[test]
+fn parity_caught_error_carries_its_value() {
+    agree(
+        "catch binds the raised message, not nil",
+        r#"
+fn boom() { raise "kaboom" }
+fn g() {
+  try { boom() } catch e { dump e }
+}
+g()
+"#,
+    );
+}
+
+/// `defer` must run when the function that registered it exits by raising.
+///
+/// A raising function still owes its caller the cleanup it registered. The
+/// interpreter skipped it entirely on the error path; the VM ran it. So a resource
+/// acquired before a failure was released only under one of the two backends.
+#[test]
+fn parity_defer_runs_when_the_function_raises() {
+    agree(
+        "defer runs on the error path too",
+        r#"
+fn cleanup() { dump "cleanup" }
+fn boom() { defer cleanup()  raise "e1" }
+for i in [1, 2, 3] { try { boom() } catch e { dump e } }
+"#,
+    );
+}
+
+/// A caller's pending `defer`s must outlive a call that raised.
+///
+/// The error path returned before `self.defers = saved_defers`, so unwinding a
+/// failed call discarded the caller's own deferred cleanup as well.
+#[test]
+fn parity_caller_defers_survive_a_failed_call() {
+    agree(
+        "the caller's pending defers are not dropped by a failed call",
+        r#"
+fn outer_cleanup() { dump "outer cleanup" }
+fn boom() { raise "e1" }
+fn outer() {
+  defer outer_cleanup()
+  try { boom() } catch e { }
+  dump "outer done"
+}
+outer()
+"#,
+    );
+}
+
+/// Repeated caught errors must not exhaust the call-depth budget.
+///
+/// `call_depth` was decremented only on the success path, so every propagated error
+/// leaked one level. A loop of caught errors would eventually trip the depth cap
+/// for reasons that have nothing to do with recursion.
+#[test]
+fn parity_repeated_caught_errors_do_not_leak_depth() {
+    agree(
+        "500 caught errors do not exhaust the depth budget",
+        r#"
+fn boom() { raise "x" }
+let mut i = 0
+while i < 500 {
+  i = i + 1
+  try { boom() } catch e { }
+}
+dump "survived"
+"#,
+    );
+}
+
+/// The unwinding restructure must not have stopped the interpreter enforcing
+/// postconditions on the success path.
+///
+/// Not an `agree` test, and deliberately so: it asserts the current behaviour of
+/// each backend separately because they currently DISAGREE. The interpreter
+/// enforces `ensures`; the VM ignores it completely.
+#[test]
+fn postcondition_enforcement_differs_between_backends() {
+    let src = r#"
+fn f(x) { return x } ensures result > 0
+f(-5)
+"#;
+
+    // The interpreter must still reject the call. This is the half that the
+    // unwinding restructure could plausibly have broken.
+    //
+    // A violated postcondition is a runtime error, so it arrives on the `Err` arm.
+    // (`eval_in_cli`'s exit code is for a program that ran to completion and chose
+    // a non-zero code, which is a different thing entirely.)
+    let err = rakc::eval_in_cli(src, ".", &[], None)
+        .err()
+        .expect("a violated postcondition must fail the call");
+    assert!(
+        err.to_string().contains("postcondition failed"),
+        "expected a postcondition diagnostic, got: {}",
+        err
+    );
+
+    // The VM currently does not enforce postconditions at all. This is a real bug,
+    // recorded rather than papered over: a contract that holds on one backend and
+    // is silently ignored on the other is exactly the class of divergence this
+    // file exists to catch. When the VM grows `ensures` support this assertion
+    // fails -- invert it to `agree` at that point, and the failure is the
+    // reminder to do so.
+    let vm = rakc::eval_vm_in(src, ".").expect("VM compiles and runs");
+    assert!(
+        vm.is_empty(),
+        "the VM now enforces postconditions; update this test to `agree` -- got: {:?}",
+        vm
+    );
+}
+
 #[test]
 fn parity_sets() {
     // Sets are spec 7A.11. The insertion order matters as much as the

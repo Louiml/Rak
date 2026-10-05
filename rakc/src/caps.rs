@@ -136,11 +136,7 @@ fn required_cap(name: &str) -> Option<&'static str> {
             &[
                 "file_write",
                 "file_append",
-                "append_file",
-                "mkdir",
-                "remove_file",
                 "zip_write",
-                "report_write",
                 // Byte-exact writers, and writing through a mapping. Each of these
                 // modifies a file, so gating `file_write` while leaving these
                 // ungated would have been a hole in the sandbox rather than a
@@ -148,6 +144,21 @@ fn required_cap(name: &str) -> Option<&'static str> {
                 "file_write_bytes",
                 "file_append_bytes",
                 "mmap_write",
+                // The mutators that were missing. Deleting, renaming, copying and
+                // creating directories all change the filesystem exactly as much
+                // as writing a file does, so a sandbox that gated `file_write` but
+                // not these four was not a narrower surface -- it was a different
+                // one. Verified: under an active sandbox `file_delete` and
+                // `file_mkdir` both completed with exit 0.
+                "file_delete",
+                "file_mkdir",
+                "file_rename",
+                "file_copy",
+                // `write` is the shortest mutator name there is and is the one
+                // most likely to be reached for first. It is the only registered
+                // builtin beginning with "write", so using it as a prefix does not
+                // over-block.
+                "write",
             ],
         ),
     ];

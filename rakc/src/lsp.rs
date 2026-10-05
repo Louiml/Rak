@@ -743,7 +743,7 @@ mod tests {
     #[test]
     fn position_to_offset_handles_astral_characters() {
         let src = "a\u{1F600}b\n"; // U+1F600, four bytes, two UTF-16 units
-        // 'a' is column 0 -> byte 0.
+                                   // 'a' is column 0 -> byte 0.
         assert_eq!(position_to_offset(src, pos(0, 0)), 0);
         // 'b' is at UTF-16 column 3 (a=1, emoji=2) -> byte 5.
         let off = position_to_offset(src, pos(0, 3));

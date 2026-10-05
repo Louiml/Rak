@@ -93,11 +93,9 @@ fn cmd_verify(args: &[String]) -> i32 {
             }
             "--quiet" | "-q" => quiet = true,
             // A bare `-` is the stdin filename, not a flag: it starts with `-`, so
-//     classifying by prefix alone made `rakc run -` unreachable.
+            //     classifying by prefix alone made `rakc run -` unreachable.
             //     `is_stdin_marker` is the single place that decides.
-            other if !is_flag_token(other) && file.is_none() => {
-                file = Some(other.to_string())
-            }
+            other if !is_flag_token(other) && file.is_none() => file = Some(other.to_string()),
             _ => {}
         }
         i += 1;
@@ -684,9 +682,22 @@ fn main() {
     // `--allow` takes a value, so the argument after it is a flag's value and not
     // the filename; without that, `rakc run --sandbox --allow csv f.rak` would try
     // to run `csv`.
+    // A literal `--` ends rakc's flags: it is consumed, and everything after it
+    // belongs to the program. There was no way to express this before, so any
+    // `-`-prefixed argument was claimed as a rakc flag wherever it appeared and
+    // `fn main(argv)` could never be handed `--verbose`. `oyvey run -- --port 8080`
+    // arrived as `[8080]`, because rakc ate the flags before oyvey's forwarding
+    // could matter.
+    //
+    // `arg_separator` is the index of that `--`, if there is one.
+    let arg_separator: Option<usize> = (2..args.len()).find(|&i| args[i] == "--");
+    // The scanner must not look past the separator, or a flag the *program* asked
+    // for would be claimed here.
+    let scan_end = arg_separator.unwrap_or(args.len());
+
     let mut flag_slots: std::collections::HashSet<usize> = std::collections::HashSet::new();
     let mut i = 2;
-    while i < args.len() {
+    while i < scan_end {
         if is_flag_token(&args[i]) {
             flag_slots.insert(i);
             // A flag whose value is the next argument. Without listing it here the
@@ -696,12 +707,17 @@ fn main() {
             // was handed to the program instead.
             if args[i] == "--allow" || args[i] == "-A" || args[i] == "--max-depth" {
                 i += 1;
-                if i < args.len() {
+                if i < scan_end {
                     flag_slots.insert(i);
                 }
             }
         }
         i += 1;
+    }
+    // The separator is consumed rather than forwarded, and recording it as a flag
+    // slot also stops it being chosen as the filename.
+    if let Some(sep) = arg_separator {
+        flag_slots.insert(sep);
     }
     // Read `--max-depth` straight out of `args`, here, rather than out of
     // `script_args` further down.
@@ -737,18 +753,46 @@ fn main() {
     let file = &args[file_index];
     let source = read_source(file);
 
-    // Everything after the file, minus the flags that preceded it: those belong
-    // to `rakc`, not to the script.
-    let script_args: Vec<String> = args[file_index + 1..]
+    // The script's argv: everything after the file, minus the flags rakc claimed
+    // before it.
+    //
+    // Arguments after a `--` separator are appended verbatim and are never offered
+    // to `caps::parse_cli` below. Without that, `rakc run f.rak -- --sandbox`
+    // dropped the flag the program had asked for -- the separator would promise
+    // delivery and then quietly eat it.
+    let pre_separator: Vec<String> = args[file_index + 1..scan_end]
         .iter()
         .enumerate()
         .filter(|(k, _)| !flag_slots.contains(&(file_index + 1 + k)))
         .map(|(_, a)| (*a).clone())
         .collect();
+    let after_separator: Vec<String> = match arg_separator {
+        Some(sep) if sep > file_index => args[sep + 1..].to_vec(),
+        _ => Vec::new(),
+    };
 
-    // Sandbox flags: --sandbox [--allow csv]. Stripped from script argv.
-    let (sandbox_on, sandbox_allow, parsed_depth, clean_args) = rakc::caps::parse_cli(&script_args);
+    // `parse_cli` drops rakc's capability flags from the pre-separator portion;
+    // `after_separator` is then appended unchanged.
+    let (_, _, parsed_depth, mut script_args) = rakc::caps::parse_cli(&pre_separator);
+    script_args.extend(after_separator);
     let max_depth = max_depth_override.or(parsed_depth);
+
+    // The sandbox decision is read from the raw tail instead, because
+    // `script_args` has already had every `-` token filtered out of it. The
+    // previous code took BOTH values from `parse_cli(&script_args)`, which meant
+    // `--sandbox` and `--allow`'s value were gone before the parser ran:
+    // `sandbox_on` was always false, `caps::enable` was never reached, and
+    // `rakc run --sandbox` sandboxed nothing at all. Only `rakc test`, which
+    // parses raw args on its own path, ever worked -- see the note above at the
+    // `--max-depth` scan, which describes this and fixed only the depth flag.
+    //
+    // Reading the whole tail covers both orders the usage text allows, because
+    // the flags are found whether they come before or after the filename.
+    // Stops at `--` for the same reason the scanner does: a `--sandbox` written
+    // after the separator is the program's argument, not an instruction to
+    // sandbox this process.
+    let raw_tail: Vec<String> = args[2.min(scan_end)..scan_end].to_vec();
+    let (sandbox_on, sandbox_allow, _, _) = rakc::caps::parse_cli(&raw_tail);
     if sandbox_on {
         rakc::caps::enable(&sandbox_allow);
         eprintln!(
@@ -767,8 +811,9 @@ fn main() {
                 .parent()
                 .map(|p| p.to_string_lossy().to_string())
                 .unwrap_or_else(|| ".".to_string());
-            // argv for a `fn main(args)` entry = everything after the file.
-            let script_args: Vec<String> = clean_args;
+            // argv for a `fn main(args)` entry = the script's arguments, built
+            // above: everything after the file, with rakc's own flags removed and
+            // anything past a `--` passed through verbatim.
             #[cfg(feature = "gui")]
             let result = rakc::gui::eval_in_cli_with_gui(&source, &base_dir, &script_args);
             #[cfg(not(feature = "gui"))]

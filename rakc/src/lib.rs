@@ -491,9 +491,13 @@ pub fn eval_cli(source: &str, argv: &[String]) -> Result<(Vec<String>, i32)> {
     let args = argv.to_vec();
     run_on_big_stack(move || {
         let mut interpreter = interpreter::Interpreter::new();
-        let output = interpreter.run_source(&src)?;
-        let code = interpreter.run_main(&args);
-        Ok((output, code))
+        // `run_source` returns a *snapshot* of the output collected so far. Taking
+        // it before `run_main` and returning it threw away everything `main`
+        // printed, so a program with all of its logic in `fn main` -- the ordinary
+        // shape -- produced no output at all. Collect only once, afterwards.
+        interpreter.run_source(&src)?;
+        let code = interpreter.run_main(&args)?;
+        Ok((interpreter.take_output(), code))
     })
 }
 
@@ -514,9 +518,10 @@ pub fn eval_in_cli(
         // else's script should not be able to die by exhausting the native stack.
         // See `DEFAULT_MAX_DEPTH`: the check already existed and simply never fired.
         interpreter.set_max_depth(max_depth.unwrap_or(interpreter::DEFAULT_MAX_DEPTH));
-        let output = interpreter.run_source(&src)?;
-        let code = interpreter.run_main(&args);
-        Ok((output, code))
+        // See `eval_cli`: the snapshot must be taken after `run_main`, not before.
+        interpreter.run_source(&src)?;
+        let code = interpreter.run_main(&args)?;
+        Ok((interpreter.take_output(), code))
     })
 }
 

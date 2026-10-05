@@ -314,7 +314,10 @@ mod tests {
         let overflow = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             chunk.add_const(crate::value::Value::I64(-1));
         }));
-        assert!(overflow.is_err(), "the pool should refuse to grow past the limit");
+        assert!(
+            overflow.is_err(),
+            "the pool should refuse to grow past the limit"
+        );
         assert_eq!(
             chunk.constants.len(),
             before,
