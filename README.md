@@ -6,57 +6,57 @@ Hex is a first-class type. The bytecode VM runs about 6x faster than the tree-wa
 
 ## What's new in 0.7.2
 
-- **DAP debugger server** — `rakc dap <file>` speaks the Debug Adapter
+- **DAP debugger server.** `rakc dap <file>` speaks the Debug Adapter
   Protocol over stdio (Content-Length framing). The VM runs the target on a
   worker thread while a reader handles requests: `setBreakpoints`/`remove`,
   `continue`, `next`, `stepIn`, `stepOut`, `stackTrace`, `scopes`/`variables`,
-  `setVariable`, and full `exceptionInfo` — line-granular breakpoint gating via
+  `setVariable`, and full `exceptionInfo`, plus line-granular breakpoint gating via
   a `last-hit-line` guard. Wire it up from VS Code (the bundled `rak`
   extension), Neovim (nvim-dap), or any DAP client.
-- **Stdlib batteries** — everyday data modules on both backends: time &
+- **Stdlib batteries.** Everyday data modules on both backends: time &
   datetime (`time_now`, `time_fmt`, `time_parse`, `time_parts`, `time_add`,
   `time_diff`, `date_today`), randomness (`rand_seed`, `rand_int`,
   `rand_float`, `rand_bytes`, `rand_hex`, `rand_choice`, `rand_shuffle`), CSV
   (`csv_parse`, `csv_stringify`), YAML (`yaml_parse`), and archives
   (`gzip_compress`, `gzip_decompress`, `zip_list`, `zip_read`, `zip_write`).
-- **OSINT pack** — WHOIS lookups and parsing (`whois_lookup`/`whois_parse`),
+- **OSINT pack.** WHOIS lookups and parsing (`whois_lookup`/`whois_parse`),
   certificate-transparency subdomain enumeration (`ct_subdomains`), a
   hand-rolled **YARA-lite** scanning engine (`yara_scan`: hex wildcards,
   `nocase`, `at`/`in`, `all-of`/`any-of`/`none-of`, boolean conditions), and
   Markdown evidence reports (`report_markdown`). Docs: `docs/content/osint.md`,
   demo: `examples/osint_demo.rak`.
-- **Language core: `in` operator** — membership checks work on strings
+- **Language core: `in` operator.** Membership checks work on strings
   (substring/char), arrays, tuples, maps (key lookup), and byte sequences.
-- **Destructuring `let`** — `let (a, b) = pair`, `let [x, y, z] = list`,
+- **Destructuring `let`.** `let (a, b) = pair`, `let [x, y, z] = list`,
   `let Point { x, y } = obj`, nested and `let mut` forms; arity mismatches
   raise a catchable error.
-- **Slice and negative indexing** — `a[1..3]`, `a[..2]`, `a[3..]`, `a[-2..]`
+- **Slice and negative indexing.** `a[1..3]`, `a[..2]`, `a[3..]`, `a[-2..]`
   slices, `a[-1]` reads and `a[-1] = v` writes from the end, with
   out-of-bounds raises on both backends.
 - **The VM caught up.** `rakc vm` now runs what the interpreter runs:
   `try`/`catch` and `expr?` (structured errors, LIFO defers before the
   handler), method dispatch on structs/enums (`obj.method(...)` via `impl`
   blocks), struct literals and enum constructors, and the full pattern
-  language in `match` — struct patterns (`Point { x, y }`), enum variants,
+  language in `match`: struct patterns (`Point { x, y }`), enum variants,
   binary bytes patterns, or-patterns, ranges, `Some`/`None`/`Ok`/`Err`, and
   guards.
-- **Operator overloading** — `impl Add/Sub/Mul/Div/Rem/Eq/Compare/Neg for T`
+- **Operator overloading.** `impl Add/Sub/Mul/Div/Rem/Eq/Compare/Neg for T`
   with `fn add(self, o)`-style methods, dispatched on both backends before
   the built-in arithmetic (`a + b`, `a == b`, `a < b`, `-a` on your types).
-- **Assignment on the VM** — `arr[i] = v`, `map[k] = v`, `s.field = v`,
+- **Assignment on the VM.** `arr[i] = v`, `map[k] = v`, `s.field = v`,
   `x += 1`, and multi-assign `a, b = x, y` (copy-on-write, mutability rules
   enforced).
-- **Iterator builtins** — `zip`, `enumerate`, `skip`, `fold`, `reduce`,
+- **Iterator builtins.** `zip`, `enumerate`, `skip`, `fold`, `reduce`,
   `any`, `all`, `flat_map`, `take_while`, plus `keys`/`values`/`has`/`get`,
   on both backends.
 - **`for (k, v) in map`** and indexed `for (i, x) in arr` work on the VM
   (`Op::IterItems` materializes any iterable; maps always yield pairs).
 - **`if let` / `while let` / `do { } while` / labeled `break`/`continue`**
   (`'outer: for ... { break 'outer }`) run on the VM.
-- **binstruct bitfields** — `u4`-style non-byte-aligned fields, packed
+- **binstruct bitfields.** `u4`-style non-byte-aligned fields, packed
   LSB-first and round-tripped through `decode`/`encode` on both backends.
-- **`rakc fmt`** — AST-based formatter (`--write`, `--check` for CI).
-- **`rakc lint`** — advisory checks (unused vars, shadowing, unreachable
+- **`rakc fmt`.** AST-based formatter (`--write`, `--check` for CI).
+- **`rakc lint`.** Advisory checks (unused vars, shadowing, unreachable
   code, missing `pub fn` return types, duplicate imports; `--deny` for CI).
 
 ## Install
@@ -103,11 +103,11 @@ scan "127.0.0.1" {
 
 The language started as an OSINT scripting tool. It grew into something bigger.
 
-**Forensic Structs & evidence provenance.** Declare a binary wire format once with `binstruct` and get both a decoder and an encoder for free (round-trip). Every decoded value is wrapped in an `evidence<T>` provenance tag carrying where/when/how it was collected, so `report(...)` emits a chain-of-custody-cited findings report. No other language bakes provenance into the value model — this only makes sense in a hex-first, OSINT-first language.
+**Forensic Structs & evidence provenance.** Declare a binary wire format once with `binstruct` and get both a decoder and an encoder for free (round-trip). Every decoded value is wrapped in an `evidence<T>` provenance tag carrying where/when/how it was collected, so `report(...)` emits a chain-of-custody-cited findings report. No other language bakes provenance into the value model. This only makes sense in a hex-first, OSINT-first language.
 
 **Bytecode VM.** `rakc vm` runs bytecode. Benchmarks show about 6x speedup over the tree-walking interpreter. Run `rakc bench file.rak` to see both.
 
-**Data pipelines.** A `|>` pipeline operator, regex literals (`/\d+/g`) with method syntax, and binary pattern matching over byte slices — built for OSINT log and PCAP triage.
+**Data pipelines.** A `|>` pipeline operator, regex literals (`/\d+/g`) with method syntax, and binary pattern matching over byte slices, built for OSINT log and PCAP triage.
 
 **Type system.** Signed and unsigned ints (i8 through u64), floats (f32, f64),
 typed literals like `42i32` and `3.14f64`, a first-class `char`, base literals
@@ -189,7 +189,7 @@ dump pkt[33]           // 0x02 (SYN flag)
 dump net_raw_send(pkt) // Ok(40) on a privileged unix box, Err(...) otherwise
 ```
 
-**Protocol parsers (DNS / TLS / PCAP).** Hand-rolled DNS wire-format builder/parser + UDP query (no external DNS crate — works air-gapped). TLS ClientHello SNI extraction and DER cert-chain parsing via `x509-parser`. PCAP offline capture behind the `pcap` cargo feature (libpcap/Npcap). All return `Result`s so they degrade gracefully offline / without the feature.
+**Protocol parsers (DNS / TLS / PCAP).** Hand-rolled DNS wire-format builder/parser + UDP query (no external DNS crate, works air-gapped). TLS ClientHello SNI extraction and DER cert-chain parsing via `x509-parser`. PCAP offline capture behind the `pcap` cargo feature (libpcap/Npcap). All return `Result`s so they degrade gracefully offline / without the feature.
 
 ```rak
 dump dns_query("example.com", "A")      // Ok({answers: [{name, type, ttl, rdata}, ...], truncated})
@@ -215,11 +215,11 @@ dump MAX_LEN
 ## Forensic Structs & evidence provenance
 
 A declarative wire-format DSL (`binstruct`) plus a provenance-typed value
-(`evidence<T>`) — the OSINT differentiator. Declare a binary layout once and
+(`evidence<T>`), the OSINT differentiator. Declare a binary layout once and
 get both a **decoder** and an **encoder** for free (round-trip); every decoded
 value is wrapped in an evidence tag carrying where/when/how it was collected, so
 `report(...)` emits a chain-of-custody-cited findings report. No other language
-bakes provenance into the value model — this only makes sense in a hex-first,
+bakes provenance into the value model. This only makes sense in a hex-first,
 OSINT-first language.
 
 ```rak
@@ -243,7 +243,7 @@ Field types: `u8`/`u16`/`u32`/`u64` and signed `i8`..`i64`, each with an optiona
 `be`/`le` endianness suffix (default big-endian); `bytes(n)` for a fixed run of
 raw bytes; `rest` for the trailing remainder; and a nested binstruct name for a
 `Ref` field. Works on both the interpreter and the bytecode VM (compile-time
-codegen to per-struct native-fn globals — no new VM opcodes).
+codegen to per-struct native-fn globals, no new VM opcodes).
 
 Evidence provenance:
 
@@ -255,13 +255,13 @@ dump provenance(ip)        // {tool, target, ts, raw_offset, raw_len, parent}
 dump strip_evidence(ip)    // 93.184.216.34
 ```
 
-- `evidence<T> from expr` — wrap a value in a root provenance tag.
-- `cite(value, tool?, target?)` — wrap a value, chaining `parent` to any
+- `evidence<T> from expr` wraps a value in a root provenance tag.
+- `cite(value, tool?, target?)` wraps a value, chaining `parent` to any
   existing evidence so provenance merges transitively.
-- `report(evidence, ...)` — render a Markdown-style report with numbered,
+- `report(evidence, ...)` renders a Markdown-style report with numbered,
   source-cited assertions (the chain-of-custody output an investigator needs).
-- `provenance(value)` — the provenance chain as a map.
-- `strip_evidence(value)` — drop the provenance wrapper, return the inner value.
+- `provenance(value)` returns the provenance chain as a map.
+- `strip_evidence(value)` drops the provenance wrapper and returns the inner value.
 
 Field access and indexing transparently unwrap evidence, so
 `evidence<struct>.field` reads through to the inner struct.
@@ -312,7 +312,7 @@ reaches the page as `rak_result(name, value)`. Register a page-side handler with
 that registered it. It receives a copy of the environment as it stood at
 `gui_callback` time, so it can read what existed then and return a value to the
 page, but it cannot write to a variable the main script reads afterwards. This
-follows from Rak having no reference types — values are shared rather than moved.
+follows from Rak having no reference types. Values are shared rather than moved.
 See [docs/V8-KNOWN-ISSUES.md](docs/V8-KNOWN-ISSUES.md).
 
 Also worth knowing: a function body without an explicit `return` evaluates to
@@ -378,7 +378,7 @@ from math import *           // all exports; local bindings win on clash
 import pkg
 import pkg.sub
 
-// Exports — both `pub` and `export` mark an item as exported (let/fn/const/
+// Exports. Both `pub` and `export` mark an item as exported (let/fn/const/
 // struct/enum/macro):
 pub let PI = 3.14
 export fn add(a, b) { return a + b }
@@ -410,7 +410,7 @@ from bank import BALANCE           // <- a copy, taken once, at import time
 
 bank.deposit(10)
 bank.deposit(10)
-dump bank.BALANCE                  // 20 — the view followed the module
+dump bank.BALANCE                  // 20. The view followed the module
 ```
 
 `m` is a handle on the module's own top-level bindings, so `m.X` reads what the
@@ -424,8 +424,8 @@ declarations: `pub let mut X` is assignable through the handle, `pub let X` is
 readable but fixed, and a name with no `pub` is unreachable. Both backends enforce
 both rules.
 
-`from m import x` binds the value as it stood at import time — Python's rule,
-and worth keeping, because a live binding there would be a second invisible way
+`from m import x` binds the value as it stood at import time, Python's rule,
+and worth keeping because a live binding there would be a second invisible way
 for a module to mutate a caller's variables. Alias it (`from bank import
 BALANCE as opening`) when you want a snapshot under a name of your choosing;
 that copies on both backends.
@@ -759,7 +759,7 @@ dump hex_encode("ABC")
 dump html_links(html)
 ```
 
-### Cryptography (native — no FFI)
+### Cryptography without FFI
 
 `hmac_sha256`, AES-256-GCM (`aes_gcm_encrypt` / `aes_gcm_decrypt`), and Ed25519
 (`ed25519_keypair`, `ed25519_sign`, `ed25519_verify`). All take and return
@@ -858,7 +858,7 @@ dump string(ws_recv(ws).payload)   // hello
 
 `log_level(level)`, `log_init(path?)`, and `log_info` / `log_warn` / `log_error`
 / `log_debug`. Each call emits one JSON line (default stdout, or append-only
-file) — greppable with jq.
+file), greppable with jq.
 
 ```rak
 log_level("debug")
@@ -943,7 +943,7 @@ The generated functions call `extern_call`, which returns an error until a Rust 
 
 ## Platform support
 
-Windows and Linux. On Windows the GUI uses WebView2 (ships with Edge); on Linux it uses WebKitGTK. Note that the feature is per-crate, so it needs `-p rakc --features gui`, not a workspace-wide `--features gui`. `rakc build` produces `.exe` on Windows and an executable with `chmod 755` on Linux. The IDE ships as NSIS/MSI on Windows and `.deb`/AppImage on Linux via GitHub Actions CI, alongside the custom `rak-setup` installer (net-install + offline bundle) on both.
+Windows and Linux. On Windows the GUI uses WebView2 (ships with Edge); on Linux it uses WebKitGTK. The feature is per-crate, so it needs `-p rakc --features gui`, not a workspace-wide `--features gui`. `rakc build` produces `.exe` on Windows and an executable with `chmod 755` on Linux. The IDE ships as NSIS/MSI on Windows and `.deb`/AppImage on Linux via GitHub Actions CI, alongside the custom `rak-setup` installer (net-install + offline bundle) on both.
 
 ## Project structure
 
