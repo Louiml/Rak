@@ -1,3 +1,20 @@
+## 0.9.1 - 2026-10-07
+
+A patch release that fixes one user-facing bug found by exercising the 0.9.0 artifacts:
+`rakc run`, `check` and `verify` on a path that does not exist panicked with
+`thread 'main' panicked ... Failed to read file` and, on Windows, exited with
+`0xC0000409`. All three now report the file and the OS reason and exit 1:
+
+    $ rakc run nope.rak
+    Error reading nope.rak: The system cannot find the file specified. (os error 2)
+
+A directory passed as the script is reported for what it is (`Access is denied` /
+`Is a directory`) instead of being indistinguishable from a missing file. The release
+smoke test also derives its expected version from the release tag, so the next cut
+cannot drift from the tag it ships.
+
+The 0.9.0 feature set and fixes are unchanged from the section below.
+
 ## 0.9.0 — 2026-10-06
 
 The release where Rak stops being a language that runs programs and starts being one that
