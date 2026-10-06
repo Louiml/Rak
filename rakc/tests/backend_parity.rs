@@ -1141,6 +1141,180 @@ fn parity_division_by_zero_is_unchanged() {
     }
 }
 
+/// Two structs differ unless their name and every field match.
+///
+/// This is the case the discriminant catch-all got wrong, and it is the one worth pinning
+/// first: a set of structs, or a map keyed on one, silently collapsed.
+#[test]
+fn parity_struct_and_enum_equality_is_structural() {
+    let out = agree(
+        "struct equality is structural",
+        r#"
+struct P { x: int }
+struct Q { x: int }
+dump P { x: 1 } == P { x: 2 }
+dump P { x: 1 } == P { x: 1 }
+dump P { x: 1 } != P { x: 2 }
+dump P { x: 1 } == Q { x: 1 }
+"#,
+    );
+    let results: Vec<&str> = out
+        .iter()
+        .filter(|l| l.starts_with("[DUMP]"))
+        .map(|l| l.trim_start_matches("[DUMP] ").trim())
+        .collect();
+    assert_eq!(
+        results,
+        vec!["false", "true", "true", "false"],
+        "got: {:?}",
+        out
+    );
+}
+
+/// A multi-field struct compares field by field.
+///
+/// One field is enough to catch the bug, but a struct whose *second* field differed was the
+/// shape most likely to be missed by a partial fix that only compared the first.
+#[test]
+fn parity_a_multifield_struct_compares_every_field() {
+    let out = agree(
+        "every field counts",
+        r#"
+struct P { x: int, y: int }
+dump P { x: 1, y: 2 } == P { x: 1, y: 2 }
+dump P { x: 1, y: 2 } == P { x: 1, y: 3 }
+dump P { x: 1, y: 2 } == P { x: 9, y: 2 }
+"#,
+    );
+    let results: Vec<&str> = out
+        .iter()
+        .filter(|l| l.starts_with("[DUMP]"))
+        .map(|l| l.trim_start_matches("[DUMP] ").trim())
+        .collect();
+    assert_eq!(results, vec!["true", "false", "false"], "got: {:?}", out);
+}
+
+/// Enum values compare by variant and by payload.
+#[test]
+fn parity_enum_equality_uses_the_variant_and_payload() {
+    let out = agree(
+        "enum equality",
+        r#"
+enum C { R, G }
+enum D { N(int), T(string) }
+dump C::R == C::G
+dump C::R == C::R
+dump D::N(1) == D::N(2)
+dump D::N(1) == D::N(1)
+dump D::N(1) == D::T("1")
+dump D::N(1) != D::T("1")
+"#,
+    );
+    let results: Vec<&str> = out
+        .iter()
+        .filter(|l| l.starts_with("[DUMP]"))
+        .map(|l| l.trim_start_matches("[DUMP] ").trim())
+        .collect();
+    assert_eq!(
+        results,
+        vec!["false", "true", "false", "true", "false", "true"],
+        "got: {:?}",
+        out
+    );
+}
+
+/// A struct containing a struct compares the whole tree.
+///
+/// The nesting is the point: a fix that compared one level of fields would pass the
+/// single-field tests and fail this one.
+#[test]
+fn parity_nested_structs_compare_the_whole_tree() {
+    let out = agree(
+        "nested structs",
+        r#"
+struct Inner { v: int }
+struct Outer { inner: Inner }
+dump Outer { inner: Inner { v: 1 } } == Outer { inner: Inner { v: 1 } }
+dump Outer { inner: Inner { v: 1 } } == Outer { inner: Inner { v: 2 } }
+"#,
+    );
+    let results: Vec<&str> = out
+        .iter()
+        .filter(|l| l.starts_with("[DUMP]"))
+        .map(|l| l.trim_start_matches("[DUMP] ").trim())
+        .collect();
+    assert_eq!(results, vec!["true", "false"], "got: {:?}", out);
+}
+
+/// Equality is what a set and a map rely on, so exercise those directly.
+///
+/// A set that deduplicates on the discriminant keeps one element when it should keep two,
+/// and a map keyed on a struct returns the same value for every key. Both are silent, and
+/// both are what the bug actually costs a program.
+#[test]
+fn parity_a_set_of_structs_keeps_distinct_elements() {
+    let out = agree(
+        "a set of structs keeps distinct elements",
+        r#"
+struct P { x: int }
+dump set_len(set_of([P { x: 1 }, P { x: 2 }]))
+dump set_len(set_of([P { x: 1 }, P { x: 1 }]))
+dump set_has(set_of([P { x: 1 }, P { x: 2 }]), P { x: 1 })
+dump set_has(set_of([P { x: 1 }, P { x: 2 }]), P { x: 9 })
+"#,
+    );
+    let results: Vec<&str> = out
+        .iter()
+        .filter(|l| l.starts_with("[DUMP]"))
+        .map(|l| l.trim_start_matches("[DUMP] ").trim())
+        .collect();
+    assert_eq!(results, vec!["2", "1", "true", "false"], "got: {:?}", out);
+}
+
+/// The shapes that already worked must keep working.
+///
+/// The catch-all was load-bearing for none of them, but a change to the last arm of a
+/// `match` is exactly where an unnoticed regression would land.
+#[test]
+fn parity_equality_that_already_worked_is_unchanged() {
+    let out = agree(
+        "already-correct equality",
+        r#"
+dump 1 == 1
+dump 1 == 1.0
+dump 0xA == 10
+dump "a" == "a"
+dump "a" == "b"
+dump 'c' == 'c'
+dump b"\x01" == b"\x01"
+dump true == true
+dump nil == nil
+dump [1, 2] == [1, 2]
+dump [1, 2] == [2, 1]
+dump [1, 2] == [1, 3]
+dump set_of([1, 2]) == set_of([2, 1])
+dump set_of([1, 2]) == set_of([1, 2])
+"#,
+    );
+    let results: Vec<&str> = out
+        .iter()
+        .filter(|l| l.starts_with("[DUMP]"))
+        .map(|l| l.trim_start_matches("[DUMP] ").trim())
+        .collect();
+    assert_eq!(
+        results,
+        // Position 11 is `[1, 2] == [2, 1]`, false: arrays are ordered. The last two
+        // are the same comparison over sets, which are *not* order-dependent -- the
+        // pair is the whole point of keeping the two lines together.
+        vec![
+            "true", "true", "true", "true", "false", "true", "true", "true", "true", "true",
+            "false", "false", "true", "true",
+        ],
+        "got: {:?}",
+        out
+    );
+}
+
 #[test]
 fn parity_sets() {
     // Sets are spec 7A.11. The insertion order matters as much as the

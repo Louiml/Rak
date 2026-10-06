@@ -396,7 +396,51 @@ impl PartialEq for Value {
             (Value::Evidence { inner: a, .. }, Value::Evidence { inner: b, .. }) => a == b,
             (Value::Evidence { inner: a, .. }, other) => (**a).eq(other),
             (other, Value::Evidence { inner: b, .. }) => other.eq(&**b),
-            _ => std::mem::discriminant(self) == std::mem::discriminant(other),
+            // Structural, by name and by content. The catch-all below compared
+            // discriminants, so on the VM as on the interpreter every struct equalled every
+            // other struct of the same type:
+            //
+            //     struct P { x: int }
+            //     P { x: 1 } == P { x: 2 }   // true, before
+            //
+            // The VM models fields as an `Arc<HashMap<..>>`, so the content comparison
+            // needs an explicit walk rather than `==` on the map itself, whose iteration
+            // order is not the same as anything meaningful here.
+            (
+                Value::Struct {
+                    name: an,
+                    fields: af,
+                },
+                Value::Struct {
+                    name: bn,
+                    fields: bf,
+                },
+            ) => {
+                an == bn
+                    && af.len() == bf.len()
+                    && af
+                        .iter()
+                        .all(|(k, v)| bf.get(k).map(|o| o == v).unwrap_or(false))
+            }
+            (
+                Value::Enum {
+                    name: an,
+                    variant: av,
+                    data: ad,
+                },
+                Value::Enum {
+                    name: bn,
+                    variant: bv,
+                    data: bd,
+                },
+            ) => an == bn && av == bv && ad == bd,
+            (Value::Result(a, b), Value::Result(c, d)) => a == c && b == d,
+            // Two values of different shapes are never equal. Shapes with no content
+            // comparison (`Module`, the socket and stream handles, `Future`, `Pcap`,
+            // `Mmap`) fall through here and are reported unequal, which is the honest
+            // answer: no equality is defined for them. `Closure` and `NativeFn` above
+            // compare by identity, so a function compared with itself still works.
+            _ => false,
         }
     }
 }

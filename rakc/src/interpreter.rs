@@ -692,10 +692,62 @@ impl PartialEq for Value {
                 .map(core::cmp::Ordering::is_eq)
                 .unwrap_or(false),
             (Value::Regex(a), Value::Regex(b)) => a.pattern == b.pattern && a.flags == b.flags,
+            // Structural, by name and by content. The catch-all below used to make every
+            // struct equal to every other struct of the same type:
+            //
+            //     struct P { x: int }
+            //     P { x: 1 } == P { x: 2 }   // true, before
+            //
+            // which is the worst kind of wrong there is -- distinct values compare equal,
+            // so a set deduplicates them, a `!=` guard never fires, and a cache keyed on a
+            // struct returns the wrong entry. Arrays and maps were already correct; only the
+            // types the catch-all swallowed were affected.
+            (
+                Value::Struct {
+                    name: a,
+                    fields: fa,
+                },
+                Value::Struct {
+                    name: b,
+                    fields: fb,
+                },
+            ) => a == b && fa == fb,
+            (
+                Value::Enum {
+                    name: an,
+                    variant: av,
+                    data: ad,
+                },
+                Value::Enum {
+                    name: bn,
+                    variant: bv,
+                    data: bd,
+                },
+            ) => an == bn && av == bv && ad == bd,
+            (Value::Result(a, b), Value::Result(c, d)) => a == c && b == d,
+            (Value::Set(a), Value::Set(b)) => {
+                // By contents. Two sets built in the same order are equal whatever the
+                // hash order underneath, which is the same reason `Display` walks them in
+                // insertion order.
+                let (a, b) = (a.lock().unwrap(), b.lock().unwrap());
+                a.len() == b.len() && a.iter().all(|v| b.contains(v))
+            }
             (Value::Evidence { inner: a, .. }, Value::Evidence { inner: b, .. }) => a == b,
             (Value::Evidence { inner: a, .. }, other) => (**a).eq(other),
             (other, Value::Evidence { inner: b, .. }) => other.eq(&**b),
-            _ => std::mem::discriminant(self) == std::mem::discriminant(other),
+            // Two values of different shapes are never equal. Previously the catch-all
+            // compared discriminants, which made every pair of the same shape equal --
+            // including two distinct functions, two distinct modules, and two open
+            // sockets.
+            //
+            // A shape with no content comparison (`Function`, `Module`, the socket and
+            // stream handles, `Future`, `Pcap`) falls here. Two separately created values
+            // of those are reported unequal, which is the honest answer: there is no
+            // equality defined for them, and claiming otherwise is how the struct case
+            // went unnoticed for so long. Comparing one to itself is also unequal now,
+            // which is why this is called out rather than hidden -- if a program needs
+            // identity for these, an explicit id is the fix.
+            _ => false,
         }
     }
 }
