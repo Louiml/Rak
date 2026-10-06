@@ -177,6 +177,27 @@ const PLATFORM_SPECIFIC: &[(&str, &str)] = &[
     ("process_demo", "spawns Windows commands"),
 ];
 
+/// Examples whose wall time depends on another program starting up, and so need a
+/// longer budget than the rest.
+///
+/// `process_demo` spawns `powershell`, and a cold PowerShell start on a loaded CI
+/// runner regularly runs past 20s. The example itself is fine -- it finishes in well
+/// under a second on a warm machine, and its output is compared, so the coverage is
+/// real. But a parity test that fails on how fast someone else's machine boots
+/// PowerShell is measuring the runner rather than the program, and it failed on
+/// `e16ed1c` for exactly that reason while the previous CI run on an identical tree
+/// passed.
+const SLOW_STARTING: &[(&str, &str)] = &[("process_demo", "spawns powershell")];
+
+/// Seconds an example gets before it counts as a timeout.
+fn timeout_secs(name: &str) -> u64 {
+    if SLOW_STARTING.iter().any(|(n, _)| *n == name) {
+        90
+    } else {
+        20
+    }
+}
+
 #[test]
 fn examples_behave_the_same_on_both_backends() {
     let dir = examples_dir();
@@ -216,8 +237,9 @@ fn examples_behave_the_same_on_both_backends() {
             panic!("rakc binary not found at {}", rakc().display());
         }
 
-        let interp = run_with_timeout(&path, false, 20);
-        let vm = run_with_timeout(&path, true, 20);
+        let budget = timeout_secs(&name);
+        let interp = run_with_timeout(&path, false, budget);
+        let vm = run_with_timeout(&path, true, budget);
 
         match (interp, vm) {
             (Some(i), Some(v)) => {
@@ -270,11 +292,14 @@ fn examples_behave_the_same_on_both_backends() {
                 }
             }
             // A timeout on the interpreter side means the example wants a
-            // network, a display or a server, and it should have been listed in
-            // ENVIRONMENTAL. That is a stale list, not a backend bug.
+            // network, a display or a server, or spends its time waiting on
+            // another program. The first three belong in ENVIRONMENTAL; the
+            // last belongs in SLOW_STARTING. Either way it is a stale list, not
+            // a backend bug.
             (None, _) => failures.push(format!(
                 "{}: the interpreter run timed out; if it needs a network or a \
-                 display, add it to ENVIRONMENTAL",
+                 display, add it to ENVIRONMENTAL, and if it waits on another \
+                 program, add it to SLOW_STARTING",
                 name
             )),
             (Some(_), None) => failures.push(format!(
