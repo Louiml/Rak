@@ -83,8 +83,18 @@ jobs:
             libxi-dev \
             patchelf
 
-      - name: Build rakc (with GUI)
-        run: cargo build --release --bin rakc --features gui
+      # No `--features gui`. That feature routes `rakc run` through
+      # `eval_in_cli_with_gui`, which runs the program on a worker thread and then makes
+      # the main thread the tao event loop -- so `run` opened a window and blocked until
+      # it was dismissed, instead of printing to stdout. Every other subcommand is
+      # unaffected, so the release looked healthy while its most-used command did the
+      # wrong thing. The README documents `rakc run file.rak` as a console command
+      # (running a server, a client, an interpreter), which a window cannot do.
+      #
+      # The GUI front end remains buildable with `--features gui` for anyone who wants it;
+      # it is not what a released `rakc` should be.
+      - name: Build rakc
+        run: cargo build --release --bin rakc
       - name: Build rak-setup
         run: cargo build --release --bin rak-setup
 
@@ -99,6 +109,14 @@ jobs:
           python dist/verify_hardening.py \
             target/release/rakc \
             target/release/rak-setup
+
+      # Smoke-test the artifact rather than the source. The test workflow never builds
+      # with `--features gui`, so the suite cannot see a packaging difference -- only the
+      # built binary reveals it, and a blocking front end has to be turned into a failure
+      # rather than left to hang the job.
+      - name: Smoke-test the release binary
+        shell: bash
+        run: python scripts/smoke_release.py target/release/rakc 0.9.0
 
       - name: Copy binaries for IDE bundling
         run: |
@@ -189,8 +207,18 @@ jobs:
         with:
           node-version: 20
 
-      - name: Build rakc (with GUI)
-        run: cargo build --release --bin rakc --features gui
+      # No `--features gui`. That feature routes `rakc run` through
+      # `eval_in_cli_with_gui`, which runs the program on a worker thread and then makes
+      # the main thread the tao event loop -- so `run` opened a window and blocked until
+      # it was dismissed, instead of printing to stdout. Every other subcommand is
+      # unaffected, so the release looked healthy while its most-used command did the
+      # wrong thing. The README documents `rakc run file.rak` as a console command
+      # (running a server, a client, an interpreter), which a window cannot do.
+      #
+      # The GUI front end remains buildable with `--features gui` for anyone who wants it;
+      # it is not what a released `rakc` should be.
+      - name: Build rakc
+        run: cargo build --release --bin rakc
       - name: Build rak-setup
         run: cargo build --release --bin rak-setup
 
@@ -205,6 +233,14 @@ jobs:
           python dist/verify_hardening.py `
             target\release\rakc.exe `
             target\release\rak-setup.exe
+
+      # Smoke-test the artifact rather than the source. The test workflow never builds
+      # with `--features gui`, so the suite cannot see a packaging difference -- only the
+      # built binary reveals it, and a blocking front end has to be turned into a failure
+      # rather than left to hang the job.
+      - name: Smoke-test the release binary
+        shell: bash
+        run: python scripts/smoke_release.py target/release/rakc 0.9.0
 
       - name: Copy binaries for IDE bundling
         run: |
