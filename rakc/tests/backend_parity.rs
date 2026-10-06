@@ -886,6 +886,30 @@ fn a_self_referential_alias_terminates() {
     }
 }
 
+/// Validation must not have changed what runs.
+///
+/// A literal rejected at compile time is only worth having if the accepted ones still
+/// work, on both backends. An `f64` field is used deliberately: it is the numeric
+/// coercion path through `compatible`, which is the same rule annotations use.
+#[test]
+fn parity_checked_literals_still_run() {
+    let out = agree(
+        "checked struct and enum literals still run",
+        r#"
+struct Point { x: f64, y: f64 }
+enum Shape { Circle(f64), Empty }
+let p = Point { x: 1, y: 2 }
+dump p.x
+dump Shape::Circle(3)
+dump Shape::Empty
+"#,
+    );
+    let text = out.join("\n");
+    assert!(text.contains("[DUMP] 1"), "{}", text);
+    assert!(text.contains("Circle(3)"), "{}", text);
+    assert!(text.contains("Empty"), "{}", text);
+}
+
 #[test]
 fn parity_sets() {
     // Sets are spec 7A.11. The insertion order matters as much as the

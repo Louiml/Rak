@@ -874,3 +874,168 @@ dump P { v: 1 }.hi()
         out
     );
 }
+
+/// A struct literal is checked against its declaration, not just its annotation.
+///
+/// The three failures this covers were all silent. Reporting them needs a field map, and
+/// this asserts the codes so a future refactor that drops the check fails here.
+#[test]
+fn a_struct_literal_is_checked_against_its_declaration() {
+    for (label, src, code) in [
+        (
+            "unknown field",
+            "struct P { v: int }\nlet p = P { v: 1, nope: 2 }\n",
+            "E0420",
+        ),
+        (
+            "missing field",
+            "struct P { v: int }\nlet p = P { }\n",
+            "E0421",
+        ),
+        (
+            "wrong field type",
+            "struct P { v: int }\nlet p = P { v: \"s\" }\n",
+            "E0422",
+        ),
+    ] {
+        let diags = check_diags(src);
+        assert!(
+            diags.iter().any(|d| d.contains(code)),
+            "{}: expected {}, got: {:#?}",
+            label,
+            code,
+            diags
+        );
+    }
+}
+
+/// An unknown field is reported *and* a suggestion is offered.
+///
+/// The suggester is worth pinning because the obvious implementation suggests the field
+/// that was just named, which reads as a non sequitur.
+#[test]
+fn an_unknown_struct_field_is_suggested() {
+    let diags = check_diags("struct P { v: int }\nlet p = P { vee: 1 }\n");
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.contains("has no field `vee`") && d.contains("did you mean `v`?")),
+        "got: {:#?}",
+        diags
+    );
+}
+
+/// A struct literal must keep its own name as its inferred type.
+///
+/// It used to infer as the literal string `Custom("struct")`, which is why the annotated
+/// case worked only by accident and the unannotated one did not work at all. This asserts
+/// the behaviour through the annotation the user writes by hand.
+#[test]
+fn a_struct_literal_keeps_its_name_as_its_type() {
+    assert!(check_diags("struct P { v: int }\nlet p = P { v: 1 }\n").is_empty());
+    assert!(
+        check_diags("struct P { v: int }\nlet p: P = P { v: 1 }\n").is_empty(),
+        "the annotated form must keep working"
+    );
+    // Two different struct names must not satisfy each other.
+    let diags = check_diags("struct P { v: int }\nstruct Q { v: int }\nlet p: P = Q { v: 1 }\n");
+    assert!(
+        diags.iter().any(|d| d.contains("type mismatch")),
+        "P and Q are different types, got: {:#?}",
+        diags
+    );
+}
+
+/// An enum variant construction is checked: variant, arity, payload types.
+///
+/// Bare paths are included, since `C::N` with no values is exactly how a payload variant
+/// gets reached by mistake -- and a unit variant, whose correct arity is zero, has to
+/// stay valid.
+#[test]
+fn an_enum_variant_construction_is_checked() {
+    for (label, src, code) in [
+        (
+            "unknown variant",
+            "enum C { R, G, B }\nlet c = C::P\n",
+            "E0423",
+        ),
+        (
+            "payload variant used bare",
+            "enum C { N(int) }\nlet c = C::N\n",
+            "E0424",
+        ),
+        (
+            "too many values",
+            "enum C { N(int) }\nlet c = C::N(1, 2)\n",
+            "E0424",
+        ),
+        (
+            "value given to a unit variant",
+            "enum C { R, G, B }\nlet c = C::R(1)\n",
+            "E0424",
+        ),
+        (
+            "wrong payload type",
+            "enum C { N(int, string) }\nlet c = C::N(1, 2)\n",
+            "E0425",
+        ),
+    ] {
+        let diags = check_diags(src);
+        assert!(
+            diags.iter().any(|d| d.contains(code)),
+            "{}: expected {}, got: {:#?}",
+            label,
+            code,
+            diags
+        );
+    }
+}
+
+/// Literals that are fine must stay clean.
+///
+/// The interesting ones are the shapes that could plausibly be mistaken for the bad
+/// cases: a two-segment module path is not an enum construction, an untyped field has
+/// nothing to check against, an undeclared struct is left to the runtime, a unit variant
+/// is a bare path with the correct arity, and an int literal still satisfies an `f64`
+/// field (the numeric arm of `compatible`, which is the same rule annotations use).
+#[test]
+fn valid_literals_stay_clean() {
+    for (label, src) in [
+        (
+            "module path is not an enum construction",
+            "mod m { pub fn thing(n: int) -> int { return n } }\nlet x = m::thing(1)\n",
+        ),
+        (
+            "undeclared struct is left to the runtime",
+            "let p = Q { v: 1 }\n",
+        ),
+        (
+            "untyped field has nothing to check against",
+            "struct P { v }\nlet p = P { v: \"s\" }\n",
+        ),
+        (
+            "unit variant",
+            "enum C { R, G, B }\nlet c = C::G\n",
+        ),
+        (
+            "payload variant with its values",
+            "enum C { N(int, string) }\nlet c = C::N(1, \"a\")\n",
+        ),
+        (
+            "int literal satisfies an f64 field",
+            "struct P { v: f64 }\nlet p = P { v: 1 }\n",
+        ),
+        (
+            "enum construction in a match arm",
+            "enum C { R, G, B }\nlet c = C::G\nmatch c { C::R => { dump 1 } C::G => { dump 2 } C::B => { dump 3 } }\n",
+        ),
+    ] {
+        let diags = check_diags(src);
+        assert!(
+            diags.is_empty(),
+            "{}: unexpected diagnostics {:#?}",
+            label,
+            diags
+        );
+    }
+}

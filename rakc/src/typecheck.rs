@@ -9,7 +9,7 @@
 //! location and snippet, plus the expected vs. found types.
 
 use crate::ast::{self, Expr, Pattern, Stmt, Type};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// A single compile-time diagnostic produced by the type checker.
 #[derive(Debug, Clone)]
@@ -79,6 +79,35 @@ impl Scope {
 
 /// The type-checker state. It holds the source for snippet rendering, the
 /// current file name, an environment stack, and collected diagnostics.
+/// Nearest declared name, for "did you mean" hints on a field or variant.
+///
+/// Shares the shape of [`suggest_trait_method`] -- a case-insensitive hit first, then a
+/// bounded edit distance -- because the realistic mistakes are the same ones: `nope` for
+/// `v`, `G` for `R`, a casing slip.
+fn suggest_field(declared: &[String], given: &str) -> Option<String> {
+    let lower = given.to_ascii_lowercase();
+    declared
+        .iter()
+        .find(|n| n.to_ascii_lowercase() == lower && *n != given)
+        .or_else(|| {
+            let mut best: Option<(usize, &String)> = None;
+            for n in declared {
+                if n == given {
+                    continue;
+                }
+                let d = edit_distance(n, given);
+                if d > given.len() / 3 + 1 {
+                    continue;
+                }
+                if best.is_none_or(|(bd, _)| d < bd) {
+                    best = Some((d, n));
+                }
+            }
+            best.map(|(_, n)| n)
+        })
+        .map(|n| format!("did you mean `{}`?", n))
+}
+
 /// Nearest method name in a trait, for "did you mean" hints.
 ///
 /// Cheap on purpose: a distance bound plus a case-insensitive prefix fallback, which
@@ -162,6 +191,15 @@ pub struct TypeChecker<'a> {
     /// Arity includes the receiver, which a method declares as its own first
     /// parameter, so `fn hi(self)` is arity 1.
     traits: HashMap<String, Vec<(String, usize)>>,
+    /// `struct` declarations, name → (field name → declared type).
+    ///
+    /// The type is optional because a field may be declared without one.
+    structs: HashMap<String, Vec<(String, Option<Type>)>>,
+    /// `enum` payload types, enum name → variant name → field types.
+    ///
+    /// Separate from `enums`, which records arity only and is read by the match
+    /// exhaustiveness check; widening it would mean rewriting that for no gain.
+    enum_fields: HashMap<String, HashMap<String, Vec<Type>>>,
     /// Trait method names usable via `.method(...)`.
     pub diagnostics: Vec<Diagnostic>,
     /// Current line being checked (best-effort).
@@ -183,6 +221,8 @@ impl<'a> TypeChecker<'a> {
             enums: HashMap::new(),
             aliases: HashMap::new(),
             traits: HashMap::new(),
+            structs: HashMap::new(),
+            enum_fields: HashMap::new(),
             diagnostics: Vec::new(),
             line: 1,
             permissive_let: false,
@@ -196,6 +236,11 @@ impl<'a> TypeChecker<'a> {
         let mut first_pass = TypeChecker::new(self.source, self.file);
         first_pass.collect_fns(&module.items);
         self.funcs = first_pass.funcs;
+        // Structs and enum payloads are collected here for the same reason: a literal
+        // may name a type declared further down the file, and a diagnostic about the
+        // literal should not depend on the order of the two.
+        self.structs = first_pass.structs.clone();
+        self.enum_fields = first_pass.enum_fields.clone();
         // Traits are collected here too, for the same reason: an `impl` can name a
         // trait declared further down the file, and a diagnostic about the `impl`
         // should not depend on the order of the two declarations.
@@ -231,6 +276,24 @@ impl<'a> TypeChecker<'a> {
                     let ret = return_type.clone().unwrap_or(Type::Nil);
                     self.funcs.insert(name.clone(), (params_t, ret));
                 }
+            }
+            Stmt::Struct { name, fields, .. } => {
+                self.structs.insert(
+                    name.clone(),
+                    fields
+                        .iter()
+                        .map(|f| (f.name.clone(), f.type_hint.clone()))
+                        .collect(),
+                );
+            }
+            Stmt::Enum { name, variants, .. } => {
+                self.enum_fields.insert(
+                    name.clone(),
+                    variants
+                        .iter()
+                        .map(|v| (v.name.clone(), v.fields.clone()))
+                        .collect(),
+                );
             }
             Stmt::Trait { name, methods } => {
                 self.traits.insert(
@@ -682,6 +745,150 @@ impl<'a> TypeChecker<'a> {
 
     /// Infer the type of an expression. Returns a best-effort `Type` and emits
     /// diagnostics for mismatches it can determine statically.
+    /// Validate a `Name { field: value, ... }` literal against the declaration.
+    ///
+    /// Reports an unknown field, a missing field, and a field whose value does not
+    /// match the declared type. A field declared without a type is not checked --
+    /// there is nothing to check it against, and that is the existing convention for
+    /// untyped fields.
+    ///
+    /// An unknown *struct* name is not reported here: that is a different diagnostic,
+    /// it is already caught at runtime, and failing to find a declaration may just mean
+    /// it lives in another module.
+    fn check_struct_literal(&mut self, name: &str, fields: &[(String, Expr)]) {
+        let Some(declared) = self.structs.get(name).cloned() else {
+            // Still infer the values so their own errors surface.
+            for (_, v) in fields {
+                self.infer(v);
+            }
+            return;
+        };
+
+        let mut seen: HashSet<&str> = HashSet::new();
+        for (fname, value) in fields {
+            seen.insert(fname.as_str());
+            match declared.iter().find(|(n, _)| n.as_str() == fname) {
+                Some((_, Some(want))) => {
+                    let got = self.infer(value);
+                    if !self.compatible(want, &got) {
+                        let want_s = self.type_name(want);
+                        let got_s = self.type_name(&got);
+                        self.report(
+                            "E0422",
+                            &format!("`{}`: field `{}` is declared `{}`", name, fname, want_s),
+                            Some(want_s),
+                            Some(got_s),
+                            None,
+                            Some(fname),
+                        );
+                    }
+                }
+                Some((_, None)) => {
+                    self.infer(value);
+                }
+                None => {
+                    let hint = suggest_field(
+                        &declared.iter().map(|(n, _)| n.clone()).collect::<Vec<_>>(),
+                        fname,
+                    );
+                    self.report(
+                        "E0420",
+                        &format!("`{}` has no field `{}`", name, fname),
+                        None,
+                        None,
+                        hint,
+                        Some(fname),
+                    );
+                    self.infer(value);
+                }
+            }
+        }
+
+        for (dname, _) in &declared {
+            if !seen.contains(dname.as_str()) {
+                self.report(
+                    "E0421",
+                    &format!("`{}` is missing field `{}`", name, dname),
+                    None,
+                    None,
+                    None,
+                    Some(dname),
+                );
+            }
+        }
+    }
+
+    /// Validate an `Enum::Variant(...)` construction.
+    ///
+    /// Checks the variant exists, the arity matches, and each argument matches its
+    /// payload type. A path with two segments is only treated as an enum construction
+    /// when the first segment names a declared enum, so a module path is left alone.
+    fn check_enum_variant(&mut self, enum_name: &str, variant: &str, args: &[Expr]) {
+        let Some(variants) = self.enum_fields.get(enum_name).cloned() else {
+            return;
+        };
+        let Some((_, payload)) = variants.iter().find(|(n, _)| n.as_str() == variant) else {
+            let hint = suggest_field(
+                &variants.keys().cloned().collect::<Vec<_>>(),
+                variant,
+            );
+            self.report(
+                "E0423",
+                &format!("enum `{}` has no variant `{}`", enum_name, variant),
+                None,
+                None,
+                hint,
+                Some(variant),
+            );
+            return;
+        };
+
+        if args.len() != payload.len() {
+            let want = if payload.len() == 1 {
+                "1 value".to_string()
+            } else {
+                format!("{} values", payload.len())
+            };
+            self.report(
+                "E0424",
+                &format!(
+                    "`{}::{}` takes {} but got {}",
+                    enum_name,
+                    variant,
+                    want,
+                    args.len()
+                ),
+                Some(want),
+                Some(format!("{} value(s)", args.len())),
+                None,
+                Some(variant),
+            );
+            return;
+        }
+
+        for (i, (arg, want)) in args.iter().zip(payload.iter()).enumerate() {
+            let got = self.infer(arg);
+            if !self.compatible(want, &got) {
+                let want_s = format!("{} (field {})", self.type_name(want), i + 1);
+                let got_s = self.type_name(&got);
+                self.report(
+                    "E0425",
+                    &format!(
+                        "`{}::{}`: field {} is declared `{}`",
+                        enum_name,
+                        variant,
+                        i + 1,
+                        self.type_name(want)
+                    ),
+                    Some(want_s),
+                    Some(got_s),
+                    None,
+                    Some(variant),
+                );
+            }
+        }
+    }
+
     fn infer(&mut self, expr: &Expr) -> Type {
         use Expr::*;
         match expr {
@@ -765,6 +972,14 @@ impl<'a> TypeChecker<'a> {
             Call { callee, args, .. } => {
                 for a in args {
                     self.infer(a);
+                }
+                // `Enum::Variant(...)` is an ordinary call with a path callee, so the
+                // variant and its arity are checked here rather than in `infer_call`,
+                // which only ever saw a name.
+                if let Expr::Path(segments) = callee.as_ref() {
+                    if segments.len() == 2 {
+                        self.check_enum_variant(&segments[0], &segments[1], args);
+                    }
                 }
                 self.infer_call(callee, args)
             }
@@ -882,16 +1097,25 @@ impl<'a> TypeChecker<'a> {
             Path(segments) => {
                 // `EnumName::Variant` — a user enum construction.
                 if segments.len() == 2 {
+                    // A bare path is a unit-variant construction, so it needs the same
+                    // checks as `Enum::Variant(...)`: an unknown variant is otherwise
+                    // only caught at runtime, as "Undefined path", and a payload
+                    // variant used without its values is not caught at all. Passing no
+                    // arguments is what makes a bare `Enum::Payload` an arity error
+                    // while `Enum::Unit` stays valid.
+                    self.check_enum_variant(&segments[0], &segments[1], &[]);
                     Type::Custom(segments[0].clone())
                 } else {
                     Type::Generic("path".into())
                 }
             }
-            StructLit { fields, .. } => {
-                for (_, f) in fields {
-                    self.infer(f);
-                }
-                Type::Custom("struct".into())
+            StructLit { name, fields } => {
+                self.check_struct_literal(name, fields);
+                // The struct's own name, not the placeholder `"struct"` the
+                // declaration is now validated against. Dropping it is why
+                // `let p = P { v: "s" }` went unchecked while the hand-annotated
+                // `let p: P = P { v: "s" }` was caught.
+                Type::Custom(name.clone())
             }
             As(e, t) => {
                 let _ = self.infer(e);
