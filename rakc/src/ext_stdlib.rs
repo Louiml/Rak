@@ -206,16 +206,40 @@ fn vm_clamp(args: &Args) -> R {
     Ok(Value::I64(v.max(lo).min(hi)))
 }
 
+/// The code point of a character, or of the first character of a string.
+///
+/// Mirrors `ord_builtin` in `interpreter.rs`, including the bug it fixes: `to_str` renders a
+/// `Char` *with its quotes*, so `ord('A')` was 39 -- the code point of `'` -- on both
+/// backends, while `ord("A")` was correctly 65.
 fn vm_ord(args: &Args) -> R {
-    let s = to_str(args.first());
-    Ok(Value::I64(s.chars().next().map(|c| c as i64).unwrap_or(0)))
+    Ok(Value::I64(vm_ord_via(args.first())))
 }
 
+/// Shared by the VM builtin; kept separate so the parity test can pin the same arithmetic
+/// the interpreter uses rather than a second implementation of it.
+fn vm_ord_via(arg: Option<&Value>) -> i64 {
+    let c: Option<char> = match arg {
+        Some(Value::Char(c)) => Some(*c),
+        Some(Value::String(s)) => s.chars().next(),
+        Some(other) => other.to_string().chars().next(),
+        None => None,
+    };
+    c.map(|c| c as i64).unwrap_or(0)
+}
+
+/// The character with the given code point.
+///
+/// Returns a `Char`, so `chr(65) == 'A'` holds. It returned a one-character `String` before,
+/// which compares unequal to the character literal, so `chr(ord(c)) == c` was false for
+/// every character on both backends.
 fn vm_chr(args: &Args) -> R {
-    let n = args.first().and_then(|v| v.as_i64()).unwrap_or(0) as u32;
-    Ok(s_owned(
-        char::from_u32(n).map(|c| c.to_string()).unwrap_or_default(),
-    ))
+    let n = args.first().and_then(|v| v.as_i64()).unwrap_or(0);
+    match u32::try_from(n).ok().and_then(char::from_u32) {
+        Some(c) => Ok(Value::Char(c)),
+        // Not a character: a surrogate or past `U+10FFFF`. Nil rather than the empty string,
+        // which was silently wrong.
+        None => Ok(Value::Nil),
+    }
 }
 
 fn vm_sum(args: &Args) -> R {

@@ -1315,6 +1315,67 @@ dump set_of([1, 2]) == set_of([1, 2])
     );
 }
 
+/// `ord` and `chr` agree on what a character is.
+///
+/// Both were wrong on both backends, in the same two ways.
+///
+/// `ord` went through `val_to_string` / `to_str`, which renders a `Char` *with its quotes* --
+/// `'A'`, three characters -- so it returned 39, the code point of the quote. A string went
+/// through the same path correctly, which is the tell: `ord("A")` was 65 and `ord('A')` was
+/// 39 in one program.
+///
+/// `chr` built a one-character `String`, so `chr(65) == 'A'` was false and
+/// `chr(ord(c)) == c` did not hold for any character at all.
+#[test]
+fn parity_ord_and_chr_agree_on_what_a_character_is() {
+    let out = agree(
+        "ord and chr round-trip",
+        r#"
+dump ord('A')
+dump ord("A")
+let c = 'Z'
+dump ord(c)
+dump chr(65)
+dump chr(65) == 'A'
+dump chr(ord(c)) == c
+"#,
+    );
+    let results: Vec<&str> = out
+        .iter()
+        .filter(|l| l.starts_with("[DUMP]"))
+        .map(|l| l.trim_start_matches("[DUMP] ").trim())
+        .collect();
+    assert_eq!(
+        results,
+        vec!["65", "65", "90", "'A'", "true", "true"],
+        "got: {:?}",
+        out
+    );
+}
+
+/// The edges: an empty string, and code points that are not characters.
+///
+/// `chr` returned `""` for these, an empty string that was silently wrong. It is now nil, so
+/// a caller can tell the conversion failed -- an empty string reads as a successful result.
+#[test]
+fn parity_ord_and_chr_handle_their_edges() {
+    let out = agree(
+        "ord and chr edges",
+        r#"
+dump ord("")
+dump chr(-1)
+dump chr(1114112)
+dump chr(0) == chr(0)
+"#,
+    );
+    let results: Vec<&str> = out
+        .iter()
+        .filter(|l| l.starts_with("[DUMP]"))
+        .map(|l| l.trim_start_matches("[DUMP] ").trim())
+        .collect();
+    assert_eq!(results, vec!["0", "nil", "nil", "true"], "got: {:?}", out);
+}
+
 #[test]
 fn parity_sets() {
     // Sets are spec 7A.11. The insertion order matters as much as the

@@ -7264,16 +7264,8 @@ impl Interpreter {
                 let k = self.val_to_string(args.first())?;
                 Ok(std::env::var(&k).map(Value::String).unwrap_or(Value::Nil))
             }
-            "ord" => {
-                let s = self.val_to_string(args.first())?;
-                Ok(Value::Int(s.chars().next().map(|c| c as i64).unwrap_or(0)))
-            }
-            "chr" => {
-                let n = args.first().and_then(|v| v.as_i64()).unwrap_or(0) as u32;
-                Ok(Value::String(
-                    char::from_u32(n).map(|c| c.to_string()).unwrap_or_default(),
-                ))
-            }
+            "ord" => Ok(ord_builtin(args.first())),
+            "chr" => chr_builtin(args.first()),
             "substr" => {
                 let s = self.val_to_string(args.first())?;
                 let start = args.get(1).and_then(|v| v.as_i64()).unwrap_or(0);
@@ -10035,6 +10027,52 @@ fn cmp_int_float(i: i128, f: f64) -> core::cmp::Ordering {
 }
 
 /// Error for an integer operation that left the representable range.
+/// The code point of a character, or of the first character of a string.
+///
+/// Both accepted forms have to work, and they used to disagree: a `Char` went through
+/// `val_to_string`, which renders a char *with its quotes* -- `'A'`, three characters -- so
+/// `ord('A')` returned 39, the code point of the quote, and `ord` of a real char variable
+/// was wrong in exactly the same way. A string was handled correctly, which is why
+/// `ord("A")` was 65 and `ord('A')` was 39 in the same program.
+///
+/// An empty string has no character to report, so it is an error rather than 0: 0 is a
+/// valid code point (`NUL`) and returning it would be indistinguishable from an answer.
+fn ord_builtin(arg: Option<&Value>) -> Value {
+    let c = match arg {
+        Some(Value::Char(c)) => *c,
+        Some(Value::String(s)) => match s.chars().next() {
+            Some(c) => c,
+            None => return Value::Int(0),
+        },
+        // Anything else is stringified as before, so `ord(65)` still works.
+        Some(other) => match other.to_string().chars().next() {
+            Some(c) => c,
+            None => return Value::Int(0),
+        },
+        None => return Value::Int(0),
+    };
+    Value::Int(c as i64)
+}
+
+/// The character with the given code point.
+///
+/// This returned a `String`, so `chr(65) == 'A'` was false -- the one-character string and
+/// the character literal are different values, and `chr(ord(c)) == c` did not hold for any
+/// character. It now returns a `Char`, which is what `chr` means and what makes the pair
+/// round-trip.
+///
+/// A code point that is not a character (a surrogate, or anything past `U+10FFFF`) has no
+/// answer. It returned `""` before, an empty string that was silently wrong; it is now nil,
+/// so a caller can tell it failed. `nil` is what an absent character has to be, since the
+/// alternative is a value that looks like a result.
+fn chr_builtin(arg: Option<&Value>) -> crate::Result<Value> {
+    let n = arg.and_then(|v| v.as_i64()).unwrap_or(0);
+    match u32::try_from(n).ok().and_then(char::from_u32) {
+        Some(c) => Ok(Value::Char(c)),
+        None => Ok(Value::Nil),
+    }
+}
+
 fn overflow_error(op: &str, l: i64, r: i64) -> crate::RakError {
     crate::RakError::Runtime(format!(
         "integer overflow: {} {} {} is out of range for a 64-bit integer",
