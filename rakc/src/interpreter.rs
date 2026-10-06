@@ -3620,7 +3620,7 @@ impl Interpreter {
             }
             Expr::As(inner, ty) => {
                 let v = self.eval_expr(inner)?;
-                Ok(self.cast_as(&v, ty))
+                self.cast_as(&v, ty)
             }
             Expr::MacroVar(name) => Err(crate::RakError::Runtime(format!(
                 "macro variable '${}' used outside a macro body",
@@ -5360,24 +5360,209 @@ impl Interpreter {
         self.eval_builtin(&joined, &arg_vals)
     }
 
-    fn cast_as(&self, v: &Value, ty: &Type) -> Value {
+    /// Convert `v` to `ty`, or explain why it cannot be converted.
+    ///
+    /// Every path here used to be either a no-op or a substitution, and neither was
+    /// reported: a non-numeric operand became 0 through `unwrap_or(0)`, and a target with
+    /// no conversion arm returned the original value through `_ => v.clone()`. So
+    /// `"abc" as int` was 0, `1 as bool` was an Int, and `if (1 as bool)` took the truthy
+    /// branch by accident. Narrowing is now range-checked, which is what makes `-1 as u8`
+    /// an error rather than `0xFFFFFFFFFFFFFFFF`.
+    /// Render a type for a cast diagnostic.
+    ///
+    /// `Type` derives `Debug` but not `Display`, and its variant names are not the
+    /// spellings the parser accepts -- a reader who wrote `u8` should not be told about
+    /// `U8` -- so the scalars are spelled out and anything else falls back to `Debug`.
+    fn ty_name(ty: &Type) -> String {
+        use Type::*;
         match ty {
-            Type::Int | Type::I64 | Type::I32 | Type::I16 | Type::I8 => {
-                Value::Int(v.as_i64().unwrap_or(0))
-            }
-            Type::U64 | Type::U32 | Type::U16 | Type::U8 | Type::Hex(_) => {
-                Value::Hex(v.as_u64().unwrap_or(0))
-            }
-            Type::F64 | Type::F32 => Value::Float(v.as_f64().unwrap_or(0.0)),
-            Type::String => Value::String(v.to_string()),
-            _ => v.clone(),
+            Int => "int".into(),
+            I8 => "i8".into(),
+            I16 => "i16".into(),
+            I32 => "i32".into(),
+            I64 => "i64".into(),
+            U8 => "u8".into(),
+            U16 => "u16".into(),
+            U32 => "u32".into(),
+            U64 => "u64".into(),
+            F32 => "f32".into(),
+            F64 => "f64".into(),
+            String => "string".into(),
+            Char => "char".into(),
+            Bytes => "bytes".into(),
+            Bool => "bool".into(),
+            Nil => "nil".into(),
+            Custom(n) => n.clone(),
+            other => format!("{:?}", other),
         }
     }
 
-    /// Defensive runtime type check: validate `v` against a declared `Type`.
-    /// Numeric types are mutually compatible; strings, chars, bools, bytes and
-    /// containers are checked structurally. The static type checker normally
-    /// rejects mismatches at compile time; this is a runtime backstop.
+    /// Whether `ty` is one of the numeric types a cast target can be.
+    fn is_numeric_type(ty: &Type) -> bool {
+        use Type::*;
+        matches!(
+            ty,
+            Int | I8 | I16 | I32 | I64 | U8 | U16 | U32 | U64 | F32 | F64 | Hex(_)
+        )
+    }
+
+    /// Bit width of a narrow integer target, or `None` for the wide ones.
+    ///
+    /// `int` and `i64` are the same width, so casting to either cannot lose anything and
+    /// is not range-checked -- only a target narrower than 64 bits can reject its
+    /// operand.
+    fn int_bits(ty: &Type) -> Option<u32> {
+        use Type::*;
+        Some(match ty {
+            I8 | U8 => 8,
+            I16 | U16 => 16,
+            I32 | U32 => 32,
+            _ => return None,
+        })
+    }
+
+    /// Error for a value that does not fit the type it was cast to.
+    fn cast_range_error(from: &str, ty: &Type, got: &str) -> crate::RakError {
+        crate::RakError::Runtime(format!(
+            "cannot cast {} to {}: {} is out of range",
+            from,
+            Self::ty_name(ty),
+            got
+        ))
+    }
+
+    /// Check `n` fits a target of `bits`, signed or unsigned per the target's own variant.
+    ///
+    /// Out of range is an error rather than a wrap. Wrapping is a real choice with real
+    /// consequences -- it turns a bug into a plausible number -- and Rak has no checked
+    /// wrapping cast to ask for instead.
+    fn check_int_range(n: i128, bits: u32, ty: &Type) -> crate::Result<()> {
+        use Type::*;
+        let (lo, hi) = match ty {
+            U8 | U16 | U32 => (0i128, (1i128 << bits) - 1),
+            _ => (-(1i128 << (bits - 1)), (1i128 << (bits - 1)) - 1),
+        };
+        if n < lo || n > hi {
+            return Err(Self::cast_range_error("a number", ty, &n.to_string()));
+        }
+        Ok(())
+    }
+
+    /// Convert `v` to `ty`, or explain why it cannot be converted.
+    ///
+    /// Every path here used to be either a no-op or a substitution, and neither was
+    /// reported. The numeric arms read through `unwrap_or(0)`, so a non-numeric operand
+    /// became 0 -- a value the author never wrote and cannot tell from a real zero -- and
+    /// a target with no conversion arm returned the original through `_ => v.clone()`, so
+    /// `1 as bool` was an Int and `if (1 as bool)` took the truthy branch by accident.
+    ///
+    /// Narrowing is range-checked, which is what turns `-1 as u8` from `0xFFFF...FF` and
+    /// `300 as u8` from `0x12C` into errors naming both types.
+    fn cast_as(&self, v: &Value, ty: &Type) -> crate::Result<Value> {
+        use Type::*;
+        // Expand a `type` alias first. `type Meters = int` makes `n as Meters` a cast to
+        // `int`, and without this it lands on the no-conversion arm below and is
+        // rejected -- an alias would then be usable as an annotation but not as a cast.
+        let expanded = self.expand_alias(ty);
+        let ty = &expanded;
+        let from = v.type_name();
+
+        // A numeric target needs a numeric operand. Rejecting this is the whole point:
+        // 0 was never the right answer for something the author could not read as a
+        // number.
+        if Self::is_numeric_type(ty)
+            && !matches!(v, Value::Int(_) | Value::Hex(_) | Value::Float(_))
+        {
+            return Err(crate::RakError::Runtime(format!(
+                "cannot cast {} to {}: only a number can be cast to a numeric type",
+                from,
+                Self::ty_name(ty)
+            )));
+        }
+
+        match ty {
+            Int | I64 | I32 | I16 | I8 => {
+                let n = v.as_i64().ok_or_else(|| {
+                    crate::RakError::Runtime(format!(
+                        "cannot cast {} to {}",
+                        from,
+                        Self::ty_name(ty)
+                    ))
+                })?;
+                if let Some(bits) = Self::int_bits(ty) {
+                    Self::check_int_range(n as i128, bits, ty)?;
+                }
+                Ok(Value::Int(n))
+            }
+            U64 | U32 | U16 | U8 | Hex(_) => {
+                // Read a float through f64 rather than truncating first: -0.5 truncated is
+                // 0, which would quietly accept a negative value for an unsigned type.
+                let n: i128 = match v {
+                    Value::Float(f) => {
+                        let t = f.trunc();
+                        if !(0.0..=u64::MAX as f64).contains(&t) {
+                            return Err(Self::cast_range_error(&from, ty, &f.to_string()));
+                        }
+                        t as i128
+                    }
+                    // Read a signed int signed rather than through `as_u64`, which
+                    // sign-extends: `-1 as u8` would otherwise be rejected as
+                    // "18446744073709551615 is out of range", naming a number the author
+                    // never wrote.
+                    Value::Int(i) => *i as i128,
+                    Value::Hex(u) => *u as i128,
+                    _ => {
+                        return Err(crate::RakError::Runtime(format!(
+                            "cannot cast {} to {}: only a number can be cast to an unsigned type",
+                            from,
+                            Self::ty_name(ty)
+                        )))
+                    }
+                };
+                if let Some(bits) = Self::int_bits(ty) {
+                    Self::check_int_range(n, bits, ty)?;
+                }
+                Ok(Value::Hex(n as u64))
+            }
+            F64 | F32 => {
+                let f = v.as_f64().ok_or_else(|| {
+                    crate::RakError::Runtime(format!(
+                        "cannot cast {} to {}",
+                        from,
+                        Self::ty_name(ty)
+                    ))
+                })?;
+                Ok(Value::Float(f))
+            }
+            String => Ok(Value::String(v.to_string())),
+            // These two had an obvious meaning and a demonstrably wrong one: `65 as char`
+            // produced the Int 1, not the character. A codepoint and a non-zero test are
+            // the only readings either has.
+            Char => {
+                let n = v.as_i64().ok_or_else(|| {
+                    crate::RakError::Runtime(format!("cannot cast {} to char", from))
+                })?;
+                match u32::try_from(n).ok().and_then(char::from_u32) {
+                    Some(c) => Ok(Value::Char(c)),
+                    None => Err(Self::cast_range_error(&from, &Char, &n.to_string())),
+                }
+            }
+            Bool => {
+                let f = v.as_f64().ok_or_else(|| {
+                    crate::RakError::Runtime(format!("cannot cast {} to bool", from))
+                })?;
+                Ok(Value::Bool(f != 0.0))
+            }
+            // Everything else has no conversion. Naming the two types is the entire value
+            // of the error; the old fallback named neither.
+            other => Err(crate::RakError::Runtime(format!(
+                "cannot cast {} to {}",
+                from,
+                Self::ty_name(other)
+            ))),
+        }
+    }
+
     /// Expand a `type` alias to what it names, transitively.
     ///
     /// Bounded so a self-referential alias (`type A = A`) terminates; such an alias
@@ -5397,6 +5582,10 @@ impl Interpreter {
         cur
     }
 
+    /// Defensive runtime type check: validate `v` against a declared `Type`.
+    /// Numeric types are mutually compatible; strings, chars, bools, bytes and
+    /// containers are checked structurally. The static type checker normally
+    /// rejects mismatches at compile time; this is a runtime backstop.
     fn check_value_type(&self, v: &Value, ty: &Type) -> crate::Result<()> {
         use Type::*;
         // Expand a `type` alias before checking, so `type Meters = int` accepts an

@@ -1039,3 +1039,202 @@ fn valid_literals_stay_clean() {
         );
     }
 }
+
+/// A cast with no conversion is an error, not a wrong value.
+///
+/// Each of these used to succeed and produce a value of the wrong type, or the wrong
+/// value entirely.
+#[test]
+fn a_cast_to_an_unconvertible_type_is_rejected() {
+    for (label, src, want) in [
+        (
+            "string as int",
+            "let x = \"abc\" as int\n",
+            "cannot cast string to int",
+        ),
+        (
+            "bool as int",
+            "let x = true as int\n",
+            "cannot cast bool to int",
+        ),
+        (
+            "int as bytes",
+            "let x = 1 as bytes\n",
+            "cannot cast int to bytes",
+        ),
+        (
+            "int as array",
+            "let x = 1 as array\n",
+            "cannot cast int to array",
+        ),
+        (
+            "int as a nominal type",
+            "struct P { v: int }\nlet x = 1 as P\n",
+            "cannot cast int to P",
+        ),
+    ] {
+        let err = rakc::eval_in_cli(src, ".", &[], None)
+            .err()
+            .unwrap_or_else(|| panic!("{}: expected an error", label));
+        let msg = err.to_string();
+        assert!(
+            msg.contains(want),
+            "{}: expected {:?}, got: {}",
+            label,
+            want,
+            msg
+        );
+    }
+}
+
+/// Narrowing is range-checked rather than wrapping or sign-extending.
+///
+/// `as_u64` sign-extends, so `-1 as u8` produced a 64-bit value; and nothing truncated, so
+/// `300 as u8` stayed 300. Both are errors now. The error names the number the author
+/// actually wrote, which is why these go through a variable rather than relying on the
+/// `-1 as u8` parse.
+#[test]
+fn a_narrowing_cast_out_of_range_is_an_error() {
+    for (label, src, want) in [
+        (
+            "negative into u8",
+            "let n = -1\nlet x = n as u8\n",
+            "-1 is out of range",
+        ),
+        (
+            "300 into u8",
+            "let n = 300\nlet x = n as u8\n",
+            "300 is out of range",
+        ),
+        (
+            "negative float into u8",
+            "let n = -1.5\nlet x = n as u8\n",
+            "-1.5 is out of range",
+        ),
+        (
+            "-5 into char",
+            "let n = -5\nlet x = n as char\n",
+            "-5 is out of range",
+        ),
+    ] {
+        let err = rakc::eval_in_cli(src, ".", &[], None)
+            .err()
+            .unwrap_or_else(|| panic!("{}: expected an error", label));
+        let msg = err.to_string();
+        assert!(
+            msg.contains(want),
+            "{}: expected {:?}, got: {}",
+            label,
+            want,
+            msg
+        );
+    }
+}
+
+/// The conversions that do have a meaning are actually performed.
+///
+/// `65 as char` used to produce the Int 1. A codepoint and a non-zero test are the only
+/// readings these two have, so both are implemented rather than rejected.
+#[test]
+fn a_defined_cast_is_performed() {
+    let out = rakc::eval(
+        r#"
+dump 65 as char
+dump 0 as bool
+dump 5 as bool
+dump 0.0 as bool
+dump 42 as string
+dump 1 as f64
+dump 1.9 as int
+dump 7 as int
+dump 255 as u8
+dump 0 as u8
+dump 200 as u8
+dump 127 as i8
+let n = -128
+dump n as i8
+"#,
+    )
+    .expect("these casts are all valid");
+    let text = out.join("\n");
+    for want in [
+        "'A'",   // codepoint, not the Int 1
+        "false", // 0 as bool
+        "true",  // 5 as bool
+        "42",    // stringified
+        "0xFF",  // 255 as u8
+        "0x0",   // 0 as u8
+        "0xC8",  // 200 as u8
+        "127",   // 127 as i8, in range
+        "-128",  // via a variable, in range
+    ] {
+        assert!(text.contains(want), "expected {:?} in:\n{}", want, text);
+    }
+}
+
+/// A cast to an unconvertible type is caught by `check`, not only at runtime.
+///
+/// Decidable from the annotation alone, so it does not need a value.
+#[test]
+fn a_cast_to_an_unconvertible_type_is_rejected_by_check() {
+    for src in [
+        "let x = 1 as bytes\n",
+        "let x = 1 as array\n",
+        "let x = 1 as map\n",
+        "struct P { v: int }\nlet x = 1 as P\n",
+    ] {
+        let diags = check_diags(src);
+        assert!(
+            diags.iter().any(|d| d.contains("E0430")),
+            "expected E0430 for {:?}, got: {:#?}",
+            src,
+            diags
+        );
+    }
+}
+
+/// An alias target must stay castable.
+///
+/// This one is a trap. A `Type::Custom` target has no conversion rule of its own, so once
+/// the runtime started rejecting unconvertible targets it would have rejected every cast
+/// to an alias -- breaking `n as Meters` for `type Meters = int`. Both the checker and the
+/// runtime expand the alias first.
+#[test]
+fn a_cast_to_an_alias_is_still_allowed() {
+    assert!(
+        check_diags("type Meters = int\nlet x = 5 as Meters\n").is_empty(),
+        "the checker must expand the alias before rejecting the target"
+    );
+    let out = rakc::eval("type Small = u8\nlet n = 200\nlet x = n as Small\ndump x\n")
+        .expect("a cast to an alias must run");
+    assert!(out.join("\n").contains("0xC8"), "{:?}", out);
+
+    // And the alias's own range rule still applies through the cast.
+    let err = rakc::eval_in_cli(
+        "type Small = u8\nlet n = 300\nlet x = n as Small\n",
+        ".",
+        &[],
+        None,
+    )
+    .err()
+    .expect("300 does not fit u8");
+    assert!(err.to_string().contains("out of range"), "{}", err);
+}
+
+/// Every ordinary cast must still type-check.
+///
+/// The targets that remain valid, including the two newly implemented conversions.
+#[test]
+fn valid_cast_targets_stay_clean() {
+    for src in [
+        "let x = 1 as f64\n",
+        "let x = 65 as char\n",
+        "let x = 1 as bool\n",
+        "let x = 1 as string\n",
+        "let x = 1 as u8\n",
+        "type Meters = int\nlet x = 5 as Meters\n",
+    ] {
+        let diags = check_diags(src);
+        assert!(diags.is_empty(), "{:?}: {:#?}", src, diags);
+    }
+}

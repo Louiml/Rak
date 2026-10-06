@@ -828,10 +828,7 @@ impl<'a> TypeChecker<'a> {
             return;
         };
         let Some((_, payload)) = variants.iter().find(|(n, _)| n.as_str() == variant) else {
-            let hint = suggest_field(
-                &variants.keys().cloned().collect::<Vec<_>>(),
-                variant,
-            );
+            let hint = suggest_field(&variants.keys().cloned().collect::<Vec<_>>(), variant);
             self.report(
                 "E0423",
                 &format!("enum `{}` has no variant `{}`", enum_name, variant),
@@ -886,6 +883,52 @@ impl<'a> TypeChecker<'a> {
                     Some(variant),
                 );
             }
+        }
+    }
+
+    /// Report a cast whose target type has no conversion rule.
+    ///
+    /// Decidable from the annotation alone, so it does not need to wait for a value the
+    /// way the runtime check does. `bytes` and the container types are excluded because
+    /// no operand can convert to them.
+    ///
+    /// Aliases are expanded first, so `type Meters = int` with `n as Meters` is a cast to
+    /// `int`. Without that, an alias target would be a bare `Custom` -- which has no
+    /// conversion rule -- and a cast that used to work would start failing.
+    fn check_cast_target(&mut self, ty: &Type) {
+        use Type::*;
+        let expanded = self.expand_alias(ty);
+        match &expanded {
+            Bytes
+            | Array(_)
+            | Map(_, _)
+            | Tuple(_)
+            | Option(_)
+            | Result(_, _)
+            | Ptr(_)
+            | Evidence(_) => {
+                self.report(
+                    "E0430",
+                    &format!("cannot cast to {}", self.type_name(&expanded)),
+                    None,
+                    None,
+                    Some("this type has no conversion from any value".to_string()),
+                    None,
+                );
+            }
+            Custom(name) => {
+                // A nominal type the checker has not seen declared may still be an alias
+                // for something castable, so only report when there is no such alias.
+                self.report(
+                    "E0430",
+                    &format!("cannot cast to `{}`", name),
+                    None,
+                    None,
+                    Some("this type has no conversion from any value".to_string()),
+                    Some(name),
+                );
+            }
+            _ => {}
         }
     }
 
@@ -1119,6 +1162,7 @@ impl<'a> TypeChecker<'a> {
             }
             As(e, t) => {
                 let _ = self.infer(e);
+                self.check_cast_target(t);
                 t.clone()
             }
             MacroVar(_) | MacroInvoke { .. } | EvidenceFrom { .. } => Type::Generic("macro".into()),
