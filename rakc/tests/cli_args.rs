@@ -1313,3 +1313,74 @@ dump 1.0 % 0.0
         .expect("integer division by zero is still an error");
     assert!(err.to_string().contains("Division by zero"), "{}", err);
 }
+
+/// A mistyped path is reported, not panicked on.
+///
+/// `read_source` used `fs::read_to_string(arg).expect("Failed to read file")`, so
+/// every unreadable path -- the single most ordinary mistake a compiler can be handed
+/// -- ended in a panic: `thread 'main' panicked at rakc\src\main.rs`, an `Os { code: 2,
+/// kind: NotFound, ... }` debug dump, and a note about RUST_BACKTRACE. On Windows the
+/// process died with 0xC0000409, so a script under CI that invoked a missing file
+/// aborted instead of exiting 1.
+///
+/// The message also dropped the path and the OS reason, so "Access is denied" and
+/// "not found" both came out as the same "Failed to read file".
+#[test]
+fn a_missing_file_is_an_error_not_a_panic() {
+    for sub in ["run", "check", "verify"] {
+        let (text, code) = run_with_stdin_code(&[sub, "definitely-not-here.rak"], "");
+        assert_eq!(
+            code,
+            Some(1),
+            "rakc {} should exit 1 on a missing file, got {:?} from:\n{}",
+            sub,
+            code,
+            text
+        );
+        assert!(
+            text.contains("definitely-not-here.rak"),
+            "rakc {} should name the file it could not read, got:\n{}",
+            sub,
+            text
+        );
+        assert!(
+            !text.contains("panicked"),
+            "rakc {} must not panic on a missing file, got:\n{}",
+            sub,
+            text
+        );
+        assert!(
+            !text.contains("RUST_BACKTRACE"),
+            "rakc {} must not suggest RUST_BACKTRACE, got:\n{}",
+            sub,
+            text
+        );
+    }
+}
+
+/// The OS reason survives, so a directory is not reported as a missing file.
+///
+/// Both are "you cannot read this path", and reporting them identically is what makes
+/// a diagnostic useless when the user has the name right and the kind of thing wrong.
+#[test]
+fn reading_a_directory_reports_its_own_reason() {
+    // "." exists, so the failure cannot be attributed to the path being absent.
+    let (text, code) = run_with_stdin_code(&["run", "."], "");
+    assert_eq!(code, Some(1), "got {:?} from:\n{}", code, text);
+    assert!(!text.contains("panicked"), "must not panic, got:\n{}", text);
+    assert!(
+        text.contains("Error reading ."),
+        "should report reading '.', got:\n{}",
+        text
+    );
+    // Linux and Windows disagree on the wording, and on macOS it can be a read error,
+    // so assert that a reason is present rather than which one.
+    let has_reason = ["is a directory", "Access is denied", "Is a directory"]
+        .iter()
+        .any(|r| text.contains(r));
+    assert!(
+        has_reason,
+        "should carry the OS reason rather than a bare 'Failed to read file', got:\n{}",
+        text
+    );
+}

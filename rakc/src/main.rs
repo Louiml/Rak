@@ -104,7 +104,13 @@ fn cmd_verify(args: &[String]) -> i32 {
         eprintln!("Usage: rakc verify <file> [--steps N] [--depth N] [--iters N] [--quiet]");
         return 2;
     };
-    let source = read_source(&file);
+    let source = match read_source(&file) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("{}", e);
+            return 1;
+        }
+    };
     let base_dir = std::path::Path::new(&file)
         .parent()
         .map(|p| p.to_string_lossy().to_string())
@@ -309,15 +315,22 @@ fn is_flag_token(arg: &str) -> bool {
     arg.starts_with('-') && !is_stdin_marker(arg)
 }
 
-fn read_source(arg: &str) -> String {
+/// Read a script from a file, or from stdin when the argument is `-`.
+///
+/// The error is returned rather than unwrapped. A mistyped path is the most ordinary
+/// mistake a compiler can be handed, and answering it with a panic and a backtrace note
+/// is both alarming and less informative: the OS reason is discarded and the message
+/// never names the file. Keeping the reason in the text also means a directory or a
+/// permissions problem still reads correctly rather than always saying "not found".
+fn read_source(arg: &str) -> Result<String, String> {
     if arg == "-" {
         let mut buf = String::new();
         io::stdin()
             .read_to_string(&mut buf)
-            .expect("Failed to read from stdin");
-        buf
+            .map_err(|e| format!("Error reading from stdin: {}", e))?;
+        Ok(buf)
     } else {
-        fs::read_to_string(arg).expect("Failed to read file")
+        fs::read_to_string(arg).map_err(|e| format!("Error reading {}: {}", arg, e))
     }
 }
 
@@ -751,7 +764,13 @@ fn main() {
         }
     };
     let file = &args[file_index];
-    let source = read_source(file);
+    let source = match read_source(file) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("{}", e);
+            std::process::exit(1);
+        }
+    };
 
     // The script's argv: everything after the file, minus the flags rakc claimed
     // before it.
