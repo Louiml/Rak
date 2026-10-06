@@ -257,7 +257,17 @@ The built-in trait hooks are:
 | `IndexMut`| `set(self, key, value)`| `obj[key] = value` (write) |
 
 The receiver is passed as the **first argument** of every method; the user
-names it (conventionally `self`, though `self` is not a keyword).
+names it (conventionally `self`, though `self` is not a keyword). Because the
+receiver is an ordinary parameter, a method written `fn hi(self)` has arity 1
+and the arity check counts it.
+
+A `trait` declaration is recorded and `impl Trait for Type` is checked against
+it: the trait must exist, every method the impl provides must be one the trait
+declares, the arity must match, and every required method must be implemented.
+This matters most for a misspelled method -- without it, a typo leaves the real
+method unimplemented and the failure appears much later as a `No method ...` at
+a call site nowhere near the typo, or never, if nothing calls it. See E0410-E0413
+under 7B.
 
 #### Architecture
 - `Interpreter` gains two registries:
@@ -1574,6 +1584,46 @@ with a wider blast radius.
   through function bodies, `?`-propagation checks (return type must admit
   `Err`), cross-module signature checking with a per-file cache, generic
   substitution (7A.9). **[SPEC]**
+
+- **Declarations are checked, not just ignored.** Four constructs used to be
+  parsed and then discarded, which left the checker with nothing to compare
+  against and the two backends disagreeing. **[SHIPPED]**
+  - `type X = T` records an alias, and an annotation naming one is expanded
+    before comparison or a runtime check. Expansion is transitive and bounded,
+    so `type A = B` / `type B = int` works and a cycle terminates.
+  - `trait` declarations record their methods. `impl Trait for Type` is checked
+    for an undeclared trait (E0410), a method the trait does not declare
+    (E0411), a differing arity (E0412), and a missing required method (E0413).
+    Traits are collected in a pre-pass, so an `impl` may precede its `trait`.
+  - `struct` fields and `enum` payload types are recorded, so literals are
+    validated where they are written: unknown field (E0420), missing field
+    (E0421), field type (E0422), unknown variant (E0423), variant arity
+    (E0424), payload type (E0425).
+  - A cast to a type with no conversion rule is rejected (E0430) rather than
+    reaching the runtime as a value of the wrong type.
+
+- **Numbers do not lose precision, and they do not wrap.** **[SHIPPED]**
+  - Comparison is exact. Two integers compare as `i128` and a mixed pair is
+    resolved without routing the integer through `f64`, so
+    `9007199254740993 == 9007199254740993.0` is false. 2^53 + 1 is the first
+    integer an `f64` cannot hold, and converting both sides rounded them to the
+    same value.
+  - The VM constant pool deduplicates on representation, not on numeric
+    equality: `I64(2)` and `F64(2.0)` compare equal, and letting them share a
+    slot made `2.0` load as an integer -- so `-2.0` was a negated integer and
+    `1.0 / 3.0` beside a `1` became integer division.
+  - Integer arithmetic is checked. `max + 1` and `max * 2` are overflow errors,
+    not wrapped values, on both backends with the same wording. A wrapped
+    result is worse than a wrong one: it is a plausible number, so the bug
+    surfaces elsewhere or nowhere. `i64::MIN / -1` and `i64::MIN % -1` are
+    reported too, so correctness does not depend on the build profile.
+    Floating-point overflow is still IEEE: `1.0e308 * 10.0` is `inf`.
+  - Casts report rather than substitute. A non-numeric operand cast to a
+    numeric type used to become 0; a target with no conversion rule used to
+    return the original value under the new type's name. Narrowing is
+    range-checked, so `-1 as u8` is an error rather than `0xFFFF...FF`. `char`
+    and `bool` are real conversions now (a codepoint, a non-zero test); they
+    were producing integers.
 - **`rakc fmt`** (new `fmt.rs`) **[SHIPPED]**: AST→source printer, 2-space
   indent, `--write` / `--check`; idempotence unit tests.
 - **`rakc lint`** (new `lint.rs`) **[SHIPPED]**: unused let/const, shadowed
