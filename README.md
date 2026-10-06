@@ -4,60 +4,62 @@ A programming language for hackers, OSINT investigators, and systems programmers
 
 Hex is a first-class type. The bytecode VM runs about 6x faster than the tree-walker. There's a SQL engine written in Rak itself, and a Rak interpreter written in Rak.
 
-## What's new in 0.7.2
+## What's new in 0.9.1
 
-- **DAP debugger server.** `rakc dap <file>` speaks the Debug Adapter
-  Protocol over stdio (Content-Length framing). The VM runs the target on a
-  worker thread while a reader handles requests: `setBreakpoints`/`remove`,
-  `continue`, `next`, `stepIn`, `stepOut`, `stackTrace`, `scopes`/`variables`,
-  `setVariable`, and full `exceptionInfo`, plus line-granular breakpoint gating via
-  a `last-hit-line` guard. Wire it up from VS Code (the bundled `rak`
-  extension), Neovim (nvim-dap), or any DAP client.
-- **Stdlib batteries.** Everyday data modules on both backends: time &
-  datetime (`time_now`, `time_fmt`, `time_parse`, `time_parts`, `time_add`,
-  `time_diff`, `date_today`), randomness (`rand_seed`, `rand_int`,
-  `rand_float`, `rand_bytes`, `rand_hex`, `rand_choice`, `rand_shuffle`), CSV
-  (`csv_parse`, `csv_stringify`), YAML (`yaml_parse`), and archives
-  (`gzip_compress`, `gzip_decompress`, `zip_list`, `zip_read`, `zip_write`).
-- **OSINT pack.** WHOIS lookups and parsing (`whois_lookup`/`whois_parse`),
-  certificate-transparency subdomain enumeration (`ct_subdomains`), a
-  hand-rolled **YARA-lite** scanning engine (`yara_scan`: hex wildcards,
-  `nocase`, `at`/`in`, `all-of`/`any-of`/`none-of`, boolean conditions), and
-  Markdown evidence reports (`report_markdown`). Docs: `docs/content/osint.md`,
-  demo: `examples/osint_demo.rak`.
-- **Language core: `in` operator.** Membership checks work on strings
-  (substring/char), arrays, tuples, maps (key lookup), and byte sequences.
-- **Destructuring `let`.** `let (a, b) = pair`, `let [x, y, z] = list`,
-  `let Point { x, y } = obj`, nested and `let mut` forms; arity mismatches
-  raise a catchable error.
-- **Slice and negative indexing.** `a[1..3]`, `a[..2]`, `a[3..]`, `a[-2..]`
-  slices, `a[-1]` reads and `a[-1] = v` writes from the end, with
-  out-of-bounds raises on both backends.
-- **The VM caught up.** `rakc vm` now runs what the interpreter runs:
-  `try`/`catch` and `expr?` (structured errors, LIFO defers before the
-  handler), method dispatch on structs/enums (`obj.method(...)` via `impl`
-  blocks), struct literals and enum constructors, and the full pattern
-  language in `match`: struct patterns (`Point { x, y }`), enum variants,
-  binary bytes patterns, or-patterns, ranges, `Some`/`None`/`Ok`/`Err`, and
-  guards.
-- **Operator overloading.** `impl Add/Sub/Mul/Div/Rem/Eq/Compare/Neg for T`
-  with `fn add(self, o)`-style methods, dispatched on both backends before
-  the built-in arithmetic (`a + b`, `a == b`, `a < b`, `-a` on your types).
-- **Assignment on the VM.** `arr[i] = v`, `map[k] = v`, `s.field = v`,
-  `x += 1`, and multi-assign `a, b = x, y` (copy-on-write, mutability rules
-  enforced).
-- **Iterator builtins.** `zip`, `enumerate`, `skip`, `fold`, `reduce`,
-  `any`, `all`, `flat_map`, `take_while`, plus `keys`/`values`/`has`/`get`,
-  on both backends.
-- **`for (k, v) in map`** and indexed `for (i, x) in arr` work on the VM
-  (`Op::IterItems` materializes any iterable; maps always yield pairs).
-- **`if let` / `while let` / `do { } while` / labeled `break`/`continue`**
-  (`'outer: for ... { break 'outer }`) run on the VM.
-- **binstruct bitfields.** `u4`-style non-byte-aligned fields, packed
-  LSB-first and round-tripped through `decode`/`encode` on both backends.
-- **`rakc fmt`.** AST-based formatter (`--write`, `--check` for CI).
-- **`rakc lint`.** Advisory checks (unused vars, shadowing, unreachable
-  code, missing `pub fn` return types, duplicate imports; `--deny` for CI).
+`v0.9.1` is a patch release on top of 0.9.0. One user-facing fix, but it was the noisy kind of kind.
+
+- **Missing scripts now produce an error, not a crash.** `rakc run`, `rakc check` and
+  `rakc verify` on a path that does not exist used to die with a Rust panic and, on
+  Windows, an exit code with no meaning to shells and CI. They now print
+  `Error reading <path>: <os reason>` and exit 1. A directory passed by mistake is
+  reported as a directory rather than as a file that is not found.
+- **The release pipeline checks the binary it publishes.** A smoke test runs the freshly
+  built artifact before upload: version, `run`, `vm`, and `check` on a spread of
+  programs that exercise the release's claims. The version it expects comes from the tag
+  itself, so the next cut cannot silently advertise a different one.
+
+The 0.9.0 picture behind the patch, since the feature list that used to live here was
+several versions stale:
+
+**A native installer.** `rak-setup` opens a window with no arguments: `eframe`/`egui` on
+`glow`, with no WebView2 or `wgpu` to go missing. It shows progress, edits PATH, sets
+`RAK_PATH`, creates shortcuts and `.rak` associations, and records every action in
+`~/.rak/manifest.json` for clean uninstall. The Tauri NSIS/MSI/`.deb`/AppImage bundles
+remain for IDE-only users.
+
+**A trustworthy package manager.** Caret, tilde, comparators, wildcards, comma ranges,
+prereleases and build metadata follow real semver rules. Every lockfile entry records a
+SHA-256 over the whole vendored dependency tree, and `--offline` turns "existing checkout
+is reused" into a guarantee instead of a lucky accident. `oyvey add` writes the package's
+declared name instead of truncating it, and unknown flags are rejected rather than
+silently ignored.
+
+**A corrected compiler.** 0.9.0 hunted down the bugs that succeeded with the wrong
+answer: `PartialEq` compared type discriminants, so distinct values compared equal;
+type annotations were enforced on one backend only; integer arithmetic wrapped,
+including `i64::MIN / -1`; numeric comparison lost precision above 2^53; same-valued
+int and float constants aliased in the constant pool; casts returned 0 or nonsense;
+struct/enum type declarations were parsed and discarded; malformed `\x` escapes ate
+characters; `ord` and `chr` disagreed on what a character is; a negative `substr`
+bound now surfaces a catchable error. Each one is pinned by a regression test on both
+backends.
+
+**A runtime that tells you the truth.** `fn main(argv)` works and its return value is
+the process exit code. Errors raised inside `main` reach the user instead of being
+folded into an exit code. `--sandbox` is enforced. Exceptions unwind from the right
+place. Integer arithmetic now errors instead of wrapping, and integer division by zero
+is a user-facing error; float division by zero follows IEEE.
+
+**Written-down limits.** The bytecode VM still refuses a named list of constructs
+(`async {}`, `test {}`, `assert`, `trace`, `scan`, `fetch`, `Lambda`, `Spawn`, `Raise`,
+`Comprehension`, `as`, `TypedInt`, `Range`, `ensures`) instead of guessing, and several
+language features (generics, trait bounds and `where`, binding patterns, tail-call
+optimisation, doc comments, `while`/`for` `else`, closure capture of mutated locals)
+are still roadmap rather than release promises. `substr` returns `""` when out of
+range while `slice` clamps, and that difference is called out, not hidden. CI runs
+the full suite on both Linux and Windows, and the release binaries for `rakc`,
+`rak-setup` and `oyvey` ship behind the hardening verifier (ASLR, high-entropy VA,
+DEP, CFG-compatible image, `LOAD_CONFIG`).
 
 ## Install
 
@@ -112,7 +114,7 @@ The language started as an OSINT scripting tool. It grew into something bigger.
 **Type system.** Signed and unsigned ints (i8 through u64), floats (f32, f64),
 typed literals like `42i32` and `3.14f64`, a first-class `char`, base literals
 (`0b1010`/`0o755`/`0xFF`), tuples, Result/Option, modules, closures with lexical
-scoping, generics, traits with method dispatch, pattern matching (including
+scoping, traits with method dispatch, pattern matching (including
 binary byte-pattern matching, plus user enum variants), and string interpolation
 with `f"hello {name}"`. A static type checker behind `rakc check` catches bad
 annotations and non-exhaustive matches before you run anything.
@@ -625,6 +627,10 @@ dump identity<int>(42)        // 42
 dump identity<string>("hi")   // hi
 dump identity(99)             // inferred: 99
 ```
+
+Both backends run this by erasing the type parameter, but `rakc check` does not yet
+model generics, so it flags the calls above. It is syntax on the road to real
+checking, not a finished promise.             
 
 ### Defer
 
