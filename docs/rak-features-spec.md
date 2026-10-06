@@ -1601,6 +1601,39 @@ with a wider blast radius.
     (E0424), payload type (E0425).
   - A cast to a type with no conversion rule is rejected (E0430) rather than
     reaching the runtime as a value of the wrong type.
+  - A `let` annotation is enforced on **both** backends. The compiler never
+    looked at `type_hint`, so `let c: int = "x"` failed under `rakc run` and
+    succeeded under `rakc vm`; a program whose correctness rests on an
+    annotation was annotated on one backend only, which is worse than having
+    no annotations, since the checking looked like it worked.
+  - `array`, `map` and `tuple` written bare parse to `Custom`, since the
+    parser has no element type to build `Array` from, so both backends
+    compared them as a nominal type and rejected the container they name:
+    `let c: array = [1]` reported "expected array, found array". The three
+    names are now resolved to the container they spell.
+  - An alias table is a pre-pass on both backends, so an annotation may name
+    one declared later in the file.
+  - `ord` and `chr` agree on what a character is. `ord` read a `Char` through
+    the string renderer, which prints it with its quotes, so `ord('A')` was
+    39 -- the code point of `'` -- while `ord("A")` was correctly 65. `chr`
+    built a one-character `String`, so `chr(65) == 'A'` was false and the pair
+    never composed.
+  - A malformed `\x` escape keeps its digits. It used to consume two
+    characters and push nothing when they were not hex, so `"\xZZb"` was
+    `"b"` -- the program read text its source never said. This matches every
+    other unknown escape, where `"\q"` stays `"\q"`.
+
+- **Equality is structural, not by discriminant.** **[SHIPPED]** `PartialEq`
+  ended in a catch-all comparing discriminants, so every struct equalled
+  every other struct of the same type and every enum value equalled every
+  other value of the same enum -- `P { x: 1 } == P { x: 2 }` was true.
+  Distinct values comparing equal is silent: a set deduplicates them, a
+  `!=` guard never fires, and a map keyed on one returns the wrong entry.
+  Structs compare by name and field, enums by name, variant and payload,
+  results by both halves, sets by membership. The catch-all is now `false`,
+  so a shape with no equality defined for it (`Module`, the socket and
+  stream handles, `Future`, `Pcap`) reports unequal rather than claiming
+  otherwise.
 
 - **Numbers do not lose precision, and they do not wrap.** **[SHIPPED]**
   - Comparison is exact. Two integers compare as `i128` and a mixed pair is
@@ -1624,6 +1657,11 @@ with a wider blast radius.
     range-checked, so `-1 as u8` is an error rather than `0xFFFF...FF`. `char`
     and `bool` are real conversions now (a codepoint, a non-zero test); they
     were producing integers.
+  - Float division by zero is IEEE, on both backends: `1.0 / 0.0` is `inf` and
+    `0.0 / 0.0` is `NaN`. The interpreter raised an error while the VM
+    returned `inf`, and `1.0 % 0.0` was already `NaN` there, so `/` and `%`
+    disagreed with each other in one expression. Integer division by zero is
+    unchanged and still an error -- that one has no IEEE answer.
 - **`rakc fmt`** (new `fmt.rs`) **[SHIPPED]**: AST→source printer, 2-space
   indent, `--write` / `--check`; idempotence unit tests.
 - **`rakc lint`** (new `lint.rs`) **[SHIPPED]**: unused let/const, shadowed
