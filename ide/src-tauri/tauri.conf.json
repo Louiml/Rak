@@ -31,7 +31,7 @@
   "bundle": {
     "active": true,
     "targets": "all",
-    "resources": ["resources/rakc*", "resources/oyvey*"],
+    "resources": ["resources/rakc*"],
     "windows": {
       "nsis": {
         "installMode": "currentUser",

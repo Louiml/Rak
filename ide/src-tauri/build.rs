@@ -14,7 +14,6 @@ fn main() {
     let _ = fs::create_dir_all(&res_dir);
 
     let rakc_src = manifest_dir.join(format!("../../target/release/rakc{}", ext));
-    let oyvey_src = manifest_dir.join(format!("../../target/release/oyvey{}", ext));
 
     if rakc_src.exists() {
         match fs::copy(&rakc_src, res_dir.join("rakc")) {
@@ -28,15 +27,9 @@ fn main() {
         );
     }
 
-    if oyvey_src.exists() {
-        match fs::copy(&oyvey_src, res_dir.join("oyvey")) {
-            Ok(_) => println!("cargo:warning=Copied oyvey to resources/"),
-            Err(e) => println!("cargo:warning=Failed to copy oyvey: {}", e),
-        }
-    } else {
-        println!(
-            "cargo:warning=oyvey binary not found at {}",
-            oyvey_src.display()
-        );
-    }
+    // No oyvey is bundled. It is a separate repository with its own releases, so it is
+    // absent here by construction -- and a stale copy into `resources/` would be worse than
+    // none, because `tauri.conf.json` only globs `resources/rakc*`, so the file would sit
+    // in the source tree looking bundled while never reaching a user. Nothing in the IDE
+    // spawns it.
 }
