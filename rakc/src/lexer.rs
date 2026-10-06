@@ -356,6 +356,22 @@ pub fn unescape(inner: &str) -> Option<String> {
                     let hex: String = chars.by_ref().take(2).collect();
                     if let Ok(n) = u8::from_str_radix(&hex, 16) {
                         result.push(n as char);
+                    } else {
+                        // The hex digits are kept verbatim. They have already been
+                        // consumed by `take`, so the escape is rebuilt by hand rather
+                        // than pushed back onto the iterator.
+                        //
+                        // Dropping them silently deleted source characters:
+                        // `"\xZZb"` was `"b"`, so a typo in an escape shortened the
+                        // string with no error and the program read text its author
+                        // never wrote. Keeping it matches how every other unknown
+                        // escape is handled -- `"\q"` stays `"\q"` -- so a malformed
+                        // escape is visible in the output rather than invisible in it.
+                        result.push('\\');
+                        result.push('x');
+                        for c in hex.chars() {
+                            result.push(c);
+                        }
                     }
                 }
                 Some(other) => {
@@ -387,6 +403,15 @@ fn parse_bytes(s: &str) -> Option<Vec<u8>> {
                     let hex: String = chars.by_ref().take(2).collect();
                     if let Ok(n) = u8::from_str_radix(&hex, 16) {
                         result.push(n);
+                    } else {
+                        // Kept verbatim, as in `unescape` above: a failed hex parse used to
+                        // discard the two digits, so `b"\xZZ"` became a shorter value than
+                        // the source described.
+                        result.push(b'\\');
+                        result.push(b'x');
+                        for c in hex.bytes() {
+                            result.push(c);
+                        }
                     }
                 }
                 Some('n') => result.push(b'\n'),
@@ -420,6 +445,10 @@ fn parse_char(s: &str) -> Option<char> {
             Some('\'') => Some('\''),
             Some('"') => Some('"'),
             Some('x') => {
+                // Not hex means the escape is malformed, and this arm returns `None` either
+                // way -- the caller reports the whole literal as a bad char. So there is
+                // nothing to put back here, unlike `unescape`, where a malformed escape
+                // produced a shorter string and the loss had to be prevented.
                 let hex: String = chars.by_ref().take(2).collect();
                 u8::from_str_radix(&hex, 16).ok().map(|n| n as char)
             }

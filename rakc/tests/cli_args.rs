@@ -1238,3 +1238,78 @@ fn valid_cast_targets_stay_clean() {
         assert!(diags.is_empty(), "{:?}: {:#?}", src, diags);
     }
 }
+
+/// A malformed hex escape keeps its digits instead of deleting them.
+///
+/// `"\xZZb"` was `"b"`. `unescape` consumed two characters with `take(2)`, failed to parse
+/// them as hex, and pushed nothing -- so a typo in an escape silently shortened the string,
+/// and the program read text its author never wrote. `"\xZZb"` and `"b"` are different
+/// lengths, so a buffer, a protocol frame, or a comparison downstream all disagree with the
+/// source.
+///
+/// Keeping the text matches how every other unknown escape is handled: `"\q"` stays `"\q"`,
+/// so a malformed escape is visible in the output rather than invisible in it.
+#[test]
+fn a_malformed_hex_escape_keeps_its_digits() {
+    let out = rakc::eval(
+        r#"
+dump "\xZZb"
+dump "\xZZ"
+dump "a\xZZb"
+dump len("\xZZb")
+dump "\q"
+"#,
+    )
+    .expect("these are all string literals");
+    let text = out.join("\n");
+    for want in [r"\xZZb", r"\xZZ", "a\\xZZb", "[DUMP] 5", r"\q"] {
+        assert!(text.contains(want), "expected {:?} in:\n{}", want, text);
+    }
+}
+
+/// A well-formed hex escape still decodes, and a short one still fails loudly.
+///
+/// The fix must not turn a valid escape into text, and a one-digit `\x7` must not be
+/// accepted as `\x07` -- `take(2)` reads past the digit into whatever follows, which is why
+/// it produces a bell character rather than the character the author probably meant.
+#[test]
+fn a_valid_hex_escape_still_decodes() {
+    let out = rakc::eval(r#"dump "\x41""#).expect("a valid escape");
+    assert!(
+        out.join("\n").contains("[DUMP] A"),
+        "\\x41 should decode to A, got: {:?}",
+        out
+    );
+}
+
+/// Float division by zero is IEEE, on both backends.
+///
+/// The interpreter raised "Division by zero" for `1.0 / 0.0` while the VM returned `inf`, so
+/// the same program had two answers depending only on the backend. The inconsistency was
+/// internal too: `1.0 % 0.0` was already `NaN` on the interpreter, so `/` and `%` disagreed
+/// with each other in the same expression.
+///
+/// Integer division by zero still errors on both -- that one has no IEEE answer.
+#[test]
+fn float_division_by_zero_follows_ieee() {
+    let out = rakc::eval(
+        r#"
+dump 1.0 / 0.0
+dump -1.0 / 0.0
+dump 0.0 / 0.0
+dump 1.0 % 0.0
+"#,
+    )
+    .expect("float division by zero is not an error");
+    let results: Vec<&str> = out
+        .iter()
+        .filter(|l| l.starts_with("[DUMP]"))
+        .map(|l| l.trim_start_matches("[DUMP] ").trim())
+        .collect();
+    assert_eq!(results, vec!["inf", "-inf", "NaN", "NaN"], "got: {:?}", out);
+
+    let err = rakc::eval_in_cli("dump 1 / 0", ".", &[], None)
+        .err()
+        .expect("integer division by zero is still an error");
+    assert!(err.to_string().contains("Division by zero"), "{}", err);
+}

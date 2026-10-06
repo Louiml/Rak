@@ -5791,13 +5791,13 @@ impl Interpreter {
                     BinOp::Add => l + r,
                     BinOp::Sub => l - r,
                     BinOp::Mul => l * r,
-                    BinOp::Div => {
-                        if r == 0.0 {
-                            return Err(crate::RakError::Runtime("Division by zero".to_string()));
-                        } else {
-                            l / r
-                        }
-                    }
+                    // IEEE: float division by zero is `inf` (or `NaN` for `0.0 / 0.0`), not
+                    // an error. The VM already did this, so `1.0 / 0.0` failed under `run`
+                    // and returned `inf` under `vm` -- the same program with two answers
+                    // depending only on the backend. `1.0 % 0.0` was already `NaN` here,
+                    // which made the inconsistency internal as well as across backends:
+                    // `/` errored and `%` returned NaN.
+                    BinOp::Div => l / r,
                     BinOp::Rem => l % r,
                     _ => unreachable!(),
                 };
