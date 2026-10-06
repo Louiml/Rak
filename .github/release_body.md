@@ -1,104 +1,135 @@
-## 0.8.4 — 2026-10-03
+## 0.9.0 — 2026-10-06
 
-Security and performance release. This one should be read before upgrading, not
-after.
+The release where Rak stops being a language that runs programs and starts being one that
+tells you when it does not. Most of what is below is a correctness fix to something that
+previously succeeded with the wrong answer, which is why so many of them were silent.
 
-### Security
+The installer and the package manager are finished and verified. The compiler executes
+considerably more than it checks — that gap is real, listed under **Known limitations**, and
+narrowed but not closed here.
 
-**FFI pointer provenance — an arbitrary write anywhere in the process is closed.**
+### Packaging
 
-`ffi_write` and `ffi_read` did this:
+**A native installer.** `rak-setup` opens a window with no arguments: `eframe`/`egui` on
+`glow`, so there is no WebView2 and no `wgpu` dependency to go missing. It shows progress,
+keeps a log pane, checks GitHub for a newer release, installs from an offline bundle,
+uninstalls, hides its console window, and reports a startup failure in a native dialog
+instead of a console nobody can see. The CLI and CI entry points are unchanged.
 
-```rust
-unsafe { *((ptr as usize + off) as *mut u8) = byte }
+### Package manager
+
+**Real semver.** Caret, tilde, comparators, wildcards, comma ranges, prereleases and build
+metadata. An unparseable constraint is now an error; it used to match everything, so a typo
+silently widened the requirement and installed the newest tag.
+
+**The lockfile is trustworthy.** Each entry records a SHA-256 over the whole vendored
+directory rather than over `package.rak`. An edited source file — including the entry point
+that actually runs — and a renamed one are both detected. Previously the checksum covered
+metadata only, so an edited dependency still audited as intact. An unreadable file is now
+reported separately from a mismatch, because those are different problems.
+
+**Offline is a rule, not an accident.** An existing checkout is reused without invoking git.
+`--offline` makes that a guarantee: anything not already cached is an error instead of a
+fetch. `--locked` refuses to change the lockfile and names the package that would have
+changed; `--frozen` is both. An unrecognised flag is an error — every command used to accept
+anything, so `oyvey build --release` looked honoured right up until it failed inside `rakc`.
+
+**Manifests are not damaged.** `oyvey add` records the package's declared name rather than
+the argument you typed, and rewrites only the `deps` block, so comments and unknown keys
+survive. A corrupt lockfile is an error instead of being silently discarded and overwritten.
+A comparator range in a manifest — `>=1.0, <2.0` — used to be split on its comma and
+resolved against a weaker one-sided constraint than the file asked for.
+
+### Correctness
+
+These are the ones that mattered. Each was silent: the program ran and produced a wrong
+answer, or the same program behaved differently depending only on which backend ran it.
+
+**Distinct values compared equal.** `PartialEq` ended by comparing type discriminants, so
+every struct equalled every other struct of the same type and every enum value equalled every
+other value of the same enum:
+
+```rak
+struct P { x: int }
+dump P { x: 1 } == P { x: 2 }   // was true
 ```
 
-with no check that `ptr` was ever allocated, and none that `off` was inside it.
-Because `ffi_ptr(n)` builds a pointer from *any* integer,
-`ffi_write(ffi_ptr(ADDRESS), 0, 0x41)` could write a byte anywhere the process
-could reach. `ffi_read` was the matching read. This is the most severe item in the
-security review, and unlike most of that list it was completely real.
+A set deduplicated such values, a `!=` guard never fired, and a map keyed on one returned the
+wrong entry. Structs, enums, results and sets now compare by content.
 
-A pointer is now *provenanced* if Rak allocated it (`ffi_alloc`,
-`ffi_string_to_cstr`) or was told it owns a region (`ffi_trust`). Provenanced
-pointers are range-checked on every access against the size recorded at allocation.
-A pointer that is neither is refused by name, and the error says what to do about
-it.
+**Type annotations were checked on one backend only.** `let c: int = "x"` failed under
+`rakc run` and succeeded under `rakc vm`, because the compiler never looked at the
+annotation. That is worse than having no annotations: nothing reported the gap, and the
+backend you happened to test on decided whether they meant anything. Both backends now
+enforce them and word the failure identically.
 
-`ffi_trust` is the deliberate escape hatch. A language with FFI that refused every
-foreign address would be useless, and resolving a symbol's address and then calling
-it is legitimate work. What is not acceptable is an address that is *silently*
-accepted, because that is indistinguishable from a safety check that always passes.
-`ffi_trust` turns unchecked pointer arithmetic into an assertion written down in the
-source — the same bargain `unsafe { reason }` makes everywhere else. It also
-narrows: trusting 4 bytes of a 16-byte allocation makes an access at offset 4 fail
-again, which is tested.
+**Integer arithmetic wrapped.** `9223372036854775807 + 1` was `-9223372036854775808`. A
+wrapped result is worse than a wrong one, because it is a plausible number, so the bug
+surfaces somewhere else or nowhere. Overflow is now reported on both backends, including
+`i64::MIN / -1`, which panicked in debug builds and wrapped in release ones — so correctness
+no longer depends on the build profile. Floating-point overflow is unchanged and still IEEE.
 
-`ffi_cstr_to_string` was a denial of service by another route — it scanned for a NUL
-byte with no bound, so a pointer to a NUL-free buffer walked off the end into
-unmapped memory, reachable from a pointer that came out of a network response. It
-is now bounded at 1 MiB.
+**Comparison lost precision above 2^53.** Every operand was converted to `f64` first, and
+2^53 + 1 is the first integer an `f64` cannot hold, so both sides of
+`9007199254740993 == 9007199254740993.0` rounded to the same value and compared equal.
+Anything crossing the int/float boundary above 2^53 — a nanosecond timestamp, a database id,
+a hash — compared equal to its neighbour.
 
-`ffi_read_i32` checks all four bytes, not merely that `off` is inside: `off` being
-valid while the read runs three bytes past the end is still a read past the end.
+That last one led to a second: the VM's constant pool deduplicated on numeric equality, so
+`F64(2.0)` reused the slot holding `I64(2)` and loaded an integer. `-2.0` is a unary
+negation, so it became a negated integer, and `1.0 / 3.0` beside a `1` anywhere in the file
+became integer division.
 
-The bounds arithmetic is done in `u128`, not `u64`, on purpose. `ptr + off` in `u64`
-wraps, and a bounds check a large offset can defeat is not a check. There is a test
-that specifically tries to defeat it.
+**Casts reported nothing.** `"abc" as int` was `0`; `1 as bool` was the integer `1`; `-1 as
+u8` was `0xFFFFFFFFFFFFFFFF`. Every cast either did nothing or substituted a plausible value.
+Narrowing is range-checked, and `char` and `bool` are now real conversions rather than
+integers that pretended.
 
-Both backends share `rak_stdlib::ffi::Allocations` so the logic lives in one tested
-place. `ffi_trust` is covered by the existing `ffi_` capability prefix, so it needs
-no new sandbox entry.
+**Declarations were parsed and discarded.** `type X = T` did nothing, so an alias was
+actively broken as an annotation. `trait` did nothing, so a misspelled method left the real
+one unimplemented and the failure appeared much later as `No method ...` at a call site
+nowhere near the typo. `struct` field types were dropped, so no struct or enum literal was
+ever checked. All three are now recorded and checked where they are written.
 
-Existing `ffi_alloc`/`ffi_free` and legitimate access are unchanged and tested.
+**A malformed escape deleted characters.** `"\xZZb"` was `"b"` — two characters consumed and
+discarded, so a typo in an escape silently shortened a string and the program read text its
+source never said.
 
-### Performance
+**`ord` and `chr` disagreed on what a character is.** `ord('A')` was 39, the code point of the
+quote the renderer included, while `ord("A")` was correctly 65. `chr(65)` built a
+one-character `String`, so `chr(65) == 'A'` was false and the pair never composed.
 
-**Constant folding.** `compile_expr` had none. Every `2 * 3` became two `LoadConst`s,
-an `AddI` and a push, on every evaluation — inside the innermost loop of every
-numeric program. `fold_int_binary` now folds the literal-on-literal case for the
-arithmetic and bitwise operators, and is deliberately narrow: both operands must be
-literals; division or remainder by zero, out-of-range shift counts, and overflow all
-fold to *nothing* so the runtime behaviour is unchanged.
+### Runtime
 
-**`rakc bench` now measures something.** The old version timed
-`rakc::eval(&source)` against `vm.run()` and nothing else. That is not a backend
-comparison: the interpreter figure included lexing, parsing and setup, the VM figure
-was bytecode execution on an already-compiled chunk, and compile time was attributed
-to nobody. It also used `as_millis()`, so anything under a millisecond printed
-`0 ms`.
+`fn main` runs with `argv` and its exit code is honoured. Output and errors from inside
+`main` are retained. `--sandbox` actually enables. A negative `substr` bound is a catchable
+error rather than a process abort. An exception restores the environment, call depth and
+defer stack. `--` passes flag-shaped arguments through. `break` and `continue` can no longer
+escape into a caller's loop. Map and struct rendering is key-sorted and array sorting is
+numeric, so output is reproducible run to run and identical across backends.
 
-It now reports five phases — lex, parse, compile, interp, vm — each over `--repeat`
-samples (default 5) after an unmeasured warm-up, as a median. The two execution
-numbers are finally like for like, and the output labels them "execution only" so
-they cannot be misread. On `examples/bench.rak` in a debug build it reports 6.61x,
-which is a measured number where the README previously had a hand-written estimate.
+### Known limitations
 
-**A benchmark corpus.** `examples/bench/` has six workloads covering recursion,
-arithmetic, arrays, map fields, strings and bytes.
+Deliberately unchanged, and listed because each one is a decision rather than an oversight:
 
-### Fixes
+- **A function's value is its `return` expression.** `fn f() { 7 }` yields nil; there is no
+  implicit tail return. Changing it would alter the meaning of every existing program, so it
+  is a v9 decision with a migration story attached.
+- **The VM still rejects several constructs outright** — `async {}`, `test {}`, `assert`,
+  `trace`, `scan`, `fetch`, `Lambda`, `Spawn`, `Raise`, `Comprehension`, `as`, `TypedInt`,
+  `Range`, `ensures`. It refuses rather than misbehaving, which is the honest failure, but it
+  is not support.
+- **Not implemented:** generics, trait bounds and `where` clauses, binding patterns, tail-call
+  optimisation, doc comments, `while`/`for` `else`, and closure capture of mutated locals.
+  There is no general-purpose Rak-level standard library. The LSP cannot format.
+- `substr` returns `""` out of range while `slice` clamps. Two slicing builtins, two
+  policies, neither documented.
 
-Three backend message divergences, all the same defect — the VM and the interpreter
-described the same failure differently, so an error message told you which backend
-you were on:
+### Verification
 
-| expression | interpreter | VM (before) |
-|---|---|---|
-| `5 % 0` | `Division by zero` | `rem by zero` |
-| `5 / 0` | `Division by zero` | `div by zero` |
-| `n * x` | `Undefined variable: x` | `Undefined: x` |
-
-The first two were Rust's internal panic wording copied into hand-written `Err`
-strings. The interpreter was itself inconsistent on the third (`Undefined variable:`
-in two places, `Undefined:` in a third); both backends are now normalised to the
-clearer form.
-
-### Upgrade notes
-
-If you use FFI, you may need to add `ffi_trust` calls. Any `ffi_write`/`ffi_read`
-through a pointer that did not come from `ffi_alloc` or `ffi_string_to_cstr` will now
-fail at the point of use rather than corrupting memory silently — which is the
-intended behaviour, but it is a behavioural change.
+346 unit tests, 61 backend-parity tests, 55 CLI tests and every other integration suite pass
+on both repositories, with CI green. Release binaries for `rakc`, `rak-setup` and `oyvey`
+pass the hardening verifier (ASLR, high-entropy VA, DEP, CFG-compatible image, `LOAD_CONFIG`).
+`oyvey` is versioned and released from its own repository.
 
 Release notes are generated from `.github/release_body.md` at tag time.
