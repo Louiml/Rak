@@ -240,7 +240,7 @@ jobs:
       # rather than left to hang the job.
       - name: Smoke-test the release binary
         shell: bash
-        run: python scripts/smoke_release.py target\release\rakc.exe 0.9.0
+        run: python scripts/smoke_release.py target/release/rakc.exe 0.9.0
 
       - name: Copy binaries for IDE bundling
         run: |
