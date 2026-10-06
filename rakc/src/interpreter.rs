@@ -1375,6 +1375,15 @@ impl Interpreter {
         for import in &module.imports {
             self.load_import(import)?;
         }
+        // Aliases first, so an annotation may name one declared later in the file:
+        //
+        //     let c: Meters = 5
+        //     type Meters = int
+        //
+        // Without this the `let` above was checked against a `Meters` that did not exist yet,
+        // so it failed with "expected Meters, found int" -- while the VM, whose alias table
+        // is a compile-time pre-pass, accepted it. Same program, opposite answers.
+        self.predeclare_aliases(&module.items);
         for stmt in &module.items {
             self.exec_stmt(stmt)?;
         }
@@ -5638,6 +5647,25 @@ impl Interpreter {
     /// Numeric types are mutually compatible; strings, chars, bools, bytes and
     /// containers are checked structurally. The static type checker normally
     /// rejects mismatches at compile time; this is a runtime backstop.
+    /// Record every `type X = T` in `items` before executing any of them.
+    ///
+    /// The same table the compiler builds as a pre-pass, for the same reason: an annotation
+    /// may name an alias declared further down. Executing in order instead means the
+    /// declaration has to come first, which is a rule no user would infer from a language
+    /// that otherwise has no declaration-order requirement.
+    fn predeclare_aliases(&mut self, items: &[Stmt]) {
+        for item in items {
+            match item {
+                Stmt::TypeAlias { name, alias } => {
+                    self.type_aliases.insert(name.clone(), alias.clone());
+                }
+                Stmt::Mod { items, .. } => self.predeclare_aliases(items),
+                Stmt::Export(inner) => self.predeclare_aliases(std::slice::from_ref(inner)),
+                _ => {}
+            }
+        }
+    }
+
     fn check_value_type(&self, v: &Value, ty: &Type) -> crate::Result<()> {
         use Type::*;
         // Expand a `type` alias before checking, so `type Meters = int` accepts an
@@ -5661,6 +5689,20 @@ impl Interpreter {
             Array(_) => matches!(v, Value::Array(_)),
             Tuple(_) => matches!(v, Value::Tuple(_)),
             Map(_, _) => matches!(v, Value::Map(_)),
+            // `array`, `map` and `tuple` written bare parse to `Custom` with that name,
+            // since the parser has no element type to build an `Array` from. Treated as a
+            // nominal type they accept a struct or a map, so `let c: array = [1]` was
+            // rejected with "expected array, found array". The name is resolved to the
+            // container it spells instead.
+            Custom(name) if bare_container_annotation(name) => {
+                let inner = bare_container_type(name).unwrap_or(Custom(name.clone()));
+                // Re-run through the normal arms rather than duplicating them.
+                match inner {
+                    Array(_) => matches!(v, Value::Array(_)),
+                    Tuple(_) => matches!(v, Value::Tuple(_)),
+                    _ => matches!(v, Value::Map(_)),
+                }
+            }
             Custom(_) => matches!(v, Value::Struct { .. } | Value::Map(_)),
             Generic(_) => true,
             Ptr(_) => matches!(v, Value::ForeignPtr(_)),
@@ -10037,6 +10079,30 @@ fn cmp_int_float(i: i128, f: f64) -> core::cmp::Ordering {
 ///
 /// An empty string has no character to report, so it is an error rather than 0: 0 is a
 /// valid code point (`NUL`) and returning it would be indistinguishable from an answer.
+/// Whether a `Custom` type name is one of the container spellings.
+///
+/// `array`, `map` and `tuple` have no element type when written bare, so the parser cannot
+/// build `Type::Array` and falls back to `Custom` with the name intact. That makes them
+/// indistinguishable at check time from a genuinely undeclared type, which is why they need
+/// recognising by name.
+pub fn bare_container_annotation(name: &str) -> bool {
+    matches!(name, "array" | "map" | "tuple")
+}
+
+/// The container type a bare spelling names, with a placeholder element type.
+///
+/// The element type is `Generic("*")`, which the checker treats as compatible with anything,
+/// so `array` constrains only the outer shape -- which is all a bare spelling can express.
+pub fn bare_container_type(name: &str) -> Option<Type> {
+    let any = Box::new(Type::Generic("*".to_string()));
+    match name {
+        "array" => Some(Type::Array(any)),
+        "tuple" => Some(Type::Tuple(vec![])),
+        "map" => Some(Type::Map(any, Box::new(Type::Generic("*".to_string())))),
+        _ => None,
+    }
+}
+
 fn ord_builtin(arg: Option<&Value>) -> Value {
     let c = match arg {
         Some(Value::Char(c)) => *c,

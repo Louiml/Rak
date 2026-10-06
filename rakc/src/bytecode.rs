@@ -7,6 +7,16 @@ pub enum Op {
     StoreLocal,
     LoadGlobal,
     StoreGlobal,
+    /// Check the value on top of the stack against a `Type`, leaving it in place.
+    ///
+    /// Peeks rather than pops, so the `StoreGlobal`/`StoreLocal` that follows still sees
+    /// the value. The type index is a u16 into [`Chunk::types`].
+    ///
+    /// The interpreter enforces a `let` annotation at runtime through
+    /// `check_value_type`; this is the same check, so an annotated `let` means the same
+    /// thing on either backend. Without it the VM ignored every annotation, so a program
+    /// could fail under `rakc run` and succeed under `rakc vm` purely by backend.
+    CheckType,
     Pop,
     Dup,
 
@@ -209,6 +219,17 @@ pub struct Chunk {
     /// Filled at compile time and read by the VM when it builds its publish
     /// index; it carries no runtime state of its own.
     pub module_cells: Vec<ModuleCell>,
+    /// Declared types for `let` annotations, addressed by `Op::CheckType`.
+    ///
+    /// A `Type` is not a `Value`, so it cannot live in `constants`. Filled at compile
+    /// time and read-only at runtime.
+    pub types: Vec<crate::ast::Type>,
+    /// `type X = T` declarations, name → aliased type.
+    ///
+    /// Collected at compile time so `Op::CheckType` can expand an annotation that names an
+    /// alias. Collected up front rather than as each declaration is reached, so an
+    /// annotation may name an alias declared later in the file.
+    pub aliases: Vec<(String, crate::ast::Type)>,
 }
 
 /// The largest a constant pool or code stream can be.
@@ -265,6 +286,39 @@ impl Chunk {
     pub fn write_u16(&mut self, v: u16, line: u32) {
         self.write_byte((v >> 8) as u8, line);
         self.write_byte((v & 0xFF) as u8, line);
+    }
+
+    /// Expand a `type` alias to what it names, transitively.
+    ///
+    /// Bounded so a self-referential alias terminates; such an alias is left unexpanded and
+    /// compares by name, which is how it behaved before aliases were recorded.
+    pub fn expand_alias(&self, ty: &crate::ast::Type) -> crate::ast::Type {
+        let mut cur = ty.clone();
+        for _ in 0..16 {
+            let crate::ast::Type::Custom(name) = &cur else {
+                break;
+            };
+            match self.aliases.iter().find(|(n, _)| n == name) {
+                Some((_, next)) => cur = next.clone(),
+                None => break,
+            }
+        }
+        cur
+    }
+
+    /// Intern a declared type, returning the index `Op::CheckType` reads.
+    pub fn add_type(&mut self, ty: crate::ast::Type) -> u16 {
+        if let Some(i) = self.types.iter().position(|t| *t == ty) {
+            return i as u16;
+        }
+        assert!(
+            self.types.len() < MAX_CHUNK_LEN,
+            "declared-type table overflow: a chunk may hold at most {} types. \
+             Split the program into modules with `import`.",
+            MAX_CHUNK_LEN
+        );
+        self.types.push(ty);
+        (self.types.len() - 1) as u16
     }
 
     pub fn add_const(&mut self, value: crate::value::Value) -> u16 {

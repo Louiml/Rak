@@ -2225,6 +2225,21 @@ impl Vm {
                         None => return Err(format!("Undefined variable: {}", name)),
                     }
                 }
+                Op::CheckType => {
+                    let ti = frame.code.read_u16(frame.ip) as usize;
+                    frame.ip += 2;
+                    let ty = frame
+                        .code
+                        .types
+                        .get(ti)
+                        .cloned()
+                        .ok_or_else(|| format!("declared type {} is out of range", ti))?;
+                    // Peek: the `StoreGlobal`/`StoreLocal` that follows still needs it.
+                    // `Frame::peek` yields Nil for an empty stack, which a `nil` annotation
+                    // accepts and every other one rejects -- so a malformed chunk is a
+                    // type error rather than a panic.
+                    check_vm_value_type(frame.peek(), &ty, &frame.code.aliases)?;
+                }
                 Op::StoreGlobal => {
                     let ci = frame.code.read_u16(frame.ip) as usize;
                     frame.ip += 2;
@@ -3713,6 +3728,111 @@ fn bin_int(frame: &mut Frame, fi: impl Fn(i64, i64) -> i64, ff: impl Fn(f64, f64
 ///
 /// Worded exactly as the interpreter's, so a user does not have to know which backend
 /// they are on to understand the failure.
+/// Whether a runtime value satisfies a declared type.
+///
+/// The mirror of `Interpreter::check_value_type`, and deliberately the same rules rather
+/// than a second opinion: an annotation has to mean one thing, or the same program would
+/// pass on one backend and fail on the other. Numeric types are mutually compatible, so
+/// `let x: f64 = 1` is fine; a nominal type accepts a struct or a map, which is what a
+/// user-defined type looks like at runtime.
+fn check_vm_value_type(
+    v: &crate::value::Value,
+    ty: &crate::ast::Type,
+    aliases: &[(String, crate::ast::Type)],
+) -> Result<(), String> {
+    use crate::ast::Type;
+    use crate::value::Value as V;
+
+    // Expand a `type` alias first, so `type Meters = int` accepts an int. The interpreter
+    // does this through its own alias table; without the same step here an annotation
+    // naming an alias was rejected as a nominal type, and `let c: Meters = 5` failed on the
+    // VM while succeeding on `run`.
+    let expanded = expand_vm_alias(ty, aliases);
+    let ty = &expanded;
+
+    // These arms mirror `Interpreter::check_value_type` case for case, and that is the
+    // point: an annotation has to mean one thing, or the same program passes on one backend
+    // and fails on the other. The bare spellings matter here -- `array`, `map` and `tuple`
+    // with no element type all parse to `Custom("array")` and friends, not to the
+    // `Array`/`Map`/`Tuple` variants, so the `Custom` arm is what actually checks them.
+    let ok = match ty {
+        Type::Int
+        | Type::I8
+        | Type::I16
+        | Type::I32
+        | Type::I64
+        | Type::U8
+        | Type::U16
+        | Type::U32
+        | Type::U64
+        | Type::F32
+        | Type::F64
+        | Type::Hex(_) => v.is_numeric(),
+        Type::String => matches!(v, V::String(_)),
+        Type::Char => matches!(v, V::Char(_)),
+        Type::Bytes => matches!(v, V::Bytes(_)),
+        Type::Bool => matches!(v, V::Bool(_)),
+        Type::Nil | Type::Void => matches!(v, V::Nil),
+        Type::Option(_) => matches!(v, V::Option(_)),
+        Type::Result(_, _) => matches!(v, V::Result(_, _)),
+        Type::Array(_) => matches!(v, V::Array(_)),
+        Type::Tuple(_) => matches!(v, V::Tuple(_)),
+        Type::Map(_, _) => matches!(v, V::Map(_)),
+        Type::Ptr(_) => matches!(v, V::ForeignPtr(_)),
+        Type::Evidence(_) => matches!(v, V::Evidence { .. }),
+        Type::Function(_, _) => matches!(v, V::Closure { .. } | V::NativeFn(_, _)),
+        // `array`, `map` and `tuple` written bare parse to `Custom` with that name, so a
+        // nominal comparison would reject the very container it spells and `let c: array =
+        // [1]` would fail with "expected array, found array". The interpreter resolves the
+        // same three names, and the resolution is shared rather than reimplemented.
+        Type::Custom(name) if crate::interpreter::bare_container_annotation(name) => {
+            match crate::interpreter::bare_container_type(name) {
+                Some(Type::Array(_)) => matches!(v, V::Array(_)),
+                Some(Type::Tuple(_)) => matches!(v, V::Tuple(_)),
+                Some(_) => matches!(v, V::Map(_)),
+                None => true,
+            }
+        }
+        // A nominal type: a struct or a map, which is what one looks like at runtime.
+        Type::Custom(_) => matches!(v, V::Struct { .. } | V::Map(_)),
+        // An in-scope generic parameter. Nothing to check against.
+        Type::Generic(_) => true,
+    };
+
+    if ok {
+        Ok(())
+    } else {
+        // `type_of` rather than a local renderer, so the declared type reads identically to
+        // the interpreter's; and the value is named in Rak's spelling for the same reason.
+        Err(format!(
+            "type mismatch: expected {}, found {}",
+            crate::value::type_of(ty),
+            crate::value::value_type_name(v)
+        ))
+    }
+}
+
+/// Expand a `type` alias to what it names, transitively.
+///
+/// Bounded so a self-referential alias terminates; such an alias is left unexpanded and
+/// compares by name, which is how it behaved before aliases were recorded.
+fn expand_vm_alias(
+    ty: &crate::ast::Type,
+    aliases: &[(String, crate::ast::Type)],
+) -> crate::ast::Type {
+    let mut cur = ty.clone();
+    for _ in 0..16 {
+        let crate::ast::Type::Custom(name) = &cur else {
+            break;
+        };
+        match aliases.iter().find(|(n, _)| n == name) {
+            Some((_, next)) => cur = next.clone(),
+            None => break,
+        }
+    }
+    cur
+}
+
 fn vm_overflow(op: &str, l: i64, r: i64) -> String {
     format!(
         "integer overflow: {} {} {} is out of range for a 64-bit integer",

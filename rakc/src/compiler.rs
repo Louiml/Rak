@@ -196,6 +196,26 @@ fn module_top_level_names(items: &[Stmt]) -> Vec<String> {
     names
 }
 
+/// Collect `type X = T` declarations into the chunk's alias table.
+///
+/// A pre-pass, because `Op::CheckType` needs the alias when it runs and a declaration may
+/// appear after the `let` that names it. `mod` bodies are walked too, since a `pub type` in
+/// one is visible to code in the same module.
+fn collect_aliases(items: &[Stmt], out: &mut Vec<(String, crate::ast::Type)>) {
+    for item in items {
+        match item {
+            Stmt::TypeAlias { name, alias } => {
+                if !out.iter().any(|(n, _)| n == name) {
+                    out.push((name.clone(), alias.clone()));
+                }
+            }
+            Stmt::Mod { items, .. } => collect_aliases(items, out),
+            Stmt::Export(inner) => collect_aliases(std::slice::from_ref(inner), out),
+            _ => {}
+        }
+    }
+}
+
 impl Compiler {
     pub fn new() -> Self {
         Compiler {
@@ -227,6 +247,8 @@ impl Compiler {
         self.current_exports.clear();
         // Pre-pass: collect top-level functions (incl. `pub fn`), macros (incl.
         // `pub macro`), externs, and the exported-name list.
+        // Aliases first, so an annotation may name one declared later in the file.
+        collect_aliases(&module.items, &mut self.chunk.aliases);
         for (idx, stmt) in module.items.iter().enumerate() {
             // Consistent statement-index line markers: the VM debugger breaks on
             // the Nth top-level statement.
@@ -1393,9 +1415,19 @@ impl Compiler {
                 name,
                 value,
                 mutable,
+                type_hint,
                 ..
             } => {
                 self.compile_expr(value)?;
+                // Enforce the annotation, as the interpreter's `check_value_type` does.
+                // `CheckType` peeks, so the store below still sees the value. Without this
+                // the VM ignored every annotation, so `let c: int = "x"` failed under
+                // `rakc run` and succeeded under `rakc vm`.
+                if let Some(ty) = type_hint {
+                    let ti = self.chunk.add_type(ty.clone());
+                    self.emit_op(Op::CheckType);
+                    self.emit_u16(ti);
+                }
                 if self.scope_depth == 0 {
                     let ci = self.global_index(name);
                     self.emit_op(Op::StoreGlobal);

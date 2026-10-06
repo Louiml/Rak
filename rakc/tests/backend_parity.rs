@@ -1376,6 +1376,178 @@ dump chr(0) == chr(0)
     assert_eq!(results, vec!["0", "nil", "nil", "true"], "got: {:?}", out);
 }
 
+/// A `let` annotation is enforced on both backends.
+///
+/// The VM ignored annotations entirely. The compiler's plain-`Let` arm never looked at
+/// `type_hint`, so `let c: int = "x"` failed under `rakc run` and *succeeded* under
+/// `rakc vm`. A program whose correctness depends on a type annotation was only annotated on
+/// one backend, which is worse than having no annotations at all: the checking looked like
+/// it worked.
+///
+/// `Op::CheckType` peeks at the value so the store that follows still sees it, and the VM's
+/// check mirrors `Interpreter::check_value_type` arm for arm -- an annotation has to mean one
+/// thing, or the same program passes on one backend and fails on the other.
+///
+/// Written with `run_body` rather than `agree`, because `agree` treats "both backends
+/// failed" as a failure -- it is built for programs that are supposed to succeed.
+#[test]
+fn parity_a_let_annotation_is_enforced_on_both_backends() {
+    let (run_kind, run_msg) = run_body("run", "let c: int = \"x\"");
+    let (vm_kind, vm_msg) = run_body("vm", "let c: int = \"x\"");
+    assert_eq!(run_kind, "error", "the interpreter should reject this");
+    assert_eq!(vm_kind, "error", "the VM should reject this too");
+    assert_eq!(run_msg, vm_msg, "the two backends word it differently");
+    assert!(run_msg.contains("type mismatch"), "got: {}", run_msg);
+}
+
+/// Every annotation shape, mismatched, with the two messages compared.
+///
+/// `agree` treats "both failed" as agreement without comparing what they said, so this walks
+/// the shapes directly and compares the message text. The prefixes differ by design
+/// (`Error: Runtime error:` versus `VM error:`), so only the body is compared.
+#[test]
+fn parity_annotation_mismatch_messages_match() {
+    let cases: &[&str] = &[
+        "let c: int = \"x\"",
+        "let c: string = 5",
+        "let c: bool = 1",
+        "let c: char = 5",
+        "let c: bytes = 5",
+        "let c: array = 5",
+        "let c: tuple = 5",
+        "let c: map = 5",
+        "struct P { v: int }\nlet c: P = 5",
+        "fn f() { let c: int = \"x\" }\nf()",
+        "for i in [1] { let c: int = \"x\" }",
+        "type Meters = int\nlet c: Meters = \"x\"",
+    ];
+    for src in cases {
+        let (label, body) = run_body("run", src);
+        let (vm_label, vm_body) = run_body("vm", src);
+        assert_eq!(
+            label, vm_label,
+            "{:?}: one backend succeeded and the other did not",
+            src
+        );
+        assert!(
+            body.contains("type mismatch"),
+            "{:?}: expected a type mismatch, got {:?}",
+            src,
+            body
+        );
+        assert_eq!(
+            body, vm_body,
+            "{:?}: the two backends word the mismatch differently",
+            src
+        );
+    }
+}
+
+/// A valid annotation must still be accepted, including through an alias.
+///
+/// Without this the check could pass by rejecting everything, which is why the mismatch test
+/// above is not the whole story.
+#[test]
+fn parity_a_valid_annotation_is_accepted_on_both_backends() {
+    let out = agree(
+        "valid annotations",
+        r#"
+let a: int = 5
+let b: string = "s"
+let c: array = [1]
+let d: map = {"k": 1}
+let e: f64 = 1
+struct P { v: int }
+let f: P = P { v: 1 }
+type Meters = int
+let g: Meters = 7
+dump a
+dump b
+dump c
+dump d
+dump e
+dump f
+dump g
+"#,
+    );
+    let results: Vec<&str> = out
+        .iter()
+        .filter(|l| l.starts_with("[DUMP]"))
+        .map(|l| l.trim_start_matches("[DUMP] ").trim())
+        .collect();
+    assert_eq!(
+        results,
+        vec!["5", "s", "[1]", "{k: 1}", "1", "P {v: 1}", "7"],
+        "got: {:?}",
+        out
+    );
+}
+
+/// `array`, `map` and `tuple` written bare are containers, not nominal types.
+///
+/// Written without an element type the parser cannot build `Array`, so it produces
+/// `Custom("array")` and the runtime compared it as a struct-or-map -- which rejected the
+/// array it names, on *both* backends: `let c: array = [1]` reported "expected array, found
+/// array".
+#[test]
+fn parity_a_bare_container_annotation_accepts_its_container() {
+    let out = agree(
+        "a bare container annotation",
+        r#"
+let a: array = [1]
+let b: map = {"k": 1}
+dump a
+dump b
+"#,
+    );
+    let results: Vec<&str> = out
+        .iter()
+        .filter(|l| l.starts_with("[DUMP]"))
+        .map(|l| l.trim_start_matches("[DUMP] ").trim())
+        .collect();
+    assert_eq!(results, vec!["[1]", "{k: 1}"], "got: {:?}", out);
+}
+
+/// An annotation naming an alias declared *later* still resolves.
+///
+/// The alias table is a compile-time pre-pass for exactly this: the interpreter's is
+/// populated as execution reaches each declaration, so ordering matters there.
+#[test]
+fn parity_an_annotation_may_name_a_later_alias() {
+    let out = agree(
+        "forward alias reference",
+        r#"
+let c: Meters = 5
+type Meters = int
+dump c
+"#,
+    );
+    assert!(out.iter().any(|l| l.contains("[DUMP] 5")), "got: {:?}", out);
+}
+
+/// Run one backend and return the message body without its prefix.
+///
+/// The prefixes differ by design -- `Error: Runtime error:` for the interpreter, `VM error:`
+/// for the VM -- so a test comparing wording has to strip them.
+fn run_body(backend: &str, src: &str) -> (&'static str, String) {
+    match rakc::eval_vm_in(src, ".").err() {
+        Some(e) => ("error", strip_prefix(&e)),
+        None => match rakc::eval_in(src, ".") {
+            Ok(_) => ("ok", String::new()),
+            Err(e) => ("error", strip_prefix(&e.to_string())),
+        },
+    }
+}
+
+fn strip_prefix(msg: &str) -> String {
+    for p in ["Error: Runtime error: ", "VM error: ", "Error: "] {
+        if let Some(rest) = msg.strip_prefix(p) {
+            return rest.trim().to_string();
+        }
+    }
+    msg.trim().to_string()
+}
+
 #[test]
 fn parity_sets() {
     // Sets are spec 7A.11. The insertion order matters as much as the

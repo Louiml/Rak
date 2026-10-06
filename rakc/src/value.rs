@@ -610,6 +610,21 @@ impl Env {
     }
 }
 
+/// A runtime value named the way Rak spells it.
+///
+/// `Value::type_name` reports the *storage* width -- "i64", "f64" -- because that is what
+/// the VM's own diagnostics are about. A type-mismatch message has to read the same on both
+/// backends, and the interpreter says "int" and "float", so this is the Rak spelling for
+/// that one message rather than changing every other.
+pub fn value_type_name(v: &Value) -> &'static str {
+    match v {
+        Value::I8(_) | Value::I16(_) | Value::I32(_) | Value::I64(_) => "int",
+        Value::U8(_) | Value::U16(_) | Value::U32(_) | Value::U64(_) => "uint",
+        Value::F32(_) | Value::F64(_) => "float",
+        other => other.type_name(),
+    }
+}
+
 pub fn type_of(t: &Type) -> String {
     match t {
         Type::Hex(_) => "hex".to_string(),
