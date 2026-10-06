@@ -1012,6 +1012,135 @@ dump 0.0 == -0.0
     );
 }
 
+/// Integer overflow is an error, and the two backends word it identically.
+///
+/// A user should not have to know which backend they are on to understand a failure, so
+/// this compares the message body, not just that both failed. The prefixes differ by
+/// design (`Error: Runtime error:` versus `VM error:`), so the test splits on the shared
+/// part instead.
+#[test]
+fn parity_integer_overflow_is_reported() {
+    let cases = [
+        "dump 9223372036854775807 + 1",
+        "dump 9223372036854775807 * 2",
+        // Built by subtraction because the lexer rejects a literal `-9223372036854775808`.
+        "let m = 0 - 9223372036854775807 - 1\ndump m - 1",
+        "let m = 0 - 9223372036854775807 - 1\nlet n = 0 - 1\ndump m / n",
+        "let m = 0 - 9223372036854775807 - 1\nlet n = 0 - 1\ndump m % n",
+    ];
+    for src in cases {
+        let interp = rakc::eval_in(src, ".")
+            .map(|_| String::new())
+            .err()
+            .unwrap_or_else(|| {
+                panic!(
+                    "{:?}: the interpreter should have reported an overflow",
+                    src
+                )
+            });
+        let vm = rakc::eval_vm_in(src, ".")
+            .err()
+            .unwrap_or_else(|| panic!("{:?}: the VM should have reported an overflow", src));
+        assert!(
+            interp.to_string().contains("integer overflow"),
+            "{:?}: interpreter said {:?}",
+            src,
+            interp
+        );
+        assert!(
+            vm.contains("integer overflow"),
+            "{:?}: VM said {:?}",
+            src,
+            vm
+        );
+        assert_eq!(
+            overflow_body(&interp.to_string()),
+            overflow_body(&vm),
+            "{:?}: the two backends word it differently",
+            src
+        );
+    }
+}
+
+/// The part of an overflow message after the shared prefix.
+fn overflow_body(msg: &str) -> &str {
+    msg.split("integer overflow")
+        .nth(1)
+        .expect("the message contains 'integer overflow'")
+        .trim()
+}
+
+/// Arithmetic inside the representable range is unchanged.
+///
+/// The point of the change is the boundary, so everything below it has to keep working --
+/// including the value one short of the maximum, which is the case most likely to be
+/// broken by an off-by-one in a range check.
+#[test]
+fn parity_arithmetic_in_range_is_unchanged() {
+    let out = agree(
+        "in-range arithmetic",
+        r#"
+dump 1 + 2
+dump 10 - 3
+dump 6 * 7
+dump 7 / 2
+dump 7 % 2
+dump 0 - 5
+dump 9223372036854775807 - 1
+dump 2147483647 * 2147483647
+"#,
+    );
+    let results: Vec<&str> = out
+        .iter()
+        .filter(|l| l.starts_with("[DUMP]"))
+        .map(|l| l.trim_start_matches("[DUMP] ").trim())
+        .collect();
+    assert_eq!(
+        results,
+        vec![
+            "3",
+            "7",
+            "42",
+            "3",
+            "1",
+            "-5",
+            "9223372036854775806",
+            "4611686014132420609"
+        ],
+        "got: {:?}",
+        out
+    );
+}
+
+/// Division by zero keeps its existing wording on both sides.
+///
+/// It already had a deliberate shared message; this pins it next to the new overflow error
+/// so adding one did not disturb the other.
+#[test]
+fn parity_division_by_zero_is_unchanged() {
+    for src in ["dump 1 / 0", "dump 1 % 0"] {
+        let interp = rakc::eval_in(src, ".")
+            .map(|_| String::new())
+            .err()
+            .unwrap_or_else(|| panic!("{:?}: expected a division by zero", src));
+        let vm = rakc::eval_vm_in(src, ".")
+            .err()
+            .unwrap_or_else(|| panic!("{:?}: expected a division by zero", src));
+        assert!(
+            interp.to_string().contains("Division by zero"),
+            "{:?}: interpreter said {:?}",
+            src,
+            interp
+        );
+        assert!(
+            vm.contains("Division by zero"),
+            "{:?}: VM said {:?}",
+            src,
+            vm
+        );
+    }
+}
+
 #[test]
 fn parity_sets() {
     // Sets are spec 7A.11. The insertion order matters as much as the

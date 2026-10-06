@@ -139,7 +139,14 @@ fn constant_folding_preserves_semantics() {
             "dump [(2 * 3), (7 / 2), (1 << 4), (2 * 3 + 1)]\n",
             "[DUMP] [6, 3, 16, 7]",
         ),
-        ("dump 2147483647 * 2147483647 * 2147483647\n", "[DUMP]"),
+        // Overflow is an error, not a wrap. This case used to expect `[DUMP]` because
+        // `2147483647^3` wrapped to a number that printed; folding now has to fold the
+        // error too, and the point of the case is that folding does not change what the
+        // program means.
+        (
+            "dump 2147483647 * 2147483647 * 2147483647\n",
+            "integer overflow",
+        ),
         ("dump 5 % 0\n", "Division by zero"),
         ("dump 1 / 0\n", "Division by zero"),
         ("dump 3 * undefined_name\n", "Undefined variable"),

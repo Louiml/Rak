@@ -3459,6 +3459,12 @@ impl Vm {
                             // through a hand-written error string; the interpreter said "Division by zero".
                             return Err("Division by zero".to_string());
                         }
+                        // `i64::MIN / -1` has no representable result: Rust panics on it in
+                        // a debug build and wraps in a release one, so it is reported like any
+                        // other overflow rather than left to the build profile.
+                        if a == i64::MIN && b == -1 {
+                            return Err(vm_overflow("/", a, b));
+                        }
                         push(frame, I64(a / b))
                     }
                     BinArith::Rem => {
@@ -3469,11 +3475,28 @@ impl Vm {
                             // the interpreter.
                             return Err("Division by zero".to_string());
                         }
+                        if a == i64::MIN && b == -1 {
+                            // `i64::MIN % -1` traps for the same reason division does:
+                            // the result is not representable, and Rust panics rather
+                            // than returning anything.
+                            return Err(vm_overflow("%", a, b));
+                        }
                         push(frame, I64(a % b))
                     }
-                    BinArith::Add => push(frame, I64(a.wrapping_add(b))),
-                    BinArith::Sub => push(frame, I64(a.wrapping_sub(b))),
-                    BinArith::Mul => push(frame, I64(a.wrapping_mul(b))),
+                    // Checked, not wrapping: the interpreter reports these and the VM must
+                    // report the same. Wrapping made `max + 1` come out as `min`.
+                    BinArith::Add => push(
+                        frame,
+                        I64(a.checked_add(b).ok_or_else(|| vm_overflow("+", a, b))?),
+                    ),
+                    BinArith::Sub => push(
+                        frame,
+                        I64(a.checked_sub(b).ok_or_else(|| vm_overflow("-", a, b))?),
+                    ),
+                    BinArith::Mul => push(
+                        frame,
+                        I64(a.checked_mul(b).ok_or_else(|| vm_overflow("*", a, b))?),
+                    ),
                 },
                 (F64(a), F64(b)) => push(
                     frame,
@@ -3684,6 +3707,17 @@ fn bin_int(frame: &mut Frame, fi: impl Fn(i64, i64) -> i64, ff: impl Fn(f64, f64
             frame.push(Value::F64(ff(av, bv)));
         }
     }
+}
+
+/// Error for an integer operation that left the representable range.
+///
+/// Worded exactly as the interpreter's, so a user does not have to know which backend
+/// they are on to understand the failure.
+fn vm_overflow(op: &str, l: i64, r: i64) -> String {
+    format!(
+        "integer overflow: {} {} {} is out of range for a 64-bit integer",
+        l, op, r
+    )
 }
 
 fn bin_float(frame: &mut Frame, f: impl Fn(f64, f64) -> f64) {

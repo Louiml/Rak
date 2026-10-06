@@ -5740,22 +5740,29 @@ impl Interpreter {
                     }
                 };
                 let res = match op {
-                    BinOp::Add => l.wrapping_add(r),
-                    BinOp::Sub => l.wrapping_sub(r),
-                    BinOp::Mul => l.wrapping_mul(r),
+                    BinOp::Add => checked_int_arith(op, l, r, l.checked_add(r))?,
+                    BinOp::Sub => checked_int_arith(op, l, r, l.checked_sub(r))?,
+                    BinOp::Mul => checked_int_arith(op, l, r, l.checked_mul(r))?,
                     BinOp::Div => {
                         if r == 0 {
                             return Err(crate::RakError::Runtime("Division by zero".to_string()));
-                        } else {
-                            l / r
                         }
+                        // `i64::MIN / -1` has no representable result. Rust panics on it in
+                        // a debug build and wraps in a release one, so neither answer is
+                        // acceptable; it is an overflow like any other.
+                        if l == i64::MIN && r == -1 {
+                            return Err(overflow_error("/", l, r));
+                        }
+                        l / r
                     }
                     BinOp::Rem => {
                         if r == 0 {
                             return Err(crate::RakError::Runtime("Division by zero".to_string()));
-                        } else {
-                            l % r
                         }
+                        if l == i64::MIN && r == -1 {
+                            return Err(overflow_error("%", l, r));
+                        }
+                        l % r
                     }
                     BinOp::BitAnd => l & r,
                     BinOp::BitOr => l | r,
@@ -9973,6 +9980,37 @@ fn cmp_int_float(i: i128, f: f64) -> core::cmp::Ordering {
         Ordering::Equal => Ordering::Less,
         other => other,
     }
+}
+
+/// Error for an integer operation that left the representable range.
+fn overflow_error(op: &str, l: i64, r: i64) -> crate::RakError {
+    crate::RakError::Runtime(format!(
+        "integer overflow: {} {} {} is out of range for a 64-bit integer",
+        l, op, r
+    ))
+}
+
+/// Unwrap a checked integer operation, or report the overflow.
+///
+/// Arithmetic used to wrap, so `9223372036854775807 + 1` was
+/// `-9223372036854775808` and `9223372036854775807 * 2` was `-2`. A wrapped result is
+/// worse than a wrong one: it is a plausible number, so the bug surfaces somewhere else
+/// entirely, or not at all. Nothing documented wrapping and no test relied on it, so this
+/// is an error like the division-by-zero beside it.
+fn checked_int_arith(
+    op: &crate::ast::BinOp,
+    l: i64,
+    r: i64,
+    got: Option<i64>,
+) -> crate::Result<i64> {
+    use crate::ast::BinOp;
+    let sym = match op {
+        BinOp::Add => "+",
+        BinOp::Sub => "-",
+        BinOp::Mul => "*",
+        _ => "?",
+    };
+    got.ok_or_else(|| overflow_error(sym, l, r))
 }
 
 fn is_numeric_val(v: &Value) -> bool {
