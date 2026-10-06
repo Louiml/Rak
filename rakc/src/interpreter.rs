@@ -688,9 +688,9 @@ impl PartialEq for Value {
             (Value::Option(a), Value::Option(b)) => a == b,
             // Numeric cross-comparison: `0xA == 10 == 10.0` are all "equal"
             // regardless of literal representation (Hex/Int/Float).
-            (a, b) if is_numeric_val(a) && is_numeric_val(b) => {
-                a.as_f64().unwrap_or(0.0) == b.as_f64().unwrap_or(0.0)
-            }
+            (a, b) if is_numeric_val(a) && is_numeric_val(b) => cmp_numeric(a, b)
+                .map(core::cmp::Ordering::is_eq)
+                .unwrap_or(false),
             (Value::Regex(a), Value::Regex(b)) => a.pattern == b.pattern && a.flags == b.flags,
             (Value::Evidence { inner: a, .. }, Value::Evidence { inner: b, .. }) => a == b,
             (Value::Evidence { inner: a, .. }, other) => (**a).eq(other),
@@ -5713,12 +5713,17 @@ impl Interpreter {
             _ if matches!(op, BinOp::Lt | BinOp::LtEq | BinOp::Gt | BinOp::GtEq)
                 && (matches!(left, Value::Float(_)) || matches!(right, Value::Float(_))) =>
             {
-                let (l, r) = (left.as_f64().unwrap_or(0.0), right.as_f64().unwrap_or(0.0));
+                // Compared exactly. Going through `as_f64` on both sides rounded any
+                // integer above 2^53, so `9007199254740993 < 9007199254740994.0` was
+                // false -- the question was answered about the rounded values, not the
+                // numbers written.
+                let ord = cmp_numeric(left, right).unwrap_or(core::cmp::Ordering::Equal);
+                use core::cmp::Ordering::*;
                 Ok(Value::Bool(match op {
-                    BinOp::Lt => l < r,
-                    BinOp::LtEq => l <= r,
-                    BinOp::Gt => l > r,
-                    BinOp::GtEq => l >= r,
+                    BinOp::Lt => ord == Less,
+                    BinOp::LtEq => ord != Greater,
+                    BinOp::Gt => ord == Greater,
+                    BinOp::GtEq => ord != Less,
                     _ => unreachable!(),
                 }))
             }
@@ -9911,6 +9916,65 @@ fn expr_str(e: &Expr) -> String {
 
 /// True for the interpreter's numeric value variants (Hex/Int/Float), used to
 /// enable cross-representation numeric equality (`0xA == 10`).
+/// Order two numbers exactly.
+///
+/// Returns `None` if either side is not a number. Two integers are compared as `i128` and
+/// two floats as `f64`; a mixed pair is resolved without ever rounding the integer, which
+/// is the whole point. `9007199254740993 == 9007199254740993.0` was true when both sides
+/// went through `as_f64`, because 2^53 + 1 is the first integer an f64 cannot hold -- so
+/// the comparison answered a question about the rounded numbers rather than the ones
+/// written.
+///
+/// A float with a fractional part is never equal to an integer; its whole part orders the
+/// pair and the fraction breaks the tie downwards. An integral float converts to `i128`
+/// exactly, and Rust's cast saturates rather than wrapping, so even a float beyond `i128`
+/// orders correctly.
+fn cmp_numeric(a: &Value, b: &Value) -> Option<core::cmp::Ordering> {
+    use core::cmp::Ordering;
+    let ai = integer_value(a);
+    let bi = integer_value(b);
+
+    match (ai, bi) {
+        (Some(x), Some(y)) => Some(x.cmp(&y)),
+        (None, None) => Some(
+            a.as_f64()
+                .unwrap_or(0.0)
+                .partial_cmp(&b.as_f64().unwrap_or(0.0))
+                .unwrap_or(Ordering::Equal),
+        ),
+        (Some(i), None) => Some(cmp_int_float(i, b.as_f64().unwrap_or(0.0))),
+        (None, Some(i)) => Some(cmp_int_float(i, a.as_f64().unwrap_or(0.0)).reverse()),
+    }
+}
+
+/// The integer a numeric value holds, or `None` for a float.
+///
+/// `Hex` is included so `0xA` orders as the number 10 rather than as a different
+/// representation, which is what keeps `0xA == 10` true.
+fn integer_value(v: &Value) -> Option<i128> {
+    match v {
+        Value::Int(i) => Some(*i as i128),
+        // Sign-extended, matching how the arithmetic fast path treats a hex operand.
+        Value::Hex(h) => Some(*h as i64 as i128),
+        _ => None,
+    }
+}
+
+/// Order an integer against a float without rounding the integer.
+fn cmp_int_float(i: i128, f: f64) -> core::cmp::Ordering {
+    use core::cmp::Ordering;
+    if f.fract() == 0.0 {
+        // An integral float converts exactly, and the cast saturates past `i128`.
+        return i.cmp(&(f as i128));
+    }
+    // `f` has a fraction, so it cannot equal `i`. Its whole part decides, unless the two
+    // whole parts agree -- and then the fraction puts `f` above `i`.
+    match i.cmp(&(f.trunc() as i128)) {
+        Ordering::Equal => Ordering::Less,
+        other => other,
+    }
+}
+
 fn is_numeric_val(v: &Value) -> bool {
     matches!(v, Value::Hex(_) | Value::Int(_) | Value::Float(_))
 }

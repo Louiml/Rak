@@ -4,6 +4,62 @@ use std::fmt;
 use std::sync::Arc;
 
 /// A compiled regular expression, shared cheaply via `Arc`.
+/// Order two numeric values exactly.
+///
+/// Equality used to convert both sides with `as_f64`, so `9007199254740993 ==
+/// 9007199254740993.0` was true: 2^53 + 1 is the first integer an f64 cannot hold, so
+/// both sides rounded to the same value. The interpreter compares exactly, and a parity
+/// split here would be worse than either answer alone.
+///
+/// Two integers are compared as `i128`, two floats as `f64`, and a mixed pair without
+/// rounding the integer. An integral float converts exactly and the cast saturates past
+/// `i128`; a float with a fraction is never equal and orders below the integer it rounds
+/// up from.
+pub fn cmp_numeric(a: &Value, b: &Value) -> Option<std::cmp::Ordering> {
+    use std::cmp::Ordering;
+    match (integer_value(a), integer_value(b)) {
+        (Some(x), Some(y)) => Some(x.cmp(&y)),
+        (None, None) => Some(
+            a.as_f64()
+                .unwrap_or(0.0)
+                .partial_cmp(&b.as_f64().unwrap_or(0.0))
+                .unwrap_or(Ordering::Equal),
+        ),
+        (Some(i), None) => Some(cmp_int_float(i, b.as_f64().unwrap_or(0.0))),
+        (None, Some(i)) => Some(cmp_int_float(i, a.as_f64().unwrap_or(0.0)).reverse()),
+    }
+}
+
+/// The integer a numeric value holds, or `None` for a float.
+///
+/// Widened to `i128`, which is exact for every width the VM models.
+fn integer_value(v: &Value) -> Option<i128> {
+    match v {
+        Value::I8(n) => Some(*n as i128),
+        Value::I16(n) => Some(*n as i128),
+        Value::I32(n) => Some(*n as i128),
+        Value::I64(n) => Some(*n as i128),
+        Value::U8(n) => Some(*n as i128),
+        Value::U16(n) => Some(*n as i128),
+        Value::U32(n) => Some(*n as i128),
+        Value::U64(n) => Some(*n as i128),
+        Value::Hex(n) => Some(*n as i128),
+        _ => None,
+    }
+}
+
+/// Order an integer against a float without rounding the integer.
+fn cmp_int_float(i: i128, f: f64) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    if f.fract() == 0.0 {
+        return i.cmp(&(f as i128));
+    }
+    match i.cmp(&(f.trunc() as i128)) {
+        Ordering::Equal => Ordering::Less,
+        other => other,
+    }
+}
+
 pub struct RegexValue {
     pub pattern: String,
     pub flags: String,
@@ -278,6 +334,28 @@ impl Value {
     }
 }
 
+impl Value {
+    /// Whether two values are interchangeable *as constants*.
+    ///
+    /// Deliberately stricter than [`PartialEq`]. `PartialEq` answers "are these the same
+    /// number", which is what the language wants for `0xA == 10 == 10.0`. The constant
+    /// pool needs a different question: "will loading this slot give me a value of the
+    /// type I wrote down".
+    ///
+    /// Using `PartialEq` there let a later constant reuse an earlier one's slot across
+    /// representations, so `let q = 2` followed by `dump 2.0` loaded an `I64` -- and then
+    /// `-2.0` was a negated integer rather than a negated float, which quietly changed
+    /// what a comparison meant. The two representations compare equal and must not share
+    /// a slot.
+    ///
+    /// The discriminant check covers the numeric widths and `Hex`, which is where the
+    /// collision actually happened. Containers are not constant-folded into the pool, so
+    /// they are not a concern here.
+    pub fn same_const_repr(&self, other: &Self) -> bool {
+        std::mem::discriminant(self) == std::mem::discriminant(other) && self == other
+    }
+}
+
 impl PartialEq for Value {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
@@ -308,9 +386,9 @@ impl PartialEq for Value {
             }
             (Value::Option(a), Value::Option(b)) => a == b,
             // Cross-representation numeric equality: `0xA == 10 == 10.0`.
-            (a, b) if a.is_numeric() && b.is_numeric() => {
-                a.as_f64().unwrap_or(0.0) == b.as_f64().unwrap_or(0.0)
-            }
+            (a, b) if a.is_numeric() && b.is_numeric() => cmp_numeric(a, b)
+                .map(std::cmp::Ordering::is_eq)
+                .unwrap_or(false),
             (Value::Regex(a), Value::Regex(b)) => a.pattern == b.pattern && a.flags == b.flags,
             (Value::ForeignPtr(a), Value::ForeignPtr(b)) => a == b,
             (Value::Closure { code: a, .. }, Value::Closure { code: b, .. }) => Arc::ptr_eq(a, b),

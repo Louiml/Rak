@@ -3560,16 +3560,24 @@ impl Vm {
         let b = match op {
             CompareOp::Eq => l == r,
             CompareOp::NotEq => l != r,
-            // If either side is a float, compare as f64 so `x >= 0.0` works.
+            // Any numeric pair, compared exactly rather than by truncating both sides
+            // to i64.
+            //
+            // Two bugs lived here. The guard matched only `F32`, so an `F64` fell through
+            // to `as_i64()` on both sides and truncated: `2.5 > 2.0` compared `2 > 2` and
+            // was false while the interpreter said true. And the float branch itself
+            // converted both sides through `f64`, so an integer above 2^53 was rounded on
+            // the way -- `9007199254740993 < 9007199254740994.0` was false.
             CompareOp::Lt | CompareOp::Gt | CompareOp::LtEq | CompareOp::GtEq
-                if matches!(l, Value::F32(_)) || matches!(r, Value::F32(_)) =>
+                if l.is_numeric() && r.is_numeric() =>
             {
-                let (a, bf) = (l.as_f64().unwrap_or(0.0), r.as_f64().unwrap_or(0.0));
+                let ord = crate::value::cmp_numeric(&l, &r).unwrap_or(std::cmp::Ordering::Equal);
+                use std::cmp::Ordering::*;
                 match op {
-                    CompareOp::Lt => a < bf,
-                    CompareOp::Gt => a > bf,
-                    CompareOp::LtEq => a <= bf,
-                    CompareOp::GtEq => a >= bf,
+                    CompareOp::Lt => ord == Less,
+                    CompareOp::Gt => ord == Greater,
+                    CompareOp::LtEq => ord != Greater,
+                    CompareOp::GtEq => ord != Less,
                     _ => unreachable!(),
                 }
             }

@@ -910,6 +910,108 @@ dump Shape::Empty
     assert!(text.contains("Empty"), "{}", text);
 }
 
+/// Numbers compare exactly, not through a lossy `f64`.
+///
+/// 2^53 + 1 is the first integer an f64 cannot represent, so anything at or above it was
+/// rounded before comparison and could compare equal to a different number.
+#[test]
+fn parity_numbers_compare_exactly_across_2_pow_53() {
+    let out = agree(
+        "integers above 2^53 compare exactly against floats",
+        r#"
+let a = 9007199254740993
+let b = 9007199254740993.0
+let c = 9007199254740992.0
+let d = 9007199254740994.0
+dump a == b     // 2^53 + 1 has no f64 representation, so this must not be equal
+dump a == c
+dump a < d      // ... and it is strictly below 2^53 + 2
+dump a > c
+dump a <= c
+dump a >= d
+"#,
+    );
+    let text = out.join("\n");
+    let results: Vec<&str> = out
+        .iter()
+        .filter(|l| l.starts_with("[DUMP]"))
+        .map(|l| l.trim_start_matches("[DUMP] ").trim())
+        .collect();
+    assert_eq!(
+        results,
+        vec!["false", "false", "true", "true", "false", "false"],
+        "got: {:?}",
+        text
+    );
+}
+
+/// An `F64` operand must be compared as a float, not truncated to an integer.
+///
+/// The VM's ordering branch guarded on `Value::F32` only, so `F64` fell through to
+/// `as_i64()` on both sides: `2.5 > 2.0` compared `2 > 2` and was false on the VM while
+/// the interpreter said true.
+#[test]
+fn parity_float_ordering_does_not_truncate() {
+    let out = agree(
+        "F64 operands order by value, not truncated",
+        r#"
+dump 2.5 > 2.0
+dump 1.5 < 2
+dump 3 > 2.5
+dump 2 < 1.5
+dump 1.5 == 1.5
+dump 1 < 2.0
+dump 1.0 <= 1.0
+dump 2.5 >= 2.5
+"#,
+    );
+    let results: Vec<&str> = out
+        .iter()
+        .filter(|l| l.starts_with("[DUMP]"))
+        .map(|l| l.trim_start_matches("[DUMP] ").trim())
+        .collect();
+    assert_eq!(
+        results,
+        vec!["true", "true", "true", "false", "true", "true", "true", "true"],
+        "got: {:?}",
+        out
+    );
+}
+
+/// Ordinary comparisons, and cross-representation equality, must be unchanged.
+///
+/// The point of the numeric arm was that `0xA == 10 == 10.0` are all equal regardless of
+/// how the literal was written. Fixing the precision must not cost that.
+#[test]
+fn parity_ordinary_numeric_comparisons_are_unchanged() {
+    let out = agree(
+        "ordinary comparisons",
+        r#"
+dump 1 == 1.0
+dump 1 != 1.0
+dump 1 == 1
+dump 0xA == 10
+dump 0xFF == 255
+dump 2 >= 2.0
+dump 1.5 < 2
+dump -1 < 0.0
+dump -2.5 < -2.0
+dump 0.0 == -0.0
+"#,
+    );
+    let results: Vec<&str> = out
+        .iter()
+        .filter(|l| l.starts_with("[DUMP]"))
+        .map(|l| l.trim_start_matches("[DUMP] ").trim())
+        .collect();
+    assert_eq!(
+        results,
+        vec!["true", "false", "true", "true", "true", "true", "true", "true", "true", "true"],
+        "got: {:?}",
+        out
+    );
+}
+
 #[test]
 fn parity_sets() {
     // Sets are spec 7A.11. The insertion order matters as much as the

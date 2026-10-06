@@ -269,7 +269,14 @@ impl Chunk {
 
     pub fn add_const(&mut self, value: crate::value::Value) -> u16 {
         for (i, c) in self.constants.iter().enumerate() {
-            if c == &value {
+            // `same_const_repr`, not `==`. `PartialEq` is numeric-aware -- `I64(2)` and
+            // `F64(2.0)` are equal -- so deduplicating with it let `2.0` reuse the slot
+            // holding `2`, and `LoadConst` then pushed an integer where a float was
+            // written. That is not just a display difference: `-2.0` is a unary negation,
+            // so it became `I64(-2)`, and `1.0 / 3.0` beside a `1` anywhere in the program
+            // became integer division. Anything comparing the two values then answered a
+            // different question from the one written.
+            if c.same_const_repr(&value) {
                 return i as u16;
             }
         }
