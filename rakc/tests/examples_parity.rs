@@ -134,12 +134,10 @@ const VM_BLOCKED: &[(&str, &str)] = &[
     ("secrets_demo", "secret_get"),
     ("security_workflow", "net_raw_send / net_raw_recv"),
     ("self_host", "compile / extern_call"),
-    ("stdlib_demo", "whois_parse is VM-only; the rest is covered"),
     ("streaming", "stream_csv / stream_jsonl with closures"),
     ("traits", "trait protocols are interpreter-only"),
     ("v071_demo", "argv / parse_args"),
     ("vm_features", "process_spawn / channel"),
-    ("log_info", "log_info is VM-only, not the other way round"),
 ];
 
 /// Examples whose output is not reproducible, so two runs of the *same*

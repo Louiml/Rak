@@ -58,7 +58,7 @@ cannot catch a per-backend omission; only a comparison can.
 
 ## What is not, and why
 
-**34 builtins exist only on the interpreter**, and every one of them is blocked
+**33 builtins exist only on the interpreter**, and every one of them is blocked
 on the same thing.
 
 A VM native has the signature:
@@ -73,11 +73,11 @@ expressible as a native:
 
 | Family | Count | What it needs |
 | --- | --- | --- |
-| `channel`, `chan_send`, `chan_recv`, `select`, `timeout`, `await_all`, `task_group`, `thread_join` | 9 | Suspend and resume |
-| `net_listen`, `net_accept`, `net_connect`, `net_local_addr`, `tcp_*`, `ws_*` | 17 | Blocking I/O, and `tcp_connect_async` needs suspension |
+| `channel`, `chan_send`, `chan_recv`, `select`, `timeout`, `await_all`, `task_group`, `thread_join` | 8 | Suspend and resume |
+| `net_listen`, `net_accept`, `net_connect`, `net_local_addr`, `http_server_poll`, `tcp_*`, `ws_*` | 15 | Blocking I/O, and `tcp_connect_async` needs suspension |
 | `spawn`, `dns_lookup`, `reverse_dns`, `scan_ports`, `scan_subdomains`, `subdomain_enum` | 6 | Threads or async I/O |
-| `extern_call`, `ffi_read_i32` | 2 | FFI trampolines through VM frames |
-| `bytes`, `argv`, `expect_error` | 3 | Reachable, but not yet swept |
+| `extern_call` | 1 | FFI trampolines through VM frames |
+| `argv`, `expect_error` | 2 | Reachable, but not yet swept |
 | `gui_callback` | 1 | Needs a Rak callback from a native |
 
 The interpreter does not have this problem because `eval_builtin` takes
@@ -86,7 +86,7 @@ a `Future` that the runtime resolves later.
 
 **The fix is coroutines in the VM**, and that is a real project, not a list of
 one-line registrations. It is not being done in this release. The gate fails on
-these 34 by design, so the gap cannot be forgotten, and the backlog test prints
+these 33 by design, so the gap cannot be forgotten, and the backlog test prints
 them so the number cannot drift upward unnoticed.
 
 ### Two entries that are allowed to differ
@@ -102,9 +102,12 @@ them so the number cannot drift upward unnoticed.
   the VM's frame teardown, its deferred calls, and the interpreter's buffered
   output. There is no correct place to put it.
 
-`VM_ONLY` lists four names the *scan* cannot see rather than real gaps: `Ok`,
+`VM_ONLY` lists six names the *scan* cannot see rather than real gaps: `Ok`,
 `Some`, `Err` and `fmt` are special-cased in the interpreter's `eval_call` rather
-than `eval_builtin`, and `__evidence_from` is VM-internal.
+than `eval_builtin`, `__evidence_from` is VM-internal, and `whois_parse` is
+dispatched from `try_interp` — it exists on both backends (the runtime report
+counts it on neither side of the gap; `vm-only: 0`), the structural scan just
+cannot reach it from inside `eval_builtin`.
 
 ## The `fn(&[Value])` boundary in practice
 
@@ -138,16 +141,3 @@ Sets and streams have shared storage (`SetRepr`, `ext_streams`), but:
 
 Both are covered by parity tests, which is the point: separate code can diverge,
 so it is compared.
-
-## A syntax limitation worth knowing
-
-`compiler.rs::iterable_is_stream` decides whether a `for` loop is over a stream
-by looking at the syntax — a call to `stream_from_array` and friends, or an
-identifier whose name looks like one. This avoids emitting a runtime probe, but
-it means a stream held in a variable under an unrecognised name falls back to
-`Op::IterItems`, which materialises the whole stream. Correct, but no longer
-lazy: a `for` over an unbounded stream would not terminate.
-
-The right fix is a runtime type check, which means either a new opcode or
-inspecting the value at the top of the loop body. Both are small; neither is
-done.

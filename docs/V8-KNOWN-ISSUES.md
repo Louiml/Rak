@@ -1,7 +1,8 @@
 # Known issues
 
-Bugs that are known, reproduced, and **not fixed** in this release. Each entry
-says what happens, what causes it, and what the workaround is.
+Bugs that are known and reproduced. Most are **not fixed** in this release; a
+few are fixed and kept here for the record, because the shape of the bug
+matters more than the fix.
 
 Nothing here is a "not yet implemented" feature — those live in
 [docs/V8-BACKEND-PARITY.md](V8-BACKEND-PARITY.md) and
@@ -51,37 +52,43 @@ on ownership and borrowing, which has to settle function semantics anyway.
 `unsafe-thin-reason`-style lint on if you have one for it. There is not one yet;
 that is the cheap mitigation and it has not been written.
 
-## A stream `for` loop is only lazy for recognised names
+## Every VM `for` loop over a stream errored
 
-**Severity: medium.** A `for` loop over a stream bound to an unrecognised
-variable name materialises the whole stream instead of pulling from it.
+**Severity: high, fixed in this release.** Recorded because the docs
+described the intended behavior as if it shipped, and because the cause was a
+lowering that had never once executed.
 
 ```rak
-// lazy: the compiler recognises `stream_from_array(..)`
 for x in stream_from_array([1, 2, 3]) { dump x }
-
-// NOT lazy: `s` does not look like a stream constructor
-let s = stream_from_array([1, 2, 3])
-for x in s { dump x }
 ```
 
-Both produce the same output for a finite stream. The difference shows up with
-an unbounded one, where the second form never terminates because
-`Op::IterItems` builds the entire array before the loop starts.
+```
+rakc run:  [DUMP] 1  [DUMP] 2  [DUMP] 3
+rakc vm:   VM error: cannot iterate over this value (stream)
+```
 
-**Cause.** `compiler.rs::iterable_is_stream` decides by syntax — a call to one
-of the eight known stream constructors, or an identifier whose name starts with
-`stream`, is `lines`, or ends in `_stream`. This avoids emitting a runtime type
-probe at the top of every loop.
+Both forms errored on the VM — the recognised constructor call in the `for`
+header and the stream bound to a variable alike.
 
-**Workaround.** Name stream variables so the heuristic matches, or call the
-constructor directly in the `for` header.
+**Cause.** `compile_stream_for` was added with the lazy-streams feature, but
+`compile_for` never called it: every stream iterable fell into the
+`Op::IterItems` path, which does not know how to iterate a `Value::Stream`.
+The function was dead from the commit that introduced it, and it was also
+broken — its emission patched the opening forward jump to a target *after*
+the body, so even wired in it would have jumped straight over the loop. The
+docs around it (a syntax-limited lazy lowering that worked for recognised
+names, materialising otherwise) described intent, not behavior.
 
-**Fix.** A runtime type check, which needs either a new opcode or inspecting the
-value before the loop body. Both are small; neither is done.
+**Fix.** `compile_for` now dispatches on the runtime type: `__is_stream(v)`
+is called once before the loop (registered on both backends), each iteration
+branches on that cached result to either pull one element (`stream_next`) or
+index the materialised items, and both steps join at a single copy of the
+body, so `break`, `continue` and loop labels behave identically whichever
+kind of iterable showed up. The syntactic name heuristic is gone with the
+dead code: a stream under any variable name iterates lazily, and an array
+named `lines` iterates as an array instead of being mistaken for a stream.
 
-## Windows and Linux report socket timeouts differently — fixed, but the
-## pattern may recur
+## Windows and Linux report socket timeouts differently — fixed, but the pattern may recur
 
 **Severity: low, fixed in this release.** Worth recording because the class of
 bug is easy to reintroduce.
@@ -148,17 +155,19 @@ would have made the parity gate quiet while the feature silently stopped
 touching the hardware. This is listed in the gate's `INTERP_ONLY` allowance with
 its reason.
 
-## Inline assembly bypasses the capability sandbox
+## Inline assembly is gated, but the sandbox cannot mediate the instruction
 
-**Severity: informational, by design.** The `asm` escape is not mediated by the
-sandbox: the sandbox gates *builtins*, and assembly is the machine executing an
-instruction directly. `extern "C"` is the safer escape, because Rak can see the
+**Severity: informational, by design.** `asm(...)` is gated like any builtin —
+`--sandbox` without `--allow asm` stops it with `sandbox: builtin 'asm'
+blocked` — but the gate is on the call, not on what the instruction does once
+the CPU executes it. `extern "C"` is the safer escape, because Rak can see the
 call.
 
 Three independent gates apply and all three are required:
 
 1. the `asm` capability (`--allow asm`), checked before anything is assembled
-2. an `unsafe` block with a written justification, so every use is greppable
+2. an `unsafe` block with a written justification — enforced by the parser, so
+   `asm(...)` outside `unsafe` does not parse and every use is greppable
 3. the `inline-asm` lint rule
 
 The operand is restricted to alphanumerics, underscores and spaces, so it cannot

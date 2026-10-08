@@ -32,13 +32,13 @@ its native errors. Both are described in
 
 ## What 8.1.0 did not close, and why
 
-**34 builtins exist only on the interpreter.** All of them are blocked on one
+**33 builtins exist only on the interpreter.** All of them are blocked on one
 thing: a VM native has signature `fn(&[Value])`, so it cannot call a Rak
 function, suspend, or resume. That rules out `channel`, `select`, `timeout`,
 `await_all`, `task_group`, the socket family, `spawn`, and FFI trampolines.
 
 The fix is **coroutines in the VM**, and that is a project rather than a list of
-registrations. The parity gate fails on these 34 deliberately, so the gap cannot
+registrations. The parity gate fails on these 33 deliberately, so the gap cannot
 be forgotten, and the backlog test prints them so the number cannot drift.
 
 **Instrumented CFI** is a toolchain limitation, not a code one. The spike is in
@@ -142,13 +142,13 @@ All front-end commands now run on the big stack:
 
 ## What 0.9.0 did not close, and why
 
-**VM coroutines** are still the blocker for the 34 interpreter-only builtins.
+**VM coroutines** are still the blocker for the 33 interpreter-only builtins.
 The VM native signature `fn(&[Value])` cannot call a Rak function, suspend, or
 resume. That rules out `channel`, `select`, `timeout`, `await_all`,
 `task_group`, the socket family, `spawn`, and FFI trampolines.
 
 The fix is **coroutines in the VM**, and that is a project rather than a list of
-registrations. The parity gate fails on these 34 deliberately, so the gap cannot
+registrations. The parity gate fails on these 33 deliberately, so the gap cannot
 be forgotten, and the backlog test prints them so the number cannot drift.
 
 **Instrumented CFI** is a toolchain limitation, not a code one. The spike is in
@@ -191,7 +191,7 @@ last, because they are the part that cannot be added compatibly.
 
 In rough order of how much they would improve Rak:
 
-1. **VM coroutines.** Unblocks the 34 builtins above, and is the precondition for
+1. **VM coroutines.** Unblocks the 33 builtins above, and is the precondition for
    `select`, `timeout` and structured concurrency on the VM.
 2. **Insertion-ordered maps.** Small, and removes a real source of
    run-to-run nondeterminism.
@@ -201,8 +201,6 @@ In rough order of how much they would improve Rak:
    and it can ship on 8.x.
 4. **Shadow-call-stack.** Instrumented control-flow protection that does not need
    LTO, unlike CFI. Untested; the obvious next spike after CFI.
-5. **A real `for`-over-stream type check**, so laziness does not depend on what a
-   variable is named.
 
 ## What is not planned
 

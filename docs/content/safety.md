@@ -94,7 +94,7 @@ declarations are on the roadmap and are not implemented.
 | `raw` | `net_raw_*` (raw sockets, ARP, ICMP) | Packet forging, ARP, raw sockets |
 | `gui` | `gui_open`, `gui_update`, `gui_callback` | Desktop windows |
 | `secrets` | `env_get`, `env_set`, `secret_*` | Environment variables, credential store |
-| `asm` | `asm! { ... }` inline assembly | Inline assembly |
+| `asm` | `asm("...")` single-register intrinsic (interpreter-only) | Inline assembly |
 
 With `--sandbox` and no `--allow`, all eight are denied and only pure
 computation works.
@@ -125,9 +125,8 @@ check them.
 | `ffi-raw-pointer` | `ffi_ptr`, `ffi_read`, `ffi_write`, `ffi_alloc`, `ffi_free`, `ffi_call`. |
 | `insecure-transport` | `ws_connect` and `net_connect`, which carry no TLS. |
 | `unsafe-thin-reason` | An `unsafe` block whose justification is a placeholder. |
-| `env-get` | `env_get` calls (environment variable reads). |
-| `env-set` | `env_set` calls (environment variable writes). |
-| `unsupported-asm` | `asm! { ... }` inline assembly (gated by `asm` capability). |
+| `unescaped-interpolation` | An f-string that builds a SQL statement or a shell command around a value no `*_escape` call wraps. |
+| `inline-asm` | An `asm(...)` call, which the capability sandbox cannot mediate at the call site (it is gated when the builtin runs). |
 
 All are advisory. `--deny` makes them exit non-zero for CI:
 

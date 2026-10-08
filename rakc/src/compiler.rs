@@ -363,6 +363,13 @@ impl Compiler {
         let mut foreigns: Vec<(String, Value)> = Vec::new();
         for stmt in &module.items {
             if let Stmt::Extern { lib, decls, .. } = stmt {
+                // The interpreter runs `caps::check_builtin("ffi:extern")` when
+                // the statement executes. The declaration compiles straight to a
+                // native here, so without this gate `rakc vm --sandbox` would
+                // load and call any foreign library the interpreter refuses --
+                // the name of a foreign function is arbitrary, so `call_value`'s
+                // per-native gate cannot recognise it.
+                crate::caps::check_str("ffi:extern")?;
                 for decl in decls {
                     let native = crate::vm::make_foreign_native(decl.clone(), lib.clone());
                     foreigns.push((decl.name.clone(), native));
@@ -595,6 +602,9 @@ impl Compiler {
                     self.binstructs.insert(name.clone(), fields.clone());
                 }
                 Stmt::Extern { lib, decls, .. } => {
+                    // Same `ffi:extern` gate as the top-level pre-pass, for an
+                    // `extern` block inside an inlined module.
+                    crate::caps::check_str("ffi:extern")?;
                     for decl in decls {
                         let native = crate::vm::make_foreign_native(decl.clone(), lib.clone());
                         local_foreigns.push((decl.name.clone(), native));
@@ -1263,94 +1273,6 @@ impl Compiler {
             self.compile_stmt(stmt)?;
         }
         Ok(())
-    }
-
-    /// Compile a `for` loop whose iterable is a stream, as a lazy pull loop.
-    ///
-    /// Returns `false` without emitting anything if the iterable is not a
-    /// stream, so the caller can fall back to the ordinary path. The check is a
-    /// syntactic one — the iterable expression is an identifier naming
-    /// `stream_from_array` and friends, or a call to one of them.
-    fn compile_stream_for(
-        &mut self,
-        pattern: &Pattern,
-        iterable: &Expr,
-        body: &[Stmt],
-        label: Option<&str>,
-    ) -> Result<bool, String> {
-        if !self.iterable_is_stream(iterable) {
-            return Ok(false);
-        }
-        let src = self.add_local("__stream".to_string());
-        self.compile_expr(iterable)?;
-        self.emit_op(Op::StoreLocal);
-        self.emit_byte(src);
-
-        let item = self.add_local("__stream_item".to_string());
-        let start = self.emit_jump(Op::Jump);
-        loop {
-            // item = stream_next(src)?  -> Some(v) | None
-            self.emit_op(Op::LoadLocal);
-            self.emit_byte(src);
-            let ci = self.const_str("stream_next");
-            self.emit_op(Op::LoadGlobal);
-            self.emit_u16(ci);
-            self.emit_op(Op::Call);
-            self.emit_byte(1);
-            self.emit_op(Op::StoreLocal);
-            self.emit_byte(item);
-            // `None` is `option(none)`; leave the loop when the option is falsy.
-            let jdone = self.emit_jump(Op::JumpIfFalse);
-
-            let binds = self.emit_pattern_match(pattern, item)?;
-            for bname in binds {
-                let slot = self.add_local(bname);
-                self.emit_op(Op::StoreLocal);
-                self.emit_byte(slot);
-            }
-            for stmt in body {
-                self.compile_stmt(stmt)?;
-            }
-            // Backward jump to re-pull. `patch_jump` writes the target into the
-            // two bytes `emit_jump` reserved.
-            self.patch_jump(start);
-            self.patch_jump(jdone);
-            self.emit_op(Op::Pop);
-            break;
-        }
-        let _ = label;
-        Ok(true)
-    }
-
-    /// Whether an expression denotes a stream.
-    ///
-    /// Syntactic on purpose: deciding at compile time avoids emitting a probe
-    /// and branching on the runtime type. The cost is that a stream held in a
-    /// variable under a different name falls back to `Op::IterItems`, which
-    /// materialises it — correct, but no longer lazy.
-    fn iterable_is_stream(&self, e: &Expr) -> bool {
-        const STREAM_FNS: &[&str] = &[
-            "stream_from_array",
-            "stream_map",
-            "filter",
-            "take",
-            "read_lines",
-            "tcp_stream",
-            "stream_csv",
-            "stream_jsonl",
-        ];
-        match e {
-            Expr::Call { callee, .. } => match callee.as_ref() {
-                Expr::Ident(name) => STREAM_FNS.contains(&name.as_str()),
-                _ => false,
-            },
-            Expr::Ident(name) => {
-                // A bare identifier is assumed to be a stream when it was bound
-                // from one of those constructors.
-                name.starts_with("stream") || name == "lines" || name.ends_with("_stream")
-            }
-            _ => false,
-        }
     }
 
     /// Emit a call to a global function by name, with already-evaluated
@@ -2051,40 +1973,114 @@ impl Compiler {
                 Ok(())
             }
             _ => {
+                // Runtime stream dispatch.
+                //
+                // A `for` over a `Value::Stream` pulls one element at a time
+                // (natural backpressure, exactly the interpreter's lazy
+                // lowering); anything else materialises iteration items first.
+                // The test is runtime on purpose: a stream can sit in any
+                // variable, and a syntactic name check would both miss `s` and
+                // misfire on an array named `lines`. Both steps store the
+                // element into `__for_elem_v` and join at a single copy of the
+                // body, so `break`, `continue` and the loop label behave the
+                // same way whichever kind of iterable showed up.
                 self.compile_expr(iterable)?;
-                // Materialize the container into iteration items (maps become
-                // (key, value) tuples; with a 2-tuple pattern, arrays/strings
-                // yield (index, item) — matching the interpreter).
+                let src_slot = self.add_local("__for_src".to_string());
+                self.emit_op(Op::StoreLocal);
+                self.emit_byte(src_slot);
+                let ci = self.const_str("__is_stream");
+                self.emit_op(Op::LoadGlobal);
+                self.emit_u16(ci);
+                self.emit_op(Op::LoadLocal);
+                self.emit_byte(src_slot);
+                self.emit_op(Op::Call);
+                self.emit_byte(1);
+                let iss_slot = self.add_local("__for_iss".to_string());
+                self.emit_op(Op::StoreLocal);
+                self.emit_byte(iss_slot);
+                let it_slot = self.add_local("__for_it".to_string());
+                let arr_slot = self.add_local("__for_arr".to_string());
+                let elem_slot = self.add_local("__for_elem_v".to_string());
+                let idx_slot = self.add_local("__for_idx".to_string());
+                // One-time split: `__for_it` holds the stream (lazy path),
+                // `__for_arr` the materialised items (ordinary path).
+                self.emit_op(Op::LoadLocal);
+                self.emit_byte(iss_slot);
+                let jmat = self.emit_jump(Op::JumpIfFalse);
+                self.emit_op(Op::Pop);
+                self.emit_op(Op::LoadLocal);
+                self.emit_byte(src_slot);
+                self.emit_op(Op::StoreLocal);
+                self.emit_byte(it_slot);
+                self.load_const(Value::Nil);
+                self.emit_op(Op::StoreLocal);
+                self.emit_byte(arr_slot);
+                let jinit = self.emit_jump(Op::Jump);
+                self.patch_jump(jmat);
+                self.emit_op(Op::Pop);
+                self.emit_op(Op::LoadLocal);
+                self.emit_byte(src_slot);
+                // Maps become (key, value) tuples; with a 2-tuple pattern,
+                // arrays/strings yield (index, item) — matching the interpreter.
                 let indexed = matches!(pattern, Pattern::Tuple(p) if p.len() == 2);
                 self.emit_op(Op::IterItems);
                 self.emit_byte(if indexed { 1 } else { 0 });
-                let arr_slot = self.add_local("__for_arr".to_string());
                 self.emit_op(Op::StoreLocal);
                 self.emit_byte(arr_slot);
+                self.load_const(Value::Nil);
+                self.emit_op(Op::StoreLocal);
+                self.emit_byte(it_slot);
+                self.patch_jump(jinit);
                 self.load_const(Value::I64(0));
-                let idx_slot = self.add_local("__for_idx".to_string());
                 self.emit_op(Op::StoreLocal);
                 self.emit_byte(idx_slot);
+
                 let loop_start = self.chunk.code.len();
                 self.loop_stack.push(LoopInfo {
                     label: label.clone(),
                     break_jumps: Vec::new(),
                     continue_jumps: Vec::new(),
                 });
-                // Loop on the *bound*, not on the element's truthiness.
-                //
-                // This used to be `IndexGet` then `JumpIfFalse`, which asked "is
-                // this element truthy?" and so ended the loop on the first `0`,
-                // `""` or `false`. `for b in bytes([0, 15, 16, 255])` iterated
-                // zero times on the VM -- and a NUL byte is the most common value
-                // in a binary file, so this stopped a buffer walk dead at the
-                // first one. The interpreter iterates all four bytes, so this was
-                // a silent backend divergence too.
-                //
-                // Stack across the test: [arr, len, idx] -> [arr, bool] -> [arr].
-                // `Gt` (not `LtEq`) because the operands are pushed length-first:
-                // `l > r` here reads as `idx < len`, the bound. `LtEq` on this
-                // stack would read `len <= idx` and the loop would never run.
+                // Which step runs this iteration?
+                self.emit_op(Op::LoadLocal);
+                self.emit_byte(iss_slot);
+                let jmat_step = self.emit_jump(Op::JumpIfFalse);
+                // --- Lazy stream step: opt = stream_next(it).
+                self.emit_op(Op::Pop);
+                let cnext = self.const_str("stream_next");
+                self.emit_op(Op::LoadGlobal);
+                self.emit_u16(cnext);
+                self.emit_op(Op::LoadLocal);
+                self.emit_byte(it_slot);
+                self.emit_op(Op::Call);
+                self.emit_byte(1);
+                let opt_slot = self.add_local("__for_opt".to_string());
+                self.emit_op(Op::StoreLocal);
+                self.emit_byte(opt_slot);
+                self.emit_op(Op::LoadLocal);
+                self.emit_byte(opt_slot);
+                // `option(none)` is falsy: the stream is exhausted.
+                let jdone = self.emit_jump(Op::JumpIfFalse);
+                self.emit_op(Op::Pop);
+                // Unwrap `option(some(v))` into `__for_elem_v` — the pattern
+                // is the user's only at the join, so the unwrap is against a
+                // plain bind here.
+                let unwrap = Pattern::Some(Box::new(Pattern::Ident("__stream_v".to_string())));
+                self.emit_pattern_match(&unwrap, opt_slot)?;
+                self.emit_op(Op::Dup);
+                self.load_const(Value::I64(0));
+                self.emit_op(Op::IndexGet);
+                self.emit_op(Op::StoreLocal);
+                self.emit_byte(elem_slot);
+                self.emit_op(Op::Pop);
+                let jbody = self.emit_jump(Op::Jump);
+                // Stream exhausted: drop the option and leave the loop.
+                self.patch_jump(jdone);
+                self.emit_op(Op::Pop);
+                let jend = self.emit_jump(Op::Jump);
+                // --- Materialised step: index over `__for_arr`.
+                self.patch_jump(jmat_step);
+                self.emit_op(Op::Pop);
                 self.emit_op(Op::LoadLocal);
                 self.emit_byte(arr_slot);
                 self.emit_op(Op::Dup);
@@ -2092,21 +2088,24 @@ impl Compiler {
                 self.emit_op(Op::LoadLocal);
                 self.emit_byte(idx_slot);
                 self.emit_op(Op::Gt);
-                let jexit = self.emit_jump(Op::JumpIfFalse);
+                let jdone2 = self.emit_jump(Op::JumpIfFalse);
                 self.emit_op(Op::Pop);
                 self.emit_op(Op::LoadLocal);
                 self.emit_byte(idx_slot);
                 self.emit_op(Op::IndexGet);
-                let item_slot = self.add_local("__for_item".to_string());
                 self.emit_op(Op::StoreLocal);
-                self.emit_byte(item_slot);
+                self.emit_byte(elem_slot);
+                // --- Body: one copy, reached from either step.
+                self.patch_jump(jbody);
                 self.begin_scope();
-                self.bind_for_pattern(pattern, item_slot)?;
+                self.bind_for_pattern(pattern, elem_slot)?;
                 for s in body {
                     self.compile_stmt(s)?;
                 }
                 self.end_scope();
-                // `continue` in a `for` skips to the next element (the increment).
+                // `continue` lands on the increment: a no-op pull-wise for the
+                // stream path (the next iteration pulls anyway), required for
+                // the materialised path.
                 let inc_target = self.chunk.code.len();
                 self.emit_op(Op::LoadLocal);
                 self.emit_byte(idx_slot);
@@ -2115,11 +2114,11 @@ impl Compiler {
                 self.emit_op(Op::StoreLocal);
                 self.emit_byte(idx_slot);
                 self.emit_jump_back(loop_start);
-                self.patch_jump(jexit);
-                // `JumpIfFalse` does not pop, so the bound result is still there,
-                // and `arr` was left underneath it. Clear both.
+                // Materialised exit: `JumpIfFalse` left [arr, bool] behind.
+                self.patch_jump(jdone2);
                 self.emit_op(Op::Pop);
                 self.emit_op(Op::Pop);
+                self.patch_jump(jend);
                 self.end_loop_with_continue(inc_target);
                 Ok(())
             }

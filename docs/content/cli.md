@@ -32,7 +32,8 @@ already formatted, which is what you want in CI.
 `rakc lint` has five style rules (`unused-var`, `shadowed`, `unreachable`,
 `missing-ret-type`, `duplicate-import`) and nine security rules
 (`hardcoded-secret`, `plaintext-url`, `weak-crypto`, `secret-compare`,
-`ffi-raw-pointer`, `insecure-transport`, `env-get`, `env-set`, `unsupported-asm`).
+`ffi-raw-pointer`, `insecure-transport`, `unescaped-interpolation`,
+`inline-asm`, `unsafe-thin-reason`).
 Both are advisory; `--deny` exits 1 when anything fires. See [Safety](safety.html) for what the security rules
 detect and where they have false negatives.
 

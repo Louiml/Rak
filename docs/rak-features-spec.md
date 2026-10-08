@@ -1200,7 +1200,7 @@ deps, compile on Windows.
 
 ---
 
-## Part 6 � v0.7: Async, streaming, CLI, errors, data processing, the package manager  **[SHIPPED]**
+## Part 6 — v0.7: Async, streaming, CLI, errors, data processing, the package manager  **[SHIPPED]**
 
 All features below are implemented, tested, and verified working (`cargo test`
 green). Nothing here is aspirational.
@@ -1218,7 +1218,7 @@ green). Nothing here is aspirational.
 
 ### 6.2 Async runtime  **[SHIPPED]**
 - Shared Tokio runtime (`async_rt.rs`) with a non-Tokio counting semaphore
-  (`permit_count`) so concurrent futures run on a bounded pool of OS threads �
+  (`permit_count`) so concurrent futures run on a bounded pool of OS threads —
   no thread per op, thousands of concurrent operations supported.
 - Builtins: `await_all([futures]) -> [values]`, `select([futures]) -> (index, value)`
   (race), `timeout(future, ms) -> Result`, `task_group([fns], limit) -> [results]`

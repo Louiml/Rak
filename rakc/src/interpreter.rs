@@ -8534,6 +8534,11 @@ impl Interpreter {
                     remaining: n,
                 }))
             }
+            // Companion to the VM's `__is_stream` native: the VM's `for` loop
+            // calls it once before the loop to pick the lazy or materialised
+            // step. The interpreter never compiles that dispatch, but the name
+            // is registered here so both backends agree on what exists.
+            "__is_stream" => Ok(Value::Bool(matches!(args.first(), Some(Value::Stream(_))))),
             "stream_next" => {
                 let handle = self.stream_handle(args.first())?;
                 let mut guard = handle.lock().unwrap();

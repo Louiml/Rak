@@ -43,7 +43,7 @@ clear message.
 | GUI (`gui_*`, `rak_call` from JS) | yes | yes (same process-wide manager) |
 | CLI (`argv()`, `parse_args`) | yes | yes |
 | Tunnel / UDP transport | yes | yes (`Value::UdpTransport`, `tunnel` lowering) |
-| Inline assembly (`asm`) | yes | yes (via `Op::Asm` + capability gate) |
+| Inline assembly (`asm`) | yes | **no**, by design (see below) |
 | WebSocket | yes | no (no TCP layer) |
 | Channels & threads (`channel`, `select`, `spawn`, `timeout`) | yes | no (needs coroutines) |
 
@@ -54,11 +54,15 @@ cannot be added to one side and forgotten on the other. The v8.0.0 release
 shipped nineteen builtins that existed only in the VM, and the suite did not
 notice.
 
-**Remaining gaps as of 0.9.1.** 33 builtins, all blocked on one thing: a VM
-native has signature `fn(&[Value])`, so it cannot call a Rak function, suspend or
-resume. That rules out the channel/thread family, the socket family, `spawn`
-and FFI trampolines until the VM has coroutines. `asm` has a VM counterpart
-via `Op::Asm` behind the `asm` capability gate.
+**Remaining gaps as of 0.9.1.** 33 interpreter-only builtins, in four
+groups. The channel/thread and socket families plus `spawn` and the async DNS
+lookups (29 of them) are blocked on one thing: a VM native has signature
+`fn(&[Value])`, so it cannot call a Rak function, suspend or resume — that
+needs VM coroutines. `gui_callback` needs the GUI event loop; `extern_call`
+is simply unimplemented on the VM. `argv` and `expect_error` are CLI
+plumbing with no path to parity. `asm` and `exit` are interpreter-only by
+design: a bytecode VM has no instructions to escape into, and the CLI exits
+the process itself.
 
 `docs/V8-BACKEND-PARITY.md` has the full list and the reasoning;
 `docs/V8-ROADMAP.md` has what closing it would take.
@@ -70,19 +74,6 @@ via `Op::Asm` behind the `asm` capability gate.
 `rakc vm` now runs the entire pipeline (lexer, parser, compiler, VM execution)
 on the big stack via `run_on_big_stack`. Deeply nested expressions no longer
 overflow the default 1 MiB stack.
-
-### Inline assembly (`asm`)
-
-Inline assembly is now supported on the VM via `Op::Asm`, gated by the `asm`
-capability and an `unsafe` block with justification:
-
-```rak
-unsafe "this asm block implements a fast user-space spinlock" {
-    asm!("pause")  // x86 spinlock hint
-}
-```
-
-The `asm` capability must be granted via `--sandbox --allow asm`.
 
 ### Capability sandbox
 
@@ -96,11 +87,13 @@ builtins are gated:
 | `mmap_open(..., "rw")` | `fs_write` |
 | `mmap_write` | `fs_write` |
 | `extern "C" { ... }` | `ffi` |
-| `asm! { ... }` | `asm` |
 
 Programs must be run with `--sandbox --allow <capability>` to use these
-features. The capability sandbox is enforced at the native call site in
-`Vm::call_value`, ensuring consistent enforcement across all VM entry points.
+features. The gate sits at the native call site in `Vm::call_value`; `extern`
+is gated one step earlier, where the compiler creates the foreign native, so
+`rakc vm --sandbox` refuses the declaration itself (the interpreter checks it
+when the statement executes). `asm` does not appear in this table: it is
+interpreter-only.
 
 ## Error model
 

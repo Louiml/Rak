@@ -616,6 +616,13 @@ impl Vm {
             .map(Value::Bool)
         });
         self.insert_native("slice", slice_vm);
+        // Runtime stream test for the `for`-loop dispatch: the compiler emits
+        // `__is_stream(v)` once before the loop and branches per iteration on
+        // the cached result. Registered on the interpreter too so the parity
+        // gate and the LSP see the same name on both backends.
+        self.insert_native("__is_stream", |args| {
+            Ok(Value::Bool(matches!(args.first(), Some(Value::Stream(_)))))
+        });
         // 0.8 feature packs: extended batteries + OSINT natives.
         for (n, f) in crate::ext_batteries::vm_natives() {
             self.insert_native(n, f);

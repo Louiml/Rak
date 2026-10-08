@@ -307,6 +307,49 @@ fn sandbox_still_allows_ordinary_computation() {
     assert!(out.contains("[DUMP] 42"), "got: {:?}", out);
 }
 
+/// `extern "C"` is a sandbox escape, and the VM was letting it through.
+///
+/// The interpreter gates the declaration on `ffi` when the statement executes.
+/// The VM had no such check anywhere: `call_value`'s per-native gate looks at
+/// the native's *name*, and a foreign function is named whatever the C header
+/// called it (`abs`, `getpid`, ...), so `required_cap` never matched. The gate
+/// now fires in the compiler where the foreign native is created, on both the
+/// top-level and the inlined-module path.
+#[test]
+fn sandbox_blocks_extern_on_both_backends() {
+    let src = "extern \"C\" { fn abs(n: i32) -> i32 }\ndump abs(-42)\n";
+    for cmd in ["run", "vm"] {
+        let (out, ok) = run_with_stdin(&[cmd, "-", "--sandbox"], src);
+        assert!(
+            !ok,
+            "{} should refuse an extern block under the sandbox; got: {:?}",
+            cmd, out
+        );
+        assert!(
+            out.contains("ffi"),
+            "{} error should name the missing capability; got: {:?}",
+            cmd,
+            out
+        );
+        assert!(
+            !out.contains("[DUMP]"),
+            "{} executed the foreign call despite the sandbox; got: {:?}",
+            cmd,
+            out
+        );
+    }
+    // Granted, both backends run it -- the sandbox is a filter, not a wall.
+    for cmd in ["run", "vm"] {
+        let (out, ok) = run_with_stdin(&[cmd, "-", "--sandbox", "--allow", "ffi"], src);
+        assert!(
+            ok,
+            "{} with --allow ffi should run the extern block; got: {:?}",
+            cmd, out
+        );
+        assert!(out.contains("[DUMP] 42"), "{}; got: {:?}", cmd, out);
+    }
+}
+
 /// Consuming `--sandbox` must not cost the script its own arguments.
 ///
 /// The sandbox flags are now parsed separately from the script's argv precisely

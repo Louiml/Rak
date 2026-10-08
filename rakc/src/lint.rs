@@ -21,6 +21,11 @@
 //! - `unescaped-interpolation` — an f-string that builds a SQL or shell
 //!   command while interpolating a value that no `*_escape` call wraps. The value
 //!   lands in the wrong syntactic position, which is what injection is.
+//! - `unsafe-thin-reason` — an `unsafe` block whose justification is a
+//!   placeholder like `todo` or `trust me`.
+//! - `inline-asm` — an `asm(...)` call: the sandbox gates builtins at their
+//!   call site, and this one executes outside it, so every use is a review
+//!   boundary.
 //!
 //! Advisory by default (exit 0). `--deny` exits 1 when any warning fires, for
 //! CI use. Names starting with `_` silence `unused-var`. A secret-shaped name

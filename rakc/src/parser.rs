@@ -55,6 +55,10 @@ struct Parser<'a> {
     /// `enum E<T>`). An identifier matching one of these parses as
     /// `Type::Generic` instead of `Type::Custom`.
     generic_type_params: Vec<String>,
+    /// Nesting depth of `unsafe "reason" { ... }` blocks. `asm(...)` is only
+    /// legal inside one, checked where the call is parsed so the refusal
+    /// carries line and column instead of surfacing at runtime.
+    unsafe_depth: usize,
 }
 
 impl<'a> Parser<'a> {
@@ -65,6 +69,7 @@ impl<'a> Parser<'a> {
             pos: 0,
             depth: 0,
             generic_type_params: Vec::new(),
+            unsafe_depth: 0,
         }
     }
 
@@ -812,8 +817,13 @@ impl<'a> Parser<'a> {
         if reason.trim().is_empty() {
             return Err(self.perr("unsafe block reason cannot be empty".to_string()));
         }
-        let body = self.parse_block()?;
-        Ok(Stmt::Unsafe { reason, body })
+        self.unsafe_depth += 1;
+        let body = self.parse_block();
+        self.unsafe_depth -= 1;
+        Ok(Stmt::Unsafe {
+            reason,
+            body: body?,
+        })
     }
 
     fn parse_fn(&mut self) -> Result<Stmt> {
@@ -2200,6 +2210,16 @@ impl<'a> Parser<'a> {
                 };
             }
             if self.match_token(&Token::LParen) {
+                // Gate two of inline assembly's three gates: an `asm` call is
+                // only legal inside `unsafe "reason" { ... }`, so every use is
+                // greppable and carries a justification the linter will not
+                // accept unless it is real.
+                if matches!(&expr, Expr::Ident(n) if n == "asm") && self.unsafe_depth == 0 {
+                    return Err(self.perr(
+                        r#"asm(...) must appear inside an unsafe block: unsafe "why this is sound" { asm("cpuid_sse2") }"#
+                            .to_string(),
+                    ));
+                }
                 let (args, named) = self.parse_args()?;
                 self.expect(Token::RParen)?;
                 expr = Expr::Call {

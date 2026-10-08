@@ -311,10 +311,13 @@ const VM_ONLY: &[(&str, &str)] = &[
         "__evidence_from",
         "internal: builds an evidence value, not callable from Rak",
     ),
-    // Real one-way builtin, kept here rather than left to fail the gate.
+    // Not a gap: `whois_parse` runs on both backends (interp dispatches it
+    // from `try_interp`, not a direct `eval_builtin` arm), but the scan is
+    // scoped to `eval_builtin` and cannot see that dispatch. The runtime
+    // report confirms `vm-only: 0`.
     (
         "whois_parse",
-        "ext_osint has a VM native with no interpreter counterpart",
+        "dispatched from try_interp; the eval_builtin scan cannot see it",
     ),
 ];
 
@@ -1632,6 +1635,20 @@ fn asm_is_absent_from_the_vm() {
 }
 
 #[test]
+fn asm_outside_unsafe_is_rejected_by_the_parser() {
+    // The unsafe block is gate two of the three inline-assembly gates, and the
+    // parser is where it was always meant to be enforced. It was not: the call
+    // went through, which meant `grep unsafe` did not list every use after all.
+    let err = rakc::eval_in(r#"dump asm("cpuid_sse2")"#, ".")
+        .expect_err("an asm call outside an unsafe block must not parse");
+    assert!(
+        err.to_string().contains("unsafe block"),
+        "expected the parser to demand an unsafe block, got: {}",
+        err
+    );
+}
+
+#[test]
 fn parity_set_type_distinctions() {
     // `1` and `"1"` are different elements; `1` and `1.0` are the same one.
     // Getting this wrong is silent, so it is worth pinning on both backends.
@@ -1754,6 +1771,67 @@ fn parity_stream_next_is_an_option() {
 let s = stream_from_array([1])
 dump stream_next(s)
 dump stream_next(s)
+"#,
+    );
+}
+
+#[test]
+fn parity_for_over_stream_pulls_lazily() {
+    // The VM used to reject every `for` over a stream with "cannot iterate over
+    // this value (stream)": the lazy lowering existed in the compiler but was
+    // never called from `compile_for`. Both backends now pull one element per
+    // iteration and produce the same output.
+    agree(
+        "for over stream",
+        r#"
+for x in stream_from_array([1, 2, 3]) {
+    dump x
+}
+"#,
+    );
+}
+
+#[test]
+fn parity_for_dispatch_is_runtime_not_a_name_check() {
+    // The stream/materialise decision is made at runtime from the value's
+    // type, not from the iterable's syntax. A stream bound to a name with no
+    // `stream` prefix iterates lazily, and an array bound to a name the old
+    // syntactic heuristic claimed (`lines`) still iterates as an array on the
+    // VM instead of erroring.
+    agree(
+        "for dispatch by value type",
+        r#"
+let items = stream_from_array([4, 5, 6])
+for x in items {
+    dump x
+}
+let lines = ["a", "b"]
+for l in lines {
+    dump l
+}
+"#,
+    );
+}
+
+#[test]
+fn parity_for_over_stream_break_and_tuple_pattern() {
+    // `break` stops the pull loop on both backends, and a tuple pattern
+    // destructures each pulled element through the same join the
+    // materialised path uses.
+    agree(
+        "for over stream with break",
+        r#"
+for x in stream_from_array([1, 2, 3, 4]) {
+    if x == 3 {
+        break
+    }
+    dump x
+}
+let p = stream_from_array([(1, 10), (2, 20)])
+for (k, v) in p {
+    dump k
+    dump v
+}
 "#,
     );
 }
