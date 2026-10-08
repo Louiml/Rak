@@ -66,6 +66,30 @@ pub struct RegexValue {
     pub re: regex::Regex,
 }
 
+/// The call-time shape of one compiled function parameter.
+///
+/// The VM lowers a `fn` body to bytecode, which records nothing about how the
+/// signature binds its arguments. The interpreter keeps the whole `Param` (with
+/// its default `Expr`) and evaluates defaults in the callee scope; the VM has no
+/// `Expr` at call time, so it records just enough to bind a rest parameter,
+/// decide whether a missing argument is legal, and name one that is not.
+///
+/// Defaults themselves are *not* here: a default can reference an earlier
+/// parameter (`fn f(a, b = a + 1)`), so evaluating it needs the callee's
+/// bindings. `compile_function` emits each missing default into the callee
+/// body's prologue instead, where the earlier parameters are already locals.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ParamShape {
+    pub name: Arc<str>,
+    /// `fn f(...rest)` -- collects every leftover positional into an array.
+    pub rest: bool,
+    /// `fn f(x?)` -- a missing argument is `nil` rather than an error.
+    pub optional: bool,
+    /// `fn f(x = <expr>)` -- a missing argument is legal and filled in by the
+    /// callee prologue.
+    pub has_default: bool,
+}
+
 #[derive(Clone)]
 pub enum Value {
     I8(i8),
@@ -134,7 +158,10 @@ pub enum Value {
     ),
     Closure {
         code: Arc<crate::bytecode::Chunk>,
-        nparams: usize,
+        /// Parameter shape, shared cheaply. The VM needs it at call time to
+        /// bind rest params, reject extra positionals, and name a missing
+        /// required argument -- none of which the compiled body carries.
+        params: Arc<[ParamShape]>,
         name: Arc<str>,
     },
     Result(Option<Box<Value>>, Option<Box<Value>>),

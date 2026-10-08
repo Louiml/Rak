@@ -994,6 +994,19 @@ impl Compiler {
         for p in params {
             sub.add_local(p.name.clone());
         }
+        // The VM's call time needs the parameter *shape* (rest / optional /
+        // defaulted) to bind arguments the way the interpreter's `bind_params`
+        // does. The compiled body alone carries none of it, so it travels on the
+        // closure value.
+        let shape: Vec<crate::value::ParamShape> = params
+            .iter()
+            .map(|p| crate::value::ParamShape {
+                name: Arc::from(p.name.as_str()),
+                rest: p.rest,
+                optional: p.optional,
+                has_default: p.default.is_some(),
+            })
+            .collect();
         sub.func_names = self.func_names.clone();
         sub.func_closures = self.func_closures.clone();
         sub.macros = self.macros.clone();
@@ -1002,6 +1015,33 @@ impl Compiler {
         // A module's functions must resolve the module's own top-level names,
         // which live in mangled globals.
         sub.rename = self.rename.clone();
+        // Default-value prologue. A default can reference an earlier parameter
+        // (`fn f(a, b = a + 1)`), and the interpreter evaluates it in the callee
+        // scope where that parameter is already bound; the VM has no `Expr` at
+        // call time, so each missing default is compiled into the callee body
+        // where the earlier parameters are already locals. `__argc` is passed in
+        // the last local slot by `call_value`.
+        //
+        // Without this the VM left a defaulted parameter `nil` (the arity pad
+        // won), so `fn f(a, b = 10)` called as `f(1)` returned `b = nil` on the
+        // VM and `b = 10` on the interpreter -- a silent wrong answer rather
+        // than a crash, which is the worst shape of divergence.
+        let argc_slot = sub.add_local("\u{0}argc".to_string());
+        for (i, p) in params.iter().enumerate() {
+            let Some(default) = &p.default else {
+                continue;
+            };
+            // if __argc < i + 1 { <param> = <default> }
+            sub.emit_op(Op::LoadLocal);
+            sub.emit_byte(argc_slot);
+            sub.load_const(Value::I64(i as i64 + 1));
+            sub.emit_op(Op::Lt);
+            let jfalse = sub.emit_jump(Op::JumpIfFalse);
+            sub.compile_expr(default)?;
+            sub.emit_op(Op::StoreLocal);
+            sub.emit_byte(i as u8);
+            sub.patch_jump(jfalse);
+        }
         for s in body {
             sub.compile_stmt(s)?;
         }
@@ -1010,7 +1050,7 @@ impl Compiler {
         let sub_chunk = std::mem::replace(&mut sub.chunk, Chunk::new());
         Ok(Value::Closure {
             code: Arc::from(sub_chunk),
-            nparams: params.len(),
+            params: Arc::from(shape),
             name: Arc::from(declared_name),
         })
     }

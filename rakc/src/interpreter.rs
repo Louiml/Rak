@@ -1464,18 +1464,27 @@ impl Interpreter {
             return Ok(0);
         };
         let args = Value::Array(argv.iter().map(|s| Value::String(s.clone())).collect());
+        // A `fn main()` that declares no parameter takes no argument. The argv
+        // array is only passed when the entry point actually has a place to
+        // receive it; otherwise the arity check rejects the call and every
+        // zero-parameter `main` -- the common case for a script that just runs
+        // top-level work -- fails with "too many arguments". Mirrors the VM,
+        // which skips the same argument.
+        let wants_argv = match &main_val {
+            Value::Function { params, .. } => !params.is_empty(),
+            _ => true,
+        };
+        let argv_args: Vec<Value> = if wants_argv { vec![args] } else { vec![] };
         // Errors propagate instead of becoming a bare exit code. `Err(_) => 1`
         // discarded the message, so an uncaught `raise` inside `main` exited 1
         // with nothing on stderr explaining why.
-        Ok(
-            match self.call_function_with_values(main_val, vec![args])? {
-                Value::Int(n) => n.clamp(i32::MIN as i64, i32::MAX as i64) as i32,
-                // A `fn main` that returns nothing still exits 0: rejecting it would
-                // fail programs that merely omit the `return`, which is a style
-                // question rather than a correctness one.
-                _ => 0,
-            },
-        )
+        Ok(match self.call_function_with_values(main_val, argv_args)? {
+            Value::Int(n) => n.clamp(i32::MIN as i64, i32::MAX as i64) as i32,
+            // A `fn main` that returns nothing still exits 0: rejecting it would
+            // fail programs that merely omit the `return`, which is a style
+            // question rather than a correctness one.
+            _ => 0,
+        })
     }
 
     /// Run tests collected by a prior `run_source`/`run` call and return per-
@@ -4764,6 +4773,17 @@ impl Interpreter {
                 continue;
             }
             if let Some(d) = &p.default {
+                // A default may reference an earlier parameter
+                // (`fn f(a, b = a + 1)`). The callee scope is pushed before
+                // binding, but parameters are defined only after `bind_params`
+                // returns, so `a` was not in scope while `b`'s default was
+                // evaluated and `f(7)` died with "Undefined variable: a".
+                // Define what is bound so far, in order, so each default sees
+                // its predecessors. The later re-definition of the full set is
+                // the same values.
+                for (bn, bv) in bound.iter() {
+                    self.env.define_mut(bn, bv.clone(), true);
+                }
                 let dv = self.eval_expr(d)?;
                 bound.push((p.name.clone(), dv));
                 continue;

@@ -88,6 +88,55 @@ kind of iterable showed up. The syntactic name heuristic is gone with the
 dead code: a stream under any variable name iterates lazily, and an array
 named `lines` iterates as an array instead of being mistaken for a stream.
 
+## VM call semantics diverged from the interpreter on every non-trivial signature
+
+**Severity: high, fixed in this release.** `Value::Closure` carried only a
+parameter *count*, so the VM bound arguments by position and Nil-padded to
+that count. Every signature feature that is not "positional, all required"
+was therefore wrong on `rakc vm`:
+
+| Signature | `rakc run` | `rakc vm` (before) |
+| --- | --- | --- |
+| `fn f(a, b = 10)` called as `f(1)` | `b = 10` | `b = nil` |
+| `fn f(a, b = a + 1)` called as `f(7)` | `Undefined variable: a` | `b = nil` |
+| `fn g(a, ...rest)` called as `g(1, 2, 3)` | `rest = [2, 3]` | `rest = 2` |
+| `fn h(a)` called as `h(1, 2)` | `too many positional arguments (1 extra)` | silently dropped |
+| `fn m(a, b)` called as `m(1)` | `missing required argument 'b'` | `b = nil` |
+| `fn main()` (no parameters) | `too many positional arguments (1 extra)` | ran fine |
+
+Three of those are silent wrong answers rather than crashes, which is the
+worst shape of divergence: the same program prints different values on the
+two backends, and only one of them is the interpreter's answer.
+
+**Cause.** Binding lived entirely at the call site (`call_value` had the
+argument list, the AST `Param` list stayed with the interpreter), and the
+compiled closure threw the signature away after reading `params.len()`. The
+interpreter's `bind_params` handles rest, defaults, optionals and arity by
+name; the VM's pad-to-N handled none of them. `fn main()` was a special case
+of the arity bug: both backends handed the argv array to an entry point that
+had declared no parameter to receive it, so the interpreter's own arity check
+rejected the call while the VM's pad absorbed it.
+
+**Fix.** The closure now carries a `ParamShape` per parameter (name, rest,
+optional, has-default) — the call-time facts, without the `Expr`. `call_value`
+binds rest into an array, raises `too many positional arguments (n extra)` and
+`missing required argument 'x'` with the interpreter's exact wording, and
+passes the number of positionals actually supplied in a hidden `__argc` local.
+Defaults cannot travel as expressions (a default may reference an earlier
+parameter, so evaluating one needs the callee's bindings), so
+`compile_function` emits each default into the callee body's prologue, keyed
+off `__argc`: omitted fills the default, an explicit `nil` stays `nil`. The
+interpreter's `bind_params` was fixed to define already-bound parameters
+before evaluating a default, which turns `fn f(a, b = a + 1)` from an error
+into the working thing both backends now do. `run_main` (both backends) passes
+argv only when `main` declares a parameter.
+
+**Still divergent, deliberately.** Named arguments (`f(b: 2, a: 1)`) work on
+the interpreter and are a compile error on the VM (`VM does not support named
+arguments`). That is a loud stop, not a silent wrong answer; supporting them
+means either call-site reordering against a known signature or a binding map
+at the call, and neither was needed to close the silent cases above.
+
 ## Windows and Linux report socket timeouts differently — fixed, but the pattern may recur
 
 **Severity: low, fixed in this release.** Worth recording because the class of

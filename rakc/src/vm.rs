@@ -2135,7 +2135,16 @@ impl Vm {
             defers: Vec::new(),
             catches: Vec::new(),
         };
-        self.call_value(&mut frame, main_val, vec![args])?;
+        // A `fn main()` that declares no parameter takes no argument, so the
+        // argv array is only passed when the entry point has a place to receive
+        // it. Mirrors `Interpreter::run_main`; without the check the arity
+        // enforcement rejects the call and every zero-parameter `main` fails.
+        let wants_argv = match &main_val {
+            Value::Closure { params, .. } => !params.is_empty(),
+            _ => true,
+        };
+        let argv_args: Vec<Value> = if wants_argv { vec![args] } else { vec![] };
+        self.call_value(&mut frame, main_val, argv_args)?;
         let code = match frame.pop() {
             // Only an explicit `Int` return value selects the exit code; a
             // float, hex, string or omitted `return` is treated like "no
@@ -3246,7 +3255,7 @@ impl Vm {
             }
             Value::Closure {
                 code,
-                nparams,
+                params: shape,
                 name,
             } => {
                 // The VM had no depth accounting, so recursive Rak exhausted the
@@ -3269,20 +3278,59 @@ impl Vm {
                 if self.debug_enabled {
                     self.debug_callstack.push(name.to_string());
                 }
-                for _ in args.len()..nparams {
-                    args.push(Value::Nil);
+                // Bind arguments the way the interpreter's `bind_params` does.
+                // The VM used to Nil-pad to `nparams` and ignore extras, so a
+                // missing required argument read as `nil` (a silent wrong
+                // answer) and an extra positional was dropped on the floor --
+                // while the interpreter raised for both. The default-value
+                // fill-in happens in the callee prologue, keyed off `__argc`.
+                let nparams = shape.len();
+                let has_rest = shape.iter().any(|p| p.rest);
+                // How many positionals the caller actually supplied, before any
+                // rest collection swallows the leftovers. The default-value
+                // prologue compares against it to tell "omitted" (fill the
+                // default) from "passed as nil" (leave it nil), a distinction
+                // the callee body cannot recover on its own.
+                let argc = args.len() as i64;
+                if !has_rest && args.len() > nparams {
+                    self.call_depth -= 1;
+                    if self.debug_enabled {
+                        self.debug_callstack.pop();
+                    }
+                    return Err(format!(
+                        "too many positional arguments ({} extra)",
+                        args.len() - nparams
+                    ));
                 }
+                let mut locals: Vec<Value> = Vec::with_capacity(nparams + 1);
+                let mut argi = args.into_iter();
+                for p in shape.iter() {
+                    if p.rest {
+                        // Collect every remaining positional into an array.
+                        locals.push(Value::Array(Arc::new(argi.by_ref().collect())));
+                        continue;
+                    }
+                    match argi.next() {
+                        Some(v) => locals.push(v),
+                        None if p.optional || p.has_default => locals.push(Value::Nil),
+                        None => {
+                            self.call_depth -= 1;
+                            if self.debug_enabled {
+                                self.debug_callstack.pop();
+                            }
+                            return Err(format!("missing required argument '{}'", p.name));
+                        }
+                    }
+                }
+                locals.push(Value::I64(argc));
                 let mut sub = Frame {
                     code: &code,
                     ip: 0,
                     stack: Vec::new(),
-                    locals: Vec::with_capacity(nparams),
+                    locals,
                     defers: Vec::new(),
                     catches: Vec::new(),
                 };
-                for i in 0..nparams {
-                    sub.locals.push(args.get(i).cloned().unwrap_or(Value::Nil));
-                }
                 let stepped = self.exec_frame(&mut sub);
                 // Decrement on the error path too, or one failed deep call would
                 // poison the count for the rest of the run.

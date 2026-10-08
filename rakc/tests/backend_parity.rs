@@ -1827,10 +1827,191 @@ for x in stream_from_array([1, 2, 3, 4]) {
     }
     dump x
 }
-let p = stream_from_array([(1, 10), (2, 20)])
-for (k, v) in p {
-    dump k
-    dump v
+    let p = stream_from_array([(1, 10), (2, 20)])
+    for (k, v) in p {
+        dump k
+        dump v
+    }
+"#,
+    );
+}
+
+#[test]
+fn parity_default_argument_is_filled_in() {
+    // The VM used to leave a defaulted parameter `nil`: `Value::Closure` carried
+    // only a parameter count, so `call_value` Nil-padded to it and the default
+    // expression was never evaluated. `f(1)` returned `b = nil` on the VM and
+    // `b = 10` on the interpreter -- a silent wrong answer rather than a crash.
+    agree(
+        "default argument filled in",
+        r#"
+fn f(a, b = 10) {
+    dump a
+    dump b
+}
+f(1)
+f(1, 2)
+"#,
+    );
+}
+
+#[test]
+fn parity_default_can_reference_an_earlier_parameter() {
+    // A default may read a parameter bound before it. The interpreter used to
+    // evaluate defaults before the parameters were defined, so `f(7)` died with
+    // "Undefined variable: a"; the VM left `b` nil. Both now evaluate the
+    // default in the callee scope where `a` is already bound.
+    agree(
+        "dependent default",
+        r#"
+fn f(a, b = a + 1) {
+    dump b
+}
+f(7)
+"#,
+    );
+}
+
+#[test]
+fn parity_default_can_reference_a_global() {
+    // A default is an ordinary expression, so it can read a top-level binding.
+    // The prologue compiles the default into the callee body, which resolves
+    // globals the same way the rest of the function does.
+    agree(
+        "default referencing a global",
+        r#"
+let K = 5
+fn f(a = K) {
+    dump a
+}
+f()
+"#,
+    );
+}
+
+#[test]
+fn parity_default_is_skipped_when_nil_is_passed() {
+    // Passing `nil` explicitly is not the same as omitting the argument: the
+    // default fills an omission, not an explicit nil. This is the distinction
+    // `__argc` exists to preserve -- the callee body cannot recover it, because
+    // both cases leave the local as nil before the prologue runs.
+    agree(
+        "explicit nil is not an omission",
+        r#"
+fn f(a, b = 10) {
+    dump b
+}
+f(1, nil)
+"#,
+    );
+}
+
+#[test]
+fn parity_optional_parameter_binds_nil() {
+    // `x?` is sugar for a nil default; it must behave like one on both
+    // backends, including when the argument is supplied.
+    agree(
+        "optional parameter",
+        r#"
+fn f(a, b?) {
+    dump a
+    dump b
+}
+f(1)
+f(1, 2)
+"#,
+    );
+}
+
+#[test]
+fn parity_rest_parameter_collects_positionals() {
+    // `Value::Closure` used to bind a rest parameter from a single argument, so
+    // `g(1, 2, 3)` bound `rest = 2` instead of `[2, 3]`. The VM now swallows
+    // every leftover positional into an array, as the interpreter does.
+    agree(
+        "rest parameter",
+        r#"
+fn g(a, ...rest) {
+    dump a
+    dump rest
+}
+g(1, 2, 3)
+g(1)
+"#,
+    );
+}
+
+#[test]
+fn parity_too_many_positional_arguments_raises() {
+    // The interpreter raised "too many positional arguments"; the VM silently
+    // dropped the extras, so a caller bug went unnoticed on one backend only.
+    // Both raise the same message, which `run_on_both` compares modulo the
+    // "Runtime error:" / "VM error:" prefix.
+    let parity = rakc::run_on_both("fn h(a) { dump a }\nh(1, 2)\nfn main() { dump 0 }", ".");
+    match &parity {
+        rakc::BackendParity::AgreeOnError(msg) => {
+            assert!(
+                msg.contains("too many positional arguments"),
+                "expected an arity error, got: {}",
+                msg
+            );
+        }
+        other => panic!(
+            "the backends did not agree on too many arguments:\n{}",
+            other
+                .divergence()
+                .unwrap_or_else(|| "agreed, but not on an error".into())
+        ),
+    }
+}
+
+#[test]
+fn parity_missing_required_argument_raises() {
+    // A missing required argument used to Nil-pad to nil on the VM, a silent
+    // wrong answer; the interpreter raised. Both now raise the same message.
+    let parity = rakc::run_on_both("fn m(a, b) { dump a }\nm(1)\nfn main() { dump 0 }", ".");
+    match &parity {
+        rakc::BackendParity::AgreeOnError(msg) => {
+            assert!(
+                msg.contains("missing required argument") && msg.contains("'b'"),
+                "expected a missing-argument error naming 'b', got: {}",
+                msg
+            );
+        }
+        other => panic!(
+            "the backends did not agree on a missing argument:\n{}",
+            other
+                .divergence()
+                .unwrap_or_else(|| "agreed, but not on an error".into())
+        ),
+    }
+}
+
+#[test]
+fn parity_main_with_no_parameters_takes_no_argv() {
+    // Both backends used to hand `fn main()` the argv array, so the arity check
+    // rejected the call and every zero-parameter `main` -- the common case for
+    // a script that just runs -- failed with "too many arguments". Both now
+    // pass argv only when the entry point declares a parameter for it.
+    agree(
+        "main with no parameters",
+        r#"
+fn main() {
+    dump 42
+}
+"#,
+    );
+}
+
+#[test]
+fn parity_main_with_one_parameter_receives_argv() {
+    // The argv array is still handed to a `fn main(argv)` entry point, so the
+    // skip did not swallow the argument the parameter exists to receive.
+    agree(
+        "main with an argv parameter",
+        r#"
+fn main(argv) {
+    dump len(argv)
 }
 "#,
     );
