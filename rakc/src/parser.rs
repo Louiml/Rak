@@ -45,6 +45,12 @@ struct Parser<'a> {
     tokens: &'a [(Token, usize)],
     source: &'a str,
     pos: usize,
+    /// Current expression nesting, so a pathological deeply-nested input fails
+    /// with a diagnostic instead of exhausting the native stack. The interpreter
+    /// already runs queries on a big stack; the parser did not, so a ~70-paren
+    /// expression crashed `rakc parse`/`fmt`/`check`/`lint` via stack overflow
+    /// rather than returning an error.
+    depth: usize,
     /// Type-parameter names currently in scope (inside `fn f<T>`, `struct S<T>`,
     /// `enum E<T>`). An identifier matching one of these parses as
     /// `Type::Generic` instead of `Type::Custom`.
@@ -57,6 +63,7 @@ impl<'a> Parser<'a> {
             tokens,
             source,
             pos: 0,
+            depth: 0,
             generic_type_params: Vec::new(),
         }
     }
@@ -1735,7 +1742,27 @@ impl<'a> Parser<'a> {
         Ok(Pattern::Bytes(parts))
     }
 
+    /// Max expression nesting. A limit slightly above what ordinary programs
+    /// need protects the parser (and, transitively, `check`/`lint`/`fmt`) from a
+    /// stack-overflow crash on a pathological input.
+    const MAX_PARSE_DEPTH: usize = 64;
+
     fn parse_expr(&mut self) -> Result<Expr> {
+        self.depth += 1;
+        if self.depth > Self::MAX_PARSE_DEPTH {
+            self.depth -= 1;
+            return Err(format!(
+                "Expression nesting exceeds {} levels; split it into a local variable",
+                Self::MAX_PARSE_DEPTH
+            )
+            .into());
+        }
+        let res = self.parse_expr_inner();
+        self.depth -= 1;
+        res
+    }
+
+    fn parse_expr_inner(&mut self) -> Result<Expr> {
         self.parse_pipeline()
     }
 
