@@ -45,7 +45,8 @@ clear message.
 | Tunnel / UDP transport | yes | yes (`Value::UdpTransport`, `tunnel` lowering) |
 | Inline assembly (`asm`) | yes | **no**, by design (see below) |
 | WebSocket | yes | no (no TCP layer) |
-| Channels & threads (`channel`, `select`, `spawn`, `timeout`) | yes | no (needs coroutines) |
+| Threads (`spawn`, `thread_join`) | yes | yes (OS thread, `Value::JoinHandle`) |
+| Channels & select (`channel`, `chan_send`, `chan_recv`, `select`, `timeout`, `task_group`, `await_all`) | yes | no (needs channel values) |
 
 The `yes`/`no` column is the authoritative backend-parity list, and it is
 checked rather than maintained by hand: `tests/backend_parity.rs` compares the
@@ -54,11 +55,12 @@ cannot be added to one side and forgotten on the other. The v8.0.0 release
 shipped nineteen builtins that existed only in the VM, and the suite did not
 notice.
 
-**Remaining gaps as of 0.9.1.** 33 interpreter-only builtins, in four
-groups. The channel/thread and socket families plus `spawn` and the async DNS
-lookups (29 of them) are blocked on one thing: a VM native has signature
-`fn(&[Value])`, so it cannot call a Rak function, suspend or resume — that
-needs VM coroutines. `gui_callback` needs the GUI event loop; `extern_call`
+**Remaining gaps as of 0.9.1.** 31 interpreter-only builtins. The channel and
+socket families plus the async DNS lookups (27 of them) are blocked on one
+thing: a VM native has signature `fn(&[Value])`, so it cannot call a Rak
+function, suspend or resume. (`spawn` and `thread_join` are now on both
+backends: the interpreter backs a task with an OS thread, and the VM does too.)
+`gui_callback` needs the GUI event loop; `extern_call`
 is simply unimplemented on the VM. `argv` and `expect_error` are CLI
 plumbing with no path to parity. `asm` and `exit` are interpreter-only by
 design: a bytecode VM has no instructions to escape into, and the CLI exits

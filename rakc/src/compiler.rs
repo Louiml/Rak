@@ -2640,6 +2640,18 @@ impl Compiler {
                 self.compile_expr(inner)?;
                 self.emit_op(Op::Await);
             }
+            Expr::Spawn(inner) => {
+                // `spawn(fn)` used to reach the VM as an unsupported expression
+                // node, so the whole task family was interpreter-only. It lowers
+                // to a call to the `spawn` builtin, which `Vm::call_value`
+                // intercepts to start the task on its own `Vm`.
+                let ci = self.const_str("spawn");
+                self.emit_op(Op::LoadGlobal);
+                self.emit_u16(ci);
+                self.compile_expr(inner)?;
+                self.emit_op(Op::Call);
+                self.emit_byte(1);
+            }
             f @ Expr::Function { .. } => {
                 // Compile a function literal to a closure constant (used by
                 // `pub fn` inlining and nested function values).

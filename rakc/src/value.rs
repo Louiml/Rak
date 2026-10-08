@@ -168,6 +168,10 @@ pub enum Value {
     Option(Option<Box<Value>>),
     Channel(Arc<crate::vm::ChannelHandle>),
     Future(Arc<crate::vm::FutureHandle>),
+    /// A `spawn`ed task, backed by an OS thread exactly as the interpreter's
+    /// `JoinHandle` is. `thread_join` takes the handle out and joins it, so a
+    /// second join reports "already joined" on both backends.
+    JoinHandle(Arc<std::sync::Mutex<Option<std::thread::JoinHandle<Value>>>>),
     Regex(Arc<RegexValue>),
     ForeignLib(Arc<std::sync::Mutex<rak_stdlib::ffi::LibHandle>>),
     ForeignPtr(u64),
@@ -261,6 +265,7 @@ impl Value {
             Value::Option(..) => "option",
             Value::Channel(_) => "channel",
             Value::Future(_) => "future",
+            Value::JoinHandle(_) => "thread",
             Value::Regex(_) => "regex",
             Value::ForeignLib(_) => "ffi-lib",
             Value::ForeignPtr(_) => "ptr",
@@ -419,6 +424,7 @@ impl PartialEq for Value {
             (Value::Regex(a), Value::Regex(b)) => a.pattern == b.pattern && a.flags == b.flags,
             (Value::ForeignPtr(a), Value::ForeignPtr(b)) => a == b,
             (Value::Closure { code: a, .. }, Value::Closure { code: b, .. }) => Arc::ptr_eq(a, b),
+            (Value::JoinHandle(a), Value::JoinHandle(b)) => Arc::ptr_eq(a, b),
             (Value::NativeFn(na, _), Value::NativeFn(nb, _)) => na == nb,
             (Value::Evidence { inner: a, .. }, Value::Evidence { inner: b, .. }) => a == b,
             (Value::Evidence { inner: a, .. }, other) => (**a).eq(other),
@@ -559,6 +565,7 @@ impl fmt::Display for Value {
             Value::Option(None) => write!(f, "None"),
             Value::Channel(_) => write!(f, "<channel>"),
             Value::Future(_) => write!(f, "<future>"),
+            Value::JoinHandle(_) => write!(f, "<thread>"),
             Value::Regex(r) => write!(f, "/{}/{}", r.pattern, r.flags),
             Value::ForeignLib(_) => write!(f, "<ffi-lib>"),
             Value::ForeignPtr(p) => write!(f, "0x{:X}", p),

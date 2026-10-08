@@ -3248,6 +3248,15 @@ impl Vm {
                     "stream_next" | "collect" => {
                         return self.vm_stream_call(frame, &name, &args);
                     }
+                    // `spawn` runs a compiled closure on an OS thread and
+                    // `thread_join` is the join half. Both need the machine (a
+                    // fresh `Vm` for the task), which a `fn(&[Value])` native
+                    // does not have.
+                    "spawn" | "thread_join" => {
+                        let result = self.vm_task_op(&name, args)?;
+                        frame.push(result);
+                        return Ok(());
+                    }
                     _ => {}
                 }
                 let result = f(&args).map_err(|e| format!("{}: {}", name, e))?;
@@ -3349,6 +3358,58 @@ impl Vm {
     /// Raise or lower the call-depth ceiling.
     pub fn set_max_call_depth(&mut self, depth: u32) {
         self.max_call_depth = depth;
+    }
+
+    /// `spawn` and `thread_join`.
+    ///
+    /// The interpreter backs a spawned task with an OS thread and a fresh
+    /// `Interpreter` seeded from the closure's captured environment; the VM
+    /// mirrors that with a fresh `Vm` seeded from the parent's globals, so the
+    /// task reads the same top-level bindings and its result is joined the same
+    /// way. A task that errors returns `nil` rather than propagating, matching
+    /// the interpreter's `spawn`, which ignores a failing statement.
+    fn vm_task_op(&mut self, name: &str, args: Vec<Value>) -> Result<Value, String> {
+        match name {
+            "spawn" => {
+                // Mirror the interpreter's `spawn_value`: a non-function (and a
+                // future, which is already a task) passes through unchanged.
+                // `spawn(5)` prints `5` on both backends rather than erroring.
+                let callee = args.into_iter().next().unwrap_or(Value::Nil);
+                let code = match &callee {
+                    Value::Closure { code, .. } => code.clone(),
+                    Value::Future(_) => return Ok(callee),
+                    _ => return Ok(callee),
+                };
+                let globals = self.globals.clone();
+                let handle = std::thread::spawn(move || -> Value {
+                    let mut vm = Vm::new();
+                    vm.globals = globals;
+                    let mut frame = Frame {
+                        code: &code,
+                        ip: 0,
+                        stack: Vec::new(),
+                        locals: Vec::new(),
+                        defers: Vec::new(),
+                        catches: Vec::new(),
+                    };
+                    match vm.call_value(&mut frame, callee, Vec::new()) {
+                        Ok(()) => frame.pop(),
+                        Err(_) => Value::Nil,
+                    }
+                });
+                Ok(Value::JoinHandle(Arc::new(std::sync::Mutex::new(Some(
+                    handle,
+                )))))
+            }
+            "thread_join" => match args.into_iter().next() {
+                Some(Value::JoinHandle(h)) => match h.lock().unwrap().take() {
+                    Some(handle) => handle.join().map_err(|_| "thread panicked".to_string()),
+                    None => Err("already joined".to_string()),
+                },
+                _ => Err("thread_join requires a thread handle".to_string()),
+            },
+            other => Err(format!("{} is not a task builtin", other)),
+        }
     }
 
     /// Run an iterator builtin whose per-element step calls a Rak function

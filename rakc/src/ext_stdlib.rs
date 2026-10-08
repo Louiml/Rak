@@ -1436,6 +1436,11 @@ pub fn vm_natives() -> Vec<(&'static str, fn(&[Value]) -> Result<Value, String>)
         // and the LSP can see the names.
         ("stream_next", vm_stream_next_unreachable),
         ("collect", vm_stream_next_unreachable),
+        // `spawn` and `thread_join` are intercepted in `Vm::call_value`: a
+        // spawned task runs on its own `Vm`, which a `fn(&[Value])` native
+        // cannot create. Registered so the parity gate and the LSP see the names.
+        ("spawn", vm_task_unreachable),
+        ("thread_join", vm_task_unreachable),
     ]
 }
 
@@ -1541,4 +1546,11 @@ fn vm_stream_jsonl(args: &Args) -> R {
 /// otherwise look like a silent `nil` rather than a bug — so it says so.
 fn vm_stream_next_unreachable(_args: &Args) -> R {
     Err("stream: internal error, this builtin must be driven with VM access".to_string())
+}
+
+/// Placeholder for `spawn`/`thread_join`, intercepted in `Vm::call_value` like
+/// the stream-next pair: both need the machine (a fresh `Vm` for the task),
+/// which a `fn(&[Value])` native does not have.
+fn vm_task_unreachable(_args: &Args) -> R {
+    Err("task: internal error, this builtin must be driven with VM access".to_string())
 }

@@ -59,7 +59,7 @@ cannot catch a per-backend omission; only a comparison can.
 
 ## What is not, and why
 
-**33 builtins exist only on the interpreter**, and every one of them is blocked
+**31 builtins exist only on the interpreter**, and every one of them is blocked
 on the same thing.
 
 A VM native has the signature:
@@ -74,9 +74,9 @@ expressible as a native:
 
 | Family | Count | What it needs |
 | --- | --- | --- |
-| `channel`, `chan_send`, `chan_recv`, `select`, `timeout`, `await_all`, `task_group`, `thread_join` | 8 | Suspend and resume |
+| `channel`, `chan_send`, `chan_recv`, `select`, `timeout`, `await_all`, `task_group` | 7 | Channels and suspension |
 | `net_listen`, `net_accept`, `net_connect`, `net_local_addr`, `http_server_poll`, `tcp_*`, `ws_*` | 15 | Blocking I/O, and `tcp_connect_async` needs suspension |
-| `spawn`, `dns_lookup`, `reverse_dns`, `scan_ports`, `scan_subdomains`, `subdomain_enum` | 6 | Threads or async I/O |
+| `dns_lookup`, `reverse_dns`, `scan_ports`, `scan_subdomains`, `subdomain_enum` | 5 | Threads or async I/O |
 | `extern_call` | 1 | FFI trampolines through VM frames |
 | `argv`, `expect_error` | 2 | Reachable, but not yet swept |
 | `gui_callback` | 1 | Needs a Rak callback from a native |
@@ -85,39 +85,41 @@ The interpreter does not have this problem because `eval_builtin` takes
 `&mut self`. It can call `call_function_with_values`, and it can hand back out
 a `Future` that the runtime resolves later.
 
-**The fix is coroutines in the VM**, and that is a real project, not a list of
-one-line registrations. It is not being done in this release. The gate fails on
-these 33 by design, so the gap cannot be forgotten, and the backlog test prints
-them so the number cannot drift upward unnoticed.
+**The fix is what this repo calls "coroutines in the VM"**, and it is a project,
+not a list of one-line registrations. The gate fails on these 31 by design, so
+the gap cannot be forgotten, and the backlog test prints them so the number
+cannot drift upward unnoticed.
 
-### What the coroutine project would actually involve
+### What a coroutine actually needs here
 
-The pieces that already exist narrow the shape of the work:
+"Coroutines" is this repo's shorthand, but the **interpreter does not implement
+cooperative coroutines**. `spawn` starts a real OS thread with a fresh
+`Interpreter` seeded from the closure's environment; `thread_join` joins it, and
+`channel` is a `std::sync::mpsc` pair. So the VM does not need a frame scheduler
+to match the interpreter — it needs the same thing the interpreter does.
 
-- **A frame is already self-contained.** `Frame { code, ip, stack, locals,
-  defers, catches }` is the entire machine state of a suspended call, so
-  "suspend" is already representable: stop stepping a frame, keep it, step it
-  later. What is missing is a *scheduler* — a ready queue and a pump that
-  advances several frames instead of one `exec_frame` recursion.
-- **`Value::Future`, `Op::Await` and a Tokio-backed pending state already
-  exist** in the VM (`vm.rs`, the async-IO builtins). Awaiting is therefore
-  half-plumbed; it is `spawn`, `chan_recv`, `select` and friends — which need
-  to park a *Rak* frame, not just a native future — that are not.
-- **The interception pattern is proven.** `set_add`, `stream_next` and `fold`
-  are already intercepted in `Vm::call_value` because a `fn(&[Value])` native
-  cannot reach the machine. The coroutine natives would join them there, not
-  in the native table.
-- **Blocking I/O is a separate problem.** The `net_*`/`tcp_*`/`ws_*` family
-  needs threads or an async runtime regardless of coroutines;
-  `tcp_connect_async` needs both. Coroutines unblock the 8 suspend/resume
-  names cleanly and `dns_lookup`-style names after a runtime decision; they
-  do not by themselves unblock a blocking `net_accept`.
+`spawn` and `thread_join` are now on both backends for that reason: `spawn`
+lowers to a call the VM intercepts, and `Vm::call_value` starts the closure on a
+fresh `Vm` over an OS thread, joined through `Value::JoinHandle`. That closed
+the first two names. What is left, and why each is harder than `spawn` was:
 
-So the honest decomposition is: a scheduler over resumable frames first, then
-park-and-resume natives (`spawn`, `channel`, `chan_send`, `chan_recv`,
-`select`, `timeout`, `await_all`, `task_group`, `thread_join`), then the
-blocking-IO family as its own decision. Each layer is testable against the
-existing parity harness, and the gate counts what each layer closes.
+- **`channel`, `chan_send`, `chan_recv`, `select`** need a channel value on the
+  VM. The interpreter has `Sender`/`Receiver` variants over `std::sync::mpsc`,
+  and a blocking `chan_recv` is fine because the sender runs on another thread;
+  `select` then waits on several receivers.
+- **`timeout`, `await_all`, `task_group`** are built on futures. `Op::Await`
+  already resolves a Tokio future, so these are argument checking and joining a
+  collection, but each needs somewhere to hold the handles.
+- **`net_*`/`tcp_*`/`ws_*`** are blocking I/O, independent of the task work, and
+  `tcp_connect_async` also wants suspension. These are their own decision.
+- **`extern_call`** needs FFI trampolines that re-enter VM frames.
+- **`argv`, `expect_error`** are reachable already and only need sweeping into
+  the VM's builtin table.
+- **`gui_callback`** needs a Rak callback from a native, i.e. the GUI event loop.
+
+The pattern is the same for all of them: intercept in `Vm::call_value`, where
+the machine is available, rather than register a `fn(&[Value])` native — exactly
+as `set_add`, `stream_next`, `spawn` and `thread_join` already are.
 
 ### Two entries that are allowed to differ
 

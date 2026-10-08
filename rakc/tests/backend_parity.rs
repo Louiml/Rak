@@ -336,7 +336,7 @@ const VM_ONLY: &[(&str, &str)] = &[
 ///
 /// If the gap ever reaches zero, replace this with a plain `assert!(...is_empty())`
 /// and delete `MAX_KNOWN_INTERP_ONLY`.
-const MAX_KNOWN_INTERP_ONLY: usize = 33;
+const MAX_KNOWN_INTERP_ONLY: usize = 31;
 
 /// The VM-only names, in addition to the documented allowances.
 const MAX_KNOWN_VM_ONLY: usize = 0;
@@ -2015,6 +2015,88 @@ fn main(argv) {
 }
 "#,
     );
+}
+
+#[test]
+fn parity_spawn_runs_a_task_and_thread_join_joins_it() {
+    // `spawn` reached the VM as an unsupported expression node, so the task
+    // family was interpreter-only. It now starts the closure on an OS thread of
+    // its own, exactly as the interpreter does, and `thread_join` joins it.
+    agree(
+        "spawn and thread_join",
+        r#"
+let h = spawn(fn() { return 21 })
+dump h
+dump thread_join(h)
+"#,
+    );
+}
+
+#[test]
+fn parity_spawn_of_a_non_function_passes_it_through() {
+    // The interpreter's spawn expression uses `spawn_value`, which leaves a
+    // non-function (and a future) unchanged rather than rejecting it. `spawn(5)`
+    // prints `5`; the VM errored "spawn requires a function" before.
+    agree("spawn a non-function", "dump spawn(5)");
+}
+
+#[test]
+fn parity_spawn_sees_the_enclosing_globals() {
+    // A task runs on a fresh machine seeded from the parent's globals, so a
+    // top-level binding is visible inside the spawned closure.
+    agree(
+        "spawn sees globals",
+        r#"
+let K = 7
+let h = spawn(fn() { return K })
+dump thread_join(h)
+"#,
+    );
+}
+
+#[test]
+fn parity_thread_join_of_a_non_handle_raises() {
+    let parity = rakc::run_on_both("dump thread_join(5)\nfn main() { dump 0 }", ".");
+    match &parity {
+        rakc::BackendParity::AgreeOnError(msg) => {
+            assert!(
+                msg.contains("thread_join requires a thread handle"),
+                "expected a thread-handle error, got: {}",
+                msg
+            );
+        }
+        other => panic!(
+            "the backends did not agree on thread_join of a non-handle:\n{}",
+            other
+                .divergence()
+                .unwrap_or_else(|| "agreed, but not on an error".into())
+        ),
+    }
+}
+
+#[test]
+fn parity_double_thread_join_raises() {
+    // The handle is consumed by the first join, so the second reports
+    // "already joined" on both backends.
+    let parity = rakc::run_on_both(
+        "let h = spawn(fn() { return 1 })\ndump thread_join(h)\ndump thread_join(h)\nfn main() { dump 0 }",
+        ".",
+    );
+    match &parity {
+        rakc::BackendParity::AgreeOnError(msg) => {
+            assert!(
+                msg.contains("already joined"),
+                "expected an already-joined error, got: {}",
+                msg
+            );
+        }
+        other => panic!(
+            "the backends did not agree on a double thread_join:\n{}",
+            other
+                .divergence()
+                .unwrap_or_else(|| "agreed, but not on an error".into())
+        ),
+    }
 }
 
 #[test]

@@ -32,14 +32,17 @@ its native errors. Both are described in
 
 ## What 8.1.0 did not close, and why
 
-**33 builtins exist only on the interpreter.** All of them are blocked on one
+**31 builtins exist only on the interpreter.** All of them are blocked on one
 thing: a VM native has signature `fn(&[Value])`, so it cannot call a Rak
 function, suspend, or resume. That rules out `channel`, `select`, `timeout`,
-`await_all`, `task_group`, the socket family, `spawn`, and FFI trampolines.
+`await_all`, `task_group`, the socket family, and FFI trampolines. (`spawn` and
+`thread_join` are closed: the interpreter backs a task with an OS thread, and
+the VM now does too.)
 
-The fix is **coroutines in the VM**, and that is a project rather than a list of
-registrations. The parity gate fails on these 33 deliberately, so the gap cannot
-be forgotten, and the backlog test prints them so the number cannot drift.
+The fix is what this repo calls **coroutines in the VM**, and that is a project
+rather than a list of registrations. The parity gate fails on these 31
+deliberately, so the gap cannot be forgotten, and the backlog test prints them
+so the number cannot drift.
 
 **Instrumented CFI** is a toolchain limitation, not a code one. The spike is in
 [CFI-SPIKE.md](CFI-SPIKE.md). What Rak ships is CFG-compatible with a guarded
@@ -142,14 +145,17 @@ All front-end commands now run on the big stack:
 
 ## What 0.9.0 did not close, and why
 
-**VM coroutines** are still the blocker for the 33 interpreter-only builtins.
-The VM native signature `fn(&[Value])` cannot call a Rak function, suspend, or
-resume. That rules out `channel`, `select`, `timeout`, `await_all`,
-`task_group`, the socket family, `spawn`, and FFI trampolines.
+**VM coroutines** are still the blocker for most of the 31 interpreter-only
+builtins. The VM native signature `fn(&[Value])` cannot call a Rak function,
+suspend, or resume. That rules out `channel`, `select`, `timeout`, `await_all`,
+`task_group`, the socket family, and FFI trampolines. `spawn` and `thread_join`
+are closed: the interpreter backs a task with an OS thread, and the VM now does
+too.
 
-The fix is **coroutines in the VM**, and that is a project rather than a list of
-registrations. The parity gate fails on these 33 deliberately, so the gap cannot
-be forgotten, and the backlog test prints them so the number cannot drift.
+The fix is what this repo calls **coroutines in the VM**, and that is a project
+rather than a list of registrations. The parity gate fails on these 31
+deliberately, so the gap cannot be forgotten, and the backlog test prints them
+so the number cannot drift.
 
 **Instrumented CFI** is a toolchain limitation, not a code one. The spike is in
 [CFI-SPIKE.md](CFI-SPIKE.md). What Rak ships is CFG-compatible with a guarded
@@ -191,8 +197,8 @@ last, because they are the part that cannot be added compatibly.
 
 In rough order of how much they would improve Rak:
 
-1. **VM coroutines.** Unblocks the 33 builtins above, and is the precondition for
-   `select`, `timeout` and structured concurrency on the VM.
+1. **VM coroutines.** Unblocks the remaining interpreter-only builtins above, and
+   is the precondition for `select`, `timeout` and structured concurrency on the VM.
 2. **Insertion-ordered maps.** Small, and removes a real source of
    run-to-run nondeterminism.
 3. **A return-value lint.** A warning for a function body whose last statement is
