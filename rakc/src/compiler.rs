@@ -1445,9 +1445,15 @@ impl Compiler {
                 self.compile_expr(e)?;
                 self.emit_op(Op::Pop);
             }
-            Stmt::Dump { value, target: _ } => {
+            Stmt::Dump { value, target } => {
                 self.compile_expr(value)?;
-                self.emit_op(Op::Print);
+                match target {
+                    None => self.emit_op(Op::Print),
+                    Some(t) => {
+                        self.compile_expr(t)?;
+                        self.emit_op(Op::DumpToFile);
+                    }
+                }
             }
             Stmt::Return(e) => {
                 if let Some(e) = e {
@@ -1630,13 +1636,13 @@ impl Compiler {
                     self.compile_stmt(s)?;
                 }
                 self.end_scope();
+                // `continue` in a `do..while` must re-evaluate the condition,
+                // not jump straight past the loop back-edge.
+                let cont = self.chunk.code.len();
                 self.compile_expr(cond)?;
                 let jexit = self.emit_jump(Op::JumpIfFalse);
                 self.emit_op(Op::Pop);
                 self.emit_jump_back(loop_start);
-                // `do..while` body runs at least once; the continue point is the
-                // condition check.
-                let cont = self.chunk.code.len();
                 self.end_loop_with_continue(cont);
                 self.patch_jump(jexit);
                 self.emit_op(Op::Pop);
@@ -2268,6 +2274,47 @@ impl Compiler {
                     self.emit_byte(2);
                     return Ok(());
                 }
+                if let BinOp::And = op {
+                    // Short-circuit: evaluate the right only when the left is truthy.
+                    self.compile_expr(l)?;
+                    let j_left_falsy = self.emit_jump(Op::JumpIfFalse);
+                    self.emit_op(Op::Pop); // left was truthy; drop it
+                    self.compile_expr(r)?;
+                    let j_r_falsy = self.emit_jump(Op::JumpIfFalse);
+                    self.emit_op(Op::Pop);
+                    self.load_const(Value::Bool(true));
+                    let j_end = self.emit_jump(Op::Jump);
+                    self.patch_jump(j_r_falsy); // stack: [r]
+                    self.emit_op(Op::Pop);
+                    self.load_const(Value::Bool(false));
+                    let j_end2 = self.emit_jump(Op::Jump);
+                    self.patch_jump(j_left_falsy); // stack: [l]
+                    self.emit_op(Op::Pop);
+                    self.load_const(Value::Bool(false));
+                    self.patch_jump(j_end);
+                    self.patch_jump(j_end2);
+                    return Ok(());
+                }
+                if let BinOp::Or = op {
+                    self.compile_expr(l)?;
+                    let j_left_true = self.emit_jump(Op::JumpIfTrue);
+                    self.emit_op(Op::Pop); // left was falsy; drop it
+                    self.compile_expr(r)?;
+                    let j_r_falsy = self.emit_jump(Op::JumpIfFalse);
+                    self.emit_op(Op::Pop);
+                    self.load_const(Value::Bool(true));
+                    let j_end = self.emit_jump(Op::Jump);
+                    self.patch_jump(j_r_falsy); // stack: [r]
+                    self.emit_op(Op::Pop);
+                    self.load_const(Value::Bool(false));
+                    let j_end2 = self.emit_jump(Op::Jump);
+                    self.patch_jump(j_left_true); // stack: [l]
+                    self.emit_op(Op::Pop);
+                    self.load_const(Value::Bool(true));
+                    self.patch_jump(j_end);
+                    self.patch_jump(j_end2);
+                    return Ok(());
+                }
                 self.compile_expr(l)?;
                 self.compile_expr(r)?;
                 self.emit_op(match op {
@@ -2287,10 +2334,7 @@ impl Compiler {
                     BinOp::Gt => Op::Gt,
                     BinOp::LtEq => Op::LtEq,
                     BinOp::GtEq => Op::GtEq,
-                    BinOp::And => Op::Nop,
-                    BinOp::Or => Op::Nop,
-                    // `in` is compiled to a `contains` native call above.
-                    BinOp::In => Op::Nop,
+                    BinOp::And | BinOp::Or | BinOp::In => unreachable!("handled above"),
                 });
             }
             Expr::Assign(name, value) => {
@@ -2805,11 +2849,12 @@ impl Compiler {
                     self.emit_op(Op::StoreLocal);
                     self.emit_byte(slot);
                 }
-                // For a structural pattern with no binds, MatchPat left a bare
-                // `true` (stack has one value); with binds it left the array.
-                if !binds.is_empty() {
-                    self.emit_op(Op::Pop); // drop the bindings array
-                }
+                // MatchPat always leaves exactly one value: the bindings array
+                // (possibly empty) for a successful match, or `true` for a
+                // bind-less structural match. In both cases the indicator must
+                // be popped before the arm body runs, otherwise it leaks onto
+                // the operand stack and corrupts the enclosing expression.
+                self.emit_op(Op::Pop);
                 self.compile_match_arm(guard, body, &mut end_jumps, jnext)?;
             } else {
                 // Scalar inline path (existing codegen): pop scrutinee, push bool.
@@ -2930,9 +2975,21 @@ impl Compiler {
         target: &Option<BreakTarget>,
         is_continue: bool,
     ) -> Result<(), String> {
+        // The loop stack is outermost-first, so the innermost loop is the
+        // last entry. Depth 1 means break/continue the innermost one.
         let idx = match target {
-            None => 0,
-            Some(BreakTarget::Depth(n)) => (*n - 1) as usize,
+            None => self
+                .loop_stack
+                .len()
+                .checked_sub(1)
+                .ok_or_else(|| "break/continue outside a loop".to_string())?,
+            Some(BreakTarget::Depth(n)) => {
+                let n = *n;
+                if n == 0 || (n as usize) > self.loop_stack.len() {
+                    return Err("break/continue depth outside a loop".to_string());
+                }
+                self.loop_stack.len() - n as usize
+            }
             Some(BreakTarget::Label(l)) => {
                 let mut found = None;
                 for (i, li) in self.loop_stack.iter().enumerate().rev() {

@@ -1453,6 +1453,10 @@ impl Interpreter {
     /// After executing a script, if a `fn main(args)` is defined, call it with
     /// the given command-line args and return its `int` result as the exit code
     /// (defaults to 0 when no `main` is present).
+    pub fn set_program_argv(&mut self, argv: &[String]) {
+        self.program_argv = argv.to_vec();
+    }
+
     pub fn run_main(&mut self, argv: &[String]) -> crate::Result<i32> {
         self.program_argv = argv.to_vec();
         let main_val = self.main_entry.clone().or_else(|| self.env.get("main"));
@@ -2253,10 +2257,15 @@ impl Interpreter {
                         // ordered at all.
                         Value::Set(s) => s.lock().unwrap().to_vec(),
                         Value::Option(Some(v)) => vec![*v],
+                        Value::Option(None) => Vec::new(),
                         // `for b in buf` yields the bytes as ints, which is what
                         // every consumer wants - a hex dump, a checksum, a
                         // comparison. Yielding one-character strings instead would
                         // put `hex_encode` and friends out of reach from a loop.
+                        Value::MmapSlice(h, off, n) => h.as_slice()[off..off + n]
+                            .iter()
+                            .map(|b| Value::Int(*b as i64))
+                            .collect(),
                         Value::Bytes(b) => b.iter().map(|x| Value::Int(*x as i64)).collect(),
                         _ => {
                             return Err(crate::RakError::Runtime(
@@ -2283,6 +2292,7 @@ impl Interpreter {
                     let target_val = self.eval_expr(t)?;
                     match &target_val {
                         Value::String(path) => {
+                            crate::caps::check_builtin("dump:file_write")?;
                             let s = self.display_value(&val)?;
                             match std::fs::write(path, s) {
                                 Ok(_) => self.output.push(format!("[DUMP] Written to {}", path)),
@@ -7303,6 +7313,7 @@ impl Interpreter {
                 Ok(Value::Array(a))
             }
             "env_get" => {
+                crate::caps::check_builtin("env_get")?;
                 let k = self.val_to_string(args.first())?;
                 Ok(std::env::var(&k).map(Value::String).unwrap_or(Value::Nil))
             }
@@ -7525,6 +7536,7 @@ impl Interpreter {
                 Ok(Value::Int(v.max(lo).min(hi)))
             }
             "env_set" => {
+                crate::caps::check_builtin("env_set")?;
                 let k = self.val_to_string(args.first())?;
                 let v = self.val_to_string(args.get(1))?;
                 std::env::set_var(k, v);
@@ -7805,6 +7817,9 @@ impl Interpreter {
                 let mode = self
                     .val_to_string(args.get(1))
                     .unwrap_or_else(|_| "r".to_string());
+                if mode != "r" {
+                    crate::caps::check_builtin("file_write")?;
+                }
                 match rak_stdlib::mmap::open(&path, &mode) {
                     Ok(h) => Ok(Value::Mmap(h)),
                     Err(e) => Err(crate::RakError::Runtime(e)),
@@ -7844,6 +7859,7 @@ impl Interpreter {
             // file, so this needs no flush and no second handle - which is the
             // point over `file_write_at`.
             "mmap_write" => {
+                crate::caps::check_builtin("mmap_write")?;
                 let h = match args.first() {
                     Some(Value::Mmap(h)) | Some(Value::MmapSlice(h, _, _)) => h.clone(),
                     _ => {

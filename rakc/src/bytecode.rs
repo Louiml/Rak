@@ -58,6 +58,9 @@ pub enum Op {
     Call,
     Return,
     Print,
+    /// `dump x, "path.txt"`: write the value to a file. Same capability gate as
+    /// any other filesystem write.
+    DumpToFile,
     Trace,
 
     NewArray,

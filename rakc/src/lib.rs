@@ -517,6 +517,7 @@ pub fn eval_in_cli(
         // A default the library does not impose, because a CLI running someone
         // else's script should not be able to die by exhausting the native stack.
         // See `DEFAULT_MAX_DEPTH`: the check already existed and simply never fired.
+        interpreter.set_program_argv(&args);
         interpreter.set_max_depth(max_depth.unwrap_or(interpreter::DEFAULT_MAX_DEPTH));
         // See `eval_cli`: the snapshot must be taken after `run_main`, not before.
         interpreter.run_source(&src)?;

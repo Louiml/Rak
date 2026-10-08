@@ -17,8 +17,28 @@
 //! which builtins fall in which bucket.
 
 use crate::value::Value;
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::Arc;
+
+// Interpreter-equivalent program arguments. The interpreter stores these on
+// its object (`Interpreter::program_argv`); the VM, whose natives are free
+// functions that receive only arguments, keeps the same data in a thread-local
+// set once by the caller that knows the script argv.
+thread_local! {
+    static SCRIPT_ARGV: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Point `parse_args(spec)` (with no explicit argv) at the same arguments the
+/// interpreter would see -- i.e. the program's argv after `rakc` knows the
+/// subcommand and file, never the host process's argv.
+pub fn set_script_argv(argv: Vec<String>) {
+    SCRIPT_ARGV.with(|cell| *cell.borrow_mut() = argv);
+}
+
+pub fn script_argv() -> Vec<String> {
+    SCRIPT_ARGV.with(|cell| cell.borrow().clone())
+}
 
 type Args = [Value];
 type R = Result<Value, String>;
@@ -1119,12 +1139,14 @@ fn vm_args(_args: &Args) -> R {
 }
 
 fn vm_env_get(args: &Args) -> R {
+    crate::caps::check_str("env_get")?;
     Ok(std::env::var(to_str(args.first()))
         .map(|x| s_owned(x))
         .unwrap_or(Value::Nil))
 }
 
 fn vm_env_set(args: &Args) -> R {
+    crate::caps::check_str("env_set")?;
     // `set_var` is infallible today but is `unsafe` in edition 2024 for
     // process-safety reasons; this crate is on 2021, where it is safe. The
     // check below is kept so the intent is explicit if that ever changes.
@@ -1159,7 +1181,7 @@ fn vm_parse_args(args: &Args) -> R {
     };
     let argv: Vec<String> = match arg(args, 1) {
         Some(Value::Array(a)) => a.iter().map(|v| v.to_string()).collect(),
-        _ => std::env::args().skip(1).collect(),
+        _ => script_argv(),
     };
 
     let mut out: HashMap<String, Value> = HashMap::new();

@@ -1670,6 +1670,11 @@ impl Vm {
                     m
                 }
             };
+            // A read-write mapping can mutate the file, so it takes the
+            // filesystem-write capability, same as `file_write` does.
+            if mode != "r" {
+                crate::caps::check_str("file_write")?;
+            }
             match rak_stdlib::mmap::open(&path, &mode) {
                 Ok(h) => Ok(Value::Mmap(h)),
                 Err(e) => Err(e),
@@ -2103,6 +2108,7 @@ impl Vm {
         chunk: &Chunk,
         argv: &[String],
     ) -> Result<(Vec<String>, i32), String> {
+        crate::ext_stdlib::set_script_argv(argv.to_owned());
         let mut output = self.run(chunk)?;
         let Some(main_val) = self.globals.get("main").cloned() else {
             return Ok((output, 0));
@@ -2123,9 +2129,13 @@ impl Vm {
             catches: Vec::new(),
         };
         self.call_value(&mut frame, main_val, vec![args])?;
-        let code = match frame.pop().as_i64() {
-            Some(n) => n.clamp(i32::MIN as i64, i32::MAX as i64) as i32,
-            None => 0,
+        let code = match frame.pop() {
+            // Only an explicit `Int` return value selects the exit code; a
+            // float, hex, string or omitted `return` is treated like "no
+            // meaningful result" (exit 0), never silently truncated, so both
+            // backends report the same code.
+            Value::I64(n) => n.clamp(i32::MIN as i64, i32::MAX as i64) as i32,
+            _ => 0,
         };
         // `run` drains `self.output`, so anything `main` printed is sitting there
         // again and has to be collected too.
@@ -2310,12 +2320,16 @@ impl Vm {
                     let v = frame.pop();
                     frame.push(Value::F64(-(v.as_f64().unwrap_or(0.0))));
                 }
-                Op::BitAnd => bin_int(frame, |a, b| a & b, |_, _| 0.0),
-                Op::BitOr => bin_int(frame, |a, b| a | b, |_, _| 0.0),
-                Op::BitXor => bin_int(frame, |a, b| a ^ b, |_, _| 0.0),
+                Op::BitAnd => bin_int(frame, |a, b| a & b, |_, _| 0.0)?,
+                Op::BitOr => bin_int(frame, |a, b| a | b, |_, _| 0.0)?,
+                Op::BitXor => bin_int(frame, |a, b| a ^ b, |_, _| 0.0)?,
                 Op::BitNot => {
                     let v = frame.pop();
-                    frame.push(Value::I64(!(v.as_i64().unwrap_or(0))));
+                    match v {
+                        Value::I64(i) => frame.push(Value::I64(!i)),
+                        Value::Hex(h) => frame.push(Value::Hex(!h)),
+                        _ => return Err("Cannot bitwise-not this value".to_string()),
+                    }
                 }
                 Op::Shl => bin_int_shift(frame, true)?,
                 Op::Shr => bin_int_shift(frame, false)?,
@@ -2395,6 +2409,20 @@ impl Vm {
                     let v = frame.pop();
                     self.output.push(format!("[DUMP] {}", v));
                 }
+                Op::DumpToFile => {
+                    let target = frame.pop();
+                    let v = frame.pop();
+                    match &target {
+                        Value::String(path) => {
+                            crate::caps::check_str("dump:file_write")?;
+                            match std::fs::write(path.as_ref(), format!("{}", v)) {
+                                Ok(_) => self.output.push(format!("[DUMP] Written to {}", path)),
+                                Err(e) => self.output.push(format!("[DUMP] File error: {}", e)),
+                            }
+                        }
+                        _ => self.output.push(format!("[DUMP] {} -> {}", v, target)),
+                    }
+                }
                 Op::Trace => {
                     let v = frame.pop();
                     self.output.push(format!("[TRACE] {:?}", v));
@@ -2449,43 +2477,62 @@ impl Vm {
                     let obj = unwrap_vm_evidence(&obj);
                     match (&obj, &idx) {
                         (Value::Array(a), Value::I64(i)) => {
-                            let i = normalize_index_vm(a.len(), *i).unwrap_or(usize::MAX);
-                            frame.push(a.get(i).cloned().unwrap_or(Value::Nil));
+                            let i = normalize_index_vm(a.len(), *i);
+                            match i {
+                                Some(i) => frame.push(a[i].clone()),
+                                None => {
+                                    return Err("Index out of bounds".to_string());
+                                }
+                            }
                         }
                         (Value::Tuple(t), Value::I64(i)) => {
-                            let i = normalize_index_vm(t.len(), *i).unwrap_or(usize::MAX);
-                            frame.push(t.get(i).cloned().unwrap_or(Value::Nil));
+                            let i = normalize_index_vm(t.len(), *i);
+                            match i {
+                                Some(i) => frame.push(t[i].clone()),
+                                None => {
+                                    return Err("Index out of bounds".to_string());
+                                }
+                            }
                         }
                         (Value::String(s), Value::I64(i)) => {
                             let k = normalize_index_vm(s.chars().count(), *i);
-                            frame.push(
-                                k.and_then(|k| s.chars().nth(k))
-                                    .map(|c| Value::String(Arc::from(c.to_string().as_str())))
-                                    .unwrap_or(Value::Nil),
-                            );
+                            match k {
+                                Some(k) => frame.push(Value::String(Arc::from(
+                                    s.chars().nth(k).unwrap().to_string().as_str(),
+                                ))),
+                                None => return Err("Index out of bounds".to_string()),
+                            }
                         }
-                        (Value::Map(m), Value::String(k)) => {
-                            frame.push(m.get(k.as_ref()).cloned().unwrap_or(Value::Nil));
-                        }
+                        (Value::Map(m), Value::String(k)) => match m.get(k.as_ref()) {
+                            Some(v) => frame.push(v.clone()),
+                            None => {
+                                return Err(format!("Key '{}' not found", k));
+                            }
+                        },
                         (Value::Mmap(h), Value::I64(i)) => {
                             let data = h.as_slice();
                             let k = normalize_index_vm(data.len(), *i);
-                            frame.push(
-                                k.map(|k| Value::I64(data[k] as i64))
-                                    .unwrap_or(Value::I64(0)),
-                            );
+                            match k {
+                                Some(k) => frame.push(Value::I64(data[k] as i64)),
+                                None => return Err("Index out of bounds".to_string()),
+                            }
                         }
                         (Value::MmapSlice(h, off, n), Value::I64(i)) => {
                             let k = normalize_index_vm(*n, *i);
-                            let b = k.map(|k| h.as_slice()[off + k] as i64).unwrap_or(0);
-                            frame.push(Value::I64(b));
+                            match k {
+                                Some(k) => frame.push(Value::I64(h.as_slice()[off + k] as i64)),
+                                None => return Err("Index out of bounds".to_string()),
+                            }
                         }
                         (Value::Bytes(b), Value::I64(i)) => {
                             let k = normalize_index_vm(b.len(), *i);
-                            frame.push(k.map(|k| Value::I64(b[k] as i64)).unwrap_or(Value::I64(0)));
+                            match k {
+                                Some(k) => frame.push(Value::I64(b[k] as i64)),
+                                None => return Err("Index out of bounds".to_string()),
+                            }
                         }
                         _ => {
-                            frame.push(Value::Nil);
+                            return Err("Invalid index operation".to_string());
                         }
                     }
                 }
@@ -2981,6 +3028,8 @@ impl Vm {
                                     .collect()
                             }
                         }
+                        Value::Option(Some(v)) => vec![(**v).clone()],
+                        Value::Option(None) => Vec::new(),
                         Value::Bytes(b) => b.iter().map(|b| Value::I64(*b as i64)).collect(),
                         // Sets iterate in insertion order, which is the
                         // reason `SetRepr` keeps one — see `setrepr`.
@@ -3523,6 +3572,15 @@ impl Vm {
                         BinArith::Rem => a % b,
                     }),
                 ),
+                (Value::Hex(a), Value::Hex(b)) => {
+                    push(frame, Hex(Self::hex_binop(op, a as i64, b as i64)? as u64))
+                }
+                (Value::Hex(a), Value::I64(b)) => {
+                    push(frame, Hex(Self::hex_binop(op, a as i64, b)? as u64))
+                }
+                (Value::I64(a), Value::Hex(b)) => {
+                    push(frame, Hex(Self::hex_binop(op, a, b as i64)? as u64))
+                }
                 (a, b) => self.numeric_fallback(frame, &a, &b, op)?,
             }
             Ok(())
@@ -3536,8 +3594,17 @@ impl Vm {
         }
     }
 
+    /// Formerly a lenient numeric-coercion path. Now reports the same
+    /// operand-type error the interpreter does; the previous "coerce unknown
+    /// pairs through f64 with 0.0 fallback" made `"abc" - 1` a plausible
+    /// number on this backend and an error on the other.
     /// Lenient numeric coercion for mixed/unknown operands (matches the original
     /// `bin_int` `(a, b)` arm).
+    ///
+    /// The interpreter does the same: if either operand is not an `Int` or `Hex`,
+    /// it attempts to coerce both to `f64` and performs the operation there.
+    /// This mirrors the interpreter's fallback, which is `0.0` for completely
+    /// non-numeric values.
     #[allow(clippy::float_cmp)]
     fn numeric_fallback(
         &mut self,
@@ -3558,11 +3625,46 @@ impl Vm {
         Ok(())
     }
 
+    /// Checked arithmetic for hex operands. Mirrors the interpreter path, which
+    /// treats `Hex` exactly like `Int` for arithmetic and then re-wraps the result
+    /// in `Value::Hex`. Kept as a free function because this file's arithmetic
+    /// helpers (`bin_int`, `bin_int_shift`, `vm_overflow`) are free too.
+    fn hex_binop(op: BinArith, a: i64, b: i64) -> Result<i64, String> {
+        let res = match op {
+            BinArith::Add => a.checked_add(b).ok_or_else(|| vm_overflow("+", a, b))?,
+            BinArith::Sub => a.checked_sub(b).ok_or_else(|| vm_overflow("-", a, b))?,
+            BinArith::Mul => a.checked_mul(b).ok_or_else(|| vm_overflow("*", a, b))?,
+            BinArith::Div => {
+                if b == 0 {
+                    return Err("Division by zero".to_string());
+                }
+                if a == i64::MIN && b == -1 {
+                    return Err(vm_overflow("/", a, b));
+                }
+                a / b
+            }
+            BinArith::Rem => {
+                if b == 0 {
+                    return Err("Division by zero".to_string());
+                }
+                if a == i64::MIN && b == -1 {
+                    return Err(vm_overflow("%", a, b));
+                }
+                a % b
+            }
+        };
+        Ok(res)
+    }
+
     fn binop_neg(&mut self, frame: &mut Frame) -> Result<(), String> {
         let v = frame.pop();
         match v {
             Value::I64(i) => {
-                frame.push(Value::I64(-i));
+                frame.push(Value::I64(i.wrapping_neg()));
+                Ok(())
+            }
+            Value::Hex(h) => {
+                frame.push(Value::Hex(h.wrapping_neg()));
                 Ok(())
             }
             Value::F64(f) => {
@@ -3574,8 +3676,7 @@ impl Vm {
                 if let Some(f) = self.globals.get(&key).cloned() {
                     self.call_value(frame, f, vec![other])
                 } else {
-                    frame.push(Value::F64(-(other.as_f64().unwrap_or(0.0))));
-                    Ok(())
+                    Err("Cannot negate this value".to_string())
                 }
             }
         }
@@ -3619,10 +3720,34 @@ impl Vm {
                     _ => unreachable!(),
                 }
             }
-            CompareOp::Lt => l.as_i64().unwrap_or(0) < r.as_i64().unwrap_or(0),
-            CompareOp::Gt => l.as_i64().unwrap_or(0) > r.as_i64().unwrap_or(0),
-            CompareOp::LtEq => l.as_i64().unwrap_or(0) <= r.as_i64().unwrap_or(0),
-            CompareOp::GtEq => l.as_i64().unwrap_or(0) >= r.as_i64().unwrap_or(0),
+            CompareOp::Lt => {
+                if lnum || rnum {
+                    l.as_i64().unwrap_or(0) < r.as_i64().unwrap_or(0)
+                } else {
+                    return Err("Invalid operand types for binary operation".to_string());
+                }
+            }
+            CompareOp::Gt => {
+                if lnum || rnum {
+                    l.as_i64().unwrap_or(0) > r.as_i64().unwrap_or(0)
+                } else {
+                    return Err("Invalid operand types for binary operation".to_string());
+                }
+            }
+            CompareOp::LtEq => {
+                if lnum || rnum {
+                    l.as_i64().unwrap_or(0) <= r.as_i64().unwrap_or(0)
+                } else {
+                    return Err("Invalid operand types for binary operation".to_string());
+                }
+            }
+            CompareOp::GtEq => {
+                if lnum || rnum {
+                    l.as_i64().unwrap_or(0) >= r.as_i64().unwrap_or(0)
+                } else {
+                    return Err("Invalid operand types for binary operation".to_string());
+                }
+            }
         };
         frame.push(Value::Bool(b));
         Ok(())
@@ -3710,20 +3835,25 @@ fn bin_int_shift(frame: &mut Frame, left: bool) -> Result<(), String> {
     Ok(())
 }
 
-fn bin_int(frame: &mut Frame, fi: impl Fn(i64, i64) -> i64, ff: impl Fn(f64, f64) -> f64) {
+fn bin_int(
+    frame: &mut Frame,
+    fi: impl Fn(i64, i64) -> i64,
+    ff: impl Fn(f64, f64) -> f64,
+) -> Result<(), String> {
     let r = frame.pop();
     let l = frame.pop();
     match (l, r) {
         (Value::I64(a), Value::I64(b)) => frame.push(Value::I64(fi(a, b))),
         (Value::F64(a), Value::F64(b)) => frame.push(Value::F64(ff(a, b))),
-        (a, b) => {
-            let av = a.as_f64().unwrap_or(0.0);
-            let bv = b.as_f64().unwrap_or(0.0);
-            frame.push(Value::F64(ff(av, bv)));
+        (Value::Hex(a), Value::Hex(b)) => frame.push(Value::Hex(fi(a as i64, b as i64) as u64)),
+        (Value::Hex(a), Value::I64(b)) => frame.push(Value::Hex(fi(a as i64, b) as u64)),
+        (Value::I64(a), Value::Hex(b)) => frame.push(Value::Hex(fi(a, b as i64) as u64)),
+        (_a, _b) => {
+            return Err("Invalid operand types for binary operation".to_string());
         }
     }
+    Ok(())
 }
-
 /// Error for an integer operation that left the representable range.
 ///
 /// Worded exactly as the interpreter's, so a user does not have to know which backend

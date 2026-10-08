@@ -122,7 +122,7 @@ fn required_cap(name: &str) -> Option<&'static str> {
             &["net_raw_send", "net_raw_recv", "pcap_listen"],
         ),
         ("gui", &["gui_", "window_"]),
-        ("secrets", &["secret_"]),
+        ("secrets", &["secret_", "env_get", "env_set"]),
         // Inline assembly. A separate capability rather than a reuse of `ffi`
         // or `raw` on purpose: `ffi` is about calling named functions through
         // a library Rak chose, and `raw` is about packet bytes. Assembly is
@@ -159,6 +159,8 @@ fn required_cap(name: &str) -> Option<&'static str> {
                 // builtin beginning with "write", so using it as a prefix does not
                 // over-block.
                 "write",
+                // `dump x, "path.txt"` writes a file; gate it like one.
+                "dump:file_write",
             ],
         ),
     ];
