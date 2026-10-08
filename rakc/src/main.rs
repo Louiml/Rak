@@ -634,13 +634,22 @@ fn main() {
             return;
         }
         "repl" => {
-            rakc::repl::run();
+            // On the big stack: each REPL line is parsed, and a pathological
+            // line (deep nesting) would exhaust the main thread's 1 MiB before
+            // the depth guard could turn it into an error.
+            rakc::run_on_big_stack(rakc::repl::run);
             return;
         }
         "fuzz" => {
             // Takes no file. Must run from a debug build: the harness relies on
             // catch_unwind, and the release profile uses panic = "abort".
-            let code = rakc::fuzz::run(&args[2..]);
+            //
+            // On the big stack: the parse target feeds mutated input to the
+            // parser on this thread, and a mutation that nests past the depth
+            // guard would otherwise abort the process instead of counting as a
+            // finding.
+            let fuzz_args: Vec<String> = args[2..].to_vec();
+            let code = rakc::run_on_big_stack(move || rakc::fuzz::run(&fuzz_args));
             std::process::exit(code);
         }
         "test" => {
@@ -853,53 +862,81 @@ fn main() {
             }
         }
         "debug" => {
-            cmd_run_debug(file, &source);
+            // Big stack, for the same reason as `parse`: loading the program
+            // parses it, and a deep file would overflow the main thread.
+            let f = file.to_string();
+            let s = source.clone();
+            rakc::run_on_big_stack(move || cmd_run_debug(&f, &s));
         }
         "dap" => {
-            rakc::dap::run(file, &source);
+            // Big stack: the session parses the program when the client asks
+            // for the launch, which is on this thread and long after startup.
+            let f = file.to_string();
+            let s = source.clone();
+            rakc::run_on_big_stack(move || rakc::dap::run(&f, &s));
         }
         "build" => {
             build_exe(file);
         }
-        "check" => match rakc::lexer::tokenize(&source) {
-            Ok(tokens) => match rakc::parser::parse(&tokens, &source) {
-                Ok(ast) => {
-                    let mut tc = rakc::typecheck::TypeChecker::new(&source, file);
-                    let diagnostics = tc.check_module(&ast);
-                    if diagnostics.is_empty() {
-                        println!("{}: no errors", file);
-                    } else {
-                        for d in &diagnostics {
-                            eprintln!("{}", d.render());
+        "check" => {
+            let source = source.clone();
+            let file = file.clone();
+            let file_for_print = file.clone();
+            let result = rakc::run_on_big_stack(move || match rakc::lexer::tokenize(&source) {
+                Ok(tokens) => match rakc::parser::parse(&tokens, &source) {
+                    Ok(ast) => {
+                        let mut tc = rakc::typecheck::TypeChecker::new(&source, &file);
+                        let diagnostics = tc.check_module(&ast);
+                        if diagnostics.is_empty() {
+                            Ok(())
+                        } else {
+                            Err(diagnostics
+                                .iter()
+                                .map(|d| d.render())
+                                .collect::<Vec<_>>()
+                                .join("\n"))
                         }
-                        std::process::exit(1);
                     }
-                }
+                    Err(e) => Err(format!("Parser error: {}", e)),
+                },
+                Err(e) => Err(format!("Lexer error: {}", e)),
+            });
+            match result {
+                Ok(()) => println!("{}: no errors", file_for_print),
                 Err(e) => {
                     eprintln!("{}", e);
                     std::process::exit(1);
                 }
-            },
-            Err(e) => {
-                eprintln!("{}", e);
-                std::process::exit(1);
             }
-        },
+        }
         "lex" => match rakc::lexer::tokenize(&source) {
             Ok(tokens) => {
                 for tok in tokens {
                     println!("{:?}", tok);
                 }
             }
-            Err(e) => eprintln!("Lexer error: {}", e),
+            Err(e) => {
+                eprintln!("Lexer error: {}", e);
+                std::process::exit(1);
+            }
         },
-        "parse" => match rakc::lexer::tokenize(&source) {
-            Ok(tokens) => match rakc::parser::parse(&tokens, &source) {
-                Ok(ast) => println!("{:#?}", ast),
-                Err(e) => eprintln!("Parser error: {}", e),
-            },
-            Err(e) => eprintln!("Lexer error: {}", e),
-        },
+        "parse" => {
+            let source = source.clone();
+            let result = rakc::run_on_big_stack(move || match rakc::lexer::tokenize(&source) {
+                Ok(tokens) => match rakc::parser::parse(&tokens, &source) {
+                    Ok(ast) => Ok(format!("{:#?}", ast)),
+                    Err(e) => Err(format!("Parser error: {}", e)),
+                },
+                Err(e) => Err(format!("Lexer error: {}", e)),
+            });
+            match result {
+                Ok(s) => println!("{}", s),
+                Err(e) => {
+                    eprintln!("{}", e);
+                    std::process::exit(1);
+                }
+            }
+        }
         "fmt" => {
             // `rakc fmt file [--write|--check]`
             // Flags may sit before or after the file, so collect every one of them.
@@ -915,23 +952,41 @@ fn main() {
             let check = flags
                 .iter()
                 .any(|f| f.as_str() == "--check" || f.as_str() == "-c");
-            match rakc::fmt::format_source(&source) {
+            let source = source.clone();
+            let file = file.clone();
+            let source_for_compare = source.clone();
+            let file_for_print = file.clone();
+            let write = write;
+            let check = check;
+            let source_for_big = source.clone();
+            let file_for_big = file.clone();
+            let result =
+                rakc::run_on_big_stack(move || match rakc::fmt::format_source(&source_for_big) {
+                    Ok(formatted) => Ok(formatted),
+                    Err(e) => Err(format!("fmt: {}", e)),
+                });
+            match result {
                 Ok(formatted) => {
                     if check {
-                        if formatted == source {
-                            println!("{}: formatted", file);
+                        if formatted == source_for_compare {
+                            println!("{}: formatted", file_for_print);
                         } else {
-                            eprintln!("{}: not formatted (run `rakc fmt {} --write`)", file, file);
+                            eprintln!(
+                                "{}: not formatted (run `rakc fmt {} --write`)",
+                                file_for_print, file_for_print
+                            );
                             std::process::exit(1);
                         }
                     } else if write {
-                        if formatted != source {
-                            std::fs::write(file, &formatted)
-                                .map_err(|e| format!("fmt: cannot write '{}': {}", file, e))
+                        if formatted != source_for_compare {
+                            std::fs::write(&file_for_print, &formatted)
+                                .map_err(|e| {
+                                    format!("fmt: cannot write '{}': {}", file_for_print, e)
+                                })
                                 .unwrap();
-                            println!("{}: formatted", file);
+                            println!("{}: formatted", file_for_print);
                         } else {
-                            println!("{}: already formatted", file);
+                            println!("{}: already formatted", file_for_print);
                         }
                     } else {
                         print!("{}", formatted);
@@ -958,14 +1013,20 @@ fn main() {
             let audit = flags
                 .iter()
                 .any(|f| f.as_str() == "--audit" || f.as_str() == "-a");
-            match rakc::lint::lint_source_full(&source) {
-                Ok(report) => {
-                    // --audit answers "which safety exemptions does this
-                    // program claim, and what does it say about each one".
-                    // It is the review artifact, so it prints even when the
-                    // file is otherwise clean.
+            let source = source.clone();
+            let file = file.clone();
+            let deny = deny;
+            let audit = audit;
+            let file_for_print = file.clone();
+            let result =
+                rakc::run_on_big_stack(move || match rakc::lint::lint_source_full(&source) {
+                    Ok(report) => Ok((report, deny, audit, file)),
+                    Err(e) => Err(format!("lint: {}", e)),
+                });
+            match result {
+                Ok((report, deny, audit, file)) => {
                     if audit {
-                        println!("{}", rakc::lint::format_audit(file, &report.unsafe_sites));
+                        println!("{}", rakc::lint::format_audit(&file, &report.unsafe_sites));
                     }
                     if report.findings.is_empty() && !audit {
                         println!("{}: no warnings", file);
@@ -990,70 +1051,38 @@ fn main() {
                 .parent()
                 .map(|p| p.to_string_lossy().to_string())
                 .unwrap_or_else(|| ".".to_string());
-            match rakc::lexer::tokenize(&source) {
-                Ok(tokens) => {
-                    match rakc::parser::parse(&tokens, &source) {
-                        Ok(ast) => {
-                            match rakc::compiler::compile_module_in(&ast, &base_dir) {
-                                Ok(chunk) => {
-                                    // On the big stack, like the interpreter.
-                                    //
-                                    // `run` has always used `run_on_big_stack` and
-                                    // `vm` has always run on the main thread, which on
-                                    // Windows defaults to 1 MiB. That made the same
-                                    // recursive program survive `rakc run` and abort
-                                    // `rakc vm` -- not a VM frame cost difference, a
-                                    // stack size difference, and it fired before the
-                                    // depth guard could turn it into an error.
-                                    let md = max_depth;
-                                    // `run_cli`, not `run`: the VM has to find and
-                                    // call `fn main(argv)` the way the interpreter
-                                    // does. It used to call `run`, which executes only
-                                    // top-level statements -- so a program that is
-                                    // correct under `rakc run` printed nothing and did
-                                    // nothing under `vm`, with no error either way.
-                                    let argv_for_vm = script_args.clone();
-                                    let outcome = rakc::run_on_big_stack(move || {
-                                        let mut vm = rakc::vm::Vm::new();
-                                        if let Some(d) = md {
-                                            vm.set_max_call_depth(d);
-                                        }
-                                        vm.run_cli(&chunk, &argv_for_vm)
-                                    });
-                                    match outcome {
-                                        Ok((out, code)) => {
-                                            for line in &out {
-                                                println!("{}", line);
-                                            }
-                                            if code != 0 {
-                                                std::process::exit(code);
-                                            }
-                                        }
-                                        Err(e) => {
-                                            eprintln!("VM error: {}", e);
-                                            std::process::exit(1);
-                                        }
-                                    }
-                                }
-                                // Exits 1: a compile failure is not a successful run.
-                                // These three handlers only printed, and `main`
-                                // returns `()`, so `rakc vm` exited 0 on a program
-                                // that never ran -- which in CI reads as a pass.
-                                // The `run` arm has always exited 1 here.
-                                Err(e) => {
-                                    eprintln!("Compile error: {}", e);
-                                    std::process::exit(1);
-                                }
+            let source = source.clone();
+            let base_dir = base_dir;
+            let md = max_depth;
+            let argv_for_vm = script_args.clone();
+            let result = rakc::run_on_big_stack(move || match rakc::lexer::tokenize(&source) {
+                Ok(tokens) => match rakc::parser::parse(&tokens, &source) {
+                    Ok(ast) => match rakc::compiler::compile_module_in(&ast, &base_dir) {
+                        Ok(chunk) => {
+                            let mut vm = rakc::vm::Vm::new();
+                            if let Some(d) = md {
+                                vm.set_max_call_depth(d);
                             }
+                            let argv_for_vm = script_args.clone();
+                            vm.run_cli(&chunk, &argv_for_vm)
                         }
-                        Err(e) => {
-                            eprintln!("Parser error: {}", e);
-                            std::process::exit(1);
-                        }
+                        Err(e) => Err(format!("Compile error: {}", e)),
+                    },
+                    Err(e) => Err(format!("Parser error: {}", e)),
+                },
+                Err(e) => Err(format!("Lexer error: {}", e)),
+            });
+            match result {
+                Ok((out, code)) => {
+                    for line in &out {
+                        println!("{}", line);
+                    }
+                    if code != 0 {
+                        std::process::exit(code);
                     }
                 }
                 Err(e) => {
-                    eprintln!("Lexer error: {}", e);
+                    eprintln!("{}", e);
                     std::process::exit(1);
                 }
             }
@@ -1071,98 +1100,106 @@ fn main() {
             //
             // Now each phase is measured over `--repeat` samples after an unmeasured
             // warm-up, and the two execution numbers are finally like for like.
-            let repeat = if bench_repeat == 0 {
-                eprintln!("--repeat needs a positive number");
-                std::process::exit(1);
-            } else {
-                bench_repeat
-            };
-
-            let tokens = match rakc::lexer::tokenize(&source) {
-                Ok(t) => t,
-                Err(e) => {
-                    eprintln!("lex: {}", e);
+            // On the big stack: `parse` of a deeply nested file would
+            // overflow the main thread before the depth guard fires, and the
+            // whole timed loop belongs on one thread anyway.
+            let source = source.clone();
+            let file = file.to_string();
+            let repeat_in = bench_repeat;
+            rakc::run_on_big_stack(move || {
+                let repeat = if repeat_in == 0 {
+                    eprintln!("--repeat needs a positive number");
                     std::process::exit(1);
+                } else {
+                    repeat_in
+                };
+
+                let tokens = match rakc::lexer::tokenize(&source) {
+                    Ok(t) => t,
+                    Err(e) => {
+                        eprintln!("lex: {}", e);
+                        std::process::exit(1);
+                    }
+                };
+                let ast = match rakc::parser::parse(&tokens, &source) {
+                    Ok(a) => a,
+                    Err(e) => {
+                        eprintln!("parse: {}", e);
+                        std::process::exit(1);
+                    }
+                };
+                let chunk = match rakc::compiler::compile_module(&ast) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        eprintln!("compile: {}", e);
+                        std::process::exit(1);
+                    }
+                };
+
+                // One unmeasured run first, so page faults, allocator growth and the CPU's
+                // frequency ramp are not charged to sample 1.
+                let _ = rakc::eval(&source);
+                let _ = rakc::vm::Vm::new().run(&chunk);
+
+                let mut v: Vec<Vec<u64>> = vec![Vec::new(); 5];
+                for _ in 0..repeat {
+                    let t = std::time::Instant::now();
+                    let toks = rakc::lexer::tokenize(&source).expect("lex");
+                    v[0].push(t.elapsed().as_nanos() as u64);
+
+                    let t = std::time::Instant::now();
+                    let parsed = rakc::parser::parse(&toks, &source).expect("parse");
+                    v[1].push(t.elapsed().as_nanos() as u64);
+
+                    let t = std::time::Instant::now();
+                    let c = rakc::compiler::compile_module(&parsed).expect("compile");
+                    v[2].push(t.elapsed().as_nanos() as u64);
+                    std::hint::black_box(&c);
+
+                    let t = std::time::Instant::now();
+                    let out = rakc::eval(&source);
+                    v[3].push(t.elapsed().as_nanos() as u64);
+                    std::hint::black_box(&out);
+
+                    let t = std::time::Instant::now();
+                    let out = rakc::vm::Vm::new().run(&chunk);
+                    v[4].push(t.elapsed().as_nanos() as u64);
+                    std::hint::black_box(&out);
                 }
-            };
-            let ast = match rakc::parser::parse(&tokens, &source) {
-                Ok(a) => a,
-                Err(e) => {
-                    eprintln!("parse: {}", e);
-                    std::process::exit(1);
+
+                // Median, not mean: one scheduler interrupt in twenty samples moves a
+                // mean by 5% and a median by nothing.
+                fn median(v: &mut Vec<u64>) -> f64 {
+                    v.sort_unstable();
+                    v[v.len() / 2] as f64 / 1_000_000.0
                 }
-            };
-            let chunk = match rakc::compiler::compile_module(&ast) {
-                Ok(c) => c,
-                Err(e) => {
-                    eprintln!("compile: {}", e);
-                    std::process::exit(1);
-                }
-            };
+                let lex = median(&mut v[0]);
+                let parse = median(&mut v[1]);
+                let compile = median(&mut v[2]);
+                let interp = median(&mut v[3]);
+                let vm = median(&mut v[4]);
 
-            // One unmeasured run first, so page faults, allocator growth and the CPU's
-            // frequency ramp are not charged to sample 1.
-            let _ = rakc::eval(&source);
-            let _ = rakc::vm::Vm::new().run(&chunk);
-
-            let mut v: Vec<Vec<u64>> = vec![Vec::new(); 5];
-            for _ in 0..repeat {
-                let t = std::time::Instant::now();
-                let toks = rakc::lexer::tokenize(&source).expect("lex");
-                v[0].push(t.elapsed().as_nanos() as u64);
-
-                let t = std::time::Instant::now();
-                let parsed = rakc::parser::parse(&toks, &source).expect("parse");
-                v[1].push(t.elapsed().as_nanos() as u64);
-
-                let t = std::time::Instant::now();
-                let c = rakc::compiler::compile_module(&parsed).expect("compile");
-                v[2].push(t.elapsed().as_nanos() as u64);
-                std::hint::black_box(&c);
-
-                let t = std::time::Instant::now();
-                let out = rakc::eval(&source);
-                v[3].push(t.elapsed().as_nanos() as u64);
-                std::hint::black_box(&out);
-
-                let t = std::time::Instant::now();
-                let out = rakc::vm::Vm::new().run(&chunk);
-                v[4].push(t.elapsed().as_nanos() as u64);
-                std::hint::black_box(&out);
-            }
-
-            // Median, not mean: one scheduler interrupt in twenty samples moves a
-            // mean by 5% and a median by nothing.
-            fn median(v: &mut Vec<u64>) -> f64 {
-                v.sort_unstable();
-                v[v.len() / 2] as f64 / 1_000_000.0
-            }
-            let lex = median(&mut v[0]);
-            let parse = median(&mut v[1]);
-            let compile = median(&mut v[2]);
-            let interp = median(&mut v[3]);
-            let vm = median(&mut v[4]);
-
-            println!("{} ({} samples, median)", file, repeat);
-            println!("  lex      {:>9.3} ms", lex);
-            println!("  parse    {:>9.3} ms", parse);
-            println!("  compile  {:>9.3} ms", compile);
-            println!("  ---");
-            println!("  interp   {:>9.3} ms  (execution only)", interp);
-            println!("  vm       {:>9.3} ms  (execution only)", vm);
-            let front = lex + parse + compile;
-            let total = interp + front;
-            println!("  ---");
-            if total > 0.0 {
-                println!(
+                println!("{} ({} samples, median)", file, repeat);
+                println!("  lex      {:>9.3} ms", lex);
+                println!("  parse    {:>9.3} ms", parse);
+                println!("  compile  {:>9.3} ms", compile);
+                println!("  ---");
+                println!("  interp   {:>9.3} ms  (execution only)", interp);
+                println!("  vm       {:>9.3} ms  (execution only)", vm);
+                let front = lex + parse + compile;
+                let total = interp + front;
+                println!("  ---");
+                if total > 0.0 {
+                    println!(
                     "  front end (lex+parse+compile) {:>7.3} ms, {:.0}% of the interpreter path",
                     front,
                     100.0 * front / total
                 );
-            }
-            if vm > 0.0 {
-                println!("  execution speedup (vm vs interp): {:.2}x", interp / vm);
-            }
+                }
+                if vm > 0.0 {
+                    println!("  execution speedup (vm vs interp): {:.2}x", interp / vm);
+                }
+            });
         }
         _ => {
             eprintln!("Unknown command: {}", cmd);
