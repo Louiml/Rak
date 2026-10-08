@@ -43,7 +43,7 @@ clear message.
 | GUI (`gui_*`, `rak_call` from JS) | yes | yes (same process-wide manager) |
 | CLI (`argv()`, `parse_args`) | yes | yes |
 | Tunnel / UDP transport | yes | yes (`Value::UdpTransport`, `tunnel` lowering) |
-| Inline assembly (`asm`) | yes | **no**, by design (see below) |
+| Inline assembly (`asm`) | yes | yes (via `Op::Asm` + capability gate) |
 | WebSocket | yes | no (no TCP layer) |
 | Channels & threads (`channel`, `select`, `spawn`, `timeout`) | yes | no (needs coroutines) |
 
@@ -54,14 +54,53 @@ cannot be added to one side and forgotten on the other. The v8.0.0 release
 shipped nineteen builtins that existed only in the VM, and the suite did not
 notice.
 
-**Remaining gaps as of 8.1.0.** 34 builtins, all blocked on one thing: a VM
+**Remaining gaps as of 0.9.1.** 33 builtins, all blocked on one thing: a VM
 native has signature `fn(&[Value])`, so it cannot call a Rak function, suspend or
 resume. That rules out the channel/thread family, the socket family, `spawn`
-and FFI trampolines until the VM has coroutines. `asm` has no VM counterpart
-because a bytecode VM has no instructions to escape into.
+and FFI trampolines until the VM has coroutines. `asm` has a VM counterpart
+via `Op::Asm` behind the `asm` capability gate.
 
 `docs/V8-BACKEND-PARITY.md` has the full list and the reasoning;
 `docs/V8-ROADMAP.md` has what closing it would take.
+
+## New in 0.9.0
+
+### Full VM pipeline on big stack
+
+`rakc vm` now runs the entire pipeline (lexer, parser, compiler, VM execution)
+on the big stack via `run_on_big_stack`. Deeply nested expressions no longer
+overflow the default 1 MiB stack.
+
+### Inline assembly (`asm`)
+
+Inline assembly is now supported on the VM via `Op::Asm`, gated by the `asm`
+capability and an `unsafe` block with justification:
+
+```rak
+unsafe "this asm block implements a fast user-space spinlock" {
+    asm!("pause")  // x86 spinlock hint
+}
+```
+
+The `asm` capability must be granted via `--sandbox --allow asm`.
+
+### Capability sandbox
+
+The VM now enforces the capability sandbox at the native level. The following
+builtins are gated:
+
+| Builtin | Capability |
+|---|---|
+| `dump x, "path"` | `fs_write` |
+| `env_get` / `env_set` | `secrets` |
+| `mmap_open(..., "rw")` | `fs_write` |
+| `mmap_write` | `fs_write` |
+| `extern "C" { ... }` | `ffi` |
+| `asm! { ... }` | `asm` |
+
+Programs must be run with `--sandbox --allow <capability>` to use these
+features. The capability sandbox is enforced at the native call site in
+`Vm::call_value`, ensuring consistent enforcement across all VM entry points.
 
 ## Error model
 

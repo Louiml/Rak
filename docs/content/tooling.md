@@ -19,7 +19,8 @@ rak> :help
 
 `:vars` shows defined variables, `:ast <expr>` prints the AST,
 `:bytecode <expr>` prints the compiled chunk, `:clear` resets state, `:quit`
-exits.
+exits. A maximum expression depth of 64 prevents stack overflow on pathological
+inputs.
 
 ## Test runner
 
@@ -114,7 +115,7 @@ actual FFI linking happens.
 
 Three layers, cheapest first.
 
-- `rakc fuzz <target>` (8.0.0) — a deterministic mutation loop in the compiler
+- `rakc fuzz <target>` (0.8.0) — a deterministic mutation loop in the compiler
   itself, on the stable toolchain, so it runs in ordinary CI and on a Windows dev
   box. `rakc fuzz all --runs 20000` covers the lexer, parser, interpreter, and
   the stdlib parsers. `--seed` makes a run reproducible and a crash replayable.
@@ -129,3 +130,44 @@ Three layers, cheapest first.
   `cargo +nightly fuzz run <target>`. Needs `-fsanitize=fuzzer`, which
   `stable-x86_64-pc-windows-msvc` cannot provide, so this layer does not run
   anywhere automatically. Use a Linux or WSL box for a long campaign.
+
+## Debugger
+
+`rakc debug program.rak` launches a bytecode-VM source debugger. The compiler
+emits a source line-marker per top-level statement into `Chunk.lines`, so
+breakpoints map to bytecode offsets (source → bytecode mapping). The VM pauses
+at line boundaries and drives an interactive REPL; program output streams
+after each pause.
+
+Commands:
+
+```text
+break <line|file:line>   set a breakpoint (1-based statement index)
+continue / c             run to the next breakpoint
+step / s                 step one statement
+next / n                 step over calls
+finish                   run out of the current function
+locals                   print local[N] slots of the current frame
+stack / bt / backtrace   function call chain with line numbers
+frame                    current frame info
+print <name>             print a local
+disassemble / dis        full bytecode listing with line markers + operands
+quit / q, help
+```
+
+`disassemble` shows the line → bytecode mapping so you can place breakpoints
+precisely.
+
+## DAP server
+
+`rakc dap program.rak` serves the [Debug Adapter Protocol](vm.html#debug-adapter-protocol-08)
+over stdio (VS Code and similar editors): line breakpoints, continue/step,
+stack/locals/globals inspection, and `evaluate`. Program output streams as DAP
+`output` events. See the VM docs for the session walkthrough.
+
+## Verify
+
+`rakc verify <file>` runs the program under resource limits and reports
+whether all `requires` and `ensures` contracts hold, up to the given
+`--steps`, `--depth`, and `--iters` limits. A violation exits non-zero.
+

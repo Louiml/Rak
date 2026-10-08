@@ -18,6 +18,8 @@ rakc repl           Start an interactive REPL
 rakc lsp            Start the language server (stdio)
 rakc bindgen <h>    Generate Rak bindings from a C header
 rakc debug <file>   Bytecode-VM source debugger (0.7)
+rakc dap <file>     Debug Adapter Protocol server (0.8)
+rakc verify <file>  Run under resource limits, check contracts (--steps, --depth, --iters)
 rakc --version
 ```
 
@@ -28,10 +30,10 @@ form, `--write` rewrites in place, and `--check` exits 1 if the file is not
 already formatted, which is what you want in CI.
 
 `rakc lint` has five style rules (`unused-var`, `shadowed`, `unreachable`,
-`missing-ret-type`, `duplicate-import`) and six security rules
+`missing-ret-type`, `duplicate-import`) and nine security rules
 (`hardcoded-secret`, `plaintext-url`, `weak-crypto`, `secret-compare`,
-`ffi-raw-pointer`, `insecure-transport`). Both are advisory; `--deny` exits 1
-when anything fires. See [Safety](safety.html) for what the security rules
+`ffi-raw-pointer`, `insecure-transport`, `env-get`, `env-set`, `unsupported-asm`).
+Both are advisory; `--deny` exits 1 when anything fires. See [Safety](safety.html) for what the security rules
 detect and where they have false negatives.
 
 ### rakc fuzz (8.0.0)
@@ -54,7 +56,7 @@ harness uses `catch_unwind` and the release profile sets `panic = "abort"`.
 The coverage-guided `cargo-fuzz` targets in `fuzz/` are still there for long
 Linux or WSL runs.
 
-### rakc check (0.7.1)
+### rakc check (0.8.0)
 
 `rakc check <file>` runs the static type checker over the AST in addition to
 lexing and parsing. It infers literal types, checks explicit annotations and
@@ -62,6 +64,12 @@ function-call argument types, and flags non-exhaustive or repeated enum-variant
 match patterns. Type mismatches are reported with the expected and found types
 and the offending source line. See [Language reference](language.html#static-type-checking)
 for the diagnostic format.
+
+Every command that parses source (`run`, `check`, `fmt`, `lint`, `parse`,
+`vm`, `bench`, `test`, `verify`, `debug`, `dap`, `repl`, `fuzz`) now runs on a
+dedicated 64 MiB stack, so deeply nested programs report the parser's depth
+error instead of crashing with a stack overflow. `lex` is iterative and `build`
+only embeds the source, so neither needs it.
 
 ### rakc test (0.7.1)
 
@@ -71,34 +79,13 @@ run it bare to scan `tests/*.rak` (falling back to `test.rak`). Flags:
 prints failure messages. A failing test exits non-zero. See
 [Tooling](tooling.html#test-runner) for the assertion set and sample output.
 
-## rakc debug (0.7)
+### rakc verify (0.9.0)
 
-`rakc debug program.rak` launches a bytecode-VM source debugger. The compiler
-emits a source line-marker per top-level statement into `Chunk.lines`, so
-breakpoints map to bytecode offsets (source ↔ bytecode mapping). The VM pauses
-at line boundaries and drives an interactive REPL; program output streams
-after each pause.
+`rakc verify <file>` runs the program under resource limits and reports
+whether all `requires` and `ensures` contracts hold, up to the given
+`--steps`, `--depth`, and `--iters` limits. A violation exits non-zero.
 
-Commands:
-
-```text
-break <line|file:line>   set a breakpoint (1-based statement index)
-continue / c             run to the next breakpoint
-step / s                 step one statement
-next / n                 step over calls
-finish                   run out of the current function
-locals                   print local[N] slots of the current frame
-stack / bt / backtrace   function call chain with line numbers
-frame                    current frame info
-print <name>             print a local
-disassemble / dis        full bytecode listing with line markers + operands
-quit / q, help
-```
-
-`disassemble` shows the line→bytecode mapping so you can place breakpoints
-precisely.
-
-## rakc dap (0.7.2)
+### rakc dap (0.8.0)
 
 `rakc dap program.rak` serves the [Debug Adapter Protocol](vm.html#debug-adapter-protocol-08)
 over stdio (VS Code and similar editors): line breakpoints, continue/step,
@@ -213,6 +200,20 @@ fn main(argv) -> int {
 }
 ```
 
-CLI builtins (0.7): `argv()`, `stdin_read_line()`, `stdin_read_all()`,
+CLI builtins (0.8): `argv()`, `stdin_read_line()`, `stdin_read_all()`,
 `eprint(...)`, and `parse_args(spec, argv) -> map`, which handles
 `--flag value`, `--flag=value`, boolean `--flag`, and positionals under `""`.
+Also `env_get(name)`, `env_set(name, value)` for environment variable access.
+
+### Sandbox CLI
+
+```text
+rakc run untrusted.rak --sandbox --allow net,fs_write,secrets
+```
+
+Seven capabilities: `net`, `fs_write`, `process`, `ffi`, `raw`, `gui`, `secrets`.
+With `--sandbox` and no `--allow`, all seven are denied and only pure
+computation works. Use `--allow` to grant specific capabilities.
+
+`env_get(name)` and `env_set(name, value)` are capability-gated by the
+`secrets` capability.

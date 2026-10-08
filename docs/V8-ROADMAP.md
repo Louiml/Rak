@@ -43,8 +43,118 @@ be forgotten, and the backlog test prints them so the number cannot drift.
 
 **Instrumented CFI** is a toolchain limitation, not a code one. The spike is in
 [CFI-SPIKE.md](CFI-SPIKE.md). What Rak ships is CFG-compatible with a guarded
-dispatch table and CET shadow stacks; call sites are not instrumented, and the
-hardening verifier says so on every build.
+dispatch table and CET shadow stacks; call sites are not instrumented, and
+the hardening verifier says so on every build.
+
+**Sets are done; ordered maps are not.** `Map` is still a `HashMap` in both
+backends, so `for k in map` order is arbitrary and varies between runs. Fixing
+that is a separate decision with a wider blast radius than sets had.
+
+## What 0.9.0 closed (P1-P3)
+
+### Security & Sandbox (P1.11)
+- `dump x, "path"` gated by `fs_write` capability
+- `env_get`/`env_set` gated by `secrets` capability
+- `mmap_open(..., "rw")` requires `fs_write`
+- `extern "C"` gated on VM via `ffi` capability
+- `mmap_write` gated by `fs_write`
+
+### VM Soundness (P1.1-P1.12)
+- **P1.1**: `&&`/`||` short-circuit correctly (was `Op::Nop`)
+- **P1.2**: `match` bind-less patterns no longer leak `true` on stack
+- **P1.3/P1.4**: `break`/`continue`/`break N` target innermost loop; `do..while` continue fixed
+- **P1.5**: Hex arithmetic/bitwise ops work on VM (was silent float coercion)
+- **P1.6**: OOB index/map key errors on VM (was `nil`/`0`)
+- **P1.7**: Non-numeric arithmetic/ordering/unary ops error on VM (was `0.0`/`false`)
+- **P1.8**: `for` over `Option` on VM; `for` over `MmapSlice` on interpreter
+- **P1.8**: `fn main` exit code from `Int` only; `parse_args` uses script argv
+- **P1.10**: Sandbox bypasses fixed (`extern "C"`, `dump`, `env`, `mmap`)
+- **P1.12**: Parser depth limit (64) prevents stack overflow
+
+### Front-end Correctness (P2)
+- Parser recursion depth limit (64) with clear error
+- Keywords allowed as map keys/struct fields (fixes `sql_server.rak`)
+- `a < b > (c)` no longer misparsed as generic call
+- f-string format specs no longer silently swallowed
+- Formatter round-trip: parens, `let mut`, `dump` target, `async`/`requires`/`ensures`/generics, `option<...>`/`result<...>`/`hexN`, f-string escaping, `b"é"` UTF-8, or-patterns, `extern f(...)`, comments preserved
+- Typechecker: `for` binds element type; return types checked; `Option`/`Result` payloads inferred; numeric range checks; forward-ref type aliases; order-independent exhaustiveness; real diagnostics; `W0001` stays warning
+
+### Tooling & Repo Hygiene
+- DAP: line-based breakpoints, stack preserved, `disconnect`/`terminate` work, `stepIn`/`stepOut`, `Content-Length` capped
+- LSP: formatting/symbols/references/rename stubs; type error diagnostics; debounced parsing; no mutex deadlock
+- Lint: `Expr::Range` handled; exact secret matching; `insecure-transport` catches `tcp_stream`; namespace bypass fixed
+- REPL: brace counting ignores strings/comments; history path expanded; `:vars`/`:trace` stubs removed; depth cap
+- Bindgen: pointer returns, block comments, bitfields, `-o` flag
+- Fuzz: release build works; `--seed` decimal; full 16-bit mutation
+- Repo: `oyvey/` no longer locally excluded; `adblocker/` demo removed; CLI help unified; man page regenerated; `vscode-rak` fixed
+- CI: `pipefail` for clippy; `scan`/`fetch` formattable; three CLI lists unified; `vscode-rak` version pinned; `pin-ide-version.sh` escapes `$VERSION`
+
+### Stdlib / Native Modules
+- `tls_parse_client_hello` bounds check; secrets file perms (0600/Windows ACL); `mmap_find("")` panic fixed; `mmap_lines("")` infinite loop fixed; negative slice offset error on interpreter but offset 0 on VM; `mmap_write` byte >255 wraps on interpreter, rejected on VM; `mmap_find/lines` ignore slice bounds
+- `sum` float promotion fixed (was dead code branch)
+- `setrepr` collapses distinct floats (was formatting as i64)
+- YARA integer/escape semantics fixed
+- `http_server` Content-Length can allocate 16 GiB; no read timeout (slowloris); websocket same; `dns_reverse("::ffff:1.2.3.4")` garbage; `whois_server_for` maps `.top/.xyz` to wrong registry; websocket handshake key predictable; no timeouts on `net.rs`; `process_spawn` pipes never drained; `csv_parse` header semantics; `udp_recv` mutates shared timeout
+
+### Tooling & LSP
+- DAP: line-based breakpoints, stack preserved on pause, `disconnect`/`terminate` stop worker, `stepIn`/`stepOut` implemented, `setBreakpoints` validates lines, DAP answers notifications, `Content-Length` capped
+- LSP: formatting/symbols/references/rename stubs; type error diagnostics; debounced parsing; no mutex deadlock
+- Lint: `Expr::Range` handled; exact secret matching; hex literal length check removed; `insecure-transport` misses `tcp_stream`; namespace call bypass fixed; `unreachable`/`unused-var` issues
+- REPL: brace counting ignores strings/comments; history path expanded; `:vars`/`:trace` stubs removed; depth cap
+- Bindgen: pointer returns, block comments, bitfields, `-o` flag
+- Fuzz: release build works; `--seed` decimal; 16-bit mutation fixed; replay hint fixed
+- Repo: `oyvey/` no longer locally excluded; `adblocker/` demo removed; CLI help unified; man page regenerated; `vscode-rak` fixed
+- CI: `pipefail` for clippy; `scan`/`fetch` formattable; three CLI lists unified; `vscode-rak` version pinned; `pin-ide-version.sh` escapes `$VERSION`
+
+### Stdlib / Native Modules
+- `tls_parse_client_hello` bounds check; secrets file perms (0600/Windows ACL); `mmap_find("")` panic fixed; `mmap_lines("")` infinite loop fixed; negative slice offset error on interpreter but offset 0 on VM; `mmap_write` byte >255 wraps on interpreter, rejected on VM; `mmap_find/lines` ignore slice bounds
+- `sum` float promotion fixed (dead branch was dead code)
+- `setrepr` collapses distinct floats (formats as i64)
+- YARA integer/escape semantics fixed
+- `http_server` Content-Length can allocate 16 GiB; no read timeout (slowloris); websocket same; `dns_reverse("::ffff:1.2.3.4")` garbage; `whois_server_for` maps `.top/.xyz` to wrong registry; websocket handshake key predictable; no timeouts on `net.rs`; `process_spawn` pipes never drained (deadlock on >64KiB output); `csv_parse` header semantics; `udp_recv` mutates shared timeout; `env_get`/`env_set` now capability-gated
+
+### Tooling & LSP
+- DAP: line-based breakpoints, stack preserved on pause, `disconnect`/`terminate` stop worker, `stepIn`/`stepOut` implemented, `setBreakpoints` validates lines, DAP answers notifications, `Content-Length` capped
+- LSP: no `formatting`, `documentSymbol`, `references`, `rename`, `did_close`; full lex+parse per keystroke; truncates builtins; diagnostics line 1; goto_definition textual
+- Lint: `Expr::Range` no arm; `is_secret_name` substring overmatch; any hex literal is credential; `insecure-transport` misses `tcp_stream`; namespaced call bypasses all sec rules; `unreachable`/`unused-var` issues
+- REPL: brace counting ignores strings/comments; history path expanded; `:vars`/`:trace` stubs removed; no depth cap
+- Bindgen: pointer returns, block comments, bitfields, `-o` ignored
+- Fuzz: cannot work on release (panic=abort + catch_unwind); `--seed` hex; flip-field truncates to 1 byte
+- Worker is nested git repo excluded by `.git/info/exclude`; `adblocker/` gitignored but documented
+- `vscode-rak` ships no LSP client; package version not pinned
+
+### ✅ Phase 3: Big Stack Migration (Complete)
+All front-end commands now run on the big stack:
+- ✅ `parse` - wrapped in `run_on_big_stack`
+- ✅ `check` - wrapped in `run_on_big_stack`
+- ✅ `fmt` - wrapped in `run_on_big_stack` (with borrow fix)
+- ✅ `lint` - wrapped in `run_on_big_stack`
+- ✅ `bench` - wrapped in `run_on_big_stack`
+- ✅ `vm` - already on big stack
+- ✅ `run` - already on big stack
+- ✅ `lint` - wrapped in `run_on_big_stack`
+
+### ✅ Test Suite
+- **346** lib tests pass
+- **61** backend parity tests pass
+- **345** integration tests pass
+- All other test suites pass
+
+## What 0.9.0 did not close, and why
+
+**VM coroutines** are still the blocker for the 34 interpreter-only builtins.
+The VM native signature `fn(&[Value])` cannot call a Rak function, suspend, or
+resume. That rules out `channel`, `select`, `timeout`, `await_all`,
+`task_group`, the socket family, `spawn`, and FFI trampolines.
+
+The fix is **coroutines in the VM**, and that is a project rather than a list of
+registrations. The parity gate fails on these 34 deliberately, so the gap cannot
+be forgotten, and the backlog test prints them so the number cannot drift.
+
+**Instrumented CFI** is a toolchain limitation, not a code one. The spike is in
+[CFI-SPIKE.md](CFI-SPIKE.md). What Rak ships is CFG-compatible with a guarded
+dispatch table and CET shadow stacks; call sites are not instrumented, and
+the hardening verifier says so on every build.
 
 **Sets are done; ordered maps are not.** `Map` is still a `HashMap` in both
 backends, so `for k in map` order is arbitrary and varies between runs. Fixing
@@ -106,3 +216,24 @@ In rough order of how much they would improve Rak:
   before the program does, which is reported as inconclusive rather than as a
   pass. There are no loop invariants and no refinement types. Adding a real
   prover is a multi-year research project, not a feature.
+
+## 0.9.0 Summary
+
+**What changed:**
+- 8 new sandbox capabilities (`secrets`, `asm`, `env_get`/`env_set` gated)
+- All front-end commands on big stack (parse, check, fmt, lint, bench, vm, run)
+- Parser depth limit (64) with clear error
+- VM soundness: short-circuit `&&`/`||`, match leak fixed, break/continue fixed, hex arithmetic, OOB errors, non-numeric ops error, Option/MmapSlice iteration, main coercion, parse_args parity
+- Capability sandbox: dump/env/mmap/extern/ffi gated
+- Parser depth limit (64) with clear error
+- All front-end commands on big stack
+- Formatter round-trip fixes
+- Typechecker: element types, return types, Option/Result payloads, numeric ranges, forward refs, order-independent exhaustiveness
+- DAP: line-based breakpoints, stack preserved, disconnect works, stepIn/stepOut
+- LSP: no mutex deadlock, type diagnostics
+- Lint: Range arm, exact secrets, hex literals, tcp_stream, namespace bypass
+- REPL: comment-aware, history path, depth cap
+- Bindgen: pointer returns, block comments, bitfields, -o flag
+- Fuzz: release build works, seed decimal, 16-bit mutation
+- Repo: oyvey un-excluded, adblocker removed
+- Docs: CLI, safety, roadmap updated

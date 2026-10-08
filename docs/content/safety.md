@@ -65,12 +65,39 @@ Every builtin that can reach outside the process is gated by name at two
 choke points, one per backend. Nothing runs unless you ask for it.
 
 ```
-rakc run untrusted.rak --sandbox --allow net,fs_write
+rakc run untrusted.rak --sandbox --allow net,fs_write,secrets
 ```
 
-Seven capabilities exist: `net`, `fs_write`, `process`, `ffi`, `raw`,
-`gui`, `secrets`. With `--sandbox` and no `--allow`, all seven are denied
-and only pure computation works.
+Eight capabilities exist: `net`, `fs_write`, `process`, `ffi`, `raw`,
+`gui`, `secrets`, `asm`. With `--sandbox` and no `--allow`, all eight are
+denied and only pure computation works.
+
+Two details worth knowing. Packet *builders* are not gated, because they only
+construct a `bytes` value and open no socket; `net_raw_send` and
+`net_raw_recv` are what need `raw`. And file *reads* are not gated, because
+imports would stop working. The reasoning is that anything able to exfiltrate
+data is denied, so a read alone cannot do damage.
+
+The limitation is real: the sandbox is a process-wide filter set once from the
+command line. A module cannot narrow its own privileges, and an imported
+package runs with whatever the invoker allowed. Per-module capability
+declarations are on the roadmap and are not implemented.
+
+### Capability details
+
+| Capability | What it gates | Typical use |
+|---|---|---|
+| `net` | TCP/UDP/HTTP/WebSocket/DNS I/O | Servers, clients, DNS, HTTP |
+| `fs_write` | File writes, `dump x, "path"`, `mmap_open(..., "rw")`, `file_write`, `file_append`, `zip_write`, `file_delete`, `file_mkdir`, `file_copy`, `file_rename` | Persistent state, configs, logs |
+| `process` | `process_spawn`, `process_wait`, `process_stdout` | Spawning child processes |
+| `ffi` | `ffi_load`, `ffi_call`, `extern "C" { ... }` | Dynamic library calls |
+| `raw` | `net_raw_*` (raw sockets, ARP, ICMP) | Packet forging, ARP, raw sockets |
+| `gui` | `gui_open`, `gui_update`, `gui_callback` | Desktop windows |
+| `secrets` | `env_get`, `env_set`, `secret_*` | Environment variables, credential store |
+| `asm` | `asm! { ... }` inline assembly | Inline assembly |
+
+With `--sandbox` and no `--allow`, all eight are denied and only pure
+computation works.
 
 Two details worth knowing. Packet *builders* are not gated, because they only
 construct a `bytes` value and open no socket; `net_raw_send` and
@@ -98,6 +125,9 @@ check them.
 | `ffi-raw-pointer` | `ffi_ptr`, `ffi_read`, `ffi_write`, `ffi_alloc`, `ffi_free`, `ffi_call`. |
 | `insecure-transport` | `ws_connect` and `net_connect`, which carry no TLS. |
 | `unsafe-thin-reason` | An `unsafe` block whose justification is a placeholder. |
+| `env-get` | `env_get` calls (environment variable reads). |
+| `env-set` | `env_set` calls (environment variable writes). |
+| `unsupported-asm` | `asm! { ... }` inline assembly (gated by `asm` capability). |
 
 All are advisory. `--deny` makes them exit non-zero for CI:
 
@@ -216,7 +246,7 @@ table below says what to use instead, and the structural option is always better
 let hostile = "x'; DROP TABLE users; --"
 dump sql_escape(hostile)      // x''; DROP TABLE users; --
 dump shell_escape("$(id)")    // '$(id)'
-dump html_escape("<b>")       // &lt;b&gt;
+dump html_escape("<b>")       // <b>
 dump regex_escape("a.c*")     // a\.c\*
 ```
 
@@ -227,7 +257,7 @@ Notes on what each one does *not* do:
   `"it''s"` inside `'...'` — a syntax error at best.
 * `shell_escape` is safe for *passing* an argument. It is not safe for printing
   something for a human to retype, which is a different problem.
-* `html_escape` escapes `'` as `&#x27;` rather than `&apos;`, so the output is safe
+* `html_escape` escapes `'` as `'` rather than `&apos;`, so the output is safe
   in a single-quoted attribute and decodes in XHTML.
 
 ### The lint that goes with them
