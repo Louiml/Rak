@@ -90,6 +90,35 @@ one-line registrations. It is not being done in this release. The gate fails on
 these 33 by design, so the gap cannot be forgotten, and the backlog test prints
 them so the number cannot drift upward unnoticed.
 
+### What the coroutine project would actually involve
+
+The pieces that already exist narrow the shape of the work:
+
+- **A frame is already self-contained.** `Frame { code, ip, stack, locals,
+  defers, catches }` is the entire machine state of a suspended call, so
+  "suspend" is already representable: stop stepping a frame, keep it, step it
+  later. What is missing is a *scheduler* — a ready queue and a pump that
+  advances several frames instead of one `exec_frame` recursion.
+- **`Value::Future`, `Op::Await` and a Tokio-backed pending state already
+  exist** in the VM (`vm.rs`, the async-IO builtins). Awaiting is therefore
+  half-plumbed; it is `spawn`, `chan_recv`, `select` and friends — which need
+  to park a *Rak* frame, not just a native future — that are not.
+- **The interception pattern is proven.** `set_add`, `stream_next` and `fold`
+  are already intercepted in `Vm::call_value` because a `fn(&[Value])` native
+  cannot reach the machine. The coroutine natives would join them there, not
+  in the native table.
+- **Blocking I/O is a separate problem.** The `net_*`/`tcp_*`/`ws_*` family
+  needs threads or an async runtime regardless of coroutines;
+  `tcp_connect_async` needs both. Coroutines unblock the 8 suspend/resume
+  names cleanly and `dns_lookup`-style names after a runtime decision; they
+  do not by themselves unblock a blocking `net_accept`.
+
+So the honest decomposition is: a scheduler over resumable frames first, then
+park-and-resume natives (`spawn`, `channel`, `chan_send`, `chan_recv`,
+`select`, `timeout`, `await_all`, `task_group`, `thread_join`), then the
+blocking-IO family as its own decision. Each layer is testable against the
+existing parity harness, and the gate counts what each layer closes.
+
 ### Two entries that are allowed to differ
 
 `INTERP_ONLY` in `tests/backend_parity.rs` lists two names with reasons:
