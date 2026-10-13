@@ -153,21 +153,24 @@ mod path_tests {
     fn destination_honours_the_triple_suffix() {
         let opts = CodegenOptions::new("src/main.rak");
         let win = crate::targets::find_triple("x86_64-pc-windows-msvc").unwrap();
+        let linux = crate::targets::find_triple("x86_64-unknown-linux-gnu").unwrap();
+        // The triple, not the host, picks the suffix — so the assertion is the
+        // same on every machine the suite runs on.
         let windows_opts = CodegenOptions {
             triple: win,
             ..opts.clone()
         };
-        // The host build's link destination carries the host triple's suffix.
-        let dest = super::super::destination_for(&EmitKind::Link, &opts);
-        assert!(
-            dest.to_string_lossy().ends_with("main.exe")
-                || dest.to_string_lossy().ends_with("main"),
-            "{:?}",
-            dest
-        );
+        let linux_opts = CodegenOptions {
+            triple: linux,
+            ..opts.clone()
+        };
         assert_eq!(
             super::super::destination_for(&EmitKind::Link, &windows_opts),
             PathBuf::from("src/main.exe")
+        );
+        assert_eq!(
+            super::super::destination_for(&EmitKind::Link, &linux_opts),
+            PathBuf::from("src/main")
         );
         assert_eq!(
             super::super::destination_for(&EmitKind::Object, &windows_opts),

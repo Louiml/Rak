@@ -417,19 +417,12 @@ pub fn destination_for(kind: &EmitKind, opts: &CodegenOptions) -> PathBuf {
 }
 
 /// Where an artifact lands when `-o` was not given: next to the source, with
-/// the kind's default extension.
+/// the kind's default extension. The `.rak` extension is always stripped, so
+/// `main.rak` with `--emit=link` is `main` on Unix and `main.exe` on Windows.
 fn default_path(kind: &EmitKind, opts: &CodegenOptions) -> PathBuf {
     let src = Path::new(&opts.source_path);
-    let base = if kind.extension(&opts.triple).is_empty() {
-        src.to_string_lossy().to_string()
-    } else {
-        format!(
-            "{}{}",
-            src.with_extension("").to_string_lossy(),
-            kind.extension(&opts.triple)
-        )
-    };
-    PathBuf::from(base)
+    let stem = src.with_extension("").to_string_lossy().into_owned();
+    PathBuf::from(format!("{}{}", stem, kind.extension(&opts.triple)))
 }
 
 /// Write one artifact to disk, or print it.
@@ -555,14 +548,28 @@ mod tests {
         assert_eq!(EmitKind::Object.extension(&linux), ".o");
         assert_eq!(EmitKind::Link.extension(&win), ".exe");
         assert_eq!(EmitKind::Link.extension(&linux), "");
-        // The default link output follows the host triple's suffix.
-        let expected = default_path(&EmitKind::Link, &opts);
-        let suffix = EmitKind::Link.extension(&opts.triple);
-        let stem = opts.stem();
+        // The link output strips `.rak` whatever the suffix, and the suffix
+        // comes from the triple — so the assertion is the same on every
+        // machine the suite runs on.
         assert_eq!(
-            expected,
-            PathBuf::from(format!("src/{}{}", stem, suffix)),
-            "the default link path should carry the host triple's suffix"
+            default_path(
+                &EmitKind::Link,
+                &CodegenOptions {
+                    triple: linux,
+                    ..opts.clone()
+                }
+            ),
+            PathBuf::from("src/main")
+        );
+        assert_eq!(
+            default_path(
+                &EmitKind::Link,
+                &CodegenOptions {
+                    triple: win,
+                    ..opts
+                }
+            ),
+            PathBuf::from("src/main.exe")
         );
     }
 
