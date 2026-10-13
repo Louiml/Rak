@@ -355,6 +355,125 @@ impl Chunk {
     }
 }
 
+/// The operand width of each opcode, in bytes after the opcode itself.
+///
+/// The debugger's `dis` command needs this to walk a chunk, and getting it
+/// wrong does not produce an error — it produces a listing that has silently
+/// desynchronised, printing operands as opcodes from the first mistake onward.
+/// Every entry here is derived from how the VM's dispatch loop consumes
+/// operands (`vm.rs`), not from how the compiler emits them, so a codegen
+/// change that adds an operand without updating this table shows up as a bad
+/// disassembly rather than as a chunk that runs wrong.
+fn operand_width(op: Op) -> usize {
+    match op {
+        // A 16-bit constant or global index.
+        Op::LoadConst
+        | Op::LoadGlobal
+        | Op::LoadGlobalOrMap
+        | Op::StoreGlobal
+        | Op::CheckType
+        | Op::FieldSet
+        | Op::MakeModule
+        | Op::BindModule => 2,
+        // A 16-bit jump or handler offset.
+        Op::Jump | Op::JumpIfFalse | Op::JumpIfTrue | Op::Try => 2,
+        // A 16-bit constant index plus a count byte.
+        Op::CallMethod | Op::StructNew => 3,
+        // Two constant indices (pattern descriptor, then bind names).
+        Op::MatchPat => 4,
+        // Namespace global, exported name, and a mutability flag.
+        Op::ModulePublish => 5,
+        // An 8-bit slot or count.
+        Op::LoadLocal | Op::StoreLocal | Op::Call | Op::IterItems | Op::DeferCall => 1,
+        Op::BuildModule => 1,
+        // Everything else is a bare opcode. `NewArray`/`NewTuple`/`NewMap` are
+        // the surprising ones: their count arrives as a pushed constant rather
+        // than as an operand, which is why listing them here would desync.
+        _ => 0,
+    }
+}
+
+/// Render a chunk as a human-readable listing.
+///
+/// Used by the debugger's `dis` command and by `rakc build --emit=bytecode-text`.
+/// The format is one instruction per line:
+///
+/// ```text
+///   0000  line  12  LoadConst   0
+///   0003  line  12  Print
+/// ```
+///
+/// A byte that is not a known opcode is printed as `<bad opcode>` rather than
+/// guessed at, and scanning resumes on the next byte — the only honest thing to
+/// do with a chunk that has been corrupted.
+pub fn disassemble_chunk(chunk: &Chunk) -> String {
+    let mut out = String::new();
+    out.push_str(&format!(
+        "bytecode: {} bytes, {} constants, {} line markers",
+        chunk.code.len(),
+        chunk.constants.len(),
+        chunk.lines.len()
+    ));
+    if !chunk.module_cells.is_empty() {
+        out.push_str(&format!(", {} module cells", chunk.module_cells.len()));
+    }
+    if !chunk.types.is_empty() {
+        out.push_str(&format!(", {} types", chunk.types.len()));
+    }
+    if !chunk.aliases.is_empty() {
+        out.push_str(&format!(", {} aliases", chunk.aliases.len()));
+    }
+
+    if !chunk.constants.is_empty() {
+        out.push_str("\nconstants:");
+        for (i, c) in chunk.constants.iter().enumerate() {
+            out.push_str(&format!("\n  {:>4}  {}", i, c));
+        }
+    }
+
+    out.push_str("\ncode:");
+    let mut off = 0usize;
+    while off < chunk.code.len() {
+        let l = chunk.lines.get(off).copied().unwrap_or(0);
+        match Op::from_u8(chunk.code[off]) {
+            Some(op) => {
+                let width = operand_width(op);
+                let operand = if width == 2 && off + 2 < chunk.code.len() {
+                    format!("{}", chunk.read_u16(off + 1))
+                } else if width == 3 && off + 3 < chunk.code.len() {
+                    format!("{} {}", chunk.read_u16(off + 1), chunk.code[off + 3])
+                } else if width == 4 && off + 4 < chunk.code.len() {
+                    format!("{} {}", chunk.read_u16(off + 1), chunk.read_u16(off + 3))
+                } else if width == 5 && off + 5 < chunk.code.len() {
+                    format!(
+                        "{} {} {}",
+                        chunk.read_u16(off + 1),
+                        chunk.read_u16(off + 3),
+                        chunk.code[off + 5]
+                    )
+                } else if width == 1 && off + 1 < chunk.code.len() {
+                    format!("{}", chunk.code[off + 1])
+                } else {
+                    String::new()
+                };
+                out.push_str(&format!(
+                    "\n  {:04}  line {:>3}  {:?} {}",
+                    off, l, op, operand
+                ));
+                off += 1 + width;
+            }
+            None => {
+                out.push_str(&format!(
+                    "\n  {:04}  line {:>3}  <bad opcode> {}",
+                    off, l, chunk.code[off]
+                ));
+                off += 1;
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

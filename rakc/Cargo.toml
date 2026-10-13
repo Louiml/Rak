@@ -14,7 +14,7 @@ anyhow.workspace = true
 serde.workspace = true
 
 # Standard library with real networking
-rak-stdlib = { path = "../stdlib", version = "0.9.1" }
+rak-stdlib = { path = "../stdlib", version = "1.0.0" }
 serde_json = "1.0"
 
 

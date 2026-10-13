@@ -337,22 +337,7 @@ fn read_source(arg: &str) -> Result<String, String> {
 fn check_embedded_payload() -> Option<String> {
     let exe_path = env::current_exe().ok()?;
     let data = fs::read(&exe_path).ok()?;
-    if data.len() < 16 {
-        return None;
-    }
-    let magic_bytes = &data[data.len() - 8..];
-    let magic = u64::from_be_bytes(magic_bytes.try_into().ok()?);
-    if magic != PAYLOAD_MAGIC {
-        return None;
-    }
-    let len_bytes = &data[data.len() - 16..data.len() - 8];
-    let source_len = u64::from_be_bytes(len_bytes.try_into().ok()?) as usize;
-    let payload_start = data.len().saturating_sub(16 + source_len);
-    if payload_start >= data.len() {
-        return None;
-    }
-    let payload = &data[payload_start..data.len() - 16];
-    String::from_utf8(payload.to_vec()).ok()
+    rakc::targets::exe::embedded_source(&data)
 }
 
 fn build_exe(source_path: &str) {
@@ -384,7 +369,9 @@ fn build_exe(source_path: &str) {
     output.write_all(&exe_data).unwrap();
     output.write_all(source_bytes).unwrap();
     output.write_all(&source_len.to_be_bytes()).unwrap();
-    output.write_all(&PAYLOAD_MAGIC.to_be_bytes()).unwrap();
+    output
+        .write_all(&rakc::targets::exe::PAYLOAD_MAGIC.to_be_bytes())
+        .unwrap();
     output.flush().unwrap();
     #[cfg(unix)]
     {
@@ -398,6 +385,244 @@ fn build_exe(source_path: &str) {
         exe_data.len() + source_bytes.len() + 16
     );
     println!("  Source embedded: {} bytes", source_bytes.len());
+}
+
+/// The `rakc build` command: multi-target compilation.
+///
+/// `rakc build <file> [--emit=...] [--target=...] [-C key=value] [-o path] [--release]`
+///
+/// Without flags, this is the historical self-extracting executable. With
+/// `--emit`, it compiles to the requested artifact(s): bytecode, C source,
+/// WebAssembly, LLVM IR, or a native binary.
+fn cmd_build(args: &[String]) -> i32 {
+    use rakc::targets::{
+        accepted_emit_list, compile_and_emit, find_triple, host_triple, parse_emit_list,
+        write_artifact, CodegenOptions, OptLevel, PanicStrategy,
+    };
+
+    let mut opts = CodegenOptions::new("");
+    let mut file: Option<String> = None;
+    let mut print: Option<String> = None;
+    let mut i = 0;
+
+    // `--emit=bytecode` is the same request as `--emit bytecode`; rustc and
+    // cargo both accept either spelling, and rejecting one makes a perfectly
+    // reasonable invocation an error. Normalise the `=` form before parsing.
+    let args = {
+        let mut out: Vec<String> = Vec::with_capacity(args.len());
+        for a in args {
+            if let Some(rest) = a.strip_prefix("--emit=") {
+                out.push("--emit".to_string());
+                out.push(rest.to_string());
+            } else if let Some(rest) = a.strip_prefix("--target=") {
+                out.push("--target".to_string());
+                out.push(rest.to_string());
+            } else if let Some(rest) = a.strip_prefix("--print=") {
+                out.push("--print".to_string());
+                out.push(rest.to_string());
+            } else if let Some(rest) = a.strip_prefix("-C") {
+                if rest.is_empty() {
+                    out.push("-C".to_string());
+                } else {
+                    // `-Copt-level=3` carries the value on the same token.
+                    out.push("-C".to_string());
+                    out.push(rest.to_string());
+                }
+            } else {
+                out.push(a.clone());
+            }
+        }
+        out
+    };
+
+    while i < args.len() {
+        let arg = &args[i];
+        match arg.as_str() {
+            "--emit" => {
+                i += 1;
+                let v = args.get(i).cloned().unwrap_or_default();
+                match parse_emit_list(&v) {
+                    Ok(kinds) => opts.emit = kinds,
+                    Err(e) => {
+                        eprintln!("{}", e);
+                        return 1;
+                    }
+                }
+            }
+            "--target" => {
+                i += 1;
+                let v = args.get(i).cloned().unwrap_or_default();
+                match find_triple(&v) {
+                    Some(t) => opts.triple = t,
+                    None => {
+                        eprintln!("{}", rakc::targets::triple::unknown_target_error(&v));
+                        return 1;
+                    }
+                }
+            }
+            "-C" | "--codegen" => {
+                i += 1;
+                let v = args.get(i).cloned().unwrap_or_default();
+                let (key, val) = match v.split_once('=') {
+                    Some((k, v)) => (k, v),
+                    None => {
+                        eprintln!("-C expects key=value (e.g. -C opt-level=3)");
+                        return 1;
+                    }
+                };
+                match key {
+                    "opt-level" => match OptLevel::parse(val) {
+                        Some(l) => opts.opt_level = l,
+                        None => {
+                            eprintln!("-C opt-level expects 0..3, s, or z");
+                            return 1;
+                        }
+                    },
+                    "debuginfo" => match val.parse::<u32>() {
+                        Ok(n) => opts.debuginfo = n,
+                        Err(_) => {
+                            eprintln!("-C debuginfo expects a number");
+                            return 1;
+                        }
+                    },
+                    "panic" => match val {
+                        "abort" => opts.panic = PanicStrategy::Abort,
+                        "unwind" => opts.panic = PanicStrategy::Unwind,
+                        _ => {
+                            eprintln!("-C panic expects abort or unwind");
+                            return 1;
+                        }
+                    },
+                    _ => {
+                        eprintln!(
+                            "unknown -C key '{}' (accepted: opt-level, debuginfo, panic)",
+                            key
+                        );
+                        return 1;
+                    }
+                }
+            }
+            "--release" => {
+                opts.opt_level = OptLevel::Aggressive;
+                opts.debuginfo = 0;
+            }
+            "--print" => {
+                i += 1;
+                print = Some(args.get(i).cloned().unwrap_or_default());
+            }
+            "-o" | "--output" | "--out-dir" => {
+                i += 1;
+                opts.out_path = Some(PathBuf::from(args.get(i).cloned().unwrap_or_default()));
+            }
+            "--help" | "-h" => {
+                print_build_help();
+                return 0;
+            }
+            other if other.starts_with('-') => {
+                eprintln!(
+                    "unknown flag '{}' for `rakc build` (accepted: --emit, --target, -C, -o, --release, --print, --help)",
+                    other
+                );
+                return 1;
+            }
+            other => {
+                if file.is_none() {
+                    file = Some(other.to_string());
+                } else {
+                    eprintln!("unexpected argument '{}' (only one source file)", other);
+                    return 1;
+                }
+            }
+        }
+        i += 1;
+    }
+
+    // Handle --print before anything else.
+    if let Some(what) = print {
+        match what.as_str() {
+            "target-list" => {
+                for t in rakc::targets::triple::SUPPORTED {
+                    println!("{}", t.name);
+                }
+                return 0;
+            }
+            "host" => {
+                println!("{}", host_triple().name);
+                return 0;
+            }
+            _ => {
+                eprintln!("--print expects target-list or host");
+                return 1;
+            }
+        }
+    }
+
+    let Some(file) = file else {
+        eprintln!("Usage: rakc build <file> [--emit=...] [--target=...] [-C key=value] [-o path] [--release]");
+        return 1;
+    };
+
+    // Set the source path now that we know it.
+    opts.source_path = file.clone();
+    opts.base_dir = std::path::Path::new(&file)
+        .parent()
+        .map(|p| p.to_string_lossy().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| ".".to_string());
+
+    let source = match read_source(&file) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("{}", e);
+            return 1;
+        }
+    };
+
+    let artifacts = match compile_and_emit(&source, &opts) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("{}", e);
+            return 1;
+        }
+    };
+
+    for artifact in &artifacts {
+        if let Err(e) = write_artifact(artifact, &opts) {
+            eprintln!("{}", e);
+            return 1;
+        }
+    }
+
+    0
+}
+
+fn print_build_help() {
+    use rakc::targets::accepted_emit_list;
+    println!("rakc build <file> — compile a Rak program to one or more targets");
+    println!();
+    println!("FLAGS:");
+    println!(
+        "  --emit <list>     comma-separated: {}",
+        accepted_emit_list()
+    );
+    println!("  --target <triple> target triple (see --print target-list)");
+    println!("  -C opt-level=N    0..3, s, or z (default: 2)");
+    println!("  -C debuginfo=N    0, 1, or 2 (default: 0)");
+    println!("  -C panic=mode     abort or unwind (default: unwind)");
+    println!("  --release         shorthand for -C opt-level=3 -C debuginfo=0");
+    println!("  -o <path>         output file (or directory with multiple --emit)");
+    println!("  --print <what>    target-list or host");
+    println!("  --help            this help");
+    println!();
+    println!("Without flags, `rakc build` produces a self-extracting executable");
+    println!("with the source embedded (the historical behavior).");
+    println!();
+    println!("Examples:");
+    println!("  rakc build hello.rak");
+    println!("  rakc build hello.rak --emit=bytecode");
+    println!("  rakc build hello.rak --emit=c --target=x86_64-unknown-linux-gnu");
+    println!("  rakc build hello.rak --emit=bytecode,c -o out/");
+    println!("  rakc build hello.rak --emit=link --release");
 }
 
 fn cmd_run_debug(file: &str, source: &str) {
@@ -532,51 +757,7 @@ fn cmd_run_debug(file: &str, source: &str) {
                     continue;
                 }
                 if lower == "disassemble" || lower == "dis" {
-                    println!("bytecode: {} bytes, {} constants, {} line markers", chunk_d.code.len(), chunk_d.constants.len(), chunk_d.lines.len());
-                    let mut off = 0usize;
-                    while off < chunk_d.code.len() {
-                        if let Some(op) = rakc::bytecode::Op::from_u8(chunk_d.code[off]) {
-                            let l = chunk_d.lines.get(off).copied().unwrap_or(0);
-                            let width = match op {
-                                rakc::bytecode::Op::LoadConst
-                                | rakc::bytecode::Op::LoadGlobal
-                                | rakc::bytecode::Op::StoreGlobal
-                                | rakc::bytecode::Op::Jump
-                                | rakc::bytecode::Op::JumpIfFalse
-                                | rakc::bytecode::Op::JumpIfTrue => 2,
-                                rakc::bytecode::Op::LoadLocal
-                                | rakc::bytecode::Op::StoreLocal
-                                | rakc::bytecode::Op::Call
-                                // `IterItems` has a 1-byte "indexed for" flag. Leaving
-                                // it out made `:dis` resync by one byte and print
-                                // nonsense for every instruction after a `for` loop.
-                                | rakc::bytecode::Op::IterItems
-                                | rakc::bytecode::Op::BuildModule => 1,
-                                // The module opcodes carry a const-index operand, so
-                                // leaving them out of this table made `:dis` decode
-                                // their operands as opcodes and print nonsense for
-                                // every instruction after the first import.
-                                rakc::bytecode::Op::MakeModule
-                                | rakc::bytecode::Op::BindModule => 2,
-                                // Two const indices (the namespace's global, then the
-                                // exported name) plus a 1-byte mutability flag.
-                                rakc::bytecode::Op::ModulePublish => 5,
-                                _ => 0,
-                            };
-                            let operand = if width == 2 {
-                                format!("{}", chunk_d.read_u16(off + 1))
-                            } else if width == 1 {
-                                format!("{}", chunk_d.code[off + 1])
-                            } else {
-                                String::new()
-                            };
-                            println!("  {:04}  line {:>3}  {:?} {}", off, l, op, operand);
-                            off += 1 + width;
-                        } else {
-                            println!("  {:04}  <bad opcode> {}", off, chunk_d.code[off]);
-                            off += 1;
-                        }
-                    }
+                    println!("{}", rakc::bytecode::disassemble_chunk(&chunk_d));
                     continue;
                 }
                 println!("unknown command '{}' (:help)", input);
@@ -773,6 +954,33 @@ fn main() {
         }
     };
     let file = &args[file_index];
+    // A `.rkbc` argument is compiled bytecode, not source: it must not go
+    // through the UTF-8 text reader, which is what made `rakc vm prog.rkbc`
+    // fail with "stream did not contain valid UTF-8" on a file this very
+    // binary had just written.
+    if cmd == "vm" && file.ends_with(".rkbc") {
+        // argv for the program: everything after the file, minus rakc's flags.
+        let script_args: Vec<String> = args[file_index + 1..].to_vec();
+        let rkbc_file = file.to_string();
+        let result = rakc::run_on_big_stack(move || {
+            rakc::targets::bytecode::run_rkbc(&rkbc_file, &script_args)
+        });
+        match result {
+            Ok((out, code)) => {
+                for line in &out {
+                    println!("{}", line);
+                }
+                if code != 0 {
+                    std::process::exit(code);
+                }
+            }
+            Err(e) => {
+                eprintln!("{}", e);
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
     let source = match read_source(file) {
         Ok(s) => s,
         Err(e) => {
@@ -876,7 +1084,7 @@ fn main() {
             rakc::run_on_big_stack(move || rakc::dap::run(&f, &s));
         }
         "build" => {
-            build_exe(file);
+            std::process::exit(cmd_build(&args[2..]));
         }
         "check" => {
             let source = source.clone();

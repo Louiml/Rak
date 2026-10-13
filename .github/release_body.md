@@ -1,3 +1,99 @@
+## 1.0.0 - 2026-10-13
+
+Rak 1.0.0 is about the build. `rakc build` is now a rustc-shaped multi-target front
+end, and the package manager `oyvey` ships with a Cargo-shaped manifest, path
+dependencies, and a versioned lockfile. Both are verified against the interpreter
+they must agree with.
+
+### The compiler compiles to anything
+
+`rakc build` keeps its old meaning (a standalone executable) and grows the rustc
+one. The front end — lex, parse, type-check — is shared by every target; a target
+is anything that turns a checked module into artifacts for a triple:
+
+    $ rakc build hello.rak --emit=bytecode
+    Emitted: hello.rkbc (1632 bytes)
+    $ rakc vm hello.rkbc
+    [DUMP] Hello, World
+
+| `--emit` | Artifact |
+|---|---|
+| `bytecode` | a `.rkbc` container, runnable with `rakc vm` |
+| `c` | a self-contained C11 file |
+| `link` | a native binary, built with the host C toolchain |
+| `exe` | the historical self-extracting executable (the default) |
+
+The `.rkbc` container is the chunk the bytecode VM runs as a file: compile once,
+ship it, run it anywhere. It is lossless — baked function values, nested chunks
+and captured environments all survive the round trip, and natives are re-bound
+by name at load time, so a chunk that needs a feature this build lacks says so
+rather than answering with a wrong value.
+
+The C target is a real translation. Every Rak value becomes a tagged `rak_val`
+in the emitted runtime, and the Display formatting, the numeric tower, the `fmt`
+spec grammar and `raise`/`try` unwinding are carried across so a compiled binary
+agrees with the interpreter byte for byte. That claim is checked, not asserted:
+a conformance corpus runs the same programs on the interpreter, the VM and the C
+toolchain and diffs their output, and the C and bytecode suites pass with the
+interpreter's exact output. The corpus caught eleven bugs during development,
+including a dangling-pointer array that overflowed the stack on `dump [1,2]` and
+a union-aliasing bug that made every builtin call return nil.
+
+Flags mirror rustc's: `--emit` (comma-separated), `--target <triple>`
+(`x86_64-pc-windows-msvc`, `x86_64-unknown-linux-gnu`, `aarch64-apple-darwin`,
+`wasm32-wasi`, `wasm32-unknown-unknown`, ...), `-C opt-level=0..3|s|z`,
+`-C debuginfo=0..2`, `-C panic=abort|unwind`, `--release`, `-o <path>`, and
+`--print target-list|host`. See the README's "Compile to anything" section.
+
+### The package manager is Cargo-shaped
+
+`oyvey` reads `Rak.toml` — the package/dependencies/features/profile tables
+Cargo uses — and a `package.rak` project keeps resolving exactly as it did. The
+manifest is edited with `toml_edit`, so `oyvey add` preserves every comment in
+the file instead of regenerating it from the six keys it models.
+
+    [package]
+    name = "mylib"
+    version = "0.1.0"
+
+    [dependencies]
+    net = "1.2"                          # registry requirement
+    local = { path = "../local" }       # sibling directory
+    gh = { git = "https://github.com/user/repo", branch = "main" }
+
+A path dependency resolves in place, transposes transitively, and is vendored
+where `rakc` finds a bare `import local`. The lockfile is v4: entries carry a
+source kind (`git+`/`path+`) and their own dependency lists, and a path
+dependency is recorded without a checksum — a mutable directory is not a
+verifiable artifact, and `oyvey audit` does not pretend otherwise.
+
+`oyvey check` validates a project through `rakc check` without building it, and
+`oyvey lock`/`tree` route through the same resolver whatever manifest the
+project declares itself with.
+
+### Binaries
+
+`rakc` and `oyvey` are released for Linux x86_64 and Windows x86_64, each
+smoke-tested before upload (`oyvey new` + `list`, `rakc run`). The Rak release
+additionally carries `rak-setup` and the IDE bundles it always has. Both
+binaries ship behind the hardening verifier (ASLR, high-entropy VA, DEP,
+CFG-compatible image, `LOAD_CONFIG`).
+
+### Known limitations
+
+**The C target is an honest subset.** It compiles a single module without the
+runtime features whose implementation lives in Rust: no `spawn`/`await`, no
+sockets, no FFI, no GUI, no `import`. Those are compile errors naming the
+construct and the target, rather than silent behaviour changes. `--emit=bytecode`
+and `--emit=exe` keep the whole language.
+
+**WASM routes through clang.** The `wasm32-*` targets compile the C translation
+with a wasm-targeted clang; they are covered by the same corpus when that
+toolchain is present.
+
+**No registry yet.** `oyvey` resolves git and path dependencies; the registry
+client (`search`, `publish`, `login`) is the next piece.
+
 ## 0.9.1 - 2026-10-07
 
 A patch release that fixes one user-facing bug found by exercising the 0.9.0 artifacts:

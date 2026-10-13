@@ -7,6 +7,7 @@ pub mod lexer;
 pub mod modules;
 pub mod parser;
 pub mod repl;
+pub mod targets;
 pub mod typecheck;
 pub mod value;
 pub mod vm;

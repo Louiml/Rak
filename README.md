@@ -4,6 +4,50 @@ A programming language for hackers, OSINT investigators, and systems programmers
 
 Hex is a first-class type. The bytecode VM runs about 6x faster than the tree-walker. There's a SQL engine written in Rak itself, and a Rak interpreter written in Rak.
 
+## What's new in 1.0.0
+
+Rak 1.0.0 is about the build. `rakc build` is now a rustc-shaped multi-target front
+end, and the package manager `oyvey` ships with a Cargo-shaped manifest, path
+dependencies, and a versioned lockfile. Both are verified against the interpreter
+they must agree with.
+
+**The compiler compiles to anything.** `rakc build hello.rak --emit=bytecode`
+writes a `.rkbc` container you can ship and run with `rakc vm hello.rkbc`;
+`--emit=c` writes a self-contained C11 file; `--emit=link` builds a native binary
+with the host C toolchain. The `.rkbc` container is lossless — baked function
+values, nested chunks and captured environments all survive the round trip, and
+natives are re-bound by name at load time, so a chunk that needs a feature this
+build lacks says so rather than answering with a wrong value.
+
+The C target is a real translation. Every Rak value becomes a tagged `rak_val`
+in the emitted runtime, and the Display formatting, the numeric tower, the `fmt`
+spec grammar and `raise`/`try` unwinding are carried across so a compiled binary
+agrees with the interpreter byte for byte. That claim is checked, not asserted: a
+conformance corpus runs the same programs on the interpreter, the VM and the C
+toolchain and diffs their output, and both new suites pass with the interpreter's
+exact output. The corpus caught eleven bugs during development, including a
+dangling-pointer array that overflowed the stack on `dump [1,2]` and a
+union-aliasing bug that made every builtin call return nil.
+
+Flags mirror rustc's: `--emit` (comma-separated), `--target <triple>`,
+`-C opt-level=0..3|s|z`, `-C debuginfo=0..2`, `-C panic=abort|unwind`,
+`--release`, `-o <path>`, `--print target-list|host`.
+
+**The package manager is Cargo-shaped.** `oyvey` reads `Rak.toml` — the
+package/dependencies/features/profile tables Cargo uses — and a `package.rak`
+project keeps resolving exactly as it did. The manifest is edited with
+`toml_edit`, so `oyvey add` preserves every comment in the file. A path
+dependency resolves in place, transposes transitively, and is vendored where
+`rakc` finds a bare `import local`. The lockfile is v4: entries carry a source
+kind (`git+`/`path+`) and their own dependency lists, and a path dependency is
+recorded without a checksum — a mutable directory is not a verifiable artifact,
+and `oyvey audit` does not pretend otherwise. `oyvey check` validates a project
+through `rakc check` without building it.
+
+**Binaries.** `rakc` and `oyvey` are released for Linux x86_64 and Windows
+x86_64, each smoke-tested before upload. The Rak release additionally carries
+`rak-setup` and the IDE bundles.
+
 ## What's new in 0.9.1
 
 `v0.9.1` is a patch release on top of 0.9.0. One user-facing fix, but it was the noisy kind of kind.
@@ -275,6 +319,70 @@ rakc build examples/hello.rak   # produces hello.exe on Windows, hello on Linux
 ./hello                          # [DUMP] Hello, World
 ```
 
+## Compile to anything
+
+`rakc build` is a rustc-shaped multi-target front end. The front end (lex,
+parse, type-check) is shared by every target; a target is anything that turns
+a checked module into artifacts for a triple.
+
+```bash
+rakc build hello.rak                              # default: self-extracting exe
+rakc build hello.rak --emit=c                     # emit C source
+rakc build hello.rak --emit=c -o hello.c          # …to a named file
+rakc build hello.rak --emit=link --release        # native binary via the C toolchain
+rakc build hello.rak --emit=bytecode              # .rkbc container (see below)
+rakc build hello.rak --emit=c --target=x86_64-unknown-linux-gnu
+rakc build --print target-list                    # the accepted triples
+rakc build --print host
+```
+
+| `--emit` | Artifact | Runs with |
+|---|---|---|
+| `interp` | none | the interpreter (like `rakc run`) |
+| `bytecode` | `.rkbc` container | `rakc vm program.rkbc` |
+| `c` | `.c` source | any C compiler |
+| `link` | native binary | directly |
+| `exe` | self-extracting executable (the default) | directly |
+
+Flags: `--target <triple>` (`x86_64-pc-windows-msvc`,
+`x86_64-unknown-linux-gnu`, `aarch64-apple-darwin`,
+`x86_64-unknown-linux-musl`, `wasm32-wasi`, `wasm32-unknown-unknown`),
+`-C opt-level=0..3|s|z`, `-C debuginfo=0..2`, `-C panic=abort|unwind`,
+`--release` (shorthand for `-C opt-level=3 -C debuginfo=0`), `-o <path>`.
+
+The `.c` target is a real translation: every Rak value becomes a tagged
+`rak_val` in the emitted runtime, and the `Display` formatting, numeric
+tower, `fmt` spec grammar and `raise`/`try` unwinding are carried across so
+a compiled binary agrees with the interpreter byte for byte — a conformance
+corpus (`rakc/tests/target_conformance.rs`) runs the same programs on the
+interpreter, the VM and the C toolchain and diffs their output.
+
+### The `.rkbc` container
+
+`--emit=bytecode` writes the chunk the bytecode VM runs as a file: compile
+once, ship it, run it anywhere.
+
+```bash
+rakc build program.rak --emit=bytecode
+rakc vm program.rkbc
+```
+
+The container is the same chunk `rakc vm` produces in-process — including
+baked function values and nested chunks — so a `.rkbc` is not a lossy
+artifact. Natives are stored by name and re-bound against the running VM's
+registry on load, so a chunk compiled by a build with the `gui` feature runs
+only where that feature exists, with a clear error naming the missing native
+rather than a wrong answer.
+
+### The honest subset
+
+The C target compiles a single module, without the runtime features whose
+implementation lives in Rust: no `spawn`/`await`, no sockets, no FFI, no
+GUI, no `import`. Those are compile errors naming the construct and the
+target, rather than silent behaviour changes — the same
+written-down-limits policy the VM follows. The bytecode and `exe` targets
+keep the whole language.
+
 ## GUI windows
 
 Requires `cargo build -p rakc --features gui`. Works on Windows and Linux.
@@ -322,32 +430,10 @@ Also worth knowing: a function body without an explicit `return` evaluates to
 
 ## Package manager
 
-`oyvey` is the official Rak package manager and build system.
-
-```bash
-oyvey new mylib              # generate a project (manifest, src/main.rak, tests)
-oyvey add user/repo          # add a GitHub dependency (vendored into packages/)
-oyvey install                # resolve + install deps from package.rak
-oyvey run                    # run the entry point via rakc run
-oyvey build                  # build a standalone executable via rakc build
-oyvey test                   # run the project's tests
-oyvey list                   # list installed packages
-oyvey remove mylib           # remove a dependency
-```
-
-The manifest is a Rak file:
-
-```rak
-let name = "mylib"
-let version = "0.1.0"
-let description = "A Rak package"
-let license = "MIT"
-let entry = "src/main.rak"
-let deps = {
-    net: "user/rak-net",
-    crypto: "user/rak-crypto@^1.0"
-}
-```
+`oyvey` is the official Rak package manager and build system. It reads
+`Rak.toml` (preferred) or `package.rak` (legacy). See
+[Package manager](#package-manager-1) near the CLI reference for the full
+command list and manifest syntax.
 
 Import installed packages by file path or by name (Python-style). See the
 Imports & exports section below for the full syntax.
@@ -356,6 +442,9 @@ Imports & exports section below for the full syntax.
 use "./packages/mylib/lib.rak"   // file-path (back-compat)
 import mylib                     // name -> searches dir, ./packages/, RAK_PATH
 ```
+
+A `package.rak` project keeps working unchanged: its `let deps = { ... }`
+specs resolve through the same git flow they always did.
 
 ## Imports & exports
 
@@ -886,19 +975,21 @@ dump secret_get("API_KEY")
 
 ```bash
 rakc run <file>     Run a Rak script on the interpreter
-rakc vm <file>      Run on the bytecode VM
-rakc build <file>   Build a standalone executable
+rakc vm <file>      Run on the bytecode VM (also accepts a .rkbc container)
+rakc build <file>   Compile to any target (--emit, --target, -C, --release, -o)
 rakc bench <file>   Benchmark interpreter vs VM
 rakc check <file>   Static type check; print diagnostics with line/column
 rakc test [file]    Run test blocks (--filter NAME, --verbose)
 rakc lex <file>     Print tokens
 rakc parse <file>   Print AST
+rakc fmt <file>     Format source (--write, --check)
+rakc lint <file>    Advisory lint checks (--deny)
 rakc repl           Start an interactive REPL
 rakc lsp            Start the language server (stdio)
 rakc bindgen <h>    Generate Rak bindings from a C header
 rakc --version
 
-oyvey new <project>      Generate a new Rak project
+oyvey new <project>      Generate a new Rak project (Rak.toml)
 oyvey init               Initialize an existing directory as a project
 oyvey add <user/repo>    Add a GitHub package dependency
 oyvey remove <package>   Remove a dependency
@@ -906,10 +997,49 @@ oyvey install            Resolve and install dependencies
 oyvey update             Re-resolve dependencies within constraints
 oyvey run                Run the entry point
 oyvey build              Build a standalone executable
+oyvey check              Validate the project without building it
 oyvey test               Run the project's tests
 oyvey clean              Remove build artifacts
 oyvey list               List installed packages
 ```
+
+See "Compile to anything" above for `rakc build`'s flags.
+
+## Package manager
+
+`oyvey` is the official Rak package manager and build system. It reads
+`Rak.toml` (preferred) or `package.rak` (legacy).
+
+```bash
+oyvey new mylib              # generate a project (Rak.toml, src/main.rak, tests)
+oyvey add user/repo          # add a GitHub dependency (vendored into packages/)
+oyvey install                # resolve + install deps (writes oyvey.lock)
+oyvey run                    # run the entry point via rakc run
+oyvey build                  # build a standalone executable via rakc build
+oyvey check                  # type-check without building
+oyvey test                   # run the project's tests
+oyvey list                   # list installed packages
+oyvey remove mylib           # remove a dependency
+```
+
+The manifest is `Rak.toml`, Cargo's table model:
+
+```toml
+[package]
+name = "mylib"
+version = "0.1.0"
+edition = "2026"
+
+[dependencies]
+net = "1.2"                          # registry, semver requirement
+local = { path = "../local" }        # sibling directory
+gh = { git = "https://github.com/user/repo", branch = "main" }
+```
+
+Dependencies are vendored into `packages/`, which is the directory `rakc`
+searches for a bare `import net`. A path dependency resolves in place and
+is recorded in `oyvey.lock` with a `path+` source and no checksum — a
+mutable directory is not a verifiable artifact.
 
 ## Tooling
 
@@ -967,9 +1097,22 @@ Rak/
 │       ├── gui.rs         WebView2/WebKitGTK window management
 │       ├── repl.rs        Interactive REPL
 │       ├── lsp.rs         Language server
-│       └── bindgen.rs     C header bindgen
+│       ├── bindgen.rs     C header bindgen
+│       └── targets/       Multi-target compilation
+│           ├── mod.rs       Target trait, emit kinds, codegen options
+│           ├── triple.rs    Supported target triples
+│           ├── rkbc.rs      The .rkbc container (writer/reader)
+│           ├── rkbc_ast.rs  AST codec for baked function values
+│           ├── c.rs         The C target: translation + native compile
+│           ├── c/runtime.rs The emitted C runtime (value model)
+│           ├── c/codegen.rs Rak AST to C translation
+│           ├── wasm.rs      The WebAssembly target (via clang)
+│           ├── llvm.rs      The LLVM backend (feature-gated)
+│           ├── exe.rs       The self-extracting executable target
+│           ├── toolchain.rs Host C compiler discovery
+│           └── expand.rs    Macro expansion for AST targets
 ├── stdlib/            Rust native stdlib (net, crypto, encoding, recon, web, file, json, log, process, secrets, http_server, websocket)
-├── oyvey/             Package manager + build system
+├── oyvey/             Package manager + build system (Rak.toml manifest, oyvey.lock v4)
 ├── rak-setup/        Custom interactive installer (TUI wizard: net-install + offline)
 ├── dist/              One-liner bootstraps (install.sh / install.ps1), man pages, completions
 ├── ide/               Tauri + Next.js IDE
@@ -1021,11 +1164,13 @@ Linux requires `libwebkit2gtk-4.1-dev`, `libgtk-3-dev`, `libayatana-appindicator
 
 ## Tech stack
 
-The compiler is Rust. Logos handles lexing. The parser is hand-written recursive descent. Two backends: a tree-walking interpreter and a stack-based bytecode VM.
+The compiler is Rust. Logos handles lexing. The parser is hand-written recursive descent. Four execution targets: a tree-walking interpreter, a stack-based bytecode VM, a translation to C11 compiled by the host toolchain, and a self-extracting executable. The front end is shared; a conformance corpus runs the same programs on all of them and diffs their output.
 
 The standard library uses `ureq` for HTTP, `scraper` for HTML parsing, `md-5`/`sha1`/`sha2` for hashing, `std::net` for TCP, `std::thread` and `mpsc` for concurrency, `libloading` for FFI, `memmap2` for memory-mapped files, and `tokio` for the async event loop. Real JSON via `serde_json`.
 
 The IDE is Tauri v2, Next.js, TypeScript, and Tailwind CSS. It runs Rak scripts as child processes, streams output, and has an integrated terminal.
+
+The package manager is Rust: `toml`/`toml_edit` for manifests and lockfiles, `sha2` for checksums, and the `git` CLI on PATH.
 
 ## License
 
