@@ -1,38 +1,46 @@
-// gui_demo.rak — a desktop window with a working JavaScript -> Rak callback
-// Run with: rakc run examples/gui_demo.rak (requires --features gui)
+// gui_demo.rak — a native desktop window built from Rak widgets (no HTML)
+// Run with: rakc run examples/gui_demo.rak (build rakc with --features gui)
 //
-// Demonstrates: gui_callback, gui_open, gui_title, gui_update, and a callback
-// whose return value is handed back to the page.
+// Demonstrates the native GUI API:
+//   gui_window, gui_add, gui_on_click, gui_callback,
+//   gui_set_text, gui_get_text, gui_set_visible, gui_wait
 //
-// Note the `return` in every function body. A Rak function's value is its
-// `return` expression; a bare expression body evaluates to nil, which would
-// make the callback send nil back to the page. See docs/V8-KNOWN-ISSUES.md.
+// Widget kinds: "label", "button", "input", "checkbox", "select", "textarea".
+// A "select" widget takes its options as a comma-separated text argument.
+//
+// Note on callbacks: `gui_callback` snapshots the environment at the point of
+// the call, so a handler sees the variables that existed *before* it was
+// registered, and its own mutations do not flow back into the running script.
+// Keep handlers self-contained.
 
-fn clicked(n) {
-  return n + 1
+fn on_click() {
+  print "clicked"
+  return nil
 }
 
-gui_callback("clicked", clicked)
+gui_callback("on_click", on_click)
 
-dump "Opening window..."
-
-let html = "<h1 style='color:#22c55e;text-align:center;margin-top:40px'>Hello from Rak!</h1>
-<p style='text-align:center;color:#666'>JavaScript can call into Rak.</p>
-<button onclick='bump()' style='display:block;margin:20px auto;padding:10px 30px;font-size:18px;background:#22c55e;color:white;border:none;border-radius:8px;cursor:pointer'>Click me</button>
-<div id='count' style='text-align:center;font-size:24px;margin-top:20px'>clicks: 0</div>
-<script>
-  var n = 0;
-  // The page asks Rak to increment, and Rak hands the answer back.
-  window.rak_on('clicked', function (v) {
-    n = v;
-    document.getElementById('count').textContent = 'clicks: ' + n;
-  });
-  function bump() { window.rak_call('clicked', n + 1); }
-</script>"
-
-let win = gui_open("Rak GUI Demo", html, 600, 400)
+let win = gui_window("Rak GUI Demo", 420, 240)
 dump f"Window opened with ID: {win}"
 
-gui_title(win, "Rak GUI Demo — click the button")
+// gui_add(window, kind, text, x, y, w, h) -> widget id
+let heading = gui_add(win, "label", "Hello from Rak!", 20, 20, 380, 28)
+let name = gui_add(win, "input", "world", 20, 70, 240, 28)
+let agree = gui_add(win, "checkbox", "I agree", 20, 120, 200, 24)
+let button = gui_add(win, "button", "Click me", 20, 170, 140, 34)
+
+// A select's text is its option list.
+gui_add(win, "select", "Small, Medium, Large", 20, 210, 200, 28)
+
+gui_on_click(button, "on_click")
+
+gui_set_text(heading, "Native widgets, zero HTML")
+gui_set_text(name, "Rak")
+
+dump f"input reads: {gui_get_text(name)}"
+dump f"checkbox reads: {gui_get_text(agree)}"
+
+// gui_set_visible(widget, false) hides a widget without removing it.
+
 gui_wait()
 dump "All windows closed"

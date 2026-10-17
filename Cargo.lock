@@ -4772,6 +4772,8 @@ version = "1.0.0"
 dependencies = [
  "anyhow",
  "bindgen",
+ "eframe",
+ "egui",
  "logos",
  "pretty_assertions",
  "proptest",
@@ -4780,11 +4782,9 @@ dependencies = [
  "rustyline",
  "serde",
  "serde_json",
- "tao",
  "thiserror 1.0.69",
  "tokio",
  "tower-lsp",
- "wry",
 ]
 
 [[package]]

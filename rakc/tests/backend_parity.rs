@@ -2295,17 +2295,17 @@ fn parity_tunnel_key_is_deterministic_across_backends() {
 /// A real window needs a display, so this cannot run in CI. What it *can* check
 /// is the thing that actually broke: that both backends resolve the same GUI
 /// names. Before the rewrite the VM had none of them, so `rakc vm` reported
-/// `Undefined: gui_open` for a program that ran fine under `rakc run`.
+/// `Undefined: gui_window` for a program that ran fine under `rakc run`.
 ///
-/// When no display is available, `gui_open` must fail with the *same* message
+/// When no display is available, `gui_window` must fail with the *same* message
 /// on both backends. "No display" and "no such builtin" are different bugs, and
 /// the second one is what this test exists to catch.
 #[test]
 fn parity_gui_registry() {
     let source = r#"
-let w = gui_open("t", "<p>x</p>", 200, 100)
-gui_update(w, "<p>y</p>")
-gui_title(w, "new")
+let w = gui_window("t", 200, 100)
+gui_add(w, "label", "x", 0, 0, 100, 20)
+gui_set_text(w, "new")
 gui_close(w)
 gui_wait()
 gui_quit(0)
@@ -2315,7 +2315,7 @@ gui_quit(0)
         // Headless is the expected outcome in CI, and it is fine — as long as
         // both backends agree about it.
         assert!(
-            why.contains("not running") || why.contains("gui_open"),
+            why.contains("not running") || why.contains("gui_window"),
             "GUI backends diverged in a way that is not a headless environment:\n{}",
             why
         );

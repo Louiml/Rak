@@ -387,46 +387,69 @@ keep the whole language.
 
 Requires `cargo build -p rakc --features gui`. Works on Windows and Linux.
 
+The GUI is **native**: windows and widgets are drawn by `egui` through the
+`glow` renderer. There is no HTML, no CSS, no JavaScript, and no WebView2 or
+WebKitGTK anywhere in the pipeline, so a Rak GUI app does not need a browser
+engine installed and does not depend on the host's web stack.
+
 ```rak
-fn on_click(msg) { return "you said: " + msg }
+fn on_click(name, message) {
+  print f"{name} says: {message}"
+  return nil
+}
 
-let html = r#"<h1 style='color:#22c55e;text-align:center;margin-top:40px'>Hello from Rak!</h1>
-<button onclick="rak_call('on_click', 'hi'); rak_on('on_click', show)">Click me</button>
-<script>
-  function show(v) { document.body.insertAdjacentHTML('beforeend', '<p>' + v + '</p>') }
-</script>"#
+gui_callback("on_widget", on_click)
 
-gui_callback("on_click", on_click)
+let win = gui_window("Rak GUI Demo", 420, 240)
 
-let win = gui_open("Rak GUI Demo", html, 600, 400)
-gui_title(win, "Still here")
-gui_update(win, "<h1>replaced</h1>")
+let heading = gui_add(win, "label", "Hello from Rak!", 20, 20, 380, 28)
+let name = gui_add(win, "input", "world", 20, 70, 240, 28)
+let agree = gui_add(win, "checkbox", "I agree", 20, 120, 200, 24)
+let button = gui_add(win, "button", "Click me", 20, 170, 140, 34)
+gui_add(win, "select", "Small, Medium, Large", 20, 210, 200, 28)
+
+gui_on_click(button, "on_widget")
+gui_set_text(heading, "Native widgets, zero HTML")
+
+dump f"input reads: {gui_get_text(name)}"
+
 gui_wait()
 ```
 
 | Builtin | Behaviour |
 |---|---|
-| `gui_open(title, html, w, h)` | Opens a window, returns its id. Blocks until it exists, so the id is real. |
-| `gui_update(id, html)` | Replaces the document. The window keeps its position, size and z-order. |
-| `gui_title(id, title)` | Sets the window title. |
+| `gui_window(title, w, h)` | Opens a window, returns its id. Blocks until it exists, so the id is real. |
+| `gui_add(window, kind, text, x, y, w, h)` | Adds a widget at an absolute position inside a window; returns the widget id. |
+| `gui_set_text(widget, text)` | Sets a widget's caption or, for inputs, its current text. |
+| `gui_get_text(widget)` | Reads a widget back: the input text, `"true"`/`"false"` for a checkbox, otherwise the caption. |
+| `gui_set_visible(widget, bool)` | Shows or hides a widget without removing it. |
+| `gui_on_click(widget, name)` | Binds a widget to a callback registered under `name`. |
 | `gui_close(id)` | Closes one window. The process keeps running. |
 | `gui_wait()` | Blocks until every window is closed. |
 | `gui_quit(code)` | Stops the GUI with an exit code. |
-| `gui_callback(name, fn)` | Registers a Rak function callable from page JavaScript as `rak_call(name, ...)`. |
+| `gui_callback(name, fn)` | Registers a Rak function that `gui_on_click` dispatches to. |
 
-The page calls Rak with `rak_call(name, ...args)`, and a callback's return value
-reaches the page as `rak_result(name, value)`. Register a page-side handler with
-`rak_on(name, fn)`.
+Widget kinds are `"label"`, `"button"`, `"input"`, `"checkbox"`, `"select"` and
+`"textarea"`. A `select` takes its options as one comma-separated string.
+
+The IDE's **GUI Designer** (`GUI Designer` in the toolbar, or the command
+palette) draws a window visually and emits this native Rak code.
 
 **One real limitation.** A callback does not share mutable state with the script
 that registered it. It receives a copy of the environment as it stood at
-`gui_callback` time, so it can read what existed then and return a value to the
-page, but it cannot write to a variable the main script reads afterwards. This
-follows from Rak having no reference types. Values are shared rather than moved.
+`gui_callback` time, so it can read what existed then, but it cannot write to a
+variable the main script reads afterwards. This follows from Rak having no
+reference types. Values are shared rather than moved.
 See [docs/V8-KNOWN-ISSUES.md](docs/V8-KNOWN-ISSUES.md).
 
 Also worth knowing: a function body without an explicit `return` evaluates to
 `nil`, which matters here because `gui_callback` takes a function.
+
+**Renamed in 1.0.1.** The webview-era builtins `gui_open`, `gui_update` and
+`gui_title` are gone. `gui_open(title, html, w, h)` becomes
+`gui_window(title, w, h)` followed by `gui_add(...)` calls; `gui_update` and
+`gui_title` have no native equivalent — use `gui_set_text` and `gui_set_visible`.
+Scripts written against the old HTML API will not run unchanged.
 
 ## Package manager
 
@@ -1079,7 +1102,7 @@ The generated functions call `extern_call`, which returns an error until a Rust 
 
 ## Platform support
 
-Windows and Linux. On Windows the GUI uses WebView2 (ships with Edge); on Linux it uses WebKitGTK. The feature is per-crate, so it needs `-p rakc --features gui`, not a workspace-wide `--features gui`. `rakc build` produces `.exe` on Windows and an executable with `chmod 755` on Linux. The IDE ships as NSIS/MSI on Windows and `.deb`/AppImage on Linux via GitHub Actions CI, alongside the custom `rak-setup` installer (net-install + offline bundle) on both.
+Windows and Linux. The GUI is native `egui` on the `glow` renderer, so it needs no browser engine on either platform. The feature is per-crate, so it needs `-p rakc --features gui`, not a workspace-wide `--features gui`. `rakc build` produces `.exe` on Windows and an executable with `chmod 755` on Linux. The IDE ships as NSIS/MSI on Windows and `.deb`/AppImage on Linux via GitHub Actions CI, alongside the custom `rak-setup` installer (net-install + offline bundle) on both.
 
 ## Project structure
 
@@ -1094,7 +1117,7 @@ Rak/
 │       ├── bytecode.rs    Opcode set and chunk
 │       ├── compiler.rs    AST to bytecode
 │       ├── vm.rs          Stack-based bytecode VM
-│       ├── gui.rs         WebView2/WebKitGTK window management
+│       ├── gui.rs         Native egui window + widget management
 │       ├── repl.rs        Interactive REPL
 │       ├── lsp.rs         Language server
 │       ├── bindgen.rs     C header bindgen
@@ -1160,7 +1183,7 @@ cargo build --release -p rakc --features gui   # rakc with GUI support
 cd ide && npm install && npx tauri build # IDE
 ```
 
-Linux requires `libwebkit2gtk-4.1-dev`, `libgtk-3-dev`, `libayatana-appindicator3-dev`, and `librsvg2-dev`.
+Building the IDE on Linux requires `libwebkit2gtk-4.1-dev`, `libgtk-3-dev`, `libayatana-appindicator3-dev`, and `librsvg2-dev` — the IDE is a Tauri app. Building `rakc --features gui` needs none of these, because the GUI is native.
 
 ## Tech stack
 

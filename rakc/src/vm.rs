@@ -643,9 +643,12 @@ impl Vm {
         // a window opened from bytecode is a real window and not a stub.
         #[cfg(feature = "gui")]
         for name in [
-            "gui_open",
-            "gui_update",
-            "gui_title",
+            "gui_window",
+            "gui_add",
+            "gui_on_click",
+            "gui_set_text",
+            "gui_get_text",
+            "gui_set_visible",
             "gui_close",
             "gui_wait",
             "gui_quit",

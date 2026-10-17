@@ -92,7 +92,7 @@ declarations are on the roadmap and are not implemented.
 | `process` | `process_spawn`, `process_wait`, `process_stdout` | Spawning child processes |
 | `ffi` | `ffi_load`, `ffi_call`, `extern "C" { ... }` | Dynamic library calls |
 | `raw` | `net_raw_*` (raw sockets, ARP, ICMP) | Packet forging, ARP, raw sockets |
-| `gui` | `gui_open`, `gui_update`, `gui_callback` | Desktop windows |
+| `gui` | `gui_window`, `gui_add`, `gui_on_click`, `gui_callback` | Desktop windows |
 | `secrets` | `env_get`, `env_set`, `secret_*` | Environment variables, credential store |
 | `asm` | `asm("...")` single-register intrinsic (interpreter-only) | Inline assembly |
 

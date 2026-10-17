@@ -13,7 +13,7 @@ Rak/
 │       ├── bytecode.rs    Opcode set and chunk
 │       ├── compiler.rs    AST to bytecode
 │       ├── vm.rs          Stack-based bytecode VM
-│       ├── gui.rs         WebView2/WebKitGTK window management
+│       ├── gui.rs         Native egui window + widget management
 │       ├── repl.rs        Interactive REPL
 │       ├── lsp.rs         Language server
 │       └── bindgen.rs     C header bindgen

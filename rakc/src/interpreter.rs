@@ -7571,31 +7571,62 @@ impl Interpreter {
                 )))
             }
             #[cfg(feature = "gui")]
-            "gui_open" => {
+            "gui_window" => {
                 let title = self.val_to_string(args.get(0))?;
-                let html = self.val_to_string(args.get(1))?;
-                let width = args.get(2).and_then(|v| v.as_i64()).unwrap_or(800) as f64;
-                let height = args.get(3).and_then(|v| v.as_i64()).unwrap_or(600) as f64;
+                let width = args.get(1).and_then(|v| v.as_i64()).unwrap_or(400) as f64;
+                let height = args.get(2).and_then(|v| v.as_i64()).unwrap_or(300) as f64;
                 let mgr = self.gui_manager()?;
                 let id = mgr
-                    .open(&title, &html, width, height)
+                    .open(&title, width, height)
                     .map_err(crate::RakError::Runtime)?;
                 Ok(Value::Int(id))
             }
             #[cfg(feature = "gui")]
-            "gui_update" => {
-                let id = args.get(0).and_then(|v| v.as_i64()).unwrap_or(-1);
-                let html = self.val_to_string(args.get(1))?;
+            "gui_add" => {
+                let window = args.get(0).and_then(|v| v.as_i64()).unwrap_or(-1);
+                let kind = self.val_to_string(args.get(1))?;
+                let text = self.val_to_string(args.get(2))?;
+                let x = args.get(3).and_then(|v| v.as_i64()).unwrap_or(0) as f64;
+                let y = args.get(4).and_then(|v| v.as_i64()).unwrap_or(0) as f64;
+                let w = args.get(5).and_then(|v| v.as_i64()).unwrap_or(120) as f64;
+                let h = args.get(6).and_then(|v| v.as_i64()).unwrap_or(28) as f64;
                 let mgr = self.gui_manager()?;
-                mgr.update(id, &html).map_err(crate::RakError::Runtime)?;
+                let id = mgr
+                    .add_widget(window, &kind, &text, x, y, w, h)
+                    .map_err(crate::RakError::Runtime)?;
+                Ok(Value::Int(id))
+            }
+            #[cfg(feature = "gui")]
+            "gui_set_text" => {
+                let widget = args.get(0).and_then(|v| v.as_i64()).unwrap_or(-1);
+                let text = self.val_to_string(args.get(1))?;
+                let mgr = self.gui_manager()?;
+                mgr.set_text(widget, &text)
+                    .map_err(crate::RakError::Runtime)?;
                 Ok(Value::Nil)
             }
             #[cfg(feature = "gui")]
-            "gui_title" => {
-                let id = args.get(0).and_then(|v| v.as_i64()).unwrap_or(-1);
-                let title = self.val_to_string(args.get(1))?;
+            "gui_get_text" => {
+                let widget = args.get(0).and_then(|v| v.as_i64()).unwrap_or(-1);
                 let mgr = self.gui_manager()?;
-                mgr.set_title(id, &title)
+                let text = mgr.get_text(widget).map_err(crate::RakError::Runtime)?;
+                Ok(Value::String(text))
+            }
+            #[cfg(feature = "gui")]
+            "gui_set_visible" => {
+                let widget = args.get(0).and_then(|v| v.as_i64()).unwrap_or(-1);
+                let visible = args.get(1).map(|v| is_truthy(v)).unwrap_or(true);
+                let mgr = self.gui_manager()?;
+                mgr.set_visible(widget, visible)
+                    .map_err(crate::RakError::Runtime)?;
+                Ok(Value::Nil)
+            }
+            #[cfg(feature = "gui")]
+            "gui_on_click" => {
+                let widget = args.get(0).and_then(|v| v.as_i64()).unwrap_or(-1);
+                let name = self.val_to_string(args.get(1))?;
+                let mgr = self.gui_manager()?;
+                mgr.on_click(widget, &name)
                     .map_err(crate::RakError::Runtime)?;
                 Ok(Value::Nil)
             }
@@ -7621,8 +7652,8 @@ impl Interpreter {
             }
             #[cfg(feature = "gui")]
             "gui_callback" => {
-                // `gui_callback("name", fn)` — the function is what page
-                // JavaScript reaches through `rak_call("name", ..)`. The
+                // `gui_callback("name", fn)` registers a handler the native GUI
+                // dispatches when a widget bound to `gui_on_click` fires. The
                 // environment is snapshotted here because Rak has no reference
                 // types, so a callback cannot reach the running script's
                 // variables; see the module comment in `gui.rs`.
@@ -7633,7 +7664,15 @@ impl Interpreter {
                 Ok(Value::Nil)
             }
             #[cfg(not(feature = "gui"))]
-            "gui_open" | "gui_update" | "gui_title" | "gui_close" | "gui_wait" | "gui_callback" => {
+            "gui_window"
+            | "gui_add"
+            | "gui_set_text"
+            | "gui_get_text"
+            | "gui_set_visible"
+            | "gui_on_click"
+            | "gui_close"
+            | "gui_wait"
+            | "gui_callback" => {
                 Err(crate::RakError::Runtime(
                     "GUI support not enabled (build with --features gui)".to_string(),
                 ))
@@ -9461,7 +9500,7 @@ impl Interpreter {
     /// The GUI manager, or a clear error explaining that the event loop was
     /// never started.
     ///
-    /// A GUI builtin reaching this means the program called `gui_open` without
+    /// A GUI builtin reaching this means the program called `gui_window` without
     /// the process having entered `gui::run_event_loop`, which is the caller's
     /// job — see `lib.rs`. The old code papered over this by creating a manager
     /// on demand, which produced a window id for a window that did not exist.

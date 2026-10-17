@@ -239,5 +239,6 @@ values written as decimal are the least surprising thing to put in a buffer.
 
 `sleep`, `now_ms`, `args`/`argv`, `env_get`, `env_set`, `ord`, `chr`,
 `substr`, `print`, `dbg`, `exit`, `eprint` (stderr, 0.7), GUI builtins
-(`gui_open`, `gui_update`, `gui_title`, `gui_close`, `gui_wait`,
-`gui_callback`).
+(`gui_window`, `gui_add`, `gui_set_text`, `gui_get_text`, `gui_set_visible`,
+`gui_on_click`, `gui_close`, `gui_wait`, `gui_quit`, `gui_callback`). The GUI
+is native `egui` — no HTML, CSS, JavaScript or WebView.

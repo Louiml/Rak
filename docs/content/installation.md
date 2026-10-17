@@ -81,16 +81,18 @@ cd ide && npm install && npx tauri build     # IDE
 The `gui` feature belongs to the `rakc` crate, so it needs `-p rakc`. A
 workspace-wide `--features gui` does not enable it.
 
-Linux requires `libwebkit2gtk-4.1-dev`, `libgtk-3-dev`,
-`libayatana-appindicator3-dev`, and `librsvg2-dev`.
+Linux needs no extra system packages for the GUI: it is native `egui` on the
+`glow` renderer, with no browser engine involved. (Building the *IDE* on Linux
+is a separate matter — that is a Tauri app and does need
+`libwebkit2gtk-4.1-dev`, `libgtk-3-dev`, `libayatana-appindicator3-dev` and
+`librsvg2-dev`.)
 
 ## Platform support
 
-Windows and Linux. On Windows the GUI uses WebView2 (ships with Edge); on Linux
-it uses WebKitGTK, so the system packages listed above are needed. The event loop
-runs on the main thread on both platforms, which is a requirement of tao rather
-than a choice — it binds to the display connection from whichever thread creates
-the loop, and rejects any other.
+Windows and Linux. The GUI uses native `egui` on both, so it needs no browser
+engine and no WebView2 or WebKitGTK. The event loop runs on the main thread on
+both platforms, because the windowing backend binds to the display connection
+from whichever thread creates the loop and rejects any other.
 
 `rakc build` produces `.exe` on Windows and an executable with `chmod 755` on
 Linux.

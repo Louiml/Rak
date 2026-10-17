@@ -1051,7 +1051,7 @@ fn main() {
             // above: everything after the file, with rakc's own flags removed and
             // anything past a `--` passed through verbatim.
             #[cfg(feature = "gui")]
-            let result = rakc::gui::eval_in_cli_with_gui(&source, &base_dir, &script_args);
+            let result = rakc::gui::eval_in_cli_with_gui(&source, &base_dir, &script_args, max_depth);
             #[cfg(not(feature = "gui"))]
             let result = rakc::eval_in_cli(&source, &base_dir, &script_args, max_depth);
             match result {

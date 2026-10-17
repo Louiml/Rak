@@ -79,26 +79,38 @@ See `examples/async_orchestration.rak` for the end-to-end demo.
 
 ## GUI note
 
-With `--features gui`, scripts can open a native desktop window rendering
-HTML/CSS/JS, and the window runs on a single event-loop thread on the main
-thread. The interpreter runs on a worker, because tao binds to the display
-connection from whichever thread creates the event loop.
+With `--features gui`, scripts can open a native desktop window. Windows and
+widgets are drawn by `egui` on the `glow` renderer — no HTML, no JavaScript, no
+WebView. The window runs on a single event-loop thread on the main thread, and
+the interpreter runs on a worker because the display connection belongs to
+whichever thread creates the loop.
 
 ```rak
-fn on_click(msg) { return "you said: " + msg }
+fn on_click(name, message) {
+  print f"{name} says: {message}"
+  return nil
+}
 
-let html = r#"<button onclick="rak_call('on_click', 'hi'); rak_on('on_click', show)">Click</button>
-<script>function show(v) { document.body.insertAdjacentHTML('beforeend', '<p>'+v+'</p>') }</script>"#
+gui_callback("on_widget", on_click)
 
-gui_callback("on_click", on_click)
-let win = gui_open("Rak GUI Demo", html, 600, 400)
+let win = gui_window("Rak GUI Demo", 420, 240)
+let button = gui_add(win, "button", "Click me", 20, 20, 140, 34)
+let label = gui_add(win, "label", "waiting", 20, 70, 240, 24)
+
+gui_on_click(button, "on_widget")
+gui_set_text(label, "clicked at least once")
+
 gui_wait()
 ```
 
 How it fits alongside the rest of this page:
 
-- **`gui_open` blocks until the window exists**, so the id it returns is real
+- **`gui_window` blocks until the window exists**, so the id it returns is real
   rather than a handle to something that may have failed to open.
+- **`gui_add` blocks until the widget is in the tree**, and returns a widget id
+  that `gui_set_text`, `gui_get_text`, `gui_set_visible` and `gui_on_click`
+  all accept. Those four are one-way sends, so they never block the interpreter;
+  `gui_get_text` is the exception and replies with the current value.
 - **`gui_wait` uses a condvar, not a poll loop**, and returns when the last window
   closes. Closing a window does not end the process: the loop stops when the
   program is finished with the GUI, or on an explicit `gui_quit(code)`.
