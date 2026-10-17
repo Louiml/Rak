@@ -18,6 +18,7 @@ import { Icon } from './components/Icon';
 import SettingsModal, { Settings, loadSettings, saveSettings } from './components/Settings';
 import Tutorial, { TourStep } from './components/Tutorial';
 import DocsBrowser from './components/DocsBrowser';
+import GuiDesigner from './components/GuiDesigner';
 
 export type { Tab };
 
@@ -77,6 +78,7 @@ export default function IDE() {
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [quickOpen, setQuickOpen] = useState(false);
   const [docsOpen, setDocsOpen] = useState(false);
+  const [guiDesignerOpen, setGuiDesignerOpen] = useState(false);
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [cursorPos, setCursorPos] = useState({ line: 1, col: 1 });
   const consoleRef = useRef<HTMLDivElement>(null);
@@ -267,6 +269,13 @@ useEffect(() => {
 
   const handleClearConsole = () => setConsoleOutput([]);
 
+  const handleInsertGuiCode = (code: string) => {
+    const id = `gui_${Date.now()}`;
+    setTabs(prev => [...prev, { id, name: 'gui.rak', path: '', content: code, isDirty: true }]);
+    setActiveTabId(id);
+    showToast('Generated Rak GUI code', 'success');
+  };
+
   const handleOpenExample = (ex: Example) => {
     const id = `ex_${ex.filename}_${Date.now()}`;
     setTabs(prev => [...prev, { id, name: ex.filename, path: '', content: ex.source, isDirty: false }]);
@@ -357,6 +366,7 @@ useEffect(() => {
     { id: 'sidebar', label: 'Toggle Sidebar', shortcut: 'Ctrl+B', icon: 'panel-left', action: () => setSidebarOpen(o => !o) },
     { id: 'console', label: 'Toggle Console', shortcut: 'Ctrl+J', icon: 'monitor', action: () => setConsoleOpen(o => !o) },
     { id: 'docs', label: 'Toggle Documentation', shortcut: 'Ctrl+K', icon: 'book', action: () => setDocsOpen(o => !o) },
+    { id: 'guidesigner', label: 'Open GUI Designer', icon: 'monitor', action: () => setGuiDesignerOpen(true) },
     { id: 'quickopen', label: 'Quick Open File', shortcut: 'Ctrl+P', icon: 'search', action: () => setQuickOpen(true) },
     { id: 'interp', label: 'Mode: Interpreter', icon: 'zap', action: () => { setRunMode('interp'); showToast('Interpreter mode', 'info'); } },
     { id: 'vm', label: 'Mode: VM', icon: 'zap', action: () => { setRunMode('vm'); showToast('VM mode', 'info'); } },
@@ -443,6 +453,7 @@ useEffect(() => {
           <button onClick={handleOpenFolder} className="px-2 py-1 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 rounded" title="Open Folder (Ctrl+O)">Open Folder</button>
           <button onClick={handleSave} className="px-3 py-1 text-zinc-300 hover:bg-zinc-800 rounded" title="Save (Ctrl+S)">Save</button>
           <button onClick={() => setDocsOpen(o => !o)} className="px-2 py-1 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 rounded" title="Docs (Ctrl+K)">Docs</button>
+          <button onClick={() => setGuiDesignerOpen(true)} className="px-2 py-1 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 rounded" title="GUI Designer">GUI Designer</button>
           <span data-tour="examples"><ExamplesMenu onOpen={handleOpenExample} /></span>
         </div>
         <div className="flex items-center gap-1">
@@ -595,6 +606,11 @@ useEffect(() => {
       {/* First-run tutorial */}
       {tutorialOpen && (
         <Tutorial steps={tutorialSteps} onClose={() => setTutorialOpen(false)} />
+      )}
+
+      {/* GUI Designer */}
+      {guiDesignerOpen && (
+        <GuiDesigner onGenerate={handleInsertGuiCode} onClose={() => setGuiDesignerOpen(false)} />
       )}
 
       {/* Toasts */}
