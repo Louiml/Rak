@@ -1521,10 +1521,10 @@ match port {
 ### 7A.9 Checked generics  **[SPEC]**
 
 `struct Box<T> { v: T }`, `enum Res<T, E> { Ok(T), Err(E) }` — parser accepts
-generic params on struct/enum; `typecheck.rs` records them, and call-site
-unification (`fn identity<T>(v: T) -> T` with `identity(42)`) substitutes
+generic params on struct/enum; the checker would record them, and call-site
+unification (`fn identity<T>(v: T) -> T` with `identity(42)`) would substitute
 concrete types to verify the return type. Runtime stays erased
-(backward-compatible); the checker becomes the source of truth.
+(backward-compatible); the checker would become the source of truth.
 
 Current state: the parser and AST carry `type_params`, but
 `typecheck.rs::compatible` blanket-accepts generics —

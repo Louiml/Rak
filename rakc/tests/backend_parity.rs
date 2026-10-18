@@ -2195,6 +2195,91 @@ dump pkg.sub.twice(21)
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Importing a module that declares a record and implements a trait for it.
+///
+/// The VM's module inliner skipped every *definition* statement -- functions,
+/// macros, externs, binstructs -- but not structs, enums, impls, traits or type
+/// aliases, so importing any module with `pub struct` or an `impl` hit
+/// `VM does not support statement: Impl { ... }`. Type declarations carry no
+/// runtime emission, exactly as the outer `inline_module` already treats them.
+#[test]
+fn parity_import_declares_a_struct_and_impl() {
+    let dir = std::env::temp_dir().join("rak_parity_decls");
+    std::fs::create_dir_all(&dir).expect("create dir");
+    std::fs::write(
+        dir.join("model.rak"),
+        "pub struct Finding { offset: int, signature: string }\n\
+         impl Display for Finding {\n\
+         \x20   fn fmt(self) { return fmt(\"0x{:08X}\", self.offset) }\n\
+         }\n",
+    )
+    .expect("write model");
+
+    let base = dir.to_string_lossy().to_string();
+    // A `from` import, because `import model; model.Finding { ... }` does not
+    // resolve on either backend yet and this test is about the definitions
+    // surviving the import, not about qualified struct literals.
+    let src = r#"
+from "./model.rak" import Finding
+let f = Finding { offset: 4096, signature: "PNG" }
+dump f
+dump f.offset
+"#;
+    agree_in("import a struct plus impl", src, &base);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `impl Display for T` must drive `dump`, on both backends.
+///
+/// The VM rendered a struct with its raw field list while the interpreter
+/// called the `fmt` method, so `dump Point { x: 3, y: 4 }` printed
+/// `Point (3, 4)` under `rakc run` and `Point {x: 3, y: 4}` under `rakc vm`.
+/// That is an output divergence, not a missing capability: the VM already
+/// baked `__method_<Type>_fmt` globals and already dispatched `Op::CallMethod`
+/// through them -- `Op::Print` was simply not looking.
+#[test]
+fn parity_impl_display_drives_dump() {
+    let dir = std::env::temp_dir().join("rak_parity_display");
+    std::fs::create_dir_all(&dir).expect("create dir");
+
+    agree(
+        "impl Display for a local struct",
+        r#"
+struct Point { x: int, y: int }
+impl Display for Point {
+    fn fmt(self) { return fmt("({}, {})", self.x, self.y) }
+}
+dump Point { x: 3, y: 4 }
+"#,
+    );
+    // A type with no `Display` impl keeps its default rendering on both, so
+    // the dispatch is not a blanket override.
+    agree(
+        "a struct with no Display impl still renders its fields",
+        r#"
+struct Bare { a: int }
+dump Bare { a: 1 }
+"#,
+    );
+    // Arrays and maps render their elements, which is where a Display impl on an
+    // element type has to be picked up.
+    agree(
+        "Display inside an array",
+        r#"
+struct P { x: int }
+impl Display for P {
+    fn fmt(self) { return "P" }
+}
+let ps = [P { x: 1 }, P { x: 2 }]
+dump ps
+dump ps[1]
+"#,
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// `assert_backends_agree` with an explicit base directory, for tests whose
 /// program imports a module from disk.
 fn agree_in(label: &str, source: &str, base_dir: &str) -> Vec<String> {

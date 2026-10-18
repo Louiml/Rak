@@ -1,15 +1,45 @@
 //! Static type checking pass.
 //!
 //! Runs after parsing, before interpretation/compilation. It walks the AST,
-//! infers the type of each expression, checks explicit type annotations,
-//! validates function-call arguments and returns, and enforces Rak's
-//! mutability semantics (assignment to an immutable `let` binding).
+//! infers the type of each expression and checks explicit type annotations,
+//! function-call arguments and returns, and `impl Trait for Type` coverage.
+//!
+//! What it does **not** do, so the name is not over-read:
+//!
+//! - It is opt-in. Only `rakc check` runs it; `rakc run`, `rakc vm`, `rakc test`,
+//!   `rakc repl` and `rakc debug` do not. Runtime annotations are still enforced
+//!   by both backends (`check_value_type` / `Op::CheckType`).
+//! - It is not a sound type system. `Type::Generic` is a bidirectional wildcard
+//!   and is what inference falls back to, so a value whose type cannot be named
+//!   is accepted anywhere. Method calls infer `Generic`, so their results are
+//!   not checked.
+//! - It does not enforce mutability. Assignment to an immutable `let` is caught
+//!   by the runtimes, not here (`is_immutable_name` always returns `false`).
+//! - It does not check across modules.
 //!
 //! Diagnostics carry a stable error code, a message, a best-effort source
 //! location and snippet, plus the expected vs. found types.
 
 use crate::ast::{self, Expr, Pattern, Stmt, Type};
 use std::collections::{HashMap, HashSet};
+
+/// The call-time facts about a declared parameter, for arity checking.
+///
+/// `(declared type, optional, rest)`. The type is `None` when the parameter was
+/// written without an annotation: an unannotated parameter is dynamic, so the
+/// checker does not guess a type for it and does not compare one.
+fn param_types(params: &[ast::Param]) -> Vec<(Option<Type>, bool, bool)> {
+    params
+        .iter()
+        .map(|p| {
+            (
+                p.type_hint.clone(),
+                p.optional || p.default.is_some(),
+                p.rest,
+            )
+        })
+        .collect()
+}
 
 /// A single compile-time diagnostic produced by the type checker.
 #[derive(Debug, Clone)]
@@ -176,7 +206,7 @@ pub struct TypeChecker<'a> {
     /// Globals declared so far.
     globals: Scope,
     /// Function signatures by name (for call checking).
-    funcs: HashMap<String, (Vec<Type>, Type)>,
+    funcs: HashMap<String, (Vec<(Option<Type>, bool, bool)>, Type)>,
     /// Enum definitions: name → (variant name → number of payload fields).
     enums: HashMap<String, Vec<(String, usize)>>,
     /// `type X = T` declarations, name → aliased type.
@@ -269,10 +299,7 @@ impl<'a> TypeChecker<'a> {
                     ..
                 } = value.as_ref()
                 {
-                    let params_t: Vec<Type> = params
-                        .iter()
-                        .map(|p| p.type_hint.clone().unwrap_or(Type::Int))
-                        .collect();
+                    let params_t = param_types(params);
                     let ret = return_type.clone().unwrap_or(Type::Nil);
                     self.funcs.insert(name.clone(), (params_t, ret));
                 }
@@ -425,16 +452,27 @@ impl<'a> TypeChecker<'a> {
             ) => true,
             // nil/void interop.
             (Void, Nil) | (Nil, Nil) => true,
-            // Generics / unknown accept anything.
-            (Generic(_), _) => true,
-            (_, Generic(_)) => true,
-            // Any container fits `array`/`map` base forms via element checks.
-            (Array(_), Array(_)) => true,
-            (Map(_, _), Map(_, _)) => true,
-            (Tuple(_), Tuple(_)) => true,
-            (Option(_), Option(_)) => true,
-            (Result(_, _), Result(_, _)) => true,
-            (Function(_, _), Function(_, _)) => true,
+            // `Generic` is the one deliberate escape hatch: it is what inference
+            // falls back to when it cannot name a type, so it accepts anything.
+            (Generic(_), _) | (_, Generic(_)) => true,
+            // Containers compare element-by-element. A blanket `Array(_) == Array(_)`
+            // arm meant `Option<int>` accepted `Option<string>` and `array` accepted
+            // `[1, "two", nil]`; the comment claimed element checks that were not
+            // there.
+            (Array(e), Array(a)) => self.compatible(e, a),
+            (Map(k1, v1), Map(k2, v2)) => self.compatible(k1, k2) && self.compatible(v1, v2),
+            (Tuple(e), Tuple(a)) if e.len() == a.len() => {
+                e.iter().zip(a.iter()).all(|(x, y)| self.compatible(x, y))
+            }
+            (Option(e), Option(a)) => self.compatible(e, a),
+            (Result(ok1, err1), Result(ok2, err2)) => {
+                self.compatible(ok1, ok2) && self.compatible(err1, err2)
+            }
+            (Function(p1, r1), Function(p2, r2)) => {
+                p1.len() == p2.len()
+                    && p1.iter().zip(p2.iter()).all(|(x, y)| self.compatible(x, y))
+                    && self.compatible(r1, r2)
+            }
             // Custom types match by name only.
             (Custom(a), Custom(b)) => a == b,
             _ => false,
@@ -566,10 +604,7 @@ impl<'a> TypeChecker<'a> {
                         self.exec_stmt(s);
                     }
                     self.pop_scope();
-                    let params_t: Vec<Type> = params
-                        .iter()
-                        .map(|p| p.type_hint.clone().unwrap_or(Type::Int))
-                        .collect();
+                    let params_t = param_types(params);
                     let ret = return_type.clone().unwrap_or(Type::Nil);
                     self.funcs.insert(name.clone(), (params_t, ret.clone()));
                     self.declare(name, Type::Function(vec![], Box::new(ret)), false);
@@ -1218,17 +1253,51 @@ impl<'a> TypeChecker<'a> {
             // User function: check argument count and types.
             if let Some((params, ret)) = self.funcs.get(name).cloned() {
                 let args_t: Vec<Type> = args.iter().map(|a| self.infer(a)).collect();
-                for (idx, (param_t, arg_t)) in params.iter().zip(args_t.iter()).enumerate() {
-                    let _ = idx;
-                    // `Int`-typed params accept any numeric literal; skip clear
-                    // generics and numeric widening, only flag obvious mismatches
-                    // (e.g. a string passed where i32 is expected).
-                    if arg_t == &Type::Generic("unknown".into())
-                        || &Type::Generic("arg".into()) == arg_t
-                    {
+                // Arity. `zip` silently truncated, so `f(1)` against `fn f(a, b)`
+                // and `f(1, 2, 3)` against `fn f(a)` both passed. Count the
+                // required parameters (everything not optional and not a rest)
+                // and the maximum (everything not a rest).
+                let required = params.iter().filter(|(_, opt, _)| !*opt).count();
+                let max = params.iter().filter(|(_, _, rest)| !*rest).count();
+                if args.len() < required {
+                    self.report(
+                        "E0308",
+                        "missing required argument",
+                        None,
+                        None,
+                        Some(format!(
+                            "the function declares {} required parameter(s) but {} were supplied",
+                            required,
+                            args.len()
+                        )),
+                        None,
+                    );
+                } else if args.len() > max {
+                    self.report(
+                        "E0308",
+                        "too many positional arguments",
+                        None,
+                        None,
+                        Some(format!(
+                            "the function accepts at most {} argument(s) but {} were supplied",
+                            max,
+                            args.len()
+                        )),
+                        None,
+                    );
+                }
+                for ((param_t, _optional, _rest), arg_t) in params.iter().zip(args_t.iter()) {
+                    // An unannotated parameter is dynamic: the checker does not
+                    // invent a type for it. This is also why an explicitly
+                    // annotated `: int` parameter is now checked -- the old
+                    // `param_t != &Type::Int` skip could not tell the two apart.
+                    let Some(param_t) = param_t else { continue };
+                    // Inference falls back to `Generic` for anything it cannot
+                    // name; that is the escape hatch and accepts everything.
+                    if matches!(arg_t, Type::Generic(_)) {
                         continue;
                     }
-                    if param_t != &Type::Int && !self.compatible(param_t, arg_t) {
+                    if !self.compatible(param_t, arg_t) {
                         let found = self.type_name(arg_t);
                         let exp = self.type_name(param_t);
                         self.report(

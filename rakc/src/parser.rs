@@ -1852,27 +1852,36 @@ impl<'a> Parser<'a> {
     fn parse_assignment(&mut self) -> Result<Expr> {
         let mut expr = self.parse_coalesce()?;
         // Multi/swap assignment: `a, b = b, a`
+        //
+        // Speculative: only a following `=` (after the commas) makes it real.
+        // The probes must never surface a parse error, because a `,` here is
+        // far more often a separator than an assignment -- `f(a.b,)` in a
+        // struct literal would otherwise abort on the closing `}`.
         if self.check(&Token::Comma) && is_assignable(&expr) {
             let saved = self.pos;
             let mut targets = vec![expr.clone()];
             let mut ok = true;
             while self.match_token(&Token::Comma) {
-                let t = self.parse_or()?;
-                if !is_assignable(&t) {
-                    ok = false;
-                    break;
+                match self.parse_or() {
+                    Ok(t) if is_assignable(&t) => targets.push(t),
+                    _ => {
+                        ok = false;
+                        break;
+                    }
                 }
-                targets.push(t);
             }
-            if ok && self.match_token(&Token::Eq) {
+            let is_multi = ok && self.match_token(&Token::Eq);
+            if !is_multi {
+                // Not a multi-assign: restore and fall through so the caller
+                // sees the original `,` in whatever context it meant.
+                self.pos = saved;
+            } else {
                 let mut values = vec![self.parse_or()?];
                 while self.match_token(&Token::Comma) {
                     values.push(self.parse_or()?);
                 }
                 return Ok(Expr::MultiAssign { targets, values });
             }
-            // not a multi-assign; restore and fall through
-            self.pos = saved;
         }
         if self.match_token(&Token::Eq) {
             let value = self.parse_expr()?;
@@ -2493,6 +2502,14 @@ impl<'a> Parser<'a> {
                         let fval = self.parse_expr()?;
                         fields.push((fname, fval));
                         if !self.match_token(&Token::Comma) {
+                            break;
+                        }
+                        // A trailing comma is legal in every other
+                        // brace-delimited list in the grammar (arrays, maps,
+                        // call args). Without this the comma is consumed
+                        // above, the loop re-enters, and `expect_ident` errors
+                        // on `}`.
+                        if self.check(&Token::RBrace) {
                             break;
                         }
                     }

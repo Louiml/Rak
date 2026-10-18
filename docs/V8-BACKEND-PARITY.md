@@ -54,8 +54,10 @@ cannot catch a per-backend omission; only a comparison can.
 | Call semantics | Both backends. Defaults (compiled into the callee prologue, keyed off a hidden `__argc`), rest parameters, optional parameters, arity errors with identical wording, and `fn main()` taking argv only when declared. Named arguments remain a VM compile error, not a silent difference. |
 | 7A.6 `import pkg.sub` | Both backends. `Op::MergeModule`, `Op::LoadGlobalOrMap`. |
 | Module namespaces | Both backends. `modns::ModuleNamespace`, `Op::MakeModule`/`ModulePublish`, `Op::StoreGlobal` republishing. `import m; m.X` is live and `pub` is enforced on both; `from m import x as y` copies on both. Three residual differences, all from the VM's flat global namespace, in [V8-KNOWN-ISSUES.md](V8-KNOWN-ISSUES.md). |
-| GUI | Both backends. Six natives, real window handles, JS→Rak IPC. |
+| GUI | Both backends. Nine natives (`gui_window`, `gui_add`, `gui_set_text`, `gui_get_text`, `gui_set_visible`, `gui_on_click`, `gui_close`, `gui_wait`, `gui_quit`), native egui windows, no webview. `gui_callback` is interpreter-only: it needs a Rak callback from a native, which is the same boundary as the other 31. |
 | ~100 stdlib builtins | Both backends, via `ext_stdlib.rs`. |
+| `impl Display` drives `dump` | Both backends. `Op::Print` looks up `__method_<Type>_fmt` exactly as `Interpreter::display_value` does, so a struct with a `Display` impl prints the same on each. It worked for locally-declared structs only: the VM's module inliner skipped `struct`/`enum`/`impl`/`trait`/`type` when inlining an imported module, and the imported module's baked methods were never emitted into the running chunk. |
+| Importing a module with a `struct` and an `impl` | Both backends. The inliner's skip list covered functions, macros, externs and binstructs but not type declarations, so `pub struct Finding` was `VM does not support statement: Impl { ... }`. |
 
 ## What is not, and why
 
@@ -80,15 +82,38 @@ expressible as a native:
 | `extern_call` | 1 | FFI trampolines through VM frames |
 | `argv`, `expect_error` | 2 | Reachable, but not yet swept |
 | `gui_callback` | 1 | Needs a Rak callback from a native |
-
 The interpreter does not have this problem because `eval_builtin` takes
 `&mut self`. It can call `call_function_with_values`, and it can hand back out
 a `Future` that the runtime resolves later.
 
+### What the structural gate cannot see
+
+`registrations_match` compares *name sets*. It says nothing about whether the
+two implementations of a name agree, which is where the last three divergences
+lived. Each was found by running the same program on both, not by reading the
+table:
+
+- **`string(bytes([65, 66]))`** returned `"AB"` on the interpreter and
+  `b"\x41\x42"` on the VM — the VM's `string` native fell through to `Display`,
+  which for `Value::Bytes` is a debug form, so a program that built a printable
+  glyph got a five-character string where it expected two. Not a missing name:
+  a different answer, with no diagnostic.
+- **`impl Display`** drove `dump` on the interpreter and was ignored by the VM's
+  `Op::Print`, so `dump Point { x: 3, y: 4 }` printed `Point (3, 4)` and
+  `Point {x: 3, y: 4}` depending on how the program was launched.
+- **Importing a `struct` with an `impl`** was a hard compile error on the VM.
+
+`Op::Print` now consults `__method_<Type>_fmt`, the inliner emits an imported
+module's baked methods, and `string` decodes a buffer's bytes as text. All three
+are pinned by `parity_*` tests, because a structural gate would have passed them
+all along.
+
 **The fix is what this repo calls "coroutines in the VM"**, and it is a project,
-not a list of one-line registrations. The gate fails on these 31 by design, so
-the gap cannot be forgotten, and the backlog test prints them so the number
-cannot drift upward unnoticed.
+not a list of one-line registrations. The structural gate currently *passes* at
+exactly 31/31 (`MAX_KNOWN_INTERP_ONLY`), so the backlog is bounded rather than
+zero, and the backlog test prints it so the number cannot drift upward
+unnoticed. `registrations_match_strictly` is the version that fails on any gap;
+it is `#[ignore]`d until the count reaches zero.
 
 ### What a coroutine actually needs here
 

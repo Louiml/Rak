@@ -521,6 +521,49 @@ impl Formatter {
                 self.indent -= 1;
                 self.line("}");
             }
+            Stmt::Scan { target, options, body } => {
+                // The interpreter and linter both handle `scan`, but the
+                // formatter fell through to "unsupported statement", so
+                // `rakc fmt` failed on a file `rakc lint` accepted.
+                let t = self.expr(target)?;
+                if options.is_empty() {
+                    self.line(&format!("scan {}", t));
+                } else {
+                    self.line(&format!("scan {} {{", t));
+                    self.indent += 1;
+                    for (k, v) in options {
+                        let ve = self.expr(v)?;
+                        self.line(&format!("{}: {}", k, ve));
+                    }
+                    self.indent -= 1;
+                    self.line("}");
+                }
+                if let Some(body) = body {
+                    self.line("{");
+                    self.block(body)?;
+                    self.line("}");
+                }
+            }
+            Stmt::Fetch { target, options, body } => {
+                let t = self.expr(target)?;
+                if options.is_empty() {
+                    self.line(&format!("fetch {}", t));
+                } else {
+                    self.line(&format!("fetch {} {{", t));
+                    self.indent += 1;
+                    for (k, v) in options {
+                        let ve = self.expr(v)?;
+                        self.line(&format!("{}: {}", k, ve));
+                    }
+                    self.indent -= 1;
+                    self.line("}");
+                }
+                if let Some(body) = body {
+                    self.line("{");
+                    self.block(body)?;
+                    self.line("}");
+                }
+            }
             other => {
                 let _ = other;
                 return Err("formatter: unsupported statement".to_string());
@@ -1203,5 +1246,22 @@ try {
         assert!(out.contains("let mut n = 0"));
         assert!(out.contains("n += 1"));
         assert!(out.contains("dump n"));
+    }
+
+    /// `scan` and `fetch` are real statements the interpreter and linter both
+    /// handle, but the formatter used to reject them as unsupported -- so
+    /// `rakc fmt` failed on a file `rakc lint` accepted.
+    #[test]
+    fn fmt_renders_scan_and_fetch() {
+        let src = "scan \"127.0.0.1\" {\n    range: [22, 80]\n} {\n    dump port\n}\n\
+                   fetch \"http://127.0.0.1/\" {\n    method: \"GET\"\n}\n";
+        let out = format_source(src).unwrap();
+        assert!(out.contains("scan \"127.0.0.1\" {"), "got: {out}");
+        assert!(out.contains("range: [22, 80]"), "got: {out}");
+        assert!(out.contains("fetch \"http://127.0.0.1/\" {"), "got: {out}");
+        assert!(out.contains("method: \"GET\""), "got: {out}");
+        // Idempotent: formatting the formatted output changes nothing.
+        let twice = format_source(&out).unwrap();
+        assert_eq!(out, twice, "fmt must be idempotent");
     }
 }

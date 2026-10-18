@@ -390,9 +390,12 @@ backend, and the `inkwell` dependency in `Cargo.toml` is commented out.
 **No inline assembly.** `extern "C"` FFI is the escape hatch, which is
 functionally comparable but not the same thing, and it is capability-gated.
 
-**No formal verification.** No theorem prover, no contracts, no loop
-invariants, no pre/postconditions. The closest thing is match-exhaustiveness
-checking in `rakc check`.
+**No formal verification.** No theorem prover and no symbolic execution. Rak
+does have `requires`/`ensures` clauses, enforced at runtime by `rakc run` and
+checked in bulk by `rakc verify` (which distinguishes PASS, FAIL and
+INCONCLUSIVE), plus match-exhaustiveness checking in `rakc check`. What it does
+not have is proof: a clause is checked on the paths a bounded execution actually
+takes, so a violation on an unexercised path is not found.
 
 **No enclaves.** No SGX, no TrustZone, no seccomp or landlock filtering. The
 capability sandbox is name-based and in-process; it does not confine the

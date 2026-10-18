@@ -1,0 +1,25 @@
+// model.rak - the value types hexhunt works with.
+//
+// A `Signature` is a thing to look for: a name, the kind of artefact it
+// identifies, and the byte pattern that identifies it. A `Finding` is one hit:
+// where it was, and which signature matched.
+
+pub struct Signature {
+    name: string,
+    kind: string,
+    pattern: bytes,
+}
+
+pub struct Finding {
+    offset: int,
+    signature: string,
+    kind: string,
+}
+
+// `Display` is the trait `dump` uses to render a value. Implementing it makes
+// `dump finding` print a one-line record instead of the struct's internals.
+impl Display for Finding {
+    fn fmt(self) {
+        return fmt("0x{:08X}  {}  {}", self.offset, self.signature, self.kind)
+    }
+}

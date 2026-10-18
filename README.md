@@ -4,6 +4,38 @@ A programming language for hackers, OSINT investigators, and systems programmers
 
 Hex is a first-class type. The bytecode VM runs about 6x faster than the tree-walker. There's a SQL engine written in Rak itself, and a Rak interpreter written in Rak.
 
+## What's new in 1.0.1
+
+1.0.1 is a hardening release on top of 1.0.0.
+
+**The GUI is native.** The webview is gone: windows and widgets are drawn by
+`egui` on the `glow` renderer, with no HTML, CSS, JavaScript or WebView, and no
+browser engine needed on either platform. This breaks the webview-era builtins:
+`gui_open(title, html, w, h)` becomes `gui_window(title, w, h)` plus
+`gui_add(window, kind, text, x, y, w, h)`; `gui_update` becomes `gui_set_text`;
+`gui_title` is set at creation; and `gui_get_text` is new. See
+[GUI windows](#gui-windows).
+
+**The sandbox no longer has holes.** `extern "C"` loaded a library with no
+`ffi` capability check, so a sandboxed script could `dlopen` an attacker-named
+library and run its constructors. `scan`, `fetch` and `tunnel` opened real
+sockets with no `net` check. All four are gated now, matching what the VM
+already did.
+
+**`oyvey` is safer and less surprising.** A dependency key was used directly as
+a directory name under `packages/`, so a manifest could point it outside the
+project and `oyvey install` would delete and overwrite whatever it named.
+Vendoring followed symlinks, copying a link's target into the project. Both are
+fixed. `oyvey add`/`remove` now edit `Rak.toml` when that is the project's
+manifest instead of writing an ignored `package.rak`; `--offline` is honoured by
+`build`/`run`/`test`/`check`; and `lock --locked` actually refuses to rewrite.
+
+**The type checker checks more, and says what it does not do.** Container types
+compare element-by-element (`Option<int>` no longer accepts `Option<string>`),
+call arity is checked, and explicitly annotated parameters are checked. The
+module documentation now states plainly that the checker is opt-in (only
+`rakc check` runs it), is not sound, and does not enforce mutability.
+
 ## What's new in 1.0.0
 
 Rak 1.0.0 is about the build. `rakc build` is now a rustc-shaped multi-target front
@@ -177,7 +209,7 @@ annotations and non-exhaustive matches before you run anything.
 
 **Build standalone executables.** `rakc build file.rak` produces a self-contained binary with the source embedded. On Windows it's a `.exe`. On Linux it gets `chmod 755`. No Rak installation needed on the target machine.
 
-**GUI windows.** With `--features gui`, Rak scripts open native desktop windows rendering HTML, CSS and JS, on Windows and Linux. Windows can be updated, retitled and closed; JavaScript calls back into Rak through `rak_call`, and a callback's return value reaches the page. Closing a window no longer ends the process. See [GUI windows](#gui-windows).
+**GUI windows.** With `--features gui`, Rak scripts open native desktop windows drawn with `egui` on the `glow` renderer — no HTML, CSS, JavaScript or WebView, and no browser engine needed on either platform. Widgets are added with `gui_add`, and clicks dispatch through `gui_callback` + `gui_on_click`. See [GUI windows](#gui-windows).
 
 **Package manager and build system.** `oyvey` is the official Rak package manager: a Cargo-style toolchain with a `package.rak` manifest, an `oyvey.lock` recording the exact revision and checksum of every dependency, transitive resolution, a global git cache, and `build` / `run` / `test` driven through `rakc`.
 

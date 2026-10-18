@@ -1,0 +1,60 @@
+// Tests for hexhunt. Run with: rakc test examples/hexhunt/tests/main.rak
+//
+// These exercise the portable subset: byte indexing, `match_at`, `scan`,
+// `count_by_kind` and `hexdump` all run on both backends, so the tests are
+// written once and expected to agree.
+
+from "../src/model.rak" import Finding
+from "../src/sweep.rak" import count_by_kind, hexdump, match_at, scan_file
+
+test "match_at finds a pattern at an offset" {
+    let data = bytes([0x00, 0xFF, 0xD8, 0xFF, 0xE0])
+    assert match_at(data, bytes([0xFF, 0xD8, 0xFF]), 1)
+}
+
+test "match_at rejects a pattern that is not there" {
+    let data = bytes([0x00, 0x01, 0x02, 0x03])
+    assert !match_at(data, bytes([0xFF, 0xD8, 0xFF]), 0)
+}
+
+test "match_at refuses to read past the end" {
+    let data = bytes([0xFF, 0xD8])
+    assert !match_at(data, bytes([0xFF, 0xD8, 0xFF]), 0)
+}
+
+test "scan reports each signature once, in file order" {
+    let data = bytes([0x00, 0xFF, 0xD8, 0xFF, 0x4D, 0x5A, 0x00])
+    let sigs = [
+        { name: "JPEG", kind: "image",      pattern: bytes([0xFF, 0xD8, 0xFF]) },
+        { name: "PE",   kind: "executable", pattern: bytes([0x4D, 0x5A]) },
+    ]
+    let found = scan_file(data, sigs)
+    assert len(found) == 2
+    assert found[0].signature == "JPEG"
+    assert found[0].offset == 1
+    assert found[1].signature == "PE"
+    assert found[1].offset == 4
+}
+
+test "scan advances past a match, so overlaps are not double-counted" {
+    let data = bytes([0x4D, 0x5A, 0x4D, 0x5A])
+    let sigs = [{ name: "PE", kind: "executable", pattern: bytes([0x4D, 0x5A]) }]
+    assert len(scan_file(data, sigs)) == 2
+}
+
+test "count_by_kind tallies by the kind field" {
+    let found = [
+        Finding { offset: 0, signature: "A", kind: "image" },
+        Finding { offset: 1, signature: "B", kind: "image" },
+        Finding { offset: 2, signature: "C", kind: "archive" },
+    ]
+    let counts = count_by_kind(found)
+    assert counts["image"] == 2
+    assert counts["archive"] == 1
+}
+
+test "hexdump renders offsets and an ascii column" {
+    let out = hexdump(bytes([0x41, 0x42, 0x00]), 3)
+    assert contains(out, "0x00000000")
+    assert contains(out, "AB.")
+}

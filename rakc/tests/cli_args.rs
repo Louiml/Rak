@@ -268,6 +268,35 @@ fn sandbox_works_before_the_filename() {
     );
 }
 
+/// The `scan`, `fetch` and `tunnel` statements and `extern "C"` declarations
+/// reach a socket and a loaded library directly, so the capability table's
+/// *builtin* names did not cover them. Each of these ran to completion under a
+/// sandbox that denied the capability it needs.
+#[test]
+fn sandbox_gates_the_statement_and_declaration_paths() {
+    let cases: &[(&str, &str, &str)] = &[
+        ("scan", "scan \"127.0.0.1\"\n", "net"),
+        ("fetch", "fetch \"http://127.0.0.1/\"\n", "net"),
+        ("tunnel", "tunnel t \"pass\" { }\n", "net"),
+        (
+            "extern",
+            "extern \"C\" { fn abs(n: i32) -> i32 }\n",
+            "ffi",
+        ),
+    ];
+    for (label, source, cap) in cases {
+        let (out, ok) = run_with_stdin(&["run", "-", "--sandbox"], source);
+        assert!(
+            !ok,
+            "{label} should be blocked under the sandbox; got: {out:?}"
+        );
+        assert!(
+            out.contains(cap),
+            "{label} should name the '{cap}' capability; got: {out:?}"
+        );
+    }
+}
+
 /// Every filesystem mutator belongs behind `fs_write`.
 ///
 /// The capability table named four builtins that do not exist -- `append_file`,

@@ -89,7 +89,6 @@ fn print_help() {
     println!("  :vars          show all defined variables");
     println!("  :ast <expr>    print the AST of an expression");
     println!("  :bytecode <expr>  print the compiled bytecode");
-    println!("  :trace <expr>  print the execution trace");
     println!("  :quit / :q     exit");
     println!();
     println!("Any other line is evaluated as Rak source.");
@@ -99,8 +98,22 @@ fn print_help() {
 fn handle_repl_command(interp: &mut Interpreter, cmd: &str, rest: &str, buffer: &mut String) {
     match cmd {
         "vars" => {
-            println!("vars command: not yet implemented (need interpreter scope dump)");
-            let _ = (interp, rest);
+            // The innermost scope is what a user means by "my variables"; the
+            // globals are reachable through it and printing both would bury
+            // the few names they actually typed.
+            let scope = interp.current_scope();
+            if scope.is_empty() {
+                println!("(no variables defined)");
+            } else {
+                let mut names: Vec<String> = scope.keys().cloned().collect();
+                names.sort();
+                for name in names {
+                    if let Some(v) = scope.get(&name) {
+                        println!("{} = {}", name, v);
+                    }
+                }
+            }
+            let _ = rest;
         }
         "ast" => match crate::lexer::tokenize(rest) {
             Ok(tokens) => match crate::parser::parse(&tokens, rest) {
@@ -120,7 +133,10 @@ fn handle_repl_command(interp: &mut Interpreter, cmd: &str, rest: &str, buffer: 
             Err(e) => println!("lex error: {}", e),
         },
         "trace" => {
-            println!("trace command: not yet implemented");
+            // There is no execution-trace facility in the interpreter, so this
+            // is not offered rather than offered and inert.
+            println!("unknown command: :trace");
+            println!("type :help for a list");
             let _ = (interp, rest, buffer);
         }
         _ => {

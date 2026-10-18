@@ -404,3 +404,25 @@ the same treatment applied to those tables.
 **Severity: none.** Both backends resolve an import against the importing
 file's directory, so a module cannot be supplied in memory. The parity test for
 this writes `pkg/init.rak` and `pkg/sub.rak` to a temp directory.
+
+## `rakc run` strips a script's own `--flags`
+
+**Severity: medium, and it is a documented-example-level surprise.** `rakc run
+script.rak --hexdump` does not pass `--hexdump` to the script: the host argument
+parser consumes any `-`-prefixed token it does not recognise, so `argv` ends up
+as just the positionals. A Rak CLI cannot see its own flags without a `--`
+separator first.
+
+```rak
+fn main(argv) {
+    let opts = parse_args({ hexdump: "bool" }, argv)
+    dump opts[""]      // [the-file, ...] -- positionals only
+}
+```
+
+`rakc run script.rak a -- --hexdump` works: `parse_args` then reports
+`hexdump: true`. `docs/content/cli.md`'s own example (`rakc run
+examples/cli_greeter.rak Alice --count 3`) still does not, so `--count` is read
+as 1 and there is no error to show for it. The fix is for `rakc` to pass
+unrecognised flags through rather than swallowing them, which means deciding
+which flags are genuinely rakc's — a real design decision rather than a tweak.

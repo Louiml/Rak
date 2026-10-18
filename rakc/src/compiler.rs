@@ -554,6 +554,7 @@ impl Compiler {
         // Pre-pass for this imported module: collect fns (incl. pub fn), macros,
         // externs. Exported names are recorded in `self.current_exports`.
         let mut local_closures: Vec<(String, Value)> = Vec::new();
+        let mut local_methods: Vec<(String, Value)> = Vec::new();
         let mut local_foreigns: Vec<(String, Value)> = Vec::new();
         for stmt in &module.items {
             match stmt {
@@ -610,6 +611,29 @@ impl Compiler {
                         local_foreigns.push((decl.name.clone(), native));
                     }
                 }
+                Stmt::Impl {
+                    target,
+                    trait_name,
+                    methods,
+                } => {
+                    // Bake this module's `impl` methods into `__method_<Type>_<name>`
+                    // globals, exactly as the top-level pre-pass does for the
+                    // module being compiled. The nested compile's own flush list
+                    // is discarded, so they have to be emitted here.
+                    let type_name = trait_name.clone().unwrap_or_else(|| target.clone());
+                    for m in methods {
+                        if let Stmt::Let {
+                            name: mname, value, ..
+                        } = m
+                        {
+                            if let Expr::Function { .. } = value.as_ref() {
+                                let key = format!("__method_{}_{}", type_name, mname);
+                                let cl = self.compile_function(&key, value.as_ref())?;
+                                local_methods.push((key, cl));
+                            }
+                        }
+                    }
+                }
                 _ => {}
             }
         }
@@ -623,6 +647,12 @@ impl Compiler {
             self.emit_make_module(&cell_global);
 
             for (n, cl) in &local_closures {
+                self.load_const(cl.clone());
+                let ci = self.global_index(n);
+                self.emit_op(Op::StoreGlobal);
+                self.emit_u16(ci);
+            }
+            for (n, cl) in &local_methods {
                 self.load_const(cl.clone());
                 let ci = self.global_index(n);
                 self.emit_op(Op::StoreGlobal);
@@ -679,6 +709,24 @@ impl Compiler {
                     continue;
                 }
                 if matches!(stmt, Stmt::BinStructDef { .. }) {
+                    continue;
+                }
+                // Compile-time metadata with no runtime emission, exactly as
+                // `inline_module` already treats them: `struct`/`enum`/`type`
+                // are type information, `impl` is baked into `__method_*`
+                // globals by the pre-pass, and `trait` is documentation. The
+                // interpreter handles all of these in `exec_stmt`; the VM has
+                // nothing to emit. Without this, importing a module that
+                // declares a record or implements a trait for it is a hard
+                // compile error.
+                if matches!(
+                    stmt,
+                    Stmt::Struct { .. }
+                        | Stmt::Enum { .. }
+                        | Stmt::TypeAlias { .. }
+                        | Stmt::Impl { .. }
+                        | Stmt::Trait { .. }
+                ) {
                     continue;
                 }
                 self.compile_stmt(stmt)?;
@@ -1676,6 +1724,13 @@ impl Compiler {
                             self.emit_byte(slot);
                         }
                     }
+                    // `struct`/`enum` are type declarations, not runtime
+                    // values: the VM resolves them at compile time into native
+                    // and label globals, so exporting them emits nothing and
+                    // the name is already recorded by the pre-pass. Without
+                    // this arm, `pub struct Finding` -- which is how every
+                    // module declares a record -- was a hard compile error.
+                    Stmt::Struct { .. } | Stmt::Enum { .. } => {}
                     other => {
                         return Err(format!("VM does not support exporting: {:?}", other));
                     }

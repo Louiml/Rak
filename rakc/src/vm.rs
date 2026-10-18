@@ -724,6 +724,13 @@ impl Vm {
                     String::from_utf8_lossy(&h.as_slice()[*off..off + n]).into_owned()
                 }
                 Some(Value::Mmap(h)) => String::from_utf8_lossy(h.as_slice()).into_owned(),
+                // A buffer's bytes *are* its text. `Value::Bytes`'s `Display`
+                // is the `b"\x41\x42"` debug form, so falling through to it made
+                // `string(bytes([65, 66]))` produce the five-character debug
+                // string on the VM and the two-character `"AB"` on the
+                // interpreter -- a divergence in the length of a value, not in
+                // a diagnostic.
+                Some(Value::Bytes(b)) => String::from_utf8_lossy(b).into_owned(),
                 Some(v) => v.to_string(),
                 None => String::new(),
             };
@@ -2426,7 +2433,17 @@ impl Vm {
                 }
                 Op::Print => {
                     let v = frame.pop();
-                    self.output.push(format!("[DUMP] {}", v));
+                    // `impl Display for T` drives `dump` on the interpreter
+                    // (`Interpreter::display_value`), so the VM has to honour
+                    // it too -- otherwise the same struct printed as
+                    // `Point (3, 4)` under `rakc run` and `Point {x: 3}` under
+                    // `rakc vm`, which is a divergence in output rather than
+                    // in capability.
+                    let text = match self.vm_display(frame, &v) {
+                        Ok(s) => s,
+                        Err(_) => v.to_string(),
+                    };
+                    self.output.push(format!("[DUMP] {}", text));
                 }
                 Op::DumpToFile => {
                     let target = frame.pop();
@@ -3521,6 +3538,43 @@ impl Vm {
     /// Dispatch `receiver.method(args...)` (mirrors the interpreter's
     /// `eval_call` method branch): regex natives, baked `impl` methods
     /// (`__method_<type>_<name>` globals), then a field holding a callable.
+    /// Render a value through `impl Display for T` if one is registered, else
+    /// through `Display` itself.
+    ///
+    /// `call_method` looks up `__method_<Type>_<name>` globals, which is where
+    /// `compile_impl` bakes a trait's methods, so this mirrors the interpreter's
+    /// `display_value` using the same keys the compiler already emits.
+    fn vm_display(&mut self, frame: &mut Frame, v: &Value) -> Result<String, String> {
+        let recv = unwrap_vm_evidence(v);
+        // Only structs and enums carry a name a trait can be implemented for;
+        // every other value has exactly one rendering.
+        let tn = match &recv {
+            Value::Struct { name, .. } => name.to_string(),
+            Value::Enum { name, .. } => name.to_string(),
+            _ => return Ok(v.to_string()),
+        };
+        // `compile_impl` bakes a trait's methods into `__method_<Type>_<name>`
+        // globals -- the trait name (`Display`) is *not* part of the key, so a
+        // `Debug` impl registered first is not shadowed. This matches
+        // `Vm::call_method`'s own lookup, and the interpreter's `display_value`
+        // which keys its `trait_impls` map on `(trait, type, method)`.
+        let key = format!("__method_{}_fmt", tn);
+        let Some(func) = self.globals.get(&key).cloned() else {
+            return Ok(v.to_string());
+        };
+        // Push the call and run to the frame boundary, then read the return
+        // value the callee left on the stack -- the same protocol
+        // `Op::CallMethod` uses.
+        let base = frame.stack.len();
+        self.call_value(frame, func, vec![v.clone()])?;
+        if frame.stack.len() > base {
+            let r = frame.stack.pop().unwrap();
+            Ok(r.to_string())
+        } else {
+            Ok(v.to_string())
+        }
+    }
+
     fn call_method(
         &mut self,
         frame: &mut Frame,

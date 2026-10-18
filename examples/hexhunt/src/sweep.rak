@@ -1,0 +1,132 @@
+// scan.rak - the scanning engine.
+//
+// The interesting part is not the loop, it is that the same code runs on the
+// tree-walking interpreter and the bytecode VM. Contracts are the one place
+// where that is not currently true: `requires` works on both backends, but
+// `ensures` is a hard compile error on the VM (see V8-KNOWN-ISSUES.md), so the
+// `ensures` clauses that would be most valuable here are written up in the
+// comments rather than declared. The precondition that matters -- a non-empty
+// signature table -- is checked on both.
+
+from "./model.rak" import Finding
+
+/// Does `pat` occur in `data` starting at `at`?
+///
+/// Byte-at-a-time rather than a slice compare, because range slicing over bytes
+/// is interpreter-only. Single-byte indexing works on both backends, so this
+/// helper is portable by construction.
+pub fn match_at(data: bytes, pat: bytes, at: int) -> bool {
+    if at + len(pat) > len(data) {
+        return false
+    }
+    let mut i = 0
+    while i < len(pat) {
+        if data[at + i] != pat[i] {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+} requires len(pat) > 0
+
+/// Scan `data` for every signature, returning the findings in file order.
+///
+/// Each match advances past the pattern it found, so overlapping occurrences of
+/// the same signature are reported once. Each finding consumes at least one
+/// byte, so the result can never be longer than the file: the postcondition
+/// `ensures len(result) <= len(data)` states that, but the VM cannot compile it
+/// today, and a comment that documents it is better than a contract that
+/// refuses to run at all.
+pub fn scan_file(data: bytes, signatures: array) -> array {
+    let mut out = []
+    for sig in signatures {
+        let pat = sig.pattern
+        let mut i = 0
+        while i + len(pat) <= len(data) {
+            if match_at(data, pat, i) {
+                out = push(out, Finding {
+                    offset: i,
+                    signature: sig.name,
+                    kind: sig.kind,
+                })
+                i = i + len(pat)
+            } else {
+                i = i + 1
+            }
+        }
+    }
+    return out
+} requires len(signatures) > 0
+
+/// Tally findings by kind, so the summary is a map rather than a loop.
+pub fn count_by_kind(findings: array) -> map {
+    let mut counts = {}
+    for f in findings {
+        let k = f.kind
+        if k in counts {
+            counts[k] = counts[k] + 1
+        } else {
+            counts[k] = 1
+        }
+    }
+    return counts
+}
+
+/// Hex dump the first `limit` bytes, 16 to a line, the way `hexdump -C` does.
+///
+/// Pure computation over `bytes`, so it is available on both backends.
+pub fn hexdump(data: bytes, limit: int) -> string {
+    let n = len(data)
+    if limit > n {
+        return hexdump_range(data, 0, n)
+    }
+    return hexdump_range(data, 0, limit)
+}
+
+/// The printable-ASCII table, indexed by `byte - 0x20`.
+///
+/// Built from bytes rather than written as a literal because a `Char` renders
+/// *with* its quotes (`'A'`) wherever it is printed or concatenated, and no
+/// escape sequence in a string literal both survives the lexer and renders
+/// bare. A one-byte-per-character table built from `bytes([...])` converts to a
+/// string with exactly the glyphs it holds.
+fn printable_table() -> string {
+    let mut codes = []
+    let mut c = 0x20
+    while c < 0x7F {
+        codes = push(codes, c)
+        c = c + 1
+    }
+    return string(bytes(codes))
+}
+
+fn hexdump_range(data: bytes, start: int, to: int) -> string {
+    let glyphs = printable_table()
+    let mut out = ""
+    let mut i = start
+    while i < to {
+        out = out + fmt("0x{:08X}  ", i)
+        let mut j = i
+        let mut ascii = ""
+        while j < i + 16 && j < to {
+            let b = data[j]
+            out = out + fmt("{:02X} ", b)
+            // `0x20` literals are `Hex`, and a Hex index is not a valid string
+            // index -- decimals keep the arithmetic in `Int` throughout.
+            if b >= 32 && b < 127 {
+                ascii = ascii + glyphs[b - 32]
+            } else {
+                ascii = ascii + "."
+            }
+            j = j + 1
+        }
+        // Pad a short final line so the ASCII column stays aligned.
+        while j < i + 16 {
+            out = out + "   "
+            j = j + 1
+        }
+        out = out + " |" + ascii + "|\n"
+        i = i + 16
+    }
+    return out
+}

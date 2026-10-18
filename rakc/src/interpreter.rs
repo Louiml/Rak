@@ -2563,6 +2563,11 @@ impl Interpreter {
                 }
             }
             Stmt::Extern { abi: _, lib, decls } => {
+                // Loading a library runs its constructors (`DllMain`,
+                // `.init_array`) before any Rak function is called, so gating
+                // only the call would still execute third-party code. The gate
+                // belongs here, at the load.
+                crate::caps::check_builtin("ffi:extern")?;
                 let lib_handle = if let Some(path) = lib {
                     Arc::new(Mutex::new(
                         rak_stdlib::ffi::load(path).map_err(crate::RakError::Runtime)?,
@@ -2780,6 +2785,10 @@ impl Interpreter {
         options: &[(String, Expr)],
         body: &Option<Vec<Stmt>>,
     ) -> crate::Result<()> {
+        // These three statements reach the network directly, bypassing the
+        // builtins the capability table names. A sandbox that gates `scan_ports`
+        // but not `scan` was not a narrower surface -- it was a different one.
+        crate::caps::check_builtin("scan_ports")?;
         let target_val = self.eval_expr(target)?;
         let target_str = match target_val {
             Value::String(s) => s,
@@ -2867,6 +2876,9 @@ impl Interpreter {
     /// encrypted UDP conduit, binding `<name>` (key), `<name>_udp` (transport)
     /// and `<name>_addr` (bound ip:port) inside the block.
     fn exec_tunnel(&mut self, name: &str, passphrase: &str, body: &[Stmt]) -> crate::Result<()> {
+        // Binds a UDP socket. The compiler lowers this same statement into
+        // `udp_*` natives for the VM, so both backends need the gate.
+        crate::caps::check_builtin("udp_bind")?;
         // Salt, iteration count and key length come from the one shared
         // definition, because the compiler lowers this same statement for the
         // VM. Two copies of these constants would eventually disagree, and a
@@ -2909,6 +2921,7 @@ impl Interpreter {
         options: &[(String, Expr)],
         body: &Option<Vec<Stmt>>,
     ) -> crate::Result<()> {
+        crate::caps::check_builtin("fetch")?;
         let target_val = self.eval_expr(target)?;
         let target_str = match target_val {
             Value::String(s) => s,
@@ -9495,6 +9508,11 @@ impl Interpreter {
     #[cfg(feature = "gui")]
     pub fn attach_gui(&mut self, manager: Arc<crate::gui::GuiManager>) {
         self.gui = Some(manager);
+    }
+
+    /// The innermost scope as a snapshot, for the REPL's `:vars`.
+    pub fn current_scope(&self) -> HashMap<String, Value> {
+        self.env.current_scope_clone()
     }
 
     /// The GUI manager, or a clear error explaining that the event loop was

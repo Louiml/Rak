@@ -247,8 +247,10 @@ where
             Err(e) => std::panic::resume_unwind(e),
         },
         // The thread spawn can fail under a hard RLIMIT_NPROC or a job-object
-        // limit, in which case running on the current thread is better than
-        // refusing to run at all.
+        // limit. There is no correct fallback -- running the program on the
+        // caller's thread would change its stack depth and its panic behaviour
+        // -- so this stays unreachable by construction rather than silently
+        // degrading.
         Err(_) => unreachable!(),
     }
 }

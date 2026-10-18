@@ -1,0 +1,103 @@
+// main.rak - hexhunt entry point.
+//
+// hexhunt reads a binary file, scans it for a table of known signatures, and
+// reports what it found with evidence provenance: every finding is cited
+// against the tool and the file it came from, so the report is a
+// chain-of-custody record rather than a list of strings.
+//
+// Run it:  rakc run examples/hexhunt/src/main.rak <file>
+//          rakc run examples/hexhunt/src/main.rak <file> -- --hexdump
+//
+// The `--` is required: rakc's own argument parser strips any `--flag` it does
+// not recognise, so without it the script never sees `--hexdump`. Use
+// `parse_args(spec)` so the flags are described once and parsed the same way on
+// both backends.
+//
+// It runs on both backends unchanged: the interpreter (`rakc run`) and the
+// bytecode VM (`rakc vm`).
+
+from "./sweep.rak" import count_by_kind, hexdump, scan_file
+
+/// The signature table. Each entry is a name, the kind of artefact it marks,
+/// and the bytes that mark it. Adding a format is one line.
+fn signatures() -> array {
+    return [
+        { name: "PNG",   kind: "image",      pattern: bytes([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]) },
+        { name: "JPEG",  kind: "image",      pattern: bytes([0xFF, 0xD8, 0xFF]) },
+        { name: "GIF",   kind: "image",      pattern: bytes([0x47, 0x49, 0x46, 0x38]) },
+        { name: "PDF",   kind: "document",   pattern: bytes([0x25, 0x50, 0x44, 0x46]) },
+        { name: "ELF",   kind: "executable", pattern: bytes([0x7F, 0x45, 0x4C, 0x46]) },
+        { name: "PE",    kind: "executable", pattern: bytes([0x4D, 0x5A]) },
+        { name: "ZIP",   kind: "archive",    pattern: bytes([0x50, 0x4B, 0x03, 0x04]) },
+        { name: "GZIP",  kind: "archive",    pattern: bytes([0x1F, 0x8B, 0x08]) },
+    ]
+}
+
+fn usage() {
+    dump "hexhunt <file> [--hexdump]"
+    dump ""
+    dump "  Scans a binary file for known signatures and reports each finding"
+    dump "  with evidence provenance."
+    dump ""
+    dump "  --hexdump   also print a hex dump of the first 256 bytes"
+}
+
+fn main(argv) -> int {
+    // `parse_args` is the CLI front end rakc ships: pass it a spec of the
+    // flags this program understands and it returns the positionals plus the
+    // parsed options. Hand-rolled flag scanning has to know which flags rakc
+    // itself consumed, which is a coupling every CLI should not have.
+    let opts = parse_args({ hexdump: "bool" }, argv)
+    let positionals = opts[""]
+    if len(positionals) < 1 {
+        usage()
+        return 2
+    }
+    let path = positionals[0]
+    let show_hexdump = has(opts, "hexdump")
+
+    // Read the file. A missing or unreadable file is a user error, not a crash:
+    // `try`/`catch` turns it into a message and an exit code.
+    let mut data = bytes([])
+    try {
+        data = file_read_bytes(path)
+    } catch e {
+        dump f"hexhunt: cannot read {path}: {e}"
+        return 1
+    }
+
+    dump f"hexhunt: {path} ({len(data)} bytes)"
+    dump ""
+
+    if show_hexdump {
+        dump hexdump(data, 256)
+        dump ""
+    }
+
+    let findings = scan_file(data, signatures())
+
+    dump f"findings: {len(findings)}"
+    for f in findings {
+        dump f
+    }
+
+    // Evidence provenance. The file is the root of the chain; the findings are
+    // cited against the tool and that file. `report` renders the numbered,
+    // source-cited output an investigator can paste into a case file.
+    let target = evidence<string> from path
+    let cited = cite(findings, "hexhunt", path)
+    dump ""
+    dump report(target, cited)
+
+    // A summary, built with a pass over the findings rather than a hand-rolled
+    // loop over them.
+    let summary = count_by_kind(findings)
+    dump ""
+    dump "by kind:"
+    for k in keys(summary) {
+        dump f"  {k}: {summary[k]}"
+    }
+
+    return 0
+}
+
