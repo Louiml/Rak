@@ -23,7 +23,7 @@ dump results
 
 dump "=== wait and see: TCP probes across many ports concurrently ==="
 let ports = [22, 80, 443, 445, 3389, 8000, 8080, 9999]
-let probe_futures = []
+let mut probe_futures = []
 for p in ports {
     probe_futures = push(probe_futures, tcp_probe("127.0.0.1", p, 300))
 }

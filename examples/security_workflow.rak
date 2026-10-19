@@ -35,7 +35,7 @@ fn run_feed(path) {
     let normalized = stream_map(iocs, normalize_ioc)
     let enriched   = stream_map(normalized, resolve_and_enrich)
 
-    let seen = {}
+    let mut seen = {}
     let count = 0
     for row in enriched {
         let ioc = row.ioc

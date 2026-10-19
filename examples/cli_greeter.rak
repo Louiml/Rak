@@ -24,7 +24,7 @@ fn main(argv) {
         print("cli_greeter " + VERSION)
         return 0
     }
-    let count = 1
+    let mut count = 1
     if has(opts, "count") {
         count = int(opts["count"])
     }

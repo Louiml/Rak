@@ -204,8 +204,16 @@ pub fn make_enum_ctor(enum_name: String, variant: String) -> Value {
     Value::NativeFn(name, Arc::new(native))
 }
 
-pub struct ChannelHandle {
-    pub id: u64,
+/// One end of a `channel()` pair.
+///
+/// The endpoints are stored in the handle itself rather than in a side
+/// registry keyed by id: a handle that carries its own endpoint cannot be
+/// used after some unrelated channel was garbage-collected, and a blocking
+/// `chan_recv` blocks on the real `std::sync::mpsc` receiver, exactly as the
+/// interpreter's does. Mirrors the interpreter's `Sender`/`Receiver` pair.
+pub enum ChannelHandle {
+    Sender(std::sync::Mutex<std::sync::mpsc::Sender<Value>>),
+    Receiver(std::sync::Mutex<std::sync::mpsc::Receiver<Value>>),
 }
 
 /// State of a VM `Value::Future`. Async I/O builtins produce `Pending`
@@ -652,6 +660,10 @@ impl Vm {
             "gui_close",
             "gui_wait",
             "gui_quit",
+            // Registered as a placeholder like `spawn`/`stream_next`: the real
+            // work happens in `Vm::call_value`, where the machine can hand
+            // the closure and its globals to the GUI's registry.
+            "gui_callback",
         ] {
             self.insert_native(name, |args| crate::gui::vm_native(name, args));
         }
@@ -2069,6 +2081,385 @@ impl Vm {
             rak_stdlib::http_server::server_stop();
             Ok(Value::Nil)
         });
+        // --- Channels (spec 7A.12) ---
+        //
+        // The interpreter's `channel()` is a `std::sync::mpsc` pair and a
+        // blocking `chan_recv` is fine there because the sender runs on
+        // another thread. The same is true here: these are plain blocking
+        // natives, not coroutines - the documented blocker for this family was
+        // never suspension, only that nobody had written the VM side.
+        self.insert_native("channel", |_args| {
+            let (tx, rx) = std::sync::mpsc::channel::<Value>();
+            Ok(Value::Tuple(Arc::from(vec![
+                Value::Channel(Arc::new(ChannelHandle::Sender(std::sync::Mutex::new(
+                    tx,
+                )))),
+                Value::Channel(Arc::new(ChannelHandle::Receiver(std::sync::Mutex::new(
+                    rx,
+                )))),
+            ])))
+        });
+        self.insert_native("chan_send", |args| match (args.first(), args.get(1)) {
+            (Some(Value::Channel(h)), Some(v)) => match h.as_ref() {
+                ChannelHandle::Sender(tx) => tx
+                    .lock()
+                    .unwrap()
+                    .send(v.clone())
+                    .map(|_| Value::Bool(true))
+                    .map_err(|_| "chan_send failed".to_string()),
+                _ => Err("chan_send requires a sender".to_string()),
+            },
+            _ => Err("chan_send(tx, v)".to_string()),
+        });
+        self.insert_native("chan_recv", |args| match args.first() {
+            Some(Value::Channel(h)) => match h.as_ref() {
+                ChannelHandle::Receiver(rx) => match rx.lock().unwrap().recv() {
+                    Ok(v) => Ok(Value::Option(Some(Box::new(v)))),
+                    Err(_) => Ok(Value::Option(None)),
+                },
+                _ => Err("chan_recv requires a receiver".to_string()),
+            },
+            _ => Err("chan_recv(rx)".to_string()),
+        });
+        // --- Future orchestration ---
+        //
+        // `await_all`, `select` and `timeout` resolve VM futures, which are
+        // either `Ready` or a Tokio `JoinHandle`. Resolving is data
+        // manipulation over the handle's state - it needs no access to the
+        // machine - so these are natives: `await_all` blocks on each in turn,
+        // `select` races one thread per future into a channel and takes the
+        // first to finish, and `timeout` polls a resolving thread against a
+        // deadline. The interpreter's versions have the same shapes.
+        self.insert_native("await_all", |args| match args.first() {
+            Some(Value::Array(items)) => {
+                // Validate every element before resolving any: the
+                // interpreter drives all futures first and joins after, so a
+                // non-future aborts the whole call.
+                for f in items.iter() {
+                    vm_check_future(f)?;
+                }
+                let mut out = Vec::with_capacity(items.len());
+                for f in items.iter() {
+                    out.push(resolve_vm_future_blocking(f)?);
+                }
+                Ok(Value::Array(Arc::new(out)))
+            }
+            _ => Err("await_all: expected an array of futures".to_string()),
+        });
+        self.insert_native("select", |args| match args.first() {
+            Some(Value::Array(items)) => {
+                if items.is_empty() {
+                    return Err("select: empty array".to_string());
+                }
+                for f in items.iter() {
+                    vm_check_future(f)?;
+                }
+                let (tx, rx) = std::sync::mpsc::channel::<(usize, Value)>();
+                for (i, f) in items.iter().enumerate() {
+                    let tx = tx.clone();
+                    let f = f.clone();
+                    std::thread::spawn(move || {
+                        let v = resolve_vm_future_blocking(&f).unwrap_or(Value::Nil);
+                        let _ = tx.send((i, v));
+                    });
+                }
+                drop(tx);
+                match rx.recv() {
+                    Ok((idx, val)) => Ok(Value::Tuple(Arc::from(vec![
+                        Value::I64(idx as i64),
+                        val,
+                    ]))),
+                    Err(_) => Err("select: no future resolved".to_string()),
+                }
+            }
+            _ => Err("select: expected an array of futures".to_string()),
+        });
+        self.insert_native("timeout", |args| {
+            let future = args.first().cloned().unwrap_or(Value::Nil);
+            let ms = args.get(1).and_then(|v| v.as_u64()).unwrap_or(1000);
+            // The interpreter's `drive_future_concurrent` rejects a non-future
+            // before the race starts; mirror that instead of passing through.
+            vm_check_future(&future)?;
+            let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let done2 = done.clone();
+            let h = std::thread::spawn(move || {
+                let r = resolve_vm_future_blocking(&future);
+                done2.store(true, std::sync::atomic::Ordering::SeqCst);
+                r
+            });
+            let start = std::time::Instant::now();
+            loop {
+                if done.load(std::sync::atomic::Ordering::SeqCst) {
+                    break match h.join() {
+                        Ok(Ok(v)) => Ok(Value::Result(Some(Box::new(v)), None)),
+                        Ok(Err(e)) => Err(e),
+                        Err(_) => Err("timeout: task panicked".to_string()),
+                    };
+                }
+                if start.elapsed().as_millis() >= ms as u128 {
+                    break Ok(Value::Result(
+                        None,
+                        Some(Box::new(Value::Error(Arc::new(
+                            crate::ErrorInfo::new("operation timed out")
+                                .with_kind(crate::ErrorKind::Timeout),
+                        )))),
+                    ));
+                }
+                std::thread::sleep(std::time::Duration::from_micros(200));
+            }
+        });
+        // --- TCP networking ---
+        //
+        // Blocking I/O is not the coroutine problem the parity doc once
+        // assumed: the interpreter's `net_*` family blocks the same way, and a
+        // native may block. `tcp_connect_async` is the one that needs the
+        // runtime, and it gets the same treatment as `http_get_async`:
+        // `spawn_blocking` producing a `Future`.
+        self.insert_native("net_listen", |args| {
+            let addr = native_str(args.first());
+            match std::net::TcpListener::bind(&addr) {
+                Ok(l) => {
+                    l.set_nonblocking(false).ok();
+                    Ok(Value::TcpListener(Arc::new(std::sync::Mutex::new(l))))
+                }
+                Err(e) => Err(format!("net_listen: {}", e)),
+            }
+        });
+        self.insert_native("net_accept", |args| match args.first() {
+            Some(Value::TcpListener(l)) => match l.lock().unwrap().accept() {
+                Ok((stream, addr)) => {
+                    let peer = addr.to_string();
+                    Ok(Value::Tuple(Arc::from(vec![
+                        Value::TcpStream(Arc::new(std::sync::Mutex::new(stream))),
+                        Value::String(Arc::from(peer.as_str())),
+                    ])))
+                }
+                Err(e) => Err(format!("net_accept: {}", e)),
+            },
+            _ => Err("net_accept requires a listener".to_string()),
+        });
+        self.insert_native("net_connect", |args| {
+            let addr = native_str(args.first());
+            match std::net::TcpStream::connect(&addr) {
+                Ok(s) => Ok(Value::TcpStream(Arc::new(std::sync::Mutex::new(s)))),
+                Err(e) => Err(format!("net_connect: {}", e)),
+            }
+        });
+        self.insert_native("net_local_addr", |args| match args.first() {
+            Some(Value::TcpListener(l)) => {
+                let local = l
+                    .lock()
+                    .unwrap()
+                    .local_addr()
+                    .map(|a| a.to_string())
+                    .unwrap_or_default();
+                Ok(Value::String(Arc::from(local.as_str())))
+            }
+            _ => Err("net_local_addr requires a listener".to_string()),
+        });
+        self.insert_native("tcp_write", |args| match (args.first(), args.get(1)) {
+            (Some(Value::TcpStream(s)), Some(v)) => {
+                let data = native_bytes(Some(v));
+                let mut st = s.lock().unwrap();
+                use std::io::Write;
+                st.write(&data).map_err(|e| format!("tcp_write: {}", e))
+            }
+            .map(|n| Value::I64(n as i64)),
+            _ => Err("tcp_write(stream, data)".to_string()),
+        });
+        self.insert_native("tcp_read", |args| match (args.first(), args.get(1)) {
+            (Some(Value::TcpStream(s)), Some(v)) => {
+                let n = v.as_u64().unwrap_or(1024) as usize;
+                let mut buf = vec![0u8; n];
+                use std::io::Read;
+                let read = s
+                    .lock()
+                    .unwrap()
+                    .read(&mut buf)
+                    .map_err(|e| format!("tcp_read: {}", e))?;
+                buf.truncate(read);
+                Ok(Value::Bytes(Arc::from(buf.as_slice())))
+            }
+            _ => Err("tcp_read(stream, n)".to_string()),
+        });
+        self.insert_native("tcp_read_line", |args| match args.first() {
+            Some(Value::TcpStream(s)) => {
+                let s = s.clone();
+                let mut out = Vec::new();
+                use std::io::Read;
+                loop {
+                    let mut byte = [0u8; 1];
+                    match s.lock().unwrap().read(&mut byte) {
+                        Ok(0) => break,
+                        Ok(_) => {
+                            if byte[0] == b'\n' {
+                                break;
+                            }
+                            if byte[0] != b'\r' {
+                                out.push(byte[0]);
+                            }
+                        }
+                        Err(e) => return Err(format!("tcp_read_line: {}", e)),
+                    }
+                }
+                Ok(Value::String(Arc::from(
+                    String::from_utf8_lossy(&out).as_ref(),
+                )))
+            }
+            _ => Err("tcp_read_line(stream)".to_string()),
+        });
+        self.insert_native("tcp_close", |args| match args.first() {
+            Some(Value::TcpStream(s)) => {
+                use std::io::Write;
+                let _ = s.lock().unwrap().shutdown(std::net::Shutdown::Both);
+                let _ = s.lock().unwrap().flush();
+                Ok(Value::Nil)
+            }
+            _ => Err("tcp_close(stream)".to_string()),
+        });
+        self.insert_native("tcp_connect_async", |args| {
+            let addr = native_str(args.first());
+            let jh = crate::async_rt::runtime().spawn_blocking(move || {
+                match std::net::TcpStream::connect(&addr) {
+                    Ok(s) => {
+                        s.set_nonblocking(false).ok();
+                        Value::TcpStream(Arc::new(std::sync::Mutex::new(s)))
+                    }
+                    Err(_) => Value::Nil,
+                }
+            });
+            Ok(Value::Future(Arc::new(FutureHandle {
+                state: std::sync::Mutex::new(VmFutureState::Pending(jh)),
+            })))
+        });
+        // --- WebSocket (RFC 6455 framing over the TCP handle) ---
+        self.insert_native("ws_connect", |args| {
+            let url = native_str(args.first());
+            let (host, port, path) = parse_ws_url(&url)?;
+            let mut stream = std::net::TcpStream::connect((host.as_str(), port))
+                .map_err(|e| format!("ws_connect: {}", e))?;
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+                .ok();
+            rak_stdlib::websocket::client_handshake(&mut stream, &host, &path)?;
+            Ok(Value::TcpStream(Arc::new(std::sync::Mutex::new(stream))))
+        });
+        self.insert_native("ws_handshake", |args| match args.first() {
+            Some(Value::TcpStream(stream)) => {
+                use std::io::BufRead;
+                let mut reader = std::io::BufReader::new(
+                    stream
+                        .lock()
+                        .unwrap()
+                        .try_clone()
+                        .map_err(|e| format!("ws_handshake: {}", e))?,
+                );
+                let mut key = String::new();
+                loop {
+                    let mut line = String::new();
+                    reader
+                        .read_line(&mut line)
+                        .map_err(|e| format!("ws_handshake: {}", e))?;
+                    if line.trim().is_empty() {
+                        break;
+                    }
+                    let low = line.to_lowercase();
+                    if low.starts_with("sec-websocket-key:") {
+                        key = line["sec-websocket-key:".len()..].trim().to_string();
+                    }
+                }
+                let accept = rak_stdlib::websocket::accept_value(&key);
+                let resp = format!("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {}\r\n\r\n", accept);
+                use std::io::Write;
+                stream
+                    .lock()
+                    .unwrap()
+                    .write_all(resp.as_bytes())
+                    .map_err(|e| format!("ws_handshake: {}", e))?;
+                Ok(Value::Nil)
+            }
+            _ => Err("ws_handshake(stream)".to_string()),
+        });
+        self.insert_native("ws_send", |args| match (args.first(), args.get(1)) {
+            (Some(Value::TcpStream(stream)), Some(v)) => {
+                let data = native_bytes(Some(v));
+                let mask = args
+                    .get(2)
+                    .map(|m| matches!(m, Value::Bool(b) if *b))
+                    .unwrap_or(true);
+                let frame = rak_stdlib::websocket::encode_frame(
+                    rak_stdlib::websocket::OP_TEXT,
+                    &data,
+                    mask,
+                );
+                use std::io::Write;
+                let n = stream
+                    .lock()
+                    .unwrap()
+                    .write(&frame)
+                    .map_err(|e| format!("ws_send: {}", e))?;
+                Ok(Value::I64(n as i64))
+            }
+            _ => Err("ws_send(stream, data)".to_string()),
+        });
+        self.insert_native("ws_recv", |args| match args.first() {
+            Some(Value::TcpStream(stream)) => {
+                let mut reader = std::io::BufReader::new(
+                    stream
+                        .lock()
+                        .unwrap()
+                        .try_clone()
+                        .map_err(|e| format!("ws_recv: {}", e))?,
+                );
+                match rak_stdlib::websocket::read_frame(&mut reader)? {
+                    Some(f) => {
+                        let mut m = HashMap::new();
+                        m.insert("opcode".to_string(), Value::I64(f.opcode as i64));
+                        m.insert("payload".to_string(), Value::Bytes(Arc::from(f.payload.as_slice())));
+                        Ok(Value::Map(Arc::new(m)))
+                    }
+                    None => Ok(Value::Nil),
+                }
+            }
+            _ => Err("ws_recv(stream)".to_string()),
+        });
+        self.insert_native("ws_close", |args| match args.first() {
+            Some(Value::TcpStream(stream)) => {
+                let frame = rak_stdlib::websocket::encode_frame(
+                    rak_stdlib::websocket::OP_CLOSE,
+                    b"",
+                    true,
+                );
+                use std::io::Write;
+                stream
+                    .lock()
+                    .unwrap()
+                    .write_all(&frame)
+                    .map_err(|e| format!("ws_close: {}", e))?;
+                Ok(Value::Nil)
+            }
+            _ => Err("ws_close(stream)".to_string()),
+        });
+        // --- Interception placeholders ---
+        //
+        // `expect_error`, `task_group` and `extern_call` are handled in
+        // `Vm::call_value`, where the machine is reachable; these
+        // registrations exist so `LoadGlobal` resolves the names and the
+        // parity gate can see them, exactly as `stream_next` and `spawn` are
+        // registered as placeholders next to their interceptions.
+        self.insert_native("expect_error", |_args| {
+            Err("expect_error: intercepted in Vm::call_value".to_string())
+        });
+        self.insert_native("task_group", |_args| {
+            Err("task_group: intercepted in Vm::call_value".to_string())
+        });
+        self.insert_native("extern_call", |args| {
+            Err(format!(
+                "extern_call(\"{}\"): C FFI bindings are not linked into this build. \
+                 Link the generated Rust wrapper to enable it.",
+                native_str(args.first())
+            ))
+        });
         self.insert_native("sleep", |args| {
             let ms = args.first().and_then(|v| v.as_u64()).unwrap_or(0);
             std::thread::sleep(std::time::Duration::from_millis(ms));
@@ -3277,6 +3668,67 @@ impl Vm {
                         frame.push(result);
                         return Ok(());
                     }
+                    // `task_group` runs an array of Rak functions, each on its
+                    // own machine over an OS thread - the same shape `spawn`
+                    // uses. A `fn(&[Value])` native cannot call back into Rak,
+                    // so this belongs where the machine is reachable.
+                    "task_group" => {
+                        return self.vm_task_group(frame, args);
+                    }
+                    // `expect_error(f)` calls `f` and passes only if it raises.
+                    // Calling needs the machine, and a raising callee leaves
+                    // `pending_error` set - which the caller's own `try` would
+                    // wrongly catch - so it is taken here.
+                    "expect_error" => {
+                        let f = args.into_iter().next().unwrap_or(Value::Nil);
+                        if !matches!(f, Value::Closure { .. } | Value::NativeFn(..)) {
+                            return Err(format!(
+                                "expect_error expects a function argument, got {}",
+                                f.type_name()
+                            ));
+                        }
+                        let base = frame.stack.len();
+                        match self.call_value(frame, f, Vec::new()) {
+                            Ok(()) => {
+                                if frame.stack.len() > base {
+                                    frame.stack.pop();
+                                }
+                                return Err(
+                                    "expected error, but no error was raised".to_string()
+                                );
+                            }
+                            Err(_) => {
+                                self.pending_error = None;
+                                frame.push(Value::Bool(true));
+                                return Ok(());
+                            }
+                        }
+                    }
+                    // The interpreter's `extern_call` is a documented stub: it
+                    // errors until a Rust wrapper is linked into the standard
+                    // library. The VM mirrors that exact message (the native
+                    // registered under the same name exists so the gate and
+                    // `LoadGlobal` can see it; this interception produces the
+                    // error without the native-name prefix, so the two
+                    // backends' messages agree).
+                    "extern_call" => {
+                        return Err(format!(
+                            "extern_call(\"{}\"): C FFI bindings are not linked into this build. \
+                             Link the generated Rust wrapper to enable it.",
+                            native_str(args.first())
+                        ));
+                    }
+                    #[cfg(feature = "gui")]
+                    "gui_callback" => {
+                        // A native cannot reach the machine, and dispatching a
+                        // VM callback later needs the closure *and* the globals
+                        // it was registered with, so registration happens here.
+                        let cb_name = native_str(args.first());
+                        let func = args.get(1).cloned().unwrap_or(Value::Nil);
+                        crate::gui::register_vm_callback(&cb_name, func, self.globals.clone());
+                        frame.push(Value::Nil);
+                        return Ok(());
+                    }
                     _ => {}
                 }
                 let result = f(&args).map_err(|e| format!("{}: {}", name, e))?;
@@ -3430,6 +3882,94 @@ impl Vm {
             },
             other => Err(format!("{} is not a task builtin", other)),
         }
+    }
+
+    /// `task_group([f, ...], limit?)` — run each function on its own machine
+    /// over an OS thread, bounded by `limit`, results in input order.
+    ///
+    /// Mirrors the interpreter's, including the resource limit (the shared
+    /// `Permit` pool) and the fail-fast error handling: the first error is
+    /// kept and reported after every dispatched task has settled. A native
+    /// cannot call back into Rak, so this runs where the machine is reachable
+    /// and each worker drives a fresh `Vm`, exactly as `spawn` does.
+    fn vm_task_group(&mut self, frame: &mut Frame, args: Vec<Value>) -> Result<(), String> {
+        let fns: Vec<Value> = match args.first() {
+            Some(Value::Array(a)) => a.to_vec(),
+            Some(other) => {
+                return Err(format!(
+                    "task_group: expected an array of functions, got {}",
+                    other.type_name()
+                ))
+            }
+            None => return Err("task_group: expected an array of functions".to_string()),
+        };
+        let limit = args
+            .get(1)
+            .and_then(|v| v.as_u64())
+            .unwrap_or(crate::async_rt::num_workers_hint()) as usize;
+        let limit = limit.max(1);
+        let permit = crate::async_rt::permit_count_raw(limit);
+        let fns = Arc::new(fns);
+        let results = Arc::new(std::sync::Mutex::new(vec![Value::Nil; fns.len()]));
+        let err_cell: Arc<std::sync::Mutex<Option<String>>> =
+            Arc::new(std::sync::Mutex::new(None));
+        let next = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let globals = self.globals.clone();
+        let mut handles = Vec::new();
+        for _ in 0..limit.min(fns.len()) {
+            let permit = permit.clone();
+            let fns = fns.clone();
+            let results = results.clone();
+            let err_cell = err_cell.clone();
+            let next = next.clone();
+            let globals = globals.clone();
+            handles.push(std::thread::spawn(move || loop {
+                let idx = next.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if idx >= fns.len() {
+                    break;
+                }
+                let _p = permit.acquire();
+                let f = fns[idx].clone();
+                let result = match &f {
+                    Value::Closure { code, .. } => {
+                        let code = code.clone();
+                        let mut vm = Vm::new();
+                        vm.globals = globals.clone();
+                        let mut fr = Frame {
+                            code: &code,
+                            ip: 0,
+                            stack: Vec::new(),
+                            locals: Vec::new(),
+                            defers: Vec::new(),
+                            catches: Vec::new(),
+                        };
+                        match vm.call_value(&mut fr, f, Vec::new()) {
+                            Ok(()) => Ok(fr.pop()),
+                            Err(_) => Err("task failed".to_string()),
+                        }
+                    }
+                    _ => Err("task_group: expected a function".to_string()),
+                };
+                match result {
+                    Ok(v) => results.lock().unwrap()[idx] = v,
+                    Err(e) => {
+                        let mut ec = err_cell.lock().unwrap();
+                        if ec.is_none() {
+                            *ec = Some(e);
+                        }
+                    }
+                }
+            }));
+        }
+        for h in handles {
+            let _ = h.join();
+        }
+        if let Some(e) = err_cell.lock().unwrap().take() {
+            return Err(e);
+        }
+        let out = results.lock().unwrap().iter().cloned().collect::<Vec<_>>();
+        frame.push(Value::Array(Arc::new(out)));
+        Ok(())
     }
 
     /// Run an iterator builtin whose per-element step calls a Rak function
@@ -4152,6 +4692,36 @@ fn bin_float(frame: &mut Frame, f: impl Fn(f64, f64) -> f64) {
     )));
 }
 
+/// Run a closure on a fresh machine seeded with the given globals.
+///
+/// Used by the GUI's callback dispatch, which runs on the event-loop thread
+/// with no machine of its own; `gui_callback`'s interception hands over a
+/// snapshot of the globals for exactly this purpose.
+#[cfg(feature = "gui")]
+pub fn run_closure_standalone(
+    func: &Value,
+    globals: HashMap<String, Value>,
+) -> Option<Value> {
+    let Value::Closure { code, .. } = func else {
+        return None;
+    };
+    let code = code.clone();
+    let mut vm = Vm::new();
+    vm.globals = globals;
+    let mut frame = Frame {
+        code: &code,
+        ip: 0,
+        stack: Vec::new(),
+        locals: Vec::new(),
+        defers: Vec::new(),
+        catches: Vec::new(),
+    };
+    match vm.call_value(&mut frame, func.clone(), Vec::new()) {
+        Ok(()) => Some(frame.pop()),
+        Err(_) => None,
+    }
+}
+
 fn native_str(v: Option<&Value>) -> String {
     match v {
         Some(Value::String(s)) => s.to_string(),
@@ -4159,6 +4729,89 @@ fn native_str(v: Option<&Value>) -> String {
         Some(v) => v.to_string(),
         None => String::new(),
     }
+}
+
+/// Resolve a VM future to a value, blocking until it is ready.
+///
+/// The same resolution `Op::Await` performs, factored out so `await_all`,
+/// `select` and `timeout` - which are natives, not opcodes - can share it.
+/// A value that is not a future passes through, as it does under `await`.
+fn resolve_vm_future_blocking(v: &Value) -> Result<Value, String> {
+    match v {
+        Value::Future(h) => {
+            let state = std::mem::replace(&mut *h.state.lock().unwrap(), VmFutureState::Polled);
+            match state {
+                VmFutureState::Ready(v) => Ok(v),
+                VmFutureState::Pending(jh) => {
+                    let joined = crate::async_rt::runtime()
+                        .block_on(async { jh.await })
+                        .map_err(|e| format!("await: task failed: {}", e))?;
+                    *h.state.lock().unwrap() = VmFutureState::Ready(joined.clone());
+                    Ok(joined)
+                }
+                VmFutureState::Polled => Err("await: future already polled".to_string()),
+            }
+        }
+        other => Ok(other.clone()),
+    }
+}
+
+/// The orchestration natives' stricter rule: `await` passes a non-future
+/// through, but `await_all`/`select`/`timeout` reject one, because the
+/// interpreter's `drive_future_concurrent` does. Without this the two
+/// backends answered differently on `await_all([42])`.
+///
+/// This only *checks* - it never resolves. `timeout` starts its race against
+/// the clock before the future is touched, and `select` resolves inside the
+/// racing threads; a checking helper that also drove the future made
+/// `timeout(f, 20ms)` block for the future's whole duration first and then
+/// report the race already decided.
+///
+/// The message spells the type the way the interpreter does - `int`, not
+/// `i64` - because the interpreter's integer variant is `Value::Int` and the
+/// two backends must say the same thing about the same value. The numeric
+/// widths a typed literal can carry all reduce to the interpreter's one
+/// spelling.
+fn vm_check_future(v: &Value) -> Result<(), String> {
+    if !matches!(v, Value::Future(_)) {
+        let tn = match v {
+            Value::I8(_)
+            | Value::I16(_)
+            | Value::I32(_)
+            | Value::I64(_)
+            | Value::U8(_)
+            | Value::U16(_)
+            | Value::U32(_)
+            | Value::U64(_) => "int",
+            Value::F32(_) | Value::F64(_) => "float",
+            other => other.type_name(),
+        };
+        return Err(format!("expected a future, got {}", tn));
+    }
+    Ok(())
+}
+
+/// Split `ws://host:port/path` into its parts. Mirrors the interpreter's
+/// helper so `ws_connect` rejects the same URLs with the same messages.
+fn parse_ws_url(url: &str) -> Result<(String, u16, String), String> {
+    let rest = url
+        .strip_prefix("ws://")
+        .or_else(|| url.strip_prefix("wss://"))
+        .ok_or_else(|| format!("ws_connect: invalid URL '{}'", url))?;
+    let (authority, path) = match rest.find('/') {
+        Some(i) => (&rest[..i], &rest[i..]),
+        None => (rest, "/"),
+    };
+    let (host, port) = match authority.rsplit_once(':') {
+        Some((h, p)) => {
+            let port: u16 = p
+                .parse()
+                .map_err(|_| format!("ws_connect: bad port '{}'", p))?;
+            (h.to_string(), port)
+        }
+        None => (authority.to_string(), 80),
+    };
+    Ok((host, port, path.to_string()))
 }
 
 /// Coerce a value to bytes for a native.

@@ -1441,7 +1441,89 @@ pub fn vm_natives() -> Vec<(&'static str, fn(&[Value]) -> Result<Value, String>)
         // cannot create. Registered so the parity gate and the LSP see the names.
         ("spawn", vm_task_unreachable),
         ("thread_join", vm_task_unreachable),
+        // DNS / recon. Plain blocking calls over `rak_stdlib::recon` - they
+        // were never coroutine problems, only unimplemented on this side.
+        ("dns_lookup", vm_dns_lookup),
+        ("reverse_dns", vm_reverse_dns),
+        ("subdomain_enum", vm_subdomain_enum),
+        ("scan_ports", vm_scan_ports),
+        ("scan_subdomains", vm_scan_subdomains),
+        // The program's own arguments, as the interpreter's `argv` reports
+        // them. Populated by `run_cli` through `set_script_argv`.
+        ("argv", vm_argv),
     ]
+}
+
+// ---------------------------------------------------------------------------
+// DNS / recon - the interpreter-only five, closed
+// ---------------------------------------------------------------------------
+
+fn vm_dns_lookup(args: &Args) -> R {
+    let ips = rak_stdlib::recon::dns_lookup(&to_str(args.first()));
+    Ok(strings(ips.into_iter().map(|ip| ip.to_string()).collect()))
+}
+
+fn vm_reverse_dns(args: &Args) -> R {
+    match rak_stdlib::recon::reverse_dns(&to_str(args.first())) {
+        Some(s) => Ok(s_owned(s)),
+        None => Ok(Value::Nil),
+    }
+}
+
+fn vm_subdomain_enum(args: &Args) -> R {
+    Ok(strings(rak_stdlib::recon::subdomain_enum(
+        &to_str(args.first()),
+    )))
+}
+
+/// `scan_ports(target, {range: [a, b], timeout: ms})` or `scan_ports(target, [a, b])`.
+/// Mirrors the interpreter's option handling exactly, including the defaults.
+fn vm_scan_ports(args: &Args) -> R {
+    let target = to_str(args.first());
+    let mut start_port: u16 = 1;
+    let mut end_port: u16 = 1024;
+    let mut timeout_ms: u64 = 1000;
+    match args.get(1) {
+        Some(Value::Map(opts)) => {
+            if let Some(Value::Array(range)) = opts.get("range") {
+                if range.len() >= 2 {
+                    start_port = range[0].as_u64().unwrap_or(1) as u16;
+                    end_port = range[1].as_u64().unwrap_or(1024) as u16;
+                }
+            }
+            if let Some(v) = opts.get("timeout") {
+                timeout_ms = v.as_u64().unwrap_or(1000);
+            }
+        }
+        Some(Value::Array(range)) => {
+            if range.len() >= 2 {
+                start_port = range[0].as_u64().unwrap_or(1) as u16;
+                end_port = range[1].as_u64().unwrap_or(1024) as u16;
+            }
+        }
+        _ => {}
+    }
+    let open = rak_stdlib::recon::port_scan(&target, start_port, end_port, timeout_ms);
+    Ok(Value::Array(Arc::new(
+        open.into_iter().map(|p| Value::I64(p as i64)).collect(),
+    )))
+}
+
+fn vm_scan_subdomains(args: &Args) -> R {
+    let domain = to_str(args.first());
+    let subs = rak_stdlib::recon::subdomain_enum(&domain);
+    let mut results: Vec<Value> = Vec::new();
+    for sub in subs {
+        let ips = rak_stdlib::recon::dns_lookup(&sub);
+        if !ips.is_empty() {
+            results.push(s_owned(format!("{} -> {}", sub, ips.first().unwrap())));
+        }
+    }
+    Ok(Value::Array(Arc::new(results)))
+}
+
+fn vm_argv(_args: &Args) -> R {
+    Ok(strings(script_argv()))
 }
 
 // ---------------------------------------------------------------------------

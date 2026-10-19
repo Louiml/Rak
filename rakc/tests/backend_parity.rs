@@ -125,7 +125,7 @@ fn collect_arms(src: &str, names: &mut BTreeSet<String>) {
 ///   natives are registered, since they all dispatch through one function
 fn vm_registrations() -> BTreeSet<String> {
     let mut names = BTreeSet::new();
-    let insert_native = "insert_native(\"";
+    let insert_call = "insert_native(";
     let table_entry = "(\"";
     for path in VM_NATIVE_SOURCES {
         let src: &str = match *path {
@@ -135,13 +135,28 @@ fn vm_registrations() -> BTreeSet<String> {
             "../src/ext_stdlib.rs" => include_str!("../src/ext_stdlib.rs"),
             other => panic!("add {} to this match when adding a native table", other),
         };
+        // The name literal may sit on the next line
+        // (`insert_native(\n    "http_server_poll", ...)`), so the needle
+        // stops at the paren and the opening quote is located after
+        // skipping whitespace. Without this the one multi-line registration
+        // counted as interpreter-only while the builtin ran fine on both
+        // backends.
         let mut rest = src;
-        while let Some(at) = rest.find(insert_native) {
-            let after = &rest[at + insert_native.len()..];
-            if let Some(end) = after.find('"') {
-                names.insert(after[..end].to_string());
+        while let Some(at) = rest.find(insert_call) {
+            // The name literal may sit on the next line
+            // (`insert_native(\n    "http_server_poll", ...)`), so the needle
+            // stops at the paren and whitespace is skipped before requiring
+            // the quote. Requiring it as the *first* non-whitespace character
+            // is what keeps the scan from scraping a string that appears later
+            // in the file out of the `insert_native` *definition* (`&mut
+            // self,`), which is not a registration.
+            let after = rest[at + insert_call.len()..].trim_start();
+            if let Some(stripped) = after.strip_prefix('"') {
+                if let Some(end) = stripped.find('"') {
+                    names.insert(stripped[..end].to_string());
+                }
             }
-            rest = &rest[at + insert_native.len()..];
+            rest = &rest[at + insert_call.len()..];
         }
         // Extension tables:  ("time_now", vm_time_now),
         // Only collect entries that name a `vm_`-prefixed function, which is
@@ -321,76 +336,36 @@ const VM_ONLY: &[(&str, &str)] = &[
     ),
 ];
 
-/// The parity gate, as a ratchet rather than a pass/fail switch.
+/// The parity gate.
 ///
-/// The gap is not zero, and it will not be zero until the VM has coroutines
-/// (see `docs/V8-BACKEND-PARITY.md`). An assertion that simply fails while
-/// that is true is a permanently red CI, and a permanently red CI is one people
-/// learn to ignore — at which point it stops catching the regressions it was
-/// added for, and the v8.0.0 regression is exactly what it should have caught.
-///
-/// So this is a ratchet: the test fails when the gap *grows* and passes when it
-/// shrinks. A missing registration fails immediately, because that is a
-/// regression. The remaining known gap is recorded below, and closing a family
-/// means lowering the number, which is the point.
-///
-/// If the gap ever reaches zero, replace this with a plain `assert!(...is_empty())`
-/// and delete `MAX_KNOWN_INTERP_ONLY`.
-const MAX_KNOWN_INTERP_ONLY: usize = 31;
-
-/// The VM-only names, in addition to the documented allowances.
-const MAX_KNOWN_VM_ONLY: usize = 0;
-
+/// The two backends' registration sets must be identical, modulo the
+/// documented one-sided builtins (`asm`, `exit`) and scan artefacts
+/// (`VM_ONLY`). This used to be a ratchet with a recorded shortfall, because
+/// the gap sat at 31 names for years and a permanently red CI is one people
+/// learn to ignore. The gap reached zero when the VM gained the channel,
+/// future-orchestration, TCP/WebSocket, DNS/recon and argv families - all of
+/// which turned out to be blocking natives rather than coroutine problems -
+/// so the ratchet was replaced with the plain assertion its own comment
+/// prescribed. A builtin added to one backend and not the other fails here,
+/// at compile-and-test time, with the name in the message.
 #[test]
 fn registrations_match() {
     let (interp_only, vm_only) = registration_diff();
-
-    assert!(
-        interp_only.len() <= MAX_KNOWN_INTERP_ONLY,
-        "the interpreter has {} builtins the VM does not, which is more than the \
-         {} already recorded. A builtin added to one backend and not the other is \
-         a regression — that is how v8.0.0 shipped nineteen builtins that only \
-         existed in the VM.\n\n  new: {}\n\nIf these are legitimate, add each to INTERP_ONLY above with a reason, and \
-         raise MAX_KNOWN_INTERP_ONLY. If a family has been closed, lower it.",
-        interp_only.len(),
-        MAX_KNOWN_INTERP_ONLY,
-        interp_only.join(", ")
-    );
-
-    assert!(
-        vm_only.len() <= MAX_KNOWN_VM_ONLY,
-        "the VM has {} builtins the interpreter does not, which is more than the {} \
-         already recorded.\n\n  new: {}\n\nAdd each to VM_ONLY above with a reason, and raise \
-         MAX_KNOWN_VM_ONLY.",
-        vm_only.len(),
-        MAX_KNOWN_VM_ONLY,
-        vm_only.join(", ")
-    );
-}
-
-/// A strict form of the gate, for whoever is closing the gap.
-///
-/// The ratchet above tolerates a known shortfall so CI can be green. This one
-/// does not, so "the gap is zero" is a claim that can actually be checked
-/// rather than assumed. `#[ignore]`d so it is not part of the default run;
-/// un-ignore it when working on the parity backlog.
-#[test]
-#[ignore = "strict form of registrations_match; the gap is not zero yet"]
-fn registrations_match_strictly() {
-    let (interp_only, vm_only) = registration_diff();
     assert!(
         interp_only.is_empty() && vm_only.is_empty(),
-        "the two backends still disagree.\n  interpreter only ({}): {}\n  \
-         VM only ({}): {}\n\nEvery one of these needs a VM coroutine, or is a \
-         documented one-sided builtin. docs/V8-BACKEND-PARITY.md has the list \
-         and the reasoning.",
+        "the two backends' builtin registrations disagree.\n\n  \
+         interpreter only ({}): {}\n  VM only ({}): {}\n\n\
+         A builtin added to one backend and not the other is a regression - \
+         that is how v8.0.0 shipped nineteen builtins that existed only in \
+         the VM. If a name here is legitimately one-sided, add it to \
+         INTERP_ONLY or VM_ONLY above with a reason; nothing else belongs \
+         there.",
         interp_only.len(),
         interp_only.join(", "),
         vm_only.len(),
         vm_only.join(", ")
     );
 }
-
 /// The parity gap needs its own budget and its own trend line, not just a
 /// pass/fail assertion.
 ///
@@ -2013,6 +1988,145 @@ fn parity_main_with_one_parameter_receives_argv() {
 fn main(argv) {
     dump len(argv)
 }
+"#,
+    );
+}
+
+/// The channel family: `channel`, `chan_send`, `chan_recv`, plus the
+/// orchestration builtins built on futures - `select`, `await_all`, `timeout`,
+/// `task_group` - and `expect_error`, which has to *call* a Rak function.
+///
+/// These were the bulk of the interpreter-only 31. None of them needed a
+/// coroutine model: a blocking native is exactly the right shape for all of
+/// them, because the interpreter's versions block too. `task_group` and
+/// `expect_error` are intercepted in `Vm::call_value` (a native cannot call
+/// back into Rak); the rest are natives.
+#[test]
+fn parity_channels_and_orchestration() {
+    agree(
+        "channel send/recv roundtrip",
+        r#"
+let (tx, rx) = channel()
+chan_send(tx, 42)
+dump chan_recv(rx)
+"#,
+    );
+    agree(
+        "a channel across threads",
+        r#"
+let (tx, rx) = channel()
+let h = spawn(fn() { chan_send(tx, "hello") return 1 })
+thread_join(h)
+dump chan_recv(rx)
+"#,
+    );
+    agree(
+        "await_all resolves every future, results in input order",
+        r#"
+let out = await_all([async_sleep(10), async_sleep(20)])
+dump out
+"#,
+    );
+    agree(
+        "select returns the index of the first future to resolve",
+        r#"
+let (i, v) = select([async_sleep(10), async_sleep(400)])
+dump i
+"#,
+    );
+    agree(
+        "timeout resolves a fast future",
+        r#"
+let r = timeout(async_sleep(5), 5000)?
+dump r
+"#,
+    );
+    agree(
+        "timeout reports a slow future as a catchable error",
+        r#"
+try {
+    let r = timeout(async_sleep(2000), 20)?
+    dump "resolved"
+} catch e {
+    dump "timed-out"
+}
+"#,
+    );
+    agree(
+        "task_group runs functions concurrently, results in input order",
+        r#"
+let out = task_group([fn() { return 1 }, fn() { return 2 }, fn() { return 3 }])
+dump out
+"#,
+    );
+    agree(
+        "expect_error passes when the function raises",
+        r#"
+dump expect_error(fn() { raise "boom" })
+"#,
+    );
+    agree(
+        "expect_error fails when nothing is raised",
+        r#"
+try {
+    expect_error(fn() { return 1 })
+    dump "not-reached"
+} catch e {
+    dump "caught"
+}
+"#,
+    );
+}
+
+/// The TCP family: `net_listen`/`net_accept`/`net_connect`/`tcp_*`, plus
+/// `net_local_addr` for an ephemeral port and `scan_ports` pointed at it.
+///
+/// An echo exchange over the loopback interface is the smallest program that
+/// exercises all of them without depending on any outside host. The client
+/// runs in a `spawn`ed task; it references `addr`, a top-level binding, which
+/// closures resolve as a global on both backends.
+#[test]
+fn parity_tcp_echo_over_loopback() {
+    agree(
+        "net_accept echoes a line the client wrote",
+        r#"
+let l = net_listen("127.0.0.1:0")
+let addr = net_local_addr(l)
+let h = spawn(fn() {
+    let s = net_connect(addr)
+    tcp_write(s, "hi")
+    tcp_close(s)
+    return 1
+})
+let (conn, _) = net_accept(l)
+dump tcp_read_line(conn)
+dump thread_join(h)
+tcp_close(conn)
+"#,
+    );
+}
+
+/// DNS / recon: the same `rak_stdlib::recon` calls the interpreter makes,
+/// reached from the VM's native table. `localhost` needs no outside resolver,
+/// and the port scan targets a listener this test just bound.
+#[test]
+fn parity_dns_and_scan_ports() {
+    agree(
+        "dns_lookup resolves localhost",
+        r#"
+let ips = dns_lookup("localhost")
+dump len(ips) > 0
+"#,
+    );
+    agree(
+        "scan_ports finds the port this listener bound",
+        r#"
+let l = net_listen("127.0.0.1:0")
+let addr = net_local_addr(l)
+let colon = find(addr, ":")
+let port = int(substr(addr, colon + 1, len(addr)))
+let open = scan_ports("127.0.0.1", [port, port])
+dump len(open) == 1
 "#,
     );
 }

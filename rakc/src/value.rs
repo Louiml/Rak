@@ -116,8 +116,17 @@ pub enum Value {
     ///
     /// `rak_stdlib`'s helpers take `&Mutex<UdpTransport>` and `udp_bind` returns
     /// a `Mutex<UdpTransport>`, so the mutex is not an interpreter convention
-    /// being repeated here — it is the type those functions are written against.
+    /// being repeated here - it is the type those functions are written against.
     UdpTransport(Arc<std::sync::Mutex<rak_stdlib::tunnel::UdpTransport>>),
+    /// A TCP server socket from `net_listen`. Behind an `Arc<Mutex<_>>` for the
+    /// same reason `UdpTransport` is: `net_accept` and `net_local_addr` need
+    /// `&mut` access to the listener, and Rak has no reference types. Mirrors
+    /// the interpreter's `TcpListener` so the `net_*` family works on both.
+    TcpListener(Arc<std::sync::Mutex<std::net::TcpListener>>),
+    /// A TCP connection from `net_connect` / `net_accept` / `tcp_connect_async`
+    /// / `ws_connect`. The `tcp_*` and `ws_*` families both read and write
+    /// through this one handle, exactly as they do on the interpreter.
+    TcpStream(Arc<std::sync::Mutex<std::net::TcpStream>>),
     /// A lazy, pull-based stream (spec 7A.4). See `crate::ext_streams`.
     ///
     /// Behind an `Arc<Mutex<_>>` for the same reason `Value::Set` is: streams
@@ -254,6 +263,8 @@ impl Value {
             Value::Map(_) => "map",
             Value::Module(_) => "module",
             Value::UdpTransport(_) => "udp-transport",
+            Value::TcpListener(_) => "tcp-listener",
+            Value::TcpStream(_) => "tcp-stream",
             Value::Stream(_) => "stream",
             Value::Set(_) => "set",
             Value::Struct { .. } => "struct",
@@ -572,6 +583,8 @@ impl fmt::Display for Value {
             Value::Mmap(_) => write!(f, "<mmap>"),
             Value::Module(_) => write!(f, "<module>"),
             Value::UdpTransport(_) => write!(f, "<udp-transport>"),
+            Value::TcpListener(_) => write!(f, "<tcp-listener>"),
+            Value::TcpStream(_) => write!(f, "<tcp-stream>"),
             Value::Stream(_) => write!(f, "<stream>"),
             Value::MmapSlice(_, _, n) => write!(f, "<mmap-slice {}B>", n),
             Value::Pcap(_) => write!(f, "<pcap>"),

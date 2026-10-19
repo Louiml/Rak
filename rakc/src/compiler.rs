@@ -1395,7 +1395,6 @@ impl Compiler {
             } => {
                 // Destructuring let: evaluate into a temp local, pattern-match
                 // with MatchPat, and raise a clear runtime error on mismatch.
-                // Bound names live as locals (same behavior as if-let binds).
                 self.compile_expr(value)?;
                 let v_slot = self.add_local_mut("__letpat_v".to_string(), false);
                 self.emit_op(Op::StoreLocal);
@@ -1407,9 +1406,25 @@ impl Compiler {
                     self.emit_op(Op::Dup);
                     self.load_const(Value::I64(i as i64));
                     self.emit_op(Op::IndexGet);
-                    let slot = self.add_local_mut(bname.clone(), *mutable);
-                    self.emit_op(Op::StoreLocal);
-                    self.emit_byte(slot);
+                    // At the top level the plain `let` arm stores a *global*,
+                    // and the interpreter defines destructured names into the
+                    // global environment the same way - so a binding made by
+                    // `let (tx, rx) = channel()` was invisible to a `spawn`ed
+                    // task and to every closure on this backend, while the
+                    // interpreter saw it. Bind globals here too; inside a
+                    // function body the names stay locals, as before.
+                    if self.scope_depth == 0 {
+                        let ci = self.global_index(bname);
+                        self.emit_op(Op::StoreGlobal);
+                        self.emit_u16(ci);
+                        if !*mutable {
+                            self.immutable_globals.insert(bname.clone());
+                        }
+                    } else {
+                        let slot = self.add_local_mut(bname.clone(), *mutable);
+                        self.emit_op(Op::StoreLocal);
+                        self.emit_byte(slot);
+                    }
                 }
                 self.emit_op(Op::Pop); // drop the bindings indicator
                 let jend = self.emit_jump(Op::Jump);
@@ -1888,6 +1903,13 @@ impl Compiler {
                 self.emit_op(Op::BindModule);
                 self.emit_u16(gi);
             }
+            // `test "name" { ... }` blocks are *collected* by the interpreter
+            // and run by `rakc test`, not by a normal program run; the
+            // interpreter's `Stmt::Test` arm only pushes them onto a list.
+            // The VM has no test runner, so the matching behaviour is to emit
+            // nothing - which is what makes an example file of `test` blocks
+            // run (and print nothing) identically on both backends.
+            Stmt::Test { .. } => {}
             other => {
                 return Err(format!("VM does not support statement: {:?}", other));
             }

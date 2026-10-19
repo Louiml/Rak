@@ -119,9 +119,23 @@ pub struct GuiManager {
     proxy: Mutex<Option<std::sync::mpsc::Sender<Command>>>,
     open: Arc<OpenWindows>,
     callbacks: Arc<Mutex<HashMap<String, Callback>>>,
+    /// Callbacks registered from bytecode-compiled scripts. The interpreter's
+    /// `Callback` holds a function value and a snapshot of the interpreter
+    /// environment; a VM closure has neither, so the two registries are
+    /// separate and `dispatch` tries each in turn.
+    vm_callbacks: Arc<Mutex<HashMap<String, VmCallback>>>,
     waiting: Arc<AtomicBool>,
     script_done: Arc<AtomicBool>,
     opened_once: Arc<AtomicBool>,
+}
+
+/// A callback whose body lives in a bytecode chunk: the closure value, plus the
+/// chunk globals it was registered with. Dispatch runs it on a fresh machine
+/// seeded with those globals, because a VM native has no machine of its own.
+#[derive(Clone)]
+struct VmCallback {
+    func: crate::value::Value,
+    globals: HashMap<String, crate::value::Value>,
 }
 
 struct OpenWindows {
@@ -150,6 +164,7 @@ impl GuiManager {
                 changed: Condvar::new(),
             }),
             callbacks: Arc::new(Mutex::new(HashMap::new())),
+            vm_callbacks: Arc::new(Mutex::new(HashMap::new())),
             waiting: Arc::new(AtomicBool::new(false)),
             script_done: Arc::new(AtomicBool::new(false)),
             opened_once: Arc::new(AtomicBool::new(false)),
@@ -293,14 +308,22 @@ impl GuiManager {
     }
 
     fn dispatch(&self, name: &str, args: &[String]) -> Option<String> {
-        let cb = self.callbacks.lock().unwrap().get(name).cloned()?;
-        crate::interpreter::call_in_env(
-            cb.func.clone(),
-            (*cb.env).clone(),
-            args.iter().map(|a| Value::String(a.clone())).collect(),
-        )
-        .ok()
-        .map(|v| v.to_string())
+        // Interpreter callbacks carry their own environment snapshot.
+        if let Some(cb) = self.callbacks.lock().unwrap().get(name).cloned() {
+            return crate::interpreter::call_in_env(
+                cb.func.clone(),
+                (*cb.env).clone(),
+                args.iter().map(|a| Value::String(a.clone())).collect(),
+            )
+            .ok()
+            .map(|v| v.to_string());
+        }
+        // A bytecode-compiled script's callback runs on a fresh machine seeded
+        // with the globals it was registered with. The event-loop thread owns
+        // no machine, so one is created per dispatch - a click handler is not
+        // hot code.
+        let cb = self.vm_callbacks.lock().unwrap().get(name).cloned()?;
+        crate::vm::run_closure_standalone(&cb.func, cb.globals).map(|v| v.to_string())
     }
 }
 
@@ -696,6 +719,26 @@ pub(crate) fn set_current(manager: Arc<GuiManager>) {
 
 pub(crate) fn current_manager() -> Option<Arc<GuiManager>> {
     CURRENT.get().cloned()
+}
+
+/// Register a callback whose body is a bytecode-compiled closure.
+///
+/// Called from `Vm::call_value`'s `gui_callback` interception: a native cannot
+/// reach the machine, and dispatching later needs the closure *and* the chunk
+/// globals it was registered with, so both are handed over here. If the GUI
+/// was never started the registration is a no-op, matching the interpreter's
+/// `gui_callback`, which stores into a manager nobody dispatches from.
+pub fn register_vm_callback(
+    name: &str,
+    func: crate::value::Value,
+    globals: HashMap<String, crate::value::Value>,
+) {
+    if let Some(mgr) = current_manager() {
+        mgr.vm_callbacks
+            .lock()
+            .unwrap()
+            .insert(name.to_string(), VmCallback { func, globals });
+    }
 }
 
 pub(crate) fn vm_native(

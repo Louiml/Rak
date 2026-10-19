@@ -35,7 +35,7 @@ impl Iterable for Range {
     }
 }
 
-let s = 0
+let mut s = 0
 for n in Range { lo: 1, hi: 5 } {
     s = s + n
 }

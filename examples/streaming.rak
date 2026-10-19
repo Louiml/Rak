@@ -20,7 +20,7 @@ dump collect(words)
 
 dump "=== lazy file line streaming (read_lines) ==="
 let lines = read_lines("examples/hello.rak")
-let i = 0
+let mut i = 0
 for line in lines {
     i = i + 1
     if i > 3 { break }            // stop early; the file is never fully read

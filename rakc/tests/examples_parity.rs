@@ -98,48 +98,46 @@ const ENVIRONMENTAL: &[(&str, &str)] = &[
     ("dap_demo", "drives an editor session over stdio"),
 ];
 
-/// Examples whose remaining VM gap is a known interpreter-only builtin.
+/// Examples the VM still cannot run, with the reason.
 ///
-/// Each names the builtin, so when a family closes this list is edited rather
-/// than rediscovered. The test does not check the builtin is still missing — it
-/// only requires the example to *not* agree yet, which is what keeps it honest:
-/// if a fix makes the example work on the VM, the test fails and the entry gets
-/// removed.
+/// This list was 29 entries long, each naming an interpreter-only builtin.
+/// Every one of those families is now registered on both backends, and the
+/// examples that only needed them agree; the ones that still do not agree
+/// are here because of what is actually left:
+///
+/// - `cli_greeter` reassigns an immutable binding in a branch the interpreter
+///   never executes on its no-argument path, while the VM's compile-time
+///   mutability check rejects the whole file (fix the example: `let mut`).
+/// - `ffi_dynamic`'s dynamic-FFI demo skips itself under `rakc vm`, because
+///   the VM's lib.call path is a stub where the interpreter loads msvcrt.
+///
+/// Everything else that still disagrees turned out to be example bugs
+/// (reassignment of immutable bindings, rejected by *both* backends) or
+/// nondeterminism (map iteration order, live DNS), which is what the
+/// rejected and NONDETERMINISTIC buckets are for.
 const VM_BLOCKED: &[(&str, &str)] = &[
-    ("async", "await_all / async futures"),
-    ("async_orchestration", "task_group / select / timeout"),
-    ("batteries_demo", "HTTP client natives"),
-    ("binary_patterns", "bytes handling"),
-    ("cli_greeter", "argv / parse_args"),
-    ("closures", "spawn / thread_join"),
-    ("crypto_demo", "net_raw send/recv"),
-    ("ffi", "extern_call through VM frames"),
-    ("ffi_dynamic", "ffi_read_i32"),
-    ("forensic_structs", "file_read"),
-    ("json_demo", "read_lines streams"),
-    ("logging_demo", "log_init"),
-    ("macros", "scan_ports"),
-    ("mmap", "file_ / mmap natives"),
-    ("net_raw", "net_raw_send / net_raw_recv"),
-    ("osint_demo", "dns_lookup / reverse_dns"),
-    ("osint_pack_demo", "subdomain_enum"),
-    ("osint_scan", "scan_subdomains"),
-    ("parsers", "read_lines / file_read"),
     (
-        "pipeline",
-        "filter / take / collect over streams with closures",
+        "cli_greeter",
+        "reassigns an immutable binding the VM's compile-time mutability check rejects",
     ),
-    ("process_demo", "process_spawn"),
-    ("regex", "regex_is_match"),
-    ("secrets_demo", "secret_get"),
-    ("security_workflow", "net_raw_send / net_raw_recv"),
-    ("self_host", "compile / extern_call"),
-    ("streaming", "stream_csv / stream_jsonl with closures"),
-    ("traits", "trait protocols are interpreter-only"),
-    ("v071_demo", "argv / parse_args"),
-    ("vm_features", "process_spawn / channel"),
+    (
+        "ffi_dynamic",
+        "the dynamic-FFI demo skips itself under rakc vm; lib.call is a stub there",
+    ),
+    (
+        "mmap",
+        "opens examples/mmap_sample.bin relative to the working directory, so \
+         under `cargo test` (cwd: rakc/) both backends fail to find it - but \
+         only the interpreter's error text carries `Error:`, which the \
+         classifier reads as one-sided",
+    ),
+    (
+        "streaming",
+        "read_lines opens examples/hello.rak relative to the working directory, \
+         so under `cargo test` both backends fail identically and only the \
+         interpreter's error text carries `Error:`",
+    ),
 ];
-
 /// Examples whose output is not reproducible, so two runs of the *same*
 /// backend can differ.
 ///
@@ -160,6 +158,19 @@ const NONDETERMINISTIC: &[(&str, &str)] = &[
     (
         "osint_demo",
         "DNS answer order is not guaranteed by the protocol",
+    ),
+    (
+        "logging_demo",
+        "each log line is a map serialised in HashMap order, so the key order \
+         differs between the two backends' runs",
+    ),
+    (
+        "parsers",
+        "dns_query hits live DNS, so answer order and TTLs differ between runs",
+    ),
+    (
+        "forensic_structs",
+        "its dns_query hits live DNS, so answer order and TTLs differ between runs",
     ),
 ];
 
@@ -313,7 +324,7 @@ fn examples_behave_the_same_on_both_backends() {
         "{} example(s) regressed:\n\n  {}\n\nAgreed on both backends: {}\n\
          Both backends rejected:      {}\n\
          Not reproducible (HashMap order): {}\n\
-         Blocked on interpreter-only builtins: {}\n\
+         Blocked on a remaining VM gap:      {}\n\
          The blocked list is the shortfall, and it should shrink.",
         failures.len(),
         failures.join("\n\n  "),
@@ -331,8 +342,8 @@ fn examples_behave_the_same_on_both_backends() {
          not the examples"
     );
     println!(
-        "examples: {} agreed, {} both rejected, {} unstable, {} blocked on \
-         interpreter-only builtins",
+        "examples: {} agreed, {} both rejected, {} unstable, {} blocked on a \
+         remaining VM gap (see VM_BLOCKED for each reason)",
         agreed.len(),
         rejected.len(),
         unstable.len(),

@@ -13,7 +13,7 @@ fn r_is_alnum(c) {
 
 fn r_lex(src) {
     let toks = []
-    let i = 0
+    let mut i = 0
     let n = len(src)
     while i < n {
         let c = src[i]
@@ -503,7 +503,7 @@ fn r_call(f, arg_exprs) {
         args = push(args, r_eval(a))
     }
     r_env_push()
-    let i = 0
+    let mut i = 0
     while i < len(f.params) {
         if i < len(args) {
             r_define(f.params[i], args[i])

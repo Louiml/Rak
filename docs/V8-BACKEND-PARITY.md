@@ -13,17 +13,19 @@ why the remaining gap is not a list of forgotten builtins.
 agree. `tests/backend_parity.rs` uses it two ways:
 
 - **`registrations_match`** is a structural gate. It reads the registration
-  sites in both backends and requires the name sets to be identical. A builtin
-  added to one side and forgotten on the other fails here.
+  sites in both backends and requires the name sets to be identical - a plain
+  assertion since the gap closed. A builtin added to one side and forgotten on
+  the other fails here.
 - **The `parity_*` tests** are behavioural. They run a program on both and
   require identical output, which catches not just missing builtins but any
   case where the two implementations disagree.
-- **`parity_backlog_report`** is `#[ignore]`d and prints the current gap, so
-  the backlog is measurable rather than remembered. Run it with
+- **`parity_backlog_report`** is `#[ignore]`d and prints the registration gap,
+  which is now empty. It is kept so a future regression shows up as a list of
+  names rather than a bare assertion failure. Run it with
   `--ignored --nocapture`.
 
 The structural scan is scoped to the interpreter's `eval_builtin` body, and
-handles three registration shapes, because each was a false positive that would
+handles four registration shapes, because each was a false positive that would
 have made the gate untrustworthy:
 
 | Shape | Example | Why it was missed |
@@ -31,6 +33,7 @@ have made the gate untrustworthy:
 | Alternation arm | `"regex_match" \| "regex_is_match" =>` | registers two names, scan saw one |
 | `for name in [..]` loop | the GUI natives | one dispatcher, N names |
 | `vm_natives()` table | `("time_now", vm_time_now),` | names live in the callee |
+| Multi-line `insert_native` | `insert_native(\n    "http_server_poll", ..)` | the needle included the opening quote, so a name on the next line was invisible - the builtin ran on both backends while the gate counted it interpreter-only |
 
 The whole-file interpreter scan also picked up `regex` *method* arms, which are
 not builtins. Scoping to `eval_builtin` fixed that.
@@ -61,40 +64,45 @@ cannot catch a per-backend omission; only a comparison can.
 
 ## What is not, and why
 
-**31 builtins exist only on the interpreter**, and every one of them is blocked
-on the same thing.
+**Nothing. The registration gap reached zero**, and the ratchet this document
+used to track it was replaced with the plain assertion its own comment
+prescribed: `registrations_match` now fails on *any* name the two backends do
+not share, and the `MAX_KNOWN_INTERP_ONLY` constant is gone. The backlog
+report (`parity_backlog_report`, still `#[ignore]`d) prints an empty list.
 
-A VM native has the signature:
+Getting there disproved this document's own central claim. The gap was recorded
+as "31 builtins blocked on coroutines in the VM", and coroutines were described
+as "a project, not a list of one-line registrations". That was wrong in a useful
+way: the interpreter has no coroutines either. Its `spawn` is an OS thread, its
+`channel` is a `std::sync::mpsc` pair, and its `net_*` family blocks the same
+thread a VM native would. Almost the whole gap was *blocking* work, and a
+blocking native needs no `&mut Vm` at all:
 
-```rust
-fn(&[Value]) -> Result<Value, String> + Send + Sync
-```
-
-No `&mut Vm`. No frame. So a native cannot invoke a Rak function, cannot
-suspend, and cannot resume. Anything that needs to do one of those is not
-expressible as a native:
-
-| Family | Count | What it needs |
+| Family | Names | How it closed |
 | --- | --- | --- |
-| `channel`, `chan_send`, `chan_recv`, `select`, `timeout`, `await_all`, `task_group` | 7 | Channels and suspension |
-| `net_listen`, `net_accept`, `net_connect`, `net_local_addr`, `http_server_poll`, `tcp_*`, `ws_*` | 15 | Blocking I/O, and `tcp_connect_async` needs suspension |
-| `dns_lookup`, `reverse_dns`, `scan_ports`, `scan_subdomains`, `subdomain_enum` | 5 | Threads or async I/O |
-| `extern_call` | 1 | FFI trampolines through VM frames |
-| `argv`, `expect_error` | 2 | Reachable, but not yet swept |
-| `gui_callback` | 1 | Needs a Rak callback from a native |
-The interpreter does not have this problem because `eval_builtin` takes
-`&mut self`. It can call `call_function_with_values`, and it can hand back out
-a `Future` that the runtime resolves later.
+| Channels | `channel`, `chan_send`, `chan_recv` | Plain natives over `Value::Channel`, which now holds the real `mpsc` endpoints. A blocking `chan_recv` is correct for the same reason it is on the interpreter: the sender runs on another thread. |
+| Future orchestration | `await_all`, `select`, `timeout` | Plain natives that resolve VM futures - the same resolution `Op::Await` performs, factored out. `select` races one thread per future into an `mpsc` and takes the first; `timeout` polls a resolving thread against a deadline. |
+| Concurrency | `task_group`, `expect_error` | Intercepted in `Vm::call_value`, because both must *call a Rak function*, which a `fn(&[Value])` native cannot. `task_group` runs each member on a fresh `Vm` over an OS thread (the `spawn` pattern); `expect_error` calls, catches, and clears `pending_error` so the caller's `try` does not see it. |
+| TCP / WebSocket | `net_listen`, `net_accept`, `net_connect`, `net_local_addr`, `tcp_*`, `ws_*` | Plain natives over two new `Value` variants, `TcpListener` and `TcpStream`. `tcp_connect_async` is the one that wanted suspension, and it gets the same treatment `http_get_async` already had: `spawn_blocking` producing a `Future`. |
+| DNS / recon | `dns_lookup`, `reverse_dns`, `scan_ports`, `scan_subdomains`, `subdomain_enum` | `ext_stdlib.rs` wrappers over the same `rak_stdlib::recon` calls the interpreter makes. |
+| Misc | `argv`, `extern_call` | `argv` reads the `script_argv` thread-local `run_cli` already sets. `extern_call` mirrors the interpreter's stub message exactly - on *both* backends it errors until a Rust wrapper is linked, so the two agree by agreeing on the refusal. |
+| GUI | `gui_callback` | Intercepted in `Vm::call_value`, where the machine can hand the closure and a snapshot of the chunk globals to the GUI's registry; dispatch runs it on a fresh `Vm` on the event-loop thread. |
+
+One of the 31 was not a gap at all: the parity scanner missed
+`http_server_poll` because its registration is split across two lines. The
+scan now skips whitespace after `insert_native(` before expecting the name -
+and requires the quote as the first non-whitespace character, so it cannot
+scrape strings out of the `insert_native` *definition* either.
 
 ### What the structural gate cannot see
 
 `registrations_match` compares *name sets*. It says nothing about whether the
-two implementations of a name agree, which is where the last three divergences
+two implementations of a name agree, which is where the last divergences
 lived. Each was found by running the same program on both, not by reading the
 table:
 
 - **`string(bytes([65, 66]))`** returned `"AB"` on the interpreter and
-  `b"\x41\x42"` on the VM — the VM's `string` native fell through to `Display`,
+  `b"\x41\x42"` on the VM - the VM's `string` native fell through to `Display`,
   which for `Value::Bytes` is a debug form, so a program that built a printable
   glyph got a five-character string where it expected two. Not a missing name:
   a different answer, with no diagnostic.
@@ -102,49 +110,27 @@ table:
   `Op::Print`, so `dump Point { x: 3, y: 4 }` printed `Point (3, 4)` and
   `Point {x: 3, y: 4}` depending on how the program was launched.
 - **Importing a `struct` with an `impl`** was a hard compile error on the VM.
+- **`let (a, b) = ...` at the top level** bound locals on the VM and globals on
+  the interpreter, so a destructured binding was invisible to every closure and
+  spawned task - which turned a `chan_recv` into a hang, not an error.
+- **`await_all([42])`** rejected the non-future on the interpreter and silently
+  passed it through on the VM.
 
-`Op::Print` now consults `__method_<Type>_fmt`, the inliner emits an imported
-module's baked methods, and `string` decodes a buffer's bytes as text. All three
-are pinned by `parity_*` tests, because a structural gate would have passed them
-all along.
+All of these are pinned by `parity_*` tests, because a structural gate would
+have passed every one of them.
 
-**The fix is what this repo calls "coroutines in the VM"**, and it is a project,
-not a list of one-line registrations. The structural gate currently *passes* at
-exactly 31/31 (`MAX_KNOWN_INTERP_ONLY`), so the backlog is bounded rather than
-zero, and the backlog test prints it so the number cannot drift upward
-unnoticed. `registrations_match_strictly` is the version that fails on any gap;
-it is `#[ignore]`d until the count reaches zero.
+### What is still open
 
-### What a coroutine actually needs here
+The registration sets now match; the *behavioural* gaps that remain are
+recorded where they belong rather than here as a count:
 
-"Coroutines" is this repo's shorthand, but the **interpreter does not implement
-cooperative coroutines**. `spawn` starts a real OS thread with a fresh
-`Interpreter` seeded from the closure's environment; `thread_join` joins it, and
-`channel` is a `std::sync::mpsc` pair. So the VM does not need a frame scheduler
-to match the interpreter — it needs the same thing the interpreter does.
-
-`spawn` and `thread_join` are now on both backends for that reason: `spawn`
-lowers to a call the VM intercepts, and `Vm::call_value` starts the closure on a
-fresh `Vm` over an OS thread, joined through `Value::JoinHandle`. That closed
-the first two names. What is left, and why each is harder than `spawn` was:
-
-- **`channel`, `chan_send`, `chan_recv`, `select`** need a channel value on the
-  VM. The interpreter has `Sender`/`Receiver` variants over `std::sync::mpsc`,
-  and a blocking `chan_recv` is fine because the sender runs on another thread;
-  `select` then waits on several receivers.
-- **`timeout`, `await_all`, `task_group`** are built on futures. `Op::Await`
-  already resolves a Tokio future, so these are argument checking and joining a
-  collection, but each needs somewhere to hold the handles.
-- **`net_*`/`tcp_*`/`ws_*`** are blocking I/O, independent of the task work, and
-  `tcp_connect_async` also wants suspension. These are their own decision.
-- **`extern_call`** needs FFI trampolines that re-enter VM frames.
-- **`argv`, `expect_error`** are reachable already and only need sweeping into
-  the VM's builtin table.
-- **`gui_callback`** needs a Rak callback from a native, i.e. the GUI event loop.
-
-The pattern is the same for all of them: intercept in `Vm::call_value`, where
-the machine is available, rather than register a `fn(&[Value])` native — exactly
-as `set_add`, `stream_next`, `spawn` and `thread_join` already are.
+- `ffi_dynamic` skips its dynamic-FFI demo under `rakc vm`, because the VM's
+  `lib.call` path is a stub where the interpreter loads a real library
+  (`examples_parity.rs`, `VM_BLOCKED`).
+- A closure that assigns to an enclosing function's local still works only by
+  the interpreter's copy-of-environment semantics; the VM rejects the compile.
+  See `docs/rak-features-spec.md` (7B) for the capture story.
+- `extern_call` is an honest stub on both backends, as above.
 
 ### Two entries that are allowed to differ
 
