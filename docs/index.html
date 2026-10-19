@@ -3,218 +3,305 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta name="theme-color" content="#fdfcfc">
-    <meta name="description" content="Rak is a programming language for hackers and OSINT investigators. First-class hex, pipelines, regex, binary pattern matching, FFI, memory-mapped files — and a built-in desktop IDE.">
+    <meta name="theme-color" content="#ffffff">
+    <meta name="description" content="Rak is a programming language for hackers and OSINT investigators. First-class hex, pipelines, regex, binary pattern matching, FFI, memory-mapped files - and a built-in desktop IDE.">
     <title>Rak: A language for hackers and OSINT investigators</title>
-    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='4' fill='%23fdfcfc'/%3E%3Cpath d='M9 9l14 0 0 14-14 0z' fill='none' stroke='%23201d1d' stroke-width='2.5'/%3E%3C/svg%3E">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%23000'/%3E%3Cpath d='M10 9l12 0 0 14-12 0z' fill='none' stroke='%23fff' stroke-width='2.4'/%3E%3C/svg%3E">
     <link rel="stylesheet" href="style.css">
 </head>
-<body class="landing">
+<body>
 
-<header class="site-header">
-    <div class="container header-inner">
+<header class="top-nav">
+    <div class="container top-nav-inner">
         <a class="brand" href="index.html">
             <span class="brand-mark">R</span>
             <span class="brand-name">Rak</span>
-            <span class="brand-ver">v8.0.0</span>
+            <span class="brand-ver">v1.0.1</span>
         </a>
         <nav class="site-nav">
             <a href="#features">Features</a>
-            <a href="#status">Status</a>
-            <a href="#feel">Examples</a>
+            <a href="#backends">Backends</a>
+            <a href="#workflow">Workflow</a>
+            <a href="#language">Language</a>
             <a href="docs.html">Docs</a>
         </nav>
         <div class="header-actions">
             <button id="theme-toggle" class="btn btn-ghost btn-sm" type="button" aria-label="Toggle theme"></button>
             <a class="btn btn-ghost btn-sm" href="https://github.com/Louiml/Rak" target="_blank" rel="noopener">GitHub</a>
+            <a class="btn btn-primary btn-sm" href="https://github.com/Louiml/Rak/releases" target="_blank" rel="noopener">Get started</a>
         </div>
     </div>
 </header>
 
 <main>
 
-    <section class="hero">
-        <div class="hero-inner reveal is-visible">
-            <h1 class="hero-title">A language for <span class="grad">hackers</span> &amp; OSINT</h1>
-            <p class="lead">English-readable syntax, first-class hexadecimal, pipelines, regex literals, and a systems stdlib: foreign function calls, zero-copy memory maps, raw sockets, and wire parsers. Write scanners like sentences.</p>
-            <div class="cta-row">
-                <a class="btn btn-primary" href="docs.html">
-                    Read the docs
-                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg>
-                </a>
-                <a class="btn btn-ghost" href="#features">What's new</a>
-                <a class="text-link" href="#feel">See it in action <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg></a>
-            </div>
-        </div>
-
-        <div class="hero-tui reveal is-visible">
-            <div class="tui-bar">
-                <span class="tui-tabs">
-                    <span class="tui-tab">summary</span>
-                    <span class="tui-tab active">terminal</span>
-                    <span class="tui-tab">console</span>
-                </span>
-                <span class="tui-status">rak &mdash; recon.rak &mdash; ~/lab</span>
+    <!-- ============================================================
+         Hero. The sky-blue wash is atmospheric and lives here only.
+         ============================================================ -->
+    <section class="hero-band">
+        <div class="container">
+            <div class="hero-inner reveal is-visible">
+                <p class="hero-badge">
+                    <span class="badge-pill"><span class="dot"></span> v1.0.1 &middot; native GUI</span>
+                </p>
+                <h1 class="hero-title display-mega">A language for <span class="grad">hackers</span><br>&amp; OSINT</h1>
+                <p class="hero-lead body-md">English-readable syntax, first-class hexadecimal, pipelines, regex literals, and a systems stdlib: foreign function calls, zero-copy memory maps, raw sockets, and wire parsers. Write scanners like sentences.</p>
+                <div class="cta-row">
+                    <a class="btn btn-primary" href="docs.html">
+                        Read the docs
+                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg>
+                    </a>
+                    <a class="btn btn-secondary" href="https://github.com/Louiml/Rak/releases" target="_blank" rel="noopener">Download</a>
+                    <a class="text-link" href="#language">See it in action <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg></a>
+                </div>
             </div>
 
-            <div class="tui-wordmark"><pre>███    ██    █  █
-█  █  █  █  █ █
-███   ████   ██
-█ █   █  █  █ █
-█  █  █  █  █  █</pre></div>
-
-            <div class="tui-body">
-                <pre><code data-lang="rak">fn sniff(d: bytes) {
-    match d {
-        [0x89, 'P', 'N', 'G', ..] => { return "png" },
-        ['%', 'P', 'D', 'F', ..] => { return "pdf" },
-        _ => { return "unknown" },
+            <!-- The device composite is the page chrome: a MacBook running the
+                 IDE, with a phone showing a scan in flight. -->
+            <div class="device-mockup reveal is-visible">
+                <div class="device-laptop">
+                    <div class="device-screen">
+                        <div class="ide">
+                            <div class="ide-titlebar">
+                                <span class="ide-dot"></span>
+                                <span class="ide-dot"></span>
+                                <span class="ide-dot"></span>
+                                <span class="ide-title">hexhunt &mdash; rak</span>
+                            </div>
+                            <div class="ide-body">
+                                <aside class="ide-tree">
+                                    <div class="sel">hexhunt</div>
+                                    <div>&nbsp;&nbsp;src</div>
+                                    <div>&nbsp;&nbsp;&nbsp;&nbsp;main.rak</div>
+                                    <div>&nbsp;&nbsp;&nbsp;&nbsp;model.rak</div>
+                                    <div>&nbsp;&nbsp;&nbsp;&nbsp;sweep.rak</div>
+                                    <div class="dim">&nbsp;&nbsp;tests</div>
+                                    <div class="dim">&nbsp;&nbsp;packages</div>
+                                </aside>
+                                <div class="ide-editor">
+<pre><code><span class="tok-com">// binary pattern matching over bytes</span>
+<span class="tok-kw">fn</span> <span class="tok-fn">sniff</span>(d: <span class="tok-typ">bytes</span>) {
+    <span class="tok-kw">match</span> d {
+        [<span class="tok-num">0x89</span>, <span class="tok-str">'P'</span>, <span class="tok-str">'N'</span>, <span class="tok-str">'G'</span>, ..] =&gt; { <span class="tok-kw">return</span> <span class="tok-str">"png"</span> },
+        [<span class="tok-num">0xFF</span>, <span class="tok-num">0xD8</span>, <span class="tok-num">0xFF</span>, ..] =&gt; { <span class="tok-kw">return</span> <span class="tok-str">"jpeg"</span> },
+        _ =&gt; { <span class="tok-kw">return</span> <span class="tok-str">"unknown"</span> },
     }
 }
 
-let m = mmap_open("trace.pcap", "r")
-let hits = mmap_slice(m, 0x1000, 64)
-    |> regex_find_all(/\d+\.\d+\.\d+\.\d+/g)
-dump hits</code></pre>
-
-                <div class="tui-prompt-row">
-                    <span class="tui-caret">&#9646;</span>
-                    <span>rak&gt; scan "10.0.0.0/24" { range: [0x0016, 0x01F4] }</span>
+<span class="tok-com">// zero-copy over a mapped capture</span>
+<span class="tok-kw">let</span> m = <span class="tok-fn">mmap_open</span>(<span class="tok-str">"trace.pcap"</span>, <span class="tok-str">"r"</span>)
+<span class="tok-kw">let</span> hits = <span class="tok-fn">mmap_slice</span>(m, <span class="tok-num">0x1000</span>, <span class="tok-num">64</span>)
+    |&gt; <span class="tok-fn">regex_find_all</span>(/\d+\.\d+\.\d+\.\d+/g)</code></pre>
+                                </div>
+                            </div>
+                            <div class="ide-terminal">
+<span class="cmd">$</span> rakc run hexhunt capture.bin
+<span class="ok">findings: 3</span>
+<span class="ok">0x00000000  PNG  image</span>
+<span class="ok">0x0000000B  JPEG  image</span>
+<span class="ok">0x0000000F  PDF  document</span>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="device-laptop-base"></div>
                 </div>
-            </div>
 
-            <div class="tui-keyhints">
-                <span><b>tab</b> switch agent</span>
-                <span><b>ctrl-p</b> commands</span>
-                <span><b>ctrl-r</b> run</span>
+                <div class="device-phone">
+                    <div class="device-phone-screen">
+                        <div class="phone-status"><span>21:04</span><span>5G</span></div>
+                        <div class="phone-body">
+<span class="cmd">$</span> rakc run scan.rak
+<span class="warn">[SCAN] 10.0.0.0/24</span>
+<span class="ok">[DUMP] 0x0016 open</span>
+<span class="ok">[DUMP] 0x0050 open</span>
+<span class="ok">[DUMP] 443 open</span>
+                        </div>
+                    </div>
+                </div>
             </div>
         </div>
     </section>
 
+    <!-- ============================================================ -->
     <section class="section" id="features">
         <div class="container">
             <div class="section-head reveal">
-                <p class="kicker">Features</p>
-                <h2 class="section-title">What is Rak?</h2>
-                <p class="section-sub">One frontend, two backends: a tree-walking interpreter and a bytecode VM. Everything below ships in the compiler and works in the IDE.</p>
+                <p class="kicker caption-uppercase">Features</p>
+                <h2 class="section-title display-lg">What is Rak?</h2>
+                <p class="section-sub">One frontend, two backends. Everything below ships in the compiler and works in the IDE.</p>
             </div>
 
             <div class="feature-grid">
-                <div class="feature reveal">
-                    <div class="feature-ico">[+]</div>
-                    <h4>Pipeline <code style="color:var(--ink)">|&gt;</code></h4>
-                    <p>Chain calls left-to-right. <code>data &#124;&gt; parse &#124;&gt; load</code> reads top-to-bottom like a sentence.</p>
+                <div class="feature-card reveal">
+                    <div class="feature-ico">|&gt;</div>
+                    <h3 class="title-md">Pipeline <code>|&gt;</code></h3>
+                    <p>Chain calls left-to-right. <code>data |&gt; parse |&gt; load</code> reads top-to-bottom like a sentence.</p>
                 </div>
-                <div class="feature reveal">
-                    <div class="feature-ico">[+]</div>
-                    <h4>Regex literals</h4>
-                    <p>Write <code>/\d+/g</code> inline. A <code>/</code> after a value is division; everywhere else it's a regex.</p>
+                <div class="feature-card reveal">
+                    <div class="feature-ico">/\d+/</div>
+                    <h3 class="title-md">Regex literals</h3>
+                    <p>Write <code>/\d+/g</code> inline. A <code>/</code> after a value is division; everywhere else it is a regex.</p>
                 </div>
-                <div class="feature reveal">
-                    <div class="feature-ico">[+]</div>
-                    <h4>Binary patterns</h4>
+                <div class="feature-card reveal">
+                    <div class="feature-ico">0x89</div>
+                    <h3 class="title-md">Binary patterns</h3>
                     <p>Match byte slices by magic number: <code>[0x89, 'P', 'N', 'G', ..]</code>. Built for PCAP and file sniffing.</p>
                 </div>
-                <div class="feature reveal">
-                    <div class="feature-ico">[+]</div>
-                    <h4>Traits &amp; protocols</h4>
+                <div class="feature-card reveal">
+                    <div class="feature-ico">impl</div>
+                    <h3 class="title-md">Traits &amp; protocols</h3>
                     <p>Implement <code>Display</code>, <code>Iterable</code>, <code>Index</code>. They drive <code>dump</code>, <code>for</code>, and <code>obj[key]</code>.</p>
                 </div>
-                <div class="feature reveal">
-                    <div class="feature-ico">[+]</div>
-                    <h4>Systems stdlib</h4>
+                <div class="feature-card reveal">
+                    <div class="feature-ico">C</div>
+                    <h3 class="title-md">Systems stdlib</h3>
                     <p>FFI, memory-mapped files, raw sockets, async I/O, DNS/TLS/PCAP parsers, macros, and modules.</p>
                 </div>
-                <div class="feature reveal">
-                    <div class="feature-ico">[+]</div>
-                    <h4>Bytecode VM</h4>
-                    <p>The VM runs the same code ~6x faster than the tree-walker. Compare with <code>rakc bench</code>.</p>
+                <div class="feature-card reveal">
+                    <div class="feature-ico">~6x</div>
+                    <h3 class="title-md">Bytecode VM</h3>
+                    <p>The VM runs the same code about six times faster than the tree-walker. Compare with <code>rakc bench</code>.</p>
                 </div>
-                <div class="feature reveal">
-                    <div class="feature-ico">[+]</div>
-                    <h4>VPN toolkit</h4>
-                    <p>X25519 key exchange, ChaCha20-Poly1305 AEAD, HKDF/PBKDF2 key derivation, tunnel framing and an encrypted UDP transport &mdash; all application-layer, Windows-friendly.</p>
+                <div class="feature-card reveal">
+                    <div class="feature-ico">key</div>
+                    <h3 class="title-md">VPN toolkit</h3>
+                    <p>X25519 key exchange, ChaCha20-Poly1305 AEAD, HKDF key derivation, tunnel framing, and an encrypted UDP transport.</p>
                 </div>
-                <div class="feature reveal">
-                    <div class="feature-ico">[+]</div>
-                    <h4>Desktop IDE</h4>
-                    <p>A Tauri + Next.js IDE with a real-time-explorer, smart completion and predictions, an in-editor searchable docs panel (<span class="kbd">Ctrl+K</span>), and recent projects on the welcome screen.</p>
+                <div class="feature-card reveal">
+                    <div class="feature-ico">cite</div>
+                    <h3 class="title-md">Evidence provenance</h3>
+                    <p>Every decoded value can carry where it came from, and a report can cite it. Chain of custody, in the type system.</p>
                 </div>
-            </div>
-        </div>
-    </section>
-
-    <section class="section" id="status">
-        <div class="container">
-            <div class="section-head reveal">
-                <p class="kicker">Project status</p>
-                <h2 class="section-title">Real today, more coming</h2>
-                <p class="section-sub">The interpreter, VM, systems stdlib, standard library, and IDE all run today. The next slice of the spec is macros-rules repetition, live capture, and full libffi.</p>
-            </div>
-
-            <div class="card notice reveal">
-                <h3>Start in 30 seconds</h3>
-                <p>Grab a release from GitHub, or build from source. Then open the IDE and the tutorial walks you through everything new.</p>
-                <div class="btn-row">
-                    <a class="btn btn-primary" href="https://github.com/Louiml/Rak/releases" target="_blank" rel="noopener">
-                        Download
-                    </a>
-                    <a class="btn btn-ghost" href="docs.html">Read the docs</a>
+                <div class="feature-card reveal">
+                    <div class="feature-ico">IDE</div>
+                    <h3 class="title-md">Desktop IDE</h3>
+                    <p>A Tauri + Next.js IDE with a real-time explorer, smart completion, an in-editor docs panel, and a GUI designer.</p>
                 </div>
             </div>
         </div>
     </section>
 
-    <section class="section" id="feel">
+    <!-- ============================================================
+         The two backends. Dark cards: the same program, both engines.
+         ============================================================ -->
+    <section class="section section-alt" id="backends">
         <div class="container">
             <div class="section-head reveal">
-                <p class="kicker">The language</p>
-                <h2 class="section-title">English in, packets out</h2>
+                <p class="kicker caption-uppercase">One language, two engines</p>
+                <h2 class="section-title display-lg">The backends agree</h2>
+                <p class="section-sub">Rak ships a tree-walking interpreter and a bytecode VM. A gate in the test suite compares their builtin registrations name by name, and the gap is zero: every builtin both engines expose, they expose on both.</p>
+            </div>
+
+            <div class="feature-grid">
+                <div class="feature-card feature-card-dark reveal">
+                    <div class="feature-ico">run</div>
+                    <h3 class="title-md">The interpreter</h3>
+                    <p>A tree walker over the AST. It is the reference implementation: contracts, evidence provenance, closures and the GUI all run here first.</p>
+                </div>
+                <div class="feature-card feature-card-dark reveal">
+                    <div class="feature-ico">vm</div>
+                    <h3 class="title-md">The bytecode VM</h3>
+                    <p>A stack machine with the same builtin surface. Channels, TCP, WebSocket, DNS and futures are native there too, not a subset.</p>
+                </div>
+                <div class="feature-card feature-card-dark reveal">
+                    <div class="feature-ico">=</div>
+                    <h3 class="title-md">The gate</h3>
+                    <p>A structural check reads both registration tables and fails on any name they do not share, plus behavioural tests run the same program on each.</p>
+                    <p class="feature-note"><span class="badge-pill badge-pill-warning">Remaining gaps</span></p>
+                    <p class="feature-note">Postconditions and closure capture of locals are still interpreter-only. They are written down, not hidden.</p>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- ============================================================ -->
+    <section class="section" id="workflow">
+        <div class="container">
+            <div class="section-head reveal">
+                <p class="kicker caption-uppercase">Workflow</p>
+                <h2 class="section-title display-lg">From nothing to a shipped tool</h2>
+                <p class="section-sub">Install a release or build from source, then stay in one toolchain.</p>
+            </div>
+
+            <div class="workflow-grid">
+                <div class="workflow-step reveal">
+                    <div class="workflow-step-icon">01</div>
+                    <h4 class="title-sm">Install</h4>
+                    <p>A native installer edits your PATH, sets <code>RAK_PATH</code>, and records every action for clean uninstall.</p>
+                </div>
+                <div class="workflow-step reveal">
+                    <div class="workflow-step-icon">02</div>
+                    <h4 class="title-sm">Write</h4>
+                    <p>One file or a package tree. The IDE, the CLI, and the language server all read the same source.</p>
+                </div>
+                <div class="workflow-step reveal">
+                    <div class="workflow-step-icon">03</div>
+                    <h4 class="title-sm">Run</h4>
+                    <p><code>rakc run</code> on the interpreter, <code>rakc vm</code> on the bytecode, <code>rakc build</code> to a native binary.</p>
+                </div>
+                <div class="workflow-step reveal">
+                    <div class="workflow-step-icon">04</div>
+                    <h4 class="title-sm">Ship</h4>
+                    <p><code>oyvey</code> vendors dependencies into <code>packages/</code> and locks every revision with a checksum.</p>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- ============================================================ -->
+    <section class="section section-alt" id="language">
+        <div class="container">
+            <div class="section-head reveal">
+                <p class="kicker caption-uppercase">The language</p>
+                <h2 class="section-title display-lg">English in, packets out</h2>
                 <p class="section-sub">No ceremony. Read it like a sentence, run it like a scanner.</p>
             </div>
 
-            <div class="grid-2">
-                <figure class="codeblock reveal" data-title="pipeline.rak">
-                    <div class="codeblock-bar" aria-hidden="true"><span class="bar-title">pipeline.rak</span></div>
-                    <pre><code data-lang="rak">fn inc(n) { return n + 1 }
+            <div class="code-grid">
+                <figure class="code-block reveal" data-title="pipeline.rak">
+                    <div class="code-block-bar" aria-hidden="true"><span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-title">pipeline.rak</span></div>
+<pre><code>fn inc(n) { return n + 1 }
 fn dbl(n) { return n * 2 }
 
 // pipeline reads left-to-right
-dump 5 |> inc |> dbl        // 12
+dump 5 |&gt; inc |&gt; dbl        // 12
 
 // regex literals match inline
 let re = /\d+/g
 dump re.find_all("a1 b22 c333")   // [1, 22, 333]</code></pre>
                 </figure>
 
-                <figure class="codeblock reveal" data-title="sniff.rak">
-                    <div class="codeblock-bar" aria-hidden="true"><span class="bar-title">sniff.rak</span></div>
-                    <pre><code data-lang="rak">// binary pattern matching over bytes
+                <figure class="code-block reveal" data-title="sniff.rak">
+                    <div class="code-block-bar" aria-hidden="true"><span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-title">sniff.rak</span></div>
+<pre><code>// binary pattern matching over bytes
 fn sniff(d: bytes) {
     match d {
-        [0x89, 'P', 'N', 'G', ..] => { return "png" },
-        [0xFF, 0xD8, 0xFF, ..] => { return "jpeg" },
-        _ => { return "unknown" },
+        [0x89, 'P', 'N', 'G', ..] =&gt; { return "png" },
+        [0xFF, 0xD8, 0xFF, ..] =&gt; { return "jpeg" },
+        _ =&gt; { return "unknown" },
     }
 }
 dump sniff(b"\x89PNG\x0d\x0a\x1a\x0a")  // png</code></pre>
                 </figure>
 
-                <figure class="codeblock reveal" data-title="ffi.rak">
-                    <div class="codeblock-bar" aria-hidden="true"><span class="bar-title">ffi.rak</span></div>
-                    <pre><code data-lang="rak">// call C from Rak
+                <figure class="code-block reveal" data-title="ffi.rak">
+                    <div class="code-block-bar" aria-hidden="true"><span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-title">ffi.rak</span></div>
+<pre><code>// call C from Rak
 extern "C" from "libc.so.6" {
-    fn abs(n: i32) -> i32
+    fn abs(n: i32) -&gt; i32
 }
 dump abs(-42)                 // 42
 
 let libc = ffi_load("libc.so.6")
-let pid = libc.call("getpid", [])</code></pre>
+dump libc.call("getpid", [])</code></pre>
                 </figure>
 
-                <figure class="codeblock reveal" data-title="recon.rak">
-                    <div class="codeblock-bar" aria-hidden="true"><span class="bar-title">recon.rak</span></div>
-                    <pre><code data-lang="rak">// async I/O + raw packet forging
+                <figure class="code-block reveal" data-title="recon.rak">
+                    <div class="code-block-bar" aria-hidden="true"><span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-title">recon.rak</span></div>
+<pre><code>// async I/O + raw packet forging
 let f = tcp_probe(host, 80, 200)
 let open = await f
 
@@ -227,12 +314,92 @@ dns_query("example.com", "A")</code></pre>
         </div>
     </section>
 
+    <!-- ============================================================
+         The stdlib, as tiles.
+         ============================================================ -->
+    <section class="section" id="stdlib">
+        <div class="container">
+            <div class="section-head reveal">
+                <p class="kicker caption-uppercase">Standard library</p>
+                <h2 class="section-title display-lg">Packs that ship with the compiler</h2>
+                <p class="section-sub">No wrappers to write first. The boring parts are already done, and they behave the same on both backends.</p>
+            </div>
+
+            <div class="ecosystem-grid reveal">
+                <div class="ecosystem-tile">net</div>
+                <div class="ecosystem-tile">crypto</div>
+                <div class="ecosystem-tile">json</div>
+                <div class="ecosystem-tile">osint</div>
+                <div class="ecosystem-tile">http</div>
+                <div class="ecosystem-tile">websocket</div>
+                <div class="ecosystem-tile">vpn</div>
+                <div class="ecosystem-tile">secrets</div>
+                <div class="ecosystem-tile">process</div>
+                <div class="ecosystem-tile">files</div>
+                <div class="ecosystem-tile">mmap</div>
+                <div class="ecosystem-tile">streams</div>
+                <div class="ecosystem-tile">sets</div>
+                <div class="ecosystem-tile">escape</div>
+                <div class="ecosystem-tile">datafmt</div>
+                <div class="ecosystem-tile">pcap</div>
+            </div>
+        </div>
+    </section>
+
+    <!-- ============================================================ -->
+    <section class="cta-band">
+        <div class="container reveal">
+            <h2 class="display-lg">Start in 30 seconds</h2>
+            <p>Grab a release, or build from source. Then open the IDE and the tutorial walks you through everything new.</p>
+            <div class="btn-row">
+                <a class="btn btn-primary" href="https://github.com/Louiml/Rak/releases" target="_blank" rel="noopener">Download</a>
+                <a class="btn btn-secondary" href="docs.html">Read the docs</a>
+            </div>
+        </div>
+    </section>
+
 </main>
 
-<footer>
-    <div class="container footer-inner">
-        <p>Rak &copy; 2026 Louiml &middot; MIT License</p>
-        <p><a href="docs.html">Documentation</a> &middot; <a href="https://github.com/Louiml/Rak/releases" target="_blank" rel="noopener">Releases</a> &middot; <a href="https://github.com/Louiml/Rak" target="_blank" rel="noopener">GitHub</a></p>
+<footer class="footer-light">
+    <div class="footer-grid">
+        <div class="footer-brand">
+            <a class="brand" href="index.html">
+                <span class="brand-mark">R</span>
+                <span class="brand-name">Rak</span>
+            </a>
+            <p>A programming language for hackers, OSINT investigators, and systems programmers.</p>
+        </div>
+        <div class="footer-col">
+            <h5>Learn</h5>
+            <a href="docs.html">Introduction</a>
+            <a href="docs.html#quick-start">Quick start</a>
+            <a href="docs.html#language">Language reference</a>
+            <a href="docs.html#stdlib">Standard library</a>
+        </div>
+        <div class="footer-col">
+            <h5>Build</h5>
+            <a href="docs.html#cli">CLI reference</a>
+            <a href="docs.html#tooling">Tooling &amp; LSP</a>
+            <a href="docs.html#project">Project layout</a>
+            <a href="docs.html#vm">Bytecode VM</a>
+        </div>
+        <div class="footer-col">
+            <h5>Ship</h5>
+            <a href="docs.html#examples">Examples</a>
+            <a href="https://github.com/Louiml/Rak/releases" target="_blank" rel="noopener">Releases</a>
+            <a href="https://github.com/Louiml/Rak" target="_blank" rel="noopener">Source</a>
+        </div>
+        <div class="footer-col">
+            <h5>Safety</h5>
+            <a href="docs.html#safety">Sandbox &amp; capabilities</a>
+            <a href="docs.html#ffi">FFI &amp; mmap</a>
+            <a href="docs.html#concurrency">Concurrency</a>
+            <a href="docs.html#vpn">VPN &amp; tunneling</a>
+        </div>
+    </div>
+    <div class="footer-base">
+        <p class="body-sm">Rak &copy; 2026 Louiml &middot; MIT License</p>
+        <p class="body-sm"><a href="docs.html">Documentation</a> &middot; <a href="https://github.com/Louiml/Rak/releases" target="_blank" rel="noopener">Releases</a> &middot; <a href="https://github.com/Louiml/Rak" target="_blank" rel="noopener">GitHub</a></p>
     </div>
 </footer>
 

@@ -42,7 +42,7 @@ returns `{id, method, path, query, headers, body}` or `nil`.
 ## WebSocket
 
 RFC 6455 framing + handshake built on the TCP stream handle.
-Interpreter-only (the VM has no TCP layer).
+Works on both backends: the VM has a TCP layer, and the frames are byte-for-byte the same.
 
 ```rak
 // server: accept + handshake + echo
@@ -139,5 +139,5 @@ offline / without the feature.
 
 `udp_bind(addr)` returns a `(transport, "ip:port")` pair;
 `udp_send(transport, data, target)`, `udp_recv(transport, max, timeout_ms)`
-(returns `nil` on timeout), `udp_local_addr(transport)`. Interpreter-only;
+(returns `nil` on timeout), `udp_local_addr(transport)`. Both backends;
 used as the conduit under the [VPN toolkit](vpn.html).

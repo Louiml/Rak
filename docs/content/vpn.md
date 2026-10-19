@@ -24,8 +24,8 @@ ephemeral UDP transport, defines `<name>`, `<name>_udp`, `<name>_addr`, and
 `tunnel_key` inside the block scope, then pops the scope when the body ends —
 so the names are undefined outside by design.
 
-The bytecode VM does not implement `tunnel` (it has no UDP transport value) and
-returns a clear `VM does not support 'tunnel' statement` error.
+The bytecode VM lowers `tunnel` to the same UDP transport and key
+derivation natives, so a tunnel runs on both backends.
 
 ## Crypto builtins
 
@@ -43,7 +43,7 @@ returns a clear `VM does not support 'tunnel' statement` error.
 | `tunnel_nonce(seq) -> bytes(12)` | Deterministic 12-byte AEAD nonce. |
 
 The UDP transport builtins (`udp_bind`/`udp_send`/`udp_recv`/`udp_local_addr`)
-are interpreter-only. The pure-crypto set runs on both backends.
+and the pure-crypto set both run on both backends.
 
 ## Key exchange walkthrough
 

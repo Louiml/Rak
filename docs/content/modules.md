@@ -210,5 +210,5 @@ The full list, with reproductions, is in
 are not namespaced". None of it affects a program written as one package with
 distinct names per module.
 
-Also interpreter-only for cross-module types: `pub struct` / `pub enum` export.
-On the VM use `pub let` / `fn` / `const` / `macro` for cross-module exports.
+Cross-module types export the same way on both backends: `pub struct`, `pub enum`,
+`pub let`, `fn`, `const` and `macro` all cross a module boundary.

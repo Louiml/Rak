@@ -7,7 +7,7 @@ Hex is a first-class type. The bytecode VM runs about 6x faster than the tree-wa
 ## Two backends, one language
 
 - **Interpreter** (`rakc run`) — a tree-walker. Every language feature works there.
-- **Bytecode VM** (`rakc vm`) — a stack machine, roughly 6x faster on compute-heavy code. It supports a deliberate subset and fails fast with a clear `VM does not support ...` error for anything else.
+- **Bytecode VM** (`rakc vm`) - a stack machine, roughly 6x faster on compute-heavy code. It registers the same builtins as the interpreter, and a gate in the test suite fails the build if the two ever drift apart. A few *statements* are still interpreter-only, and the VM says so with a clear `VM does not support ...` error rather than guessing.
 
 Both share one parser, and `rakc bench file.rak` compares them on the same script. `rakc build file.rak` produces a self-contained executable with no Rak installation needed on the target machine.
 

@@ -1,6 +1,11 @@
 (function () {
   'use strict';
 
+  // Mark the document as scripted before anything renders, so the stylesheet
+  // knows it is safe to hide the not-yet-revealed elements. Without this the
+  // reveal state is applied by CSS alone and a failed script leaves a blank page.
+  document.documentElement.classList.add('js');
+
   var reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
   // ============================================================
@@ -97,8 +102,8 @@
 
     function openCodeblock(lang) {
       lang = (lang || 'text').trim();
-      return '<figure class="codeblock" data-title="' + escapeHTML(lang) + '">' +
-        '<div class="codeblock-bar" aria-hidden="true"><span class="bar-dot"></span><span class="bar-dot"></span>' +
+      return '<figure class="code-block" data-title="' + escapeHTML(lang) + '">' +
+        '<div class="code-block-bar" aria-hidden="true"><span class="bar-dot"></span><span class="bar-dot"></span>' +
         '<span class="bar-dot"></span><span class="bar-title">' + escapeHTML(lang) + '</span></div>' +
         '<pre><code data-lang="' + escapeHTML(lang) + '">';
     }
@@ -124,7 +129,12 @@
         var raw = h[2].replace(/\s+#+\s*$/, '');
         var plain = raw.replace(/`([^`]+)`/g, '$1');
         var id = slugify(plain);
-        out.push('<h' + level + (level <= 3 ? ' id="' + id + '"' : '') + '>' + mdInline(escapeHTML(raw), currentPage) + '</h' + level + '>');
+        // The display scale lives in the stylesheet; the renderer only picks
+        // which step of it a heading sits at.
+        var scale = { 1: 'display-lg', 2: 'display-md', 3: 'display-sm', 4: 'title-md', 5: 'title-sm', 6: 'title-sm' }[level];
+        out.push('<h' + level + (level <= 3 ? ' id="' + id + '"' : '') +
+          (scale ? ' class="' + scale + '"' : '') + '>' +
+          mdInline(escapeHTML(raw), currentPage) + '</h' + level + '>');
         i++;
         continue;
       }
@@ -351,7 +361,7 @@
             '<div class="md-error">' +
             '<h2>Could not load <code>content/' + escapeHTML(file) + '</code></h2>' +
             '<p>The docs viewer fetches its markdown pages at runtime. Browsers block <code>fetch()</code> from <code>file://</code> URLs &mdash; serve the <code>docs/</code> folder over HTTP, e.g.:</p>' +
-            '<figure class="codeblock" data-title="shell"><div class="codeblock-bar" aria-hidden="true"><span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-title">shell</span></div>' +
+            '<figure class="code-block" data-title="shell"><div class="code-block-bar" aria-hidden="true"><span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-dot"></span><span class="bar-title">shell</span></div>' +
             '<pre><code data-lang="text">cd docs &amp;&amp; python -m http.server 8000\n# then open http://localhost:8000/docs.html</code></pre></figure>' +
             '<p>On GitHub Pages this resolves automatically.</p>' +
             '</div>';
@@ -582,7 +592,7 @@
   }
 
   function initCopyButtons() {
-    document.querySelectorAll('.codeblock').forEach(function (block) {
+    document.querySelectorAll('.code-block').forEach(function (block) {
       var pre = block.querySelector('pre');
       if (!pre) return;
       if (block.querySelector('.copy-btn')) return;
@@ -707,24 +717,22 @@
 
     var stored = null;
     try { stored = localStorage.getItem('rak-theme'); } catch (err) {}
-    var mq = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)');
-    var theme = stored || (mq && mq.matches ? 'dark' : 'light');
+    // The brand is the light palette: a pure white canvas with the sky-blue
+    // wash behind the hero. Dark is an opt-in inversion of the same tokens,
+    // not something the operating system decides - a reader whose machine
+    // happens to be in dark mode still gets the page as designed.
+    var theme = stored || 'light';
 
     function apply(t) {
       root.setAttribute('data-theme', t);
-      btn.textContent = t === 'dark' ? 'light' : 'dark';
+      btn.textContent = t === 'dark' ? 'Light' : 'Dark';
+      btn.setAttribute('aria-label', t === 'dark' ? 'Switch to the light theme' : 'Switch to the dark theme');
       var meta = document.querySelector('meta[name="theme-color"]');
-      if (meta) meta.setAttribute('content', t === 'dark' ? '#141312' : '#fdfcfc');
+      if (meta) meta.setAttribute('content', t === 'dark' ? '#171717' : '#ffffff');
       try { localStorage.setItem('rak-theme', t); } catch (err) {}
     }
 
     apply(theme);
-
-    if (!stored && mq) {
-      var onChange = function (e) { apply(e.matches ? 'dark' : 'light'); };
-      if (mq.addEventListener) mq.addEventListener('change', onChange);
-      else if (mq.addListener) mq.addListener(onChange);
-    }
 
     btn.addEventListener('click', function () {
       apply(root.getAttribute('data-theme') === 'dark' ? 'light' : 'dark');

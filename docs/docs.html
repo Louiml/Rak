@@ -3,31 +3,39 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta name="theme-color" content="#fdfcfc">
+    <meta name="theme-color" content="#ffffff">
     <meta name="description" content="Rak language documentation: a programming language for hackers, OSINT investigators, and systems programmers.">
     <title>Rak Documentation</title>
-    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='4' fill='%23fdfcfc'/%3E%3Cpath d='M9 9l14 0 0 14-14 0z' fill='none' stroke='%23201d1d' stroke-width='2.5'/%3E%3C/svg%3E">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%23000'/%3E%3Cpath d='M10 9l12 0 0 14-12 0z' fill='none' stroke='%23fff' stroke-width='2.4'/%3E%3C/svg%3E">
     <link rel="stylesheet" href="style.css">
 </head>
-<body class="docs">
+<body>
 
-<header class="site-header">
-    <div class="container header-inner">
+<header class="top-nav">
+    <div class="container top-nav-inner">
         <a class="brand" href="index.html">
             <span class="brand-mark">R</span>
             <span class="brand-name">Rak</span>
-            <span class="brand-ver">v8.0.0</span>
+            <span class="brand-ver">v1.0.1</span>
         </a>
         <nav class="site-nav">
-            <a href="https://github.com/Louiml/Rak" target="_blank" rel="noopener">GitHub</a>
-            <a href="https://github.com/Louiml/Rak/releases" target="_blank" rel="noopener">Releases</a>
+            <a href="index.html#features">Features</a>
+            <a href="index.html#backends">Backends</a>
+            <a href="index.html#language">Language</a>
+            <a href="index.html">Overview</a>
         </nav>
         <div class="header-actions">
             <button id="theme-toggle" class="btn btn-ghost btn-sm" type="button" aria-label="Toggle theme"></button>
-            <a class="btn btn-ghost btn-sm" href="index.html">Overview</a>
+            <a class="btn btn-ghost btn-sm" href="https://github.com/Louiml/Rak" target="_blank" rel="noopener">GitHub</a>
+            <a class="btn btn-primary btn-sm" href="https://github.com/Louiml/Rak/releases" target="_blank" rel="noopener">Get started</a>
         </div>
     </div>
 </header>
+
+<div class="progress" aria-hidden="true"><span data-width="100"></span></div>
 
 <main class="docs-body">
     <div class="container docs-layout">

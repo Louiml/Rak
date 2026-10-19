@@ -175,8 +175,8 @@ fn sniff(data: bytes) {
 dump sniff(b"\x89PNG\x0d\x0a\x1a\x0a")  // png
 ```
 
-Without `..`, the pattern matches an exact length. Byte patterns are
-interpreter-only (the VM errors clearly). Always terminate match arms with `,`.
+Without `..`, the pattern matches an exact length. Byte patterns work on both
+backends. Always terminate match arms with `,`.
 
 ## Membership: `x in collection`
 
@@ -301,8 +301,9 @@ for n in Range { lo: 1, hi: 5 } { s = s + n }
 dump s   // 15
 ```
 
-Trait protocols and method-call dispatch are interpreter-only; on the VM,
-`obj.method(...)` is limited to maps/structs holding callables.
+Trait protocols and method-call dispatch work on both backends. An `impl` block
+is baked into method globals at compile time, so `obj.method(...)` dispatches on
+the receiver's runtime type on the VM exactly as it does on the interpreter.
 
 ## Defer
 

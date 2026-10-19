@@ -119,13 +119,14 @@ jobs:
         if: always()
         run: |
           echo "See the 'Run the test suites' step for per-suite results."
-          echo "backend parity is expected to FAIL until VM coroutines land;"
-          echo "docs/V8-BACKEND-PARITY.md lists the 34 remaining builtins."
+          echo "backend parity is expected to PASS: the two backends register"
+          echo "the same builtins, and docs/V8-BACKEND-PARITY.md records what closed it."
 
-      - name: Report the remaining backend-parity gap
-        # Prints the current shortfall without failing. The gate test in the
-        # suite above already fails on it; this makes the number visible without
-        # digging out an ignored test, so the trend is readable at a glance.
+      - name: Report the backend-parity registration sets
+        # Prints both registration sets without failing. The gate test in the
+        # suite above already requires them to be identical; this makes the
+        # contents visible without digging out an ignored test, so the surface
+        # stays readable at a glance.
         if: runner.os == 'Linux'
         run: |
           cargo test -p rakc --test backend_parity -- --ignored --nocapture parity_backlog_report || true

@@ -19,7 +19,7 @@ clear message.
 | Pipeline `\|>` | yes | yes (desugar) |
 | Regex literals | yes (methods + builtins) | yes (builtins) |
 | Binary pattern matching | yes | yes (`Op::MatchPat` descriptors) |
-| Trait protocols | yes | no (graceful error) |
+| Trait protocols | yes | yes (`__method_*` globals, `Op::CallMethod`) |
 | Method-call dispatch | yes | yes (`Op::CallMethod`) |
 | User enum patterns (`Event::Variant(..)`) | yes | yes (`Op::MatchPat`) |
 | Generic functions (`fn f<T>`) | yes | yes |
@@ -44,9 +44,9 @@ clear message.
 | CLI (`argv()`, `parse_args`) | yes | yes |
 | Tunnel / UDP transport | yes | yes (`Value::UdpTransport`, `tunnel` lowering) |
 | Inline assembly (`asm`) | yes | **no**, by design (see below) |
-| WebSocket | yes | no (no TCP layer) |
+| WebSocket | yes | yes (`Value::TcpStream`, RFC 6455 framing) |
 | Threads (`spawn`, `thread_join`) | yes | yes (OS thread, `Value::JoinHandle`) |
-| Channels & select (`channel`, `chan_send`, `chan_recv`, `select`, `timeout`, `task_group`, `await_all`) | yes | no (needs channel values) |
+| Channels & select (`channel`, `chan_send`, `chan_recv`, `select`, `timeout`, `task_group`, `await_all`) | yes | yes (`Value::Channel`; `select` races a thread per future) |
 
 The `yes`/`no` column is the authoritative backend-parity list, and it is
 checked rather than maintained by hand: `tests/backend_parity.rs` compares the
@@ -55,18 +55,26 @@ cannot be added to one side and forgotten on the other. The v8.0.0 release
 shipped nineteen builtins that existed only in the VM, and the suite did not
 notice.
 
-**Remaining gaps as of 0.9.1.** 31 interpreter-only builtins. The channel and
-socket families plus the async DNS lookups (27 of them) are blocked on one
-thing: a VM native has signature `fn(&[Value])`, so it cannot call a Rak
-function, suspend or resume. (`spawn` and `thread_join` are now on both
-backends: the interpreter backs a task with an OS thread, and the VM does too.)
-`gui_callback` needs the GUI event loop; `extern_call`
-is simply unimplemented on the VM. `argv` and `expect_error` are CLI
-plumbing with no path to parity. `asm` and `exit` are interpreter-only by
-design: a bytecode VM has no instructions to escape into, and the CLI exits
-the process itself.
+**The registration gap is closed.** The two backends register the same
+builtins, and the gate that compares their registration tables fails the
+build when they diverge.
 
-`docs/V8-BACKEND-PARITY.md` has the full list and the reasoning;
+The last of the gap was closed by recognising that most of it was never a
+coroutine problem. A VM native has the signature `fn(&[Value])`, so it cannot
+*call* a Rak function - but it can block, and the interpreter's versions of
+the channel, socket, DNS and future builtins block too. They are now plain
+natives on the VM, with the two that genuinely need the machine
+(`task_group`, `expect_error`, `gui_callback`) intercepted in `Vm::call_value`.
+
+`asm` and `exit` are still interpreter-only, by design rather than by gap: a
+bytecode VM has no instructions to escape into, and the CLI exits the process
+itself.
+
+What remains is narrower, and it is behavioural rather than a missing name:
+`ensures` postconditions do not compile on the VM, and a closure that
+assigns to an enclosing function's local is only accepted by the
+interpreter's copy-of-environment semantics. `docs/V8-BACKEND-PARITY.md` has
+the reasoning and the list.
 `docs/V8-ROADMAP.md` has what closing it would take.
 
 ## New in 0.9.0
