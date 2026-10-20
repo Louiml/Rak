@@ -1,42 +1,152 @@
 # Language reference
 
+Rak is dynamically typed with optional annotations, and it has two backends
+that agree. This page is the syntax and semantics; the [standard
+library](stdlib.html) is the builtins.
+
+## Comments and whitespace
+
+```rak
+// a line comment
+/* a block comment */
+```
+
+`///` and `//!` are **not** doc comments — they are ordinary comments and are
+discarded. Rak has no doc comments and no attributes: `#![allow(dead_code)]`
+is a lexer error.
+
+## Literals
+
+### Integers
+
+```rak
+42          // decimal
+1_000_000   // underscores between digits
+0xDEADBEEF  // hex
+0b1010      // binary
+0o755       // octal
+```
+
+Hex, binary and octal literals are unsigned. A typed suffix may be applied to
+a **decimal** literal only:
+
+```rak
+42i32
+10u8
+1_0i64
+```
+
+The suffixes are `i8 i16 i32 i64 u8 u16 u32 u64`. `0x1Au8` is not a literal —
+the suffix is a separate identifier.
+
+### Floats
+
+```rak
+3.14
+1_000.5
+1.5e3
+3.14f32
+```
+
+A fractional part is required: `.5` is a syntax error, and `1e10` is an
+identifier, not a float. The only float suffix is `f32`.
+
+### Characters
+
+```rak
+'a'
+'א'
+'\u{03B1}'    // α
+'\x41'        // A
+'\n' '\'' '\\'
+```
+
+A character is a code point, and `ord`/`chr` agree with that.
+
+### Strings
+
+```rak
+"plain"
+"escapes: \" \\ \n \t \r \0 \x41"
+r"raw: \n is two characters"
+"""multi
+line"""
+f"interpolated {name}, {{literal braces}}"
+```
+
+An unknown escape in a normal string is kept verbatim rather than dropped, and
+a malformed `\x` keeps its digits.
+
+### Bytes
+
+```rak
+b"\x89PNG\r\n"
+```
+
+Bytes are a distinct type from strings. Indexing yields an integer.
+
+### Regular expressions
+
+```rak
+/\d+/g
+/[a-z]+/i
+```
+
+A `/` after a value is division; a `/` in operand position starts a regex.
+Flags are `i` (case-insensitive), `m` (multi-line), `s` (dotall) and `x`
+(extended). A regex value has methods (`is_match`, `find_all`, `replace`) and
+there are free-function forms (`regex_find_all(/…/g, text)`) that work the
+same way on both backends.
+
+### Collections
+
+```rak
+[1, 2, 3]             // array
+[]                     // empty array
+(1, 2)                // tuple
+(1,)                   // one-element tuple
+()                     // empty tuple
+{ name: "rak", n: 1 } // map
+{ "name": "rak" }      // string keys work too
+```
+
+A map literal's **first** key must be an identifier or a string; later keys
+may be any expression. `{1: 2}` is not a map — it is parsed as a block, and
+fails.
+
+There are no set literals. Build one with `set_of([...])`.
+
 ## Variables
 
 ```rak
 let target = "192.168.1.1"
-let port = 0x0050
 let mut counter = 0
-counter = counter + 1
-let pi = 3.14f64
-let n = 42i32
+let pi: f64 = 3.14
+let (host, port) = ("10.0.0.5", 443)      // destructuring
+let [first, second] = [10, 20]
+let Point { x, y } = Point { x: 1, y: 2 }
 ```
 
-`let` binds an immutable value; `let mut` allows reassignment. Assigning to an
-immutable binding is an error (`cannot assign to immutable variable 'x'`), on
-the interpreter and the VM alike. Literals carry optional type suffixes
-(`42i32`, `3.14f64`, `42u8`).
+`mut` goes before the name; the type annotation goes after it and before `=`.
+A `let` binding is immutable, and assigning to one is an error on both
+backends.
+
+Destructuring supports tuple, array and struct patterns.
+
+## Assignment
+
+Assignment is an expression, and `=` is right-associative.
 
 ```rak
-let mut counter = 0          // ok: mutable
 counter = counter + 1
-// let fixed = 0
-// fixed = 1                 // error: cannot assign to immutable variable 'fixed'
+counter += 1
+xs[0] = 9
+obj.field = 9
+a, b = b, a
 ```
 
-## Numeric literals
-
-Plain decimals, plus base-prefixed literals:
-
-```rak
-let dec = 42
-let bin = 0b101010           // 42
-let oct = 0o755              // 493
-let hex = 0xFF               // 255
-let big = 1_000_000          // underscores are allowed
-```
-
-All integer forms compare equal by value, so `0xA == 10` is `true`. Typed
-suffixes (`i8`...`u64`, `f32`/`f64`, `1e10f64`) select the representation.
+Compound assignment (`+= -= *= /= %= &= |= ^= <<= >>=`) takes a bare
+identifier only — not an index or a field.
 
 ## Functions
 
@@ -44,304 +154,340 @@ suffixes (`i8`...`u64`, `f32`/`f64`, `1e10f64`) select the representation.
 fn add(a, b) {
     return a + b
 }
-dump add(0x10, 0x20)   // 48
-```
 
-Closures are lexical: free variables resolve at the definition site, not the
-call site. Recursive closures like
-`let f = fn(n) { if n < 2 { return n } return f(n-1) + f(n-2) }` just work.
+fn add(a, b) -> int {
+    return a + b
+}
 
-## Generic functions
-
-Declare type parameters in angle brackets. The runtime is dynamically typed, so
-a generic body works for any argument; the type parameters are validated and
-then ignored:
-
-```rak
 fn identity<T>(value: T) -> T {
     return value
 }
-dump identity<int>(42)        // 42
-dump identity<string>("hi")   // hi
-dump identity(99)             // inferred: 99
 ```
+
+A `fn` declaration is a `let` binding of a function value, which is why
+`pub fn` and `pub let` behave alike. Generic parameters are parsed and
+**discarded**: the language is dynamically typed, and `identity<int>(42)` is a
+dynamic call with a type argument the runtime ignores.
+
+A function body without an explicit `return` evaluates to `nil`.
+
+### Closures
+
+```rak
+let f = fn(n) { if n < 2 { return n } return f(n-1) + f(n-2) }
+```
+
+Free variables resolve at the **definition** site: a closure sees the function
+it was written in, by value. An assignment inside a closure lands in the
+closure's own copy, and the enclosing function never sees it. A *global* is
+not copied — a closure reads and writes the program's globals on both
+backends.
+
+An expression-bodied lambda parses but returns `nil`:
+
+```rak
+fn(x) x + 1        // parses, evaluates to nil
+fn(x) { return x + 1 }   // this is what you want
+```
+
+### Contracts
+
+`requires` and `ensures` come after the body. `ensures` clauses see `result`
+bound to the value the caller receives.
+
+```rak
+fn double(x) -> int {
+    return x * 2
+} requires x > 0 ensures result == x * 2
+```
+
+Both backends check them, and `rakc verify` reports them under a budget. A
+violation names the function and the clause.
+
+### `defer`
+
+```rak
+fn work() {
+    defer cleanup()
+    defer dump "runs first"
+}
+```
+
+Deferred calls run in LIFO order when the current function exits — after the
+return value is computed, and before an `ensures` clause is judged, so a
+cleanup has already happened when the promise is checked.
 
 ## Control flow
 
 ```rak
-if port == 0x0050 {
-    dump "HTTP"
-} else {
-    dump "Other"
+if cond { … } else if other { … } else { … }
+
+if let PATTERN = expr { … } else { … }
+
+while cond { … }
+while let PATTERN = expr { … }
+do { … } while cond;
+loop { … }
+
+for x in [1, 2, 3] { … }
+for i, x in pairs { … }
+```
+
+`if` is an expression, so `let x = if cond { 1 } else { 2 }` works. `if let`
+is a statement.
+
+`for` iterates arrays, tuples, strings (yielding one-character strings), maps
+(yielding `[key, value]` tuples), `Some` values, sets, and anything with an
+`Iterable` implementation.
+
+### Labels
+
+A label has **no closing quote**:
+
+```rak
+'outer: for x in rows {
+    for y in x {
+        if y == 0 { break 'outer }
+    }
 }
-
-for x in [1, 2, 3] { dump x }
-while counter < 0x0A { counter = counter + 1 }
-loop { break }
 ```
 
-## Types
-
-Signed and unsigned ints (i8 through i64, u8 through u64), floats (f32, f64),
-typed literals like `42i32` and `3.14f64`, tuples, `Result`/`Option`, strings,
-`char`, `bytes`, maps, arrays, structs, and enums. Hex is a first-class type
-(`hex8`/`hex16`/`hex32`/`hex64`).
-
-## Characters
-
-`char` holds a single Unicode scalar. It is distinct from `u8` and `bytes`.
-Write a character directly, or use an escape:
-
-```rak
-let a: char = 'A'
-let newline = '\n'
-let hebrew = 'א'
-let alpha = '\u{03B1}'   // α
-```
-
-Supported escapes: `\n`, `\r`, `\t`, `\\`, `\'`, `\"`, `\0`, `\xNN`, and
-`\u{HEX}`. A `char` is truthy except for `'\0'`.
-
-## Hex arithmetic
-
-```rak
-let sig = 0xDEADBEEF
-let mask = 0xFF00FF00
-dump fmt("0x{:08X}", sig & mask)
-```
-
-## String interpolation
-
-```rak
-let name = "Rak"
-dump f"hello {name}!"
-```
-
-## Tuples and structs
-
-```rak
-let p = (1, 2)
-dump p.1
-struct Point { x: int, y: int }
-let o = Point { x: 1, y: 2 }
-dump o.x
-```
+`break 2` breaks out of two enclosing loops. `continue` works the same way.
 
 ## Pattern matching
 
 ```rak
-match 2 {
+match value {
     1 => { dump "one" },
     2 => { dump "two" },
+    x if x > 100 => { dump "big" },
     _ => { dump "other" }
 }
 ```
 
-Arms may be comma-separated or newline-separated. Patterns can destructure
-arrays and tuples, match literals, use a `_` catch-all, and match user enum
-variants.
+Arms are separated by commas or newlines — the comma is optional. An arm body
+is a single expression; `{ … }` is a block expression.
+
+Or-patterns need a leading pipe: `| 1 | 2 => { … }`.
+
+## Operators and precedence
+
+Loosest to tightest:
+
+| Level | Operators |
+|---|---|
+| 1 | `\|>` pipeline (left) |
+| 2 | `=`, `+=`, `a, b = c, d` (right) |
+| 3 | `??` (right) |
+| 4 | `? :` ternary, postfix `?` (right) |
+| 5 | `\|\|` (left) |
+| 6 | `&&` (left) |
+| 7 | `==` `!=` (left) |
+| 8 | `<` `>` `<=` `>=` `in` (left) |
+| 9 | `..` range |
+| 10 | `&` `\|` `^` — all three at the **same** level (left) |
+| 11 | `<<` `>>` (left) |
+| 12 | `+` `-` (left) |
+| 13 | `*` `/` `%` (left) |
+| 14 | unary `-` `!` `~` `await` `spawn` `raise` |
+| 15 | postfix `()` `[]` `.` `::` `?.` `?[` `?` `as` `!()` |
+
+`as` binds tighter than every binary operator, so `x as int + 1` is
+`(x as int) + 1`.
+
+Comparisons are not chainable: `1 < 2 < 3` is an error, because it evaluates
+`(1 < 2) < 3`.
+
+`+` concatenates strings and arrays as well as adding numbers. `/` on two
+integers is integer division.
+
+### The `?` operator
+
+`?` is context-sensitive. `expr?` unwraps a `Result` or `Option` and raises
+on `Err`/`None`. `cond ? a : b` is a ternary. Which one you get depends on
+whether the token after `?` can start an expression:
 
 ```rak
-enum Event {
-    Connect(string),
-    Disconnect(i32)
-}
-
-let e = Event::Connect("host")
-match e {
-    Event::Connect(host) => { dump host }      // "host"
-    Event::Disconnect(code) => { dump code }
-}
+let v = Ok(42)?          // unwrap
+let name = flag ? "yes" : "no"   // ternary
 ```
 
-Unit variants (`enum State { Ready, Running, Finished }`) match the same way.
-The static checker (`rakc check`) flags a non-exhaustive match that leaves a
-unit variant uncovered, and flags a variant pattern matched twice.
+So `x? { … }` is a ternary, because `{` can start an expression.
 
-## Binary pattern matching
+`??` is nil-coalescing: `a ?? b` is `b` when `a` is `nil` or `None`.
 
-Match a `bytes` value against byte literals (hex, int, or char) with a trailing
-`..` to match the rest. Useful for magic-number sniffing.
+### Ranges
+
+`..` is **inclusive** as a value and **exclusive** as a slice bound. That
+difference is real and deliberate:
 
 ```rak
-fn sniff(data: bytes) {
-    match data {
-        [0x89, 'P', 'N', 'G', ..] => { return "png" },
-        [0xFF, 0xD8, 0xFF, ..] => { return "jpeg" },
-        ['%', 'P', 'D', 'F', ..] => { return "pdf" },
-        _ => { return "unknown" },
-    }
-}
-dump sniff(b"\x89PNG\x0d\x0a\x1a\x0a")  // png
+dump 1..5              // [1, 2, 3, 4, 5]
+dump [1, 2, 3, 4][1..3] // [2, 3]
+dump [1, 2, 3, 4][..2]  // [1, 2]
 ```
 
-Without `..`, the pattern matches an exact length. Byte patterns work on both
-backends. Always terminate match arms with `,`.
+Negative indices count from the end: `xs[-1]` is the last element. Slicing
+clamps; out-of-range indices are an error.
 
-## Membership: `x in collection`
-
-`in` tests membership and returns a bool — substring for strings, element for
-arrays/tuples, key for maps, byte for `bytes`:
+### Casts
 
 ```rak
-dump "ell" in "hello"            // true
-dump "x" in "hello"              // false
-dump 2 in [1, 2, 3]              // true
-dump "a" in { a: 1 }             // true
-dump 0x4D in b"MZ"               // true
+dump 65 as char       // 'A'
+dump 300 as u8        // error: 300 is out of range
 ```
 
-Works on both backends; `in` is also the keyword used in `for` headers and
-`for ... in` iteration.
+Casts work between numbers, from a number to a string, and between a number
+and a `char` (the code point). Casting a string to a number is an error.
 
-## Destructuring `let`
+### Pipelines
 
-Bind names directly from arrays, tuples, and structs:
+`x |> f` is `f(x)`, and `x |> f(a, b)` is `f(x, a, b)`. The desugaring
+happens in the front end, so both backends see the same call.
 
-```rak
-let (host, port) = ("10.0.0.5", 443)
-let [a, b, rest] = [1, 2, 3]     // rest = 3
-let [_, second] = [10, 20]       // _ skips
-let [p, [q, r]] = [1, [2, 3]]    // nested
-let Point { x, y } = origin      // struct fields
-
-let mut (lo, hi) = (1, 2)
-lo = hi + 1
-```
-
-A mismatch (`let (a, b) = (1, 2, 3)`) raises a clear
-`destructuring failed` error on the interpreter and the VM. The same patterns
-work in `match`, `if let`, and `for` headers.
-
-## Slice indexing and negative indices
-
-`xs[a..b]`, `xs[..b]`, and `xs[a..]` slice strings (char-based), arrays,
-tuples, and bytes. Bounds clamp; a negative bound counts from the end. Single
-negative indices also work, as do negative index-assigns:
-
-```rak
-let d = [10, 20, 30, 40, 50]
-dump d[1..3]      // [20, 30]
-dump d[..2]       // [10, 20]
-dump d[-2..]      // [40, 50]
-dump d[-1]        // 50
-dump "hello"[1..3] // el
-let mut xs = [1, 2, 3]
-xs[-1] = 99       // [1, 2, 99]
-```
-
-Writing out of bounds (`xs[5] = 0`) raises on both backends — the interpreter
-used to silently ignore it; it now matches the VM's `index-assign: index 5 out
-of bounds` error.
-
-## Pipeline operator
-
-`x |> f` desugars to `f(x)`, and `x |> f(a, b)` to `f(x, a, b)`. Chaining is
-left-associative, so `data |> parse |> load` is `load(parse(data))`. Works on
-both the interpreter and the bytecode VM (parse-time desugar, no new opcode).
-
-```rak
-fn inc(n) { return n + 1 }
-fn dbl(n) { return n * 2 }
-dump 5 |> inc |> dbl          // 12
-dump 3 |> add(10)             // 13
-```
-
-## Regex literals
-
-`/pattern/flags` with flags `i` (case-insensitive), `m` (multi-line), `s`
-(dotall), `x` (extended), `g` (accepted, no-op). A `/` after a value is
-division; a `/` in operand position starts a regex.
-
-```rak
-let re = /\d+/g
-dump re.is_match("abc123")             // true
-dump re.find_all("a1 b22 c333")        // [1, 22, 333]
-dump (/\s+/g).replace("a  b   c", "_") // a_b_c
-
-// Free-function form (also works on the VM):
-dump regex_find_all(/[a-z]+/g, "a1bc2def")   // [a, bc, def]
-```
-
-An invalid pattern is a runtime error, never a panic. A literal `/` outside a
-character class must be escaped as `\/`; `/` inside `[...]` classes does not
-terminate the literal.
-
-## Traits (Display, Debug, Iterable, Index, IndexMut)
-
-The receiver is passed as the first argument of each method. `Display::fmt`
-drives `dump`, `Iterable::iter` drives `for x in target`, `Index::index` /
-`IndexMut::set` drive `obj[key]` reads and writes.
-
-| Trait | Method | Used by |
-|-------|--------|---------|
-| `Display` | `fmt(self) -> string` | `dump` |
-| `Debug` | `fmt(self) -> string` | `trace` |
-| `Iterable` | `iter(self) -> array` | `for x in target` |
-| `Index` | `index(self, key)` | `obj[key]` (read) |
-| `IndexMut` | `set(self, key, value)` | `obj[key] = value` (write) |
+## Structs, enums, traits
 
 ```rak
 struct Point { x: int, y: int }
+struct Box<T> { value: T }
+
+enum Color { Red, Green }
+enum Shape { Circle(i32), Rect(i32, i32) }
+```
+
+A struct literal needs `field: value` — there is no `Point { x }` shorthand.
+Field access is `p.x`; tuple access is `p.0`.
+
+Traits are protocols, and the receiver is the first parameter:
+
+```rak
+trait Display {
+    fn fmt(self) -> string
+}
+
 impl Display for Point {
     fn fmt(self) { return fmt("({}, {})", self.x, self.y) }
 }
-dump Point { x: 3, y: 4 }   // (3, 4)
-
-struct Range { lo: int, hi: int }
-impl Iterable for Range {
-    fn iter(self) {
-        let out = []; let i = self.lo
-        while i <= self.hi { out = push(out, i); i = i + 1 }
-        return out
-    }
-}
-let s = 0
-for n in Range { lo: 1, hi: 5 } { s = s + n }
-dump s   // 15
 ```
 
-Trait protocols and method-call dispatch work on both backends. An `impl` block
-is baked into method globals at compile time, so `obj.method(...)` dispatches on
-the receiver's runtime type on the VM exactly as it does on the interpreter.
+`Display::fmt` drives `dump`, `Iterable::iter` drives `for x in target`, and
+`Index::index` / `IndexMut::set` drive `obj[key]`.
 
-## Defer
+`impl Type { … }` without a `for` is an inherent implementation.
 
-`defer expr()` registers a call that runs when the current function exits, in
-LIFO order. The last registered call runs first. Deferred calls run on a normal
-return, an early return, or a raised error.
+## Sets
 
 ```rak
-fn cleanup1() { dump "cleanup1" }
-fn cleanup2() { dump "cleanup2" }
-
-fn work() {
-    defer cleanup1()
-    defer cleanup2()
-    dump "body"
-}
-work()   // body, then cleanup2, then cleanup1
+let s = set_of(["a", "b", "a"])
+dump set_len(s)         // 2
+dump set_has(s, "a")    // true
+for item in s { dump item }
 ```
 
-`defer` works the same on the interpreter and the VM. The deferred call's
-arguments are evaluated at the point the `defer` is reached.
+Sets keep insertion order. `set_add`, `set_discard`, `set_has_all`,
+`set_union`, `set_intersect`, `set_diff` and `set_to_array` complete the
+family.
+
+## Statements that are not expressions
+
+Four things are statements rather than calls, and read differently:
+
+```rak
+dump value                // print, using Display
+dump value, "path.txt"    // print, and also write to a file
+trace value               // print, using Debug
+```
+
+```rak
+scan "127.0.0.1" { range: [0x0016, 0x0050] } {
+    if open { dump fmt("Port 0x{:04X}", port) }
+}
+```
+
+`scan` takes an **options** group and then a **body** group, in that order.
+The body binds `port`, `open` and `banner`.
+
+```rak
+fetch "https://example.com" { method: "GET" } {
+    dump status
+    dump body
+}
+```
+
+`fetch` takes the same two groups; the body binds `status`, `headers` and
+`body`. The options are `method`, `headers` and `body`.
+
+Both `scan` and `fetch` are **interpreter-only**: the bytecode VM refuses to
+compile a program that uses them, with a clear error.
+
+## `unsafe` blocks
+
+```rak
+unsafe "the pointer comes from ffi_alloc and is 4 bytes long" {
+    asm("cpuid_sse2")
+}
+```
+
+The reason string is mandatory and must be a real justification — `rakc lint`
+rejects a short one, or one containing "trust me". Inline assembly is only
+legal inside an `unsafe` block; the parser enforces that.
+
+## `evidence`
+
+```rak
+let ip = evidence<string> from "93.184.216.34"
+```
+
+`evidence<T> from expr` tags a value with where it came from. The `<T>` is
+parsed and discarded. See [Forensics](forensics.html).
+
+## Tests
+
+```rak
+test "addition works" {
+    assert add(2, 3) == 5
+    assert_eq(add(2, 3), 5)
+    expect_error(fn() { raise "boom" })
+}
+```
+
+Test blocks are collected, not run, during a normal run. `rakc test` runs
+them.
 
 ## Static type checking
 
-`rakc check <file>` runs a static analysis pass over the AST before any
-interpreter or VM work. It infers literal types, checks explicit annotations,
-and checks function-call argument types against declared signatures. A mismatch
-reports the expected and found types with the source line:
+`rakc check` type-checks a file. The diagnostics look like this:
 
 ```text
 error[E0308]: type mismatch
-  --> main.rak:1:16
+  --> demo.rak:1:19
 1 | let count: i32 = "hello"
-  |                  ^
+  |                   ^
+
 expected: int
 found:    string
+help: an explicit `let x: T = value` requires `value` to have type `T`
 ```
 
-`int`, `char`, `string`, `bytes`, `bool`, and the typed sizes are distinct in
-the checker. Numeric literals are mutually compatible, so assigning an `i32` to
-a `u64`-annotated binding is fine, but `let x: char = "hi"` is rejected.
+It checks explicit annotations, call argument types and arity, container
+element types, struct fields, enum variants, and casts. It does **not** model
+generics, enforce mutability, or check across modules. Annotations are
+enforced at runtime regardless of whether you run `rakc check`.
+
+## Things that are not in the language
+
+So that you do not go looking for them:
+
+- No attributes (`#![…]`) and no doc comments.
+- No `mod { }` without a name — it is `mod name { … }`.
+- No set literals, no `**` power operator, no comparison chaining.
+- No `.5` floats, no `1e10` floats, no `f64` literal suffix, no typed suffix
+  on a hex literal.
+- No `+=` on an index or a field target.
+- No general method dispatch on builtins: `"abc".len()` is an error. Methods
+  come from an `impl` block.
+- `use`/`import`/`from` are only valid at module top level, not inside a
+  function or a `mod` block.
+- `raise` and `throw` are the same keyword.
+- `use` and `import` are the same statement; `pub` and `export` are the same
+  prefix.

@@ -1,114 +1,129 @@
-# Batteries — time, randomness, data formats, archives
+# Standard library batteries
 
-The batteries builtins cover the daily-driver tasks that scripts keep re-writing
-by hand: civil date handling, a tiny deterministic RNG, CSV/YAML, and gzip/zip.
-Everything is available on **both** backends (`rakc run` and `rakc vm`) with
-identical semantics, and randomized functions are **seedable** so demos and tests
-stay reproducible.
+The "batteries" pack: time, seeded randomness, data formats and archives.
+These are the builtins that turn a string-and-array language into one that
+can process real files.
 
-## Time & dates
-
-The RNG's uniforms are the only source of nondeterminism here — but see
-`rand_seed`.
-
-**Note:** fallible calls return a `Result`, unwrapped with `?`:
+## Time and dates
 
 ```rak
-let ts = time_parse("2023-11-14 22:13:20")?   // epoch seconds
-dump time_fmt(ts, "%Y-%m-%d %H:%M:%S")         // 2023-11-14 22:13:20
-dump time_fmt(0, "%Y-%m-%d (%T, %A)")          // 1970-01-01 (00:00:00, Thursday)
-let p = time_parts(1700000000)                 // { year, month, day, hour, ... }
-dump p.year                                    // 2023
-dump p.weekday                                 // 2 (0 = Sunday)
-dump date_today()                              // 2023-11-14
-dump time_now()                                // seconds since the Unix epoch
-dump time_now_millis()                         // milliseconds
-dump time_add(100, 50)                        // 150
-dump time_diff(150, 100)                      // 50
+let now = time_now()
+dump time_fmt(now, "%Y-%m-%d %H:%M:%S")
+dump date_today()
 ```
 
-`time_fmt` supports the classic `strftime` specifiers (`%Y %m %d %H %M %S %T %A`),
-and `time_parse` accepts `YYYY-MM-DD` and `YYYY-MM-DD HH:MM:SS`. `time_add` /
-`time_diff` work on epoch seconds.
+| Builtin | Does |
+|---|---|
+| `time_now()` | Unix seconds. |
+| `time_now_millis()` | Unix milliseconds. |
+| `time_fmt(ts, spec)` | Format a timestamp: `%Y %m %d %H %M %S %T %y %e %%`. |
+| `time_parse(s)` | `Ok(ts)`. Accepts `YYYY-MM-DD` and `YYYY-MM-DD HH:MM:SS`. |
+| `time_parts(ts)` | The calendar fields, as a map. |
+| `time_add(ts, secs)` | Shift a timestamp. |
+| `time_diff(a, b)` | `a - b`, in seconds. |
+| `date_today()` | `YYYY-MM-DD`. |
+
+The arithmetic is pure UTC civil time, so it does not depend on the machine's
+timezone database.
 
 ## Randomness
 
 ```rak
-rand_seed(7)                     // deterministic stream for demos/tests
-dump rand_int(0, 100)            // uniform in [0, 100)
-dump rand_int(100)               // same as rand_int(0, 100)
-dump rand_float()                // f64 in [0.0, 1.0)
-dump len(rand_bytes(16))         // 16 random bytes
-dump len(rand_hex(16))           // 16 hex chars
-dump (rand_choice(["a", "b"])?)   // one element; Err on empty input
-let xs = rand_shuffle([1, 2, 3])
+rand_seed(7)                          // deterministic, for tests
+dump rand_int(1, 100)
+dump rand_float()
+dump len(rand_bytes(16))
+dump rand_hex(24)
+dump rand_choice(["a", "b", "c"])?    // Ok(value)
+rand_shuffle(list)
 ```
 
-`rand_int` raises on an empty range (a programming error, like division by zero)
-instead of returning `Err`.
+| Builtin | Does |
+|---|---|
+| `rand_seed(n)` | Reseed the generator. |
+| `rand_int(lo, hi)` / `rand_int(hi)` | An integer in `[lo, hi)`. |
+| `rand_float()` | A float in `[0.0, 1.0)`. |
+| `rand_bytes(n)` | `n` random bytes. |
+| `rand_hex(n)` | `n` random hex characters. |
+| `rand_choice(arr)` | `Ok(item)`. |
+| `rand_shuffle(arr)` | Shuffle in place, Fisher–Yates. |
+
+`rand_int` raises on an empty range, naming it.
+
+**The `rand` feature.** A build without it keeps the builtins registered and
+substitutes a stub, and the behaviour is not uniform: `rand_int` raises
+("this build has no random number generator"), while `rand_float` returns
+`0.0` and `rand_bytes` returns nothing. The browser build has randomness —
+the module asks the page for it — but a build with the feature off should
+not be used for anything that needs a real number.
 
 ## CSV
 
 ```rak
-let rows = csv_parse("host,port\nexample.com,443\n10.0.0.5,0x1F\n")
-dump rows[1].host                // 10.0.0.5
-dump rows[1].port                // 0x1F
-dump len(rows)                   // 2 (header row consumed)
-
-// Fields as arrays (no header interpretation):
-let raw = csv_parse("a,b\n1,2\n", { header: false })
-dump raw[1][1]                   // 2
-
-// Serialize back. Arrays-of-maps re-emit headers; arrays-of-arrays don't.
+let rows = csv_parse("host,port\nwin.example,443\n")
+dump rows[0].host                    // win.example
 dump csv_stringify(rows)
 ```
 
-The parser is RFC-4180: quoted fields, embedded commas and `"` (doubled) are
-handled. Malformed input **raises** (like `json_parse`).
+| Builtin | Does |
+|---|---|
+| `csv_parse(text, opts?)` | Rows as maps, with the header as the keys. `{header: false}` keeps every row as an array. |
+| `csv_stringify(rows)` | Back to CSV, with the fields quoted where the format requires it. |
+| `parse_csv_line(line, sep?)` | One line, into an array of fields. |
 
-## YAML (subset)
+Malformed CSV raises, with the line number.
 
-A pragmatic YAML subset: scalars (`bool/int/float/string`), nested maps, and
-block-style lists.
-
-```rak
-let cfg = yaml_parse("target: 10.0.0.1\nports:\n  - 80\n  - 443\nstealth: true\n")?
-dump cfg.target                  // 10.0.0.1
-dump cfg.ports[1]                // 443
-dump cfg.stealth                 // true
-```
-
-Unsupported constructs raise with the offending line. Use JSON for anything
-more exotic.
-
-## gzip
+## YAML (a subset)
 
 ```rak
-let packed = gzip_compress("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
-dump len(packed) < 40            // true — repetition compresses well
-dump (gzip_decompress(packed)?) == b"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+let doc = yaml_parse("name: rak\nport: 443\n")
+dump doc.name
 ```
 
-`gzip_decompress` returns `Err` for corrupt input instead of raising, so pair it
-with `?` when the data must be valid:
+The subset is block maps and lists by indentation, scalars (`null`, `~`,
+booleans, integers, floats, quoted and bare strings), and `#` comments. Flow
+style (`{a: 1}`), anchors and aliases are not supported, and the error names
+the line. Maps keep their order.
+
+## gzip and zip
 
 ```rak
-if let Ok(plain) = gzip_decompress(blob) { use plain }
+let packed = gzip("some bytes")
+dump gunzip(packed)
+
+let archive = zip_archive([("a.txt", "hello")])
+dump zip_extract(archive, "a.txt")
 ```
 
-## zip archives
+| Builtin | Does |
+|---|---|
+| `gzip(b, level?)` / `gunzip(b)` | gzip. |
+| `gzip_compress(b)` / `gzip_decompress(b)` | The batteries spellings; the second returns `Ok(bytes)`. |
+| `deflate(b, level?)` / `inflate(b)` | Raw deflate. |
+| `zip_archive(files)` | Build a zip in memory. |
+| `zip_extract(zip, name)` | Read one entry. |
+| `zip_list(path)` | The entries of a zip file, as `{name, size, compressed}`. |
+| `zip_read(path, name)` / `zip_write(path, entries)` | Read and write zip files. |
 
-`zip_list(path)` → array of `{ name, size, compressed }` maps. `zip_read` returns
-the entry as bytes. `zip_write(path, entries)` writes `[name, content]` pairs
-(arrays of pairs or a single map) and returns the entry count:
+Decompression is bounded at 100 MiB and checked while reading, so a
+decompression bomb is refused rather than filling the disk. See
+[Safety](safety.html#bounded-decompression).
 
-```rak
-zip_write("scan.zip", {
-  "a.txt": b"hello",
-  "b.txt": "world data",
-})
-dump zip_list("scan.zip")        // [{name: "a.txt", size: 5, ...}, ...]
-dump zip_read("scan.zip", "a.txt")
-```
+## The other feature-gated families
 
-Archive errors (`Err`/`Ok`) are returned as Results, never raised.
+Two more standard-library families are behind cargo features, and their
+absence is worth knowing about:
+
+- **`html`** — the HTML scraping builtins. A build without the feature keeps
+  them registered and returns empty results: `html_title` gives nil,
+  `html_count` gives 0, the rest give empty arrays. The reason is never
+  surfaced, so a program that scrapes in such a build sees "nothing found"
+  rather than "this build cannot".
+- **`http`** — the `fetch` statement raises when the build has no HTTP
+  client, and says so. `ct_subdomains` returns an `Err` naming the same
+  thing.
+
+The `html` family is the one to watch: it fails silently. If a program
+depends on scraping, check that the build has the feature.
+
+See [Standard library](stdlib.html) for the full catalogue.

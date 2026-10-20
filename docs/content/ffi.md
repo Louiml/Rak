@@ -46,6 +46,49 @@ ffi_free(buf)
   <os err>`, `ffi: cannot marshal <type> to C` — never a panic.
 - Pointers are opaque `u64`; dereferencing is explicit via
   `ffi_read`/`ffi_write`/`ffi_cstr_to_string`.
+- `ffi_read_i32(ptr, off)` reads a little-endian 32-bit integer, with a
+  four-byte bounds check.
+
+## Pointer provenance
+
+Rak tracks which memory it owns. A pointer that came from `ffi_alloc` or
+`ffi_string_to_cstr` is a region Rak knows the length of, and every read and
+write through it is bounds-checked against that length:
+
+```text
+access of 8 byte(s) at 0x7f3c0000+0x10 runs past the end of a 4-byte allocation
+```
+
+A pointer that did **not** come from Rak is refused outright, with the
+remedy in the message:
+
+```text
+pointer 0x7f3c0010 is not a region Rak owns: it did not come from ffi_alloc
+or ffi_string_to_cstr. If it is a library-owned address, declare it with
+ffi_trust(0x7f3c0010, <length>); until then every read and write through it is
+refused.
+```
+
+`ffi_trust(ptr, len)` declares a library-owned region, and after that the
+bounds checks have something to check against. The length must be between 1
+and 4294967296.
+
+This is the difference between a program that can read out of bounds by
+accident and one that cannot. It does not make the C library itself safe.
+
+## The sandbox
+
+Every `ffi_*` call needs the `ffi` capability, and so does an `extern "C"`
+declaration. Under `--sandbox` without `--allow ffi`, the declaration itself
+is refused on the VM, and the call is refused on both backends:
+
+```text
+sandbox: builtin 'ffi_alloc' blocked — capability 'ffi' not granted (rerun with --allow ffi)
+```
+
+`extern_call` is an honest stub on both backends: it errors, saying that the
+generated Rust wrapper has to be linked into the standard library. The
+wrapper is where the actual linking happens.
 
 Works on both the interpreter and the bytecode VM (`Op::FFICall`/`Op::FFIClose`
 natives; `extern` declarations are baked into `Value::NativeFn` globals).

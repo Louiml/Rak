@@ -1,61 +1,78 @@
 # Rak
 
-A programming language for hackers, OSINT investigators, and systems programmers. Build desktop GUI apps, backend SQL servers, shareable packages, and self-host the compiler. All in Rak.
+A programming language for hackers, OSINT investigators, and systems
+programmers.
 
-Hex is a first-class type. The bytecode VM runs about 6x faster than the tree-walker. There's a SQL engine written in Rak itself, and a Rak interpreter written in Rak.
+Hex is a first-class type. A bytecode VM runs about 6x faster than the
+tree-walker. There is a SQL engine written in Rak itself, and a Rak
+interpreter written in Rak.
 
 ## Two backends, one language
 
-- **Interpreter** (`rakc run`) — a tree-walker. Every language feature works there.
-- **Bytecode VM** (`rakc vm`) - a stack machine, roughly 6x faster on compute-heavy code. It registers the same builtins as the interpreter, and a gate in the test suite fails the build if the two ever drift apart. A few *statements* are still interpreter-only, and the VM says so with a clear `VM does not support ...` error rather than guessing.
+- **Interpreter** (`rakc run`) — a tree-walker. Every language feature works
+  there.
+- **Bytecode VM** (`rakc vm`) — a stack machine, roughly 6x faster on
+  compute-heavy code.
 
-Both share one parser, and `rakc bench file.rak` compares them on the same script. `rakc build file.rak` produces a self-contained executable with no Rak installation needed on the target machine.
+They share one parser, and they register the same builtins. A gate in the
+test suite compares the two registration tables and fails the build if they
+ever drift apart, and a second family of tests runs a program on both and
+requires identical output. The v8.0.0 release shipped nineteen builtins that
+existed only on the VM and the suite did not notice; the registration gap is
+now closed.
 
-## What's new in 0.7.0
+A few *statements* are still interpreter-only, and the VM says so with a
+clear error rather than guessing. See [Bytecode VM](vm.html).
 
-- **Structured errors** — `catch e` binds a first-class `Error` value with a
-  `kind`, source span, cause, and context (`err_kind`/`err_message`/`err_line` …).
-- **True async concurrency** — `await_all`, `select` (race), `timeout`,
-  `task_group`, `async_sleep`/`async_yield`, and deferred `async fn` bodies run
-  concurrently on a bounded worker pool (thousands of lightweight ops).
-- **Streaming** — pull-based `Value::Stream` with `stream_map`/`filter`/`take`/
-  `collect`, `read_lines`, and `tcp_stream`; lazily consumed by `for`.
-- **CLI** — `fn main(argv) -> int` entry with real exit codes, `argv()`,
-  stdin/stdout builtins, and a structured `parse_args(spec, argv)` flag parser.
-- **Data processing** — lazy `stream_csv`/`stream_jsonl`, plus
-  `gzip`/`gunzip`/`deflate`/`inflate` and `zip_archive`/`zip_list`/`zip_extract`.
-- **oyvey** - the Cargo-style package manager and build system: `package.rak`
-  manifest, `oyvey.lock` (exact rev + SHA-256 checksum), transitive resolution,
-  a global git cache, and `build`/`run`/`test` driven through `rakc`.
-- **Debugger** — `rakc debug program.rak` (break/continue/step/locals/stack/
-  print/disassemble) powered by the bytecode VM with statement-to-bytecode
-  line mapping.
-- **Fuzzing** — 8 proptest harnesses (stable CI) plus a 13-target libFuzzer /
-  cargo-fuzz pack (`fuzz/`) for the lexer, parser, DNS/TLS/JSON parsers,
-  packet builders, WebSocket frames, tunnel, compression, and package manifests.
+`rakc bench file.rak` compares the two on the same script, and
+`rakc build file.rak` compiles to a standalone executable.
+
+## It runs in a browser
+
+The documentation site has a playground that runs **Rak's own interpreter**,
+compiled to WebAssembly, inside the page — the same lexer, parser and
+evaluator as `rakc run`.
+
+```text
+https://louiml.github.io/Rak/playground.html
+```
+
+A browser has no TLS stack, no event loop and no file system, so the browser
+build has no network, no async and no filesystem, and it says so rather than
+pretending to work. Randomness does work: the module asks the page for
+entropy, and the page uses the browser's own cryptographic generator.
+
+That build is a configuration CI tests on every push, with its own suite.
 
 ## Feature families
 
-The language started as an OSINT scripting tool. It grew into something bigger:
+The language started as an OSINT scripting tool. It grew into something
+bigger.
 
-- **Forensic structs and evidence provenance** — declare a binary wire format
-  once with `binstruct` and get both a decoder and an encoder for free. Every
-  decoded value is wrapped in an `evidence<T>` provenance tag, so `report(...)`
-  emits a chain-of-custody-cited findings report. No other language bakes
-  provenance into the value model.
+- **Forensic structs and evidence provenance** — declare a binary wire
+  format once with `binstruct` and get both a decoder and an encoder for
+  free. Every decoded value is wrapped in an `evidence<T>` provenance tag, so
+  `report(...)` emits a chain-of-custody-cited findings report.
 - **Data pipelines** — a `|>` pipeline operator, regex literals (`/\d+/g`)
   with method syntax, and binary pattern matching over byte slices.
-- **Type system** — signed and unsigned ints (i8..i64, u8..u64), floats
-  (f32, f64), typed literals like `42i32` and `3.14f64`, tuples, Result/Option,
-  modules, closures with lexical scoping, generics, traits with method
-  dispatch, pattern matching, and string interpolation with `f"hello {name}"`.
+- **A type system** — signed and unsigned ints (i8..i64, u8..u64), floats
+  (f32, f64), typed literals like `42i32`, tuples, Result and Option,
+  modules, closures with lexical scoping, traits with method dispatch,
+  pattern matching, and string interpolation with `f"hello {name}"`.
+- **Contracts** — `requires` and `ensures` on a function, checked on both
+  backends, with `result` in scope.
 - **Concurrency** — `spawn`/`thread_join`/`channel()` threads, an async event
-  loop on Tokio, and v0.7's bounded-pool fan-out (`await_all`, `select`,
-  `timeout`, `task_group`).
-- **SQL server in Rak** — a full SQL engine, lexer through executor, written
+  loop on Tokio, and bounded-pool fan-out (`await_all`, `select`, `timeout`,
+  `task_group`).
+- **A SQL server in Rak** — a full SQL engine, lexer through executor, written
   in the language itself. It serves queries over TCP.
 - **Self-hosting** — `examples/self_host.rak` is a Rak interpreter written in
   Rak. It lexes, parses, and evaluates real Rak source code.
+- **A native GUI** — windows and widgets drawn by `egui`, with no webview and
+  no browser engine on either platform.
+- **A package manager** — `oyvey`, with a Cargo-shaped manifest, a versioned
+  lockfile with per-package checksums, path dependencies, and a lockfile that
+  is verified rather than trusted.
 
 The full design and implementation plan for every systems-level feature is in
-[`rak-features-spec.md`](../rak-features-spec.md).
+[`rak-features-spec.md`](https://github.com/Louiml/Rak/blob/main/docs/rak-features-spec.md).

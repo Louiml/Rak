@@ -1,124 +1,111 @@
-# Concurrency & async
+# Concurrency and async
+
+Rak has threads, channels, and an async event loop. All three work on both
+backends.
 
 ## Threads and channels
 
 ```rak
 let h = spawn(fn() { return 42 })
 dump thread_join(h)
+```
+
+`spawn` runs a function on an OS thread and returns a handle.
+`thread_join` waits for it and returns its value.
+
+```rak
 let (tx, rx) = channel()
-chan_send(tx, "hi")
+chan_send(tx, "hello")
+dump chan_recv(rx)          // Some("hello")
+```
+
+`channel()` returns a `[sender, receiver]` pair. `chan_send` sends, and
+`chan_recv` **blocks** until a value arrives — it returns `Some(value)`, or
+`None` when the channel is closed and drained.
+
+A common pattern is to send a result back from a worker:
+
+```rak
+let (tx, rx) = channel()
+let h = spawn(fn() {
+    chan_send(tx, compute())
+    return 0
+})
+thread_join(h)
 dump chan_recv(rx)
 ```
 
-`spawn` launches an OS thread, `thread_join` waits for it, and `channel()`
-gives you a sender/receiver pair.
-
 ## Async functions and await
 
-`async fn` returns a **deferred future** whose body runs on the first `await`.
-`await` blocks until the future resolves.
+An `async fn` returns a future. `await` resolves it.
 
 ```rak
 async fn probe(host, port) {
     let open = await tcp_probe(host, port, 200)
     return open
 }
+
 dump await probe("127.0.0.1", 80)
-
-let body = await http_get_async("https://example.com")
-dump string(body)
 ```
 
-`http_get_async` / `tcp_probe` / `tcp_connect_async` run on a lazily-started
-multi-thread Tokio runtime and return a `Future`; a future can be stored and
-awaited later:
+The async builtins are `async_sleep`, `async_yield`, `tcp_probe`,
+`tcp_connect_async` and `http_get_async`. They need the `async` feature, and
+a build without it does not register them at all — the call is an "Unknown
+function" rather than a silent no-op.
+
+`http_get_async` resolves to the body as a string. On failure it resolves to
+the **string** `"error: …"` rather than to an error value, so check it before
+you use it.
+
+## Orchestration
+
+| Builtin | Does |
+|---|---|
+| `await_all(futures)` | Resolve every future; the results are in input order. |
+| `select(futures)` | `[index, value]` — the first to resolve. |
+| `timeout(future, ms?)` | `Ok(value)`, or `Err` when the deadline passes. |
+| `task_group(fns, limit?)` | Run functions concurrently; the results are in input order. |
 
 ```rak
-let f = tcp_probe(host, 80, 200)
-let open = await f
+let out = await_all([async_sleep(10), async_sleep(20)])
+dump out
+
+let (i, v) = select([async_sleep(10), async_sleep(400)])
+dump i
+
+let r = timeout(async_sleep(5), 5000)?
+dump r
 ```
 
-There is no special "async context" requirement — `await` outside `async fn`
-just resolves the value. Works on both the interpreter (deferred `async fn`
-bodies) and the bytecode VM (`Op::Await`; VM `async fn` bodies run
-synchronously on call).
-
-## Async concurrency (0.7)
-
-Deferred `async fn` bodies and async I/O futures run concurrently on a bounded
-worker pool (a non-Tokio counting semaphore over a shared Tokio runtime), so
-thousands of lightweight operations run without one OS thread per op.
-
-| Builtin | Signature | Notes |
-|---------|-----------|-------|
-| `await_all` | `await_all([futures]) -> [values]` | Join every future; returns all results. |
-| `select` | `select([futures]) -> (index, value)` | Race; returns the first to resolve. |
-| `timeout` | `timeout(future, ms) -> Result` | `Ok(value)` or `Err(...)` on expiry. |
-| `task_group` | `task_group([fns], limit) -> [results]` | Bounded parallelism + error propagation. |
-| `async_sleep` | `async_sleep(ms)` | Non-blocking timer future. |
-| `async_yield` | `async_yield()` | Yield control to the pool. |
+`timeout` gives a catchable error, not a crash:
 
 ```rak
-// Fan out a scan concurrently
-let futures = hosts |> map(fn(h) { tcp_probe(h, 80, 500) })
-let results = await_all(futures)
-for (i, r) in results { dump f"{i}: {r}" }
-
-// Race two mirrors; first response wins
-let (idx, body) = select([http_get_async(url_a), http_get_async(url_b)])
-
-// Bounded parallelism over a list of jobs
-let out = task_group(jobs, 4)
-```
-
-A panic in a task surfaces as `Runtime("await: task failed: <join error>")`.
-Dropping a pending future aborts nothing eagerly (the task completes in the
-background); `await` is the only resolution point.
-
-See `examples/async_orchestration.rak` for the end-to-end demo.
-
-## GUI note
-
-With `--features gui`, scripts can open a native desktop window. Windows and
-widgets are drawn by `egui` on the `glow` renderer — no HTML, no JavaScript, no
-WebView. The window runs on a single event-loop thread on the main thread, and
-the interpreter runs on a worker because the display connection belongs to
-whichever thread creates the loop.
-
-```rak
-fn on_click(name, message) {
-  print f"{name} says: {message}"
-  return nil
+try {
+    let r = timeout(async_sleep(2000), 20)?
+    dump "resolved"
+} catch e {
+    dump "timed-out"
 }
-
-gui_callback("on_widget", on_click)
-
-let win = gui_window("Rak GUI Demo", 420, 240)
-let button = gui_add(win, "button", "Click me", 20, 20, 140, 34)
-let label = gui_add(win, "label", "waiting", 20, 70, 240, 24)
-
-gui_on_click(button, "on_widget")
-gui_set_text(label, "clicked at least once")
-
-gui_wait()
 ```
 
-How it fits alongside the rest of this page:
+`task_group` runs a list of functions with bounded parallelism, and fails
+fast if one of them raises.
 
-- **`gui_window` blocks until the window exists**, so the id it returns is real
-  rather than a handle to something that may have failed to open.
-- **`gui_add` blocks until the widget is in the tree**, and returns a widget id
-  that `gui_set_text`, `gui_get_text`, `gui_set_visible` and `gui_on_click`
-  all accept. Those four are one-way sends, so they never block the interpreter;
-  `gui_get_text` is the exception and replies with the current value.
-- **`gui_wait` uses a condvar, not a poll loop**, and returns when the last window
-  closes. Closing a window does not end the process: the loop stops when the
-  program is finished with the GUI, or on an explicit `gui_quit(code)`.
-- **A callback cannot mutate the calling script's state.** It gets a copy of the
-  environment as it stood at `gui_callback` time. This is a consequence of Rak
-  having no reference types, and it is the one real limitation left in the GUI.
-- **Both backends work.** The VM has GUI natives, and they resolve the same
-  process-wide manager the interpreter does.
-- **`asm` is the one builtin with no VM counterpart**, and it is deliberate: a
-  bytecode VM has no instructions to escape into. See
-  `docs/V8-BACKEND-PARITY.md`.
+## The two backends differ here
+
+On the interpreter, an `async fn` body is deferred to a worker, so it really
+does run concurrently. On the bytecode VM, an `async fn` body runs
+**synchronously** in place, and `await` resolves immediately. The result is
+the same; the concurrency is not. This is the one place where the two
+backends differ in behaviour rather than in error text, and it is a
+difference of scheduling, not of semantics.
+
+The `async` builtins themselves behave the same on both: they are backed by
+the same Tokio runtime.
+
+## Threads and futures are different things
+
+`spawn` gives you a thread and a handle you can join. A future is a value
+you await, and the work behind it is scheduled by the async runtime. They
+compose — a `spawn`ed task can await futures — but they are not
+interchangeable, and `thread_join` does not accept a future.

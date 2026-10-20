@@ -206,7 +206,7 @@ their own.
   through it (`d.m.N = 1`) is a compile error on the VM.
 
 The full list, with reproductions, is in
-[docs/V8-KNOWN-ISSUES.md](../V8-KNOWN-ISSUES.md) under "The VM's module globals
+[docs/V8-KNOWN-ISSUES.md](https://github.com/Louiml/Rak/blob/main/docs/V8-KNOWN-ISSUES.md) under "The VM's module globals
 are not namespaced". None of it affects a program written as one package with
 distinct names per module.
 

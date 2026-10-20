@@ -1,409 +1,228 @@
 # Safety
 
-This page covers what Rak does about security properties, and, just as
-importantly, what it does not do. If you are auditing someone else's script,
-read the second section before trusting the first.
+Rak's position is that a limit is stated where it is measured. This page says
+what is enforced, what is checked, and what is not enforced at all.
 
-Rak is a dynamic language with reference-counted values. It is not a
-memory-safe systems language and does not claim to be. What it does provide
-is a set of primitives, checks, and an audit trail that make unsafe code
-visible and make the common crypto mistakes hard to write.
+## The capability sandbox
 
-## What is enforced
+`rakc run untrusted.rak --sandbox --allow net,fs_read` runs a program with
+nothing but the capabilities it was granted. With `--sandbox` and no
+`--allow`, every capability is denied and only pure computation works.
 
-### Unsafe blocks
+```text
+sandbox: active (allow: net,fs_read)
+```
 
-Anything that touches raw memory, FFI, or a wire format should be wrapped in an
-`unsafe` block with a written justification. The reason is mandatory and
-enforced by the parser, not by the linter, so an unjustified exemption is a
-parse error:
+A refusal names the capability and the fix:
+
+```text
+sandbox: builtin 'net_connect' blocked — capability 'net' not granted (rerun with --allow net)
+```
+
+### The capabilities
+
+| Capability | Grants |
+|---|---|
+| `net` | `net_listen`, `net_accept`, `net_connect`, `net_local_addr`, the `tcp_`/`udp_`/`http_`/`ws_` families, the `dns_*` family, `fetch`, `scan_ports`, `scan_subdomains`, `ct_subdomains`, `whois_lookup` |
+| `fs_read` | `read`, `file_read`, `read_lines`, `stream_csv`, `stream_jsonl`, `mmap_open` (read mode), `file_list`, `file_exists`, `file_size`, `zip_list`, `zip_read` |
+| `fs_write` | `write`, `file_write`, `file_append`, `file_write_bytes`, `file_append_bytes`, `zip_write`, `mmap_write`, `file_delete`, `file_mkdir`, `file_copy`, `file_rename`, `log_init`, `dump x, "path"` |
+| `process` | the `process_` family |
+| `ffi` | the `ffi_` family, `extern_call`, and `extern "C" { … }` declarations |
+| `raw` | `net_raw_send`, `net_raw_recv`, the `pcap_` family |
+| `gui` | the `gui_` family |
+| `secrets` | the `secret_` family, `env_get`, `env_set` |
+| `asm` | inline assembly |
+| `all` | every one of the above |
+
+`fs` is accepted for `fs_write`, `proc` for `process`, and `raw_sockets` for
+`raw`. An unknown name is a warning, not an error:
+`sandbox: unknown capability 'x' (ignored)`.
+
+The gate sits at the call site, and both backends enforce the same list.
+
+**What is deliberately not gated.** Anything that cannot reach outside the
+process: the packet *builders* (`net_raw_ipv4`, `net_raw_tcp`, `net_raw_udp`,
+`net_raw_tcp_syn`, `net_raw_csum`, `net_raw_icmp*`, `net_raw_arp_*`), the DNS
+*builders* (`dns_build`, `dns_parse`), `whois_parse`, `subdomain_enum`, the
+`tunnel_*` crypto, and the hashing and constant-time helpers. A program can
+compute all of those under a sandbox, because computing them has no effect on
+anything.
+
+**The sandbox is a process-wide filter, set once from the command line.** A
+module cannot narrow its own privileges, and it cannot widen them either —
+a program that runs under `--sandbox` runs its whole dependency tree under
+it.
+
+### The filesystem scope
+
+`--fs-root DIR` is a separate limit from the capabilities. It confines paths,
+independently of whether `fs_read` is granted:
+
+```text
+sandbox: path '/etc/passwd' is outside the filesystem scope '/tmp/work'
+```
+
+The path is resolved before the comparison, and the deepest existing ancestor
+is canonicalised, so a symlink pointing out of the scope is refused too.
+
+## Unsafe blocks
+
+Some things cannot be checked, so they must be justified in the source:
 
 ```rak
-fn parse_frame(b) {
-    unsafe "the binstruct decoder bounds-checked this length prefix on line 4" {
-        let n = b[0] * 256 + b[1]
-        return slice(b, 2, 2 + n)
-    }
+unsafe "the pointer comes from ffi_alloc and the region is 4 bytes long" {
+    let b = ffi_read(ptr, 0)
 }
 ```
 
-Be clear about what this is and is not. It is **not** a permission. The block
-executes exactly as written: normal scoping, normal mutability enforcement,
-normal error handling. There is no borrow checker in Rak to suspend, so `unsafe`
-cannot grant access to something the language would otherwise forbid. What it
-does is give you two things that matter for review:
+The reason string is **mandatory**. `rakc lint`'s `unsafe-thin-reason` rule
+rejects a reason that is shorter than fifteen characters, or that contains
+"trust me", "because", "todo", "fixme", "hack" or "n/a" — a justification
+that says nothing is not a justification.
 
-- `grep unsafe` returns every exemption in a codebase, each with the author's
-  own words attached. An exemption nobody had to explain is one nobody reads.
-- `rakc lint --audit` prints the same list as a review artifact.
+`rakc lint --audit` prints every unsafe block's reason in source order, so
+the justifications can be reviewed as a list rather than hunted for.
 
-```
-rakc lint tool.rak --audit
-```
+Inline assembly (`asm`) is only legal inside an `unsafe` block, and the
+parser enforces that. The `asm` capability gates the call, but nothing
+mediates the instruction itself: the machine executes it. Treat every `asm`
+call as a review boundary.
 
-```
-safety audit: 2 unsafe block(s) in tool.rak
-   1. the binstruct decoder bounds-checked this length prefix on line 4
-   2. TODO
-  each of these bypasses the safety lint rules. check the justification holds,
-  then check the block does not do what the justification does not cover.
-```
+## The linter's security rules
 
-`unsafe-thin-reason` flags a justification that is a placeholder: under 15
-characters, or containing `todo`, `because`, `trust me`, `hack`, or `n/a`. A
-fake justification is worse than none, because it reads as if someone had
-thought about it.
-
-The interpreter also records which `unsafe` blocks were actually *entered*
-during a run, which is a different and sometimes more useful question than
-which ones exist: a `ffi_call` on a branch that never runs on this input is not
-a risk on this input.
-
-### Capability sandbox
-
-Every builtin that can reach outside the process is gated by name at two
-choke points, one per backend. Nothing runs unless you ask for it.
-
-```
-rakc run untrusted.rak --sandbox --allow net,fs_write,secrets
-```
-
-Eight capabilities exist: `net`, `fs_write`, `process`, `ffi`, `raw`,
-`gui`, `secrets`, `asm`. With `--sandbox` and no `--allow`, all eight are
-denied and only pure computation works.
-
-Two details worth knowing. Packet *builders* are not gated, because they only
-construct a `bytes` value and open no socket; `net_raw_send` and
-`net_raw_recv` are what need `raw`. And file *reads* are not gated, because
-imports would stop working. The reasoning is that anything able to exfiltrate
-data is denied, so a read alone cannot do damage.
-
-The limitation is real: the sandbox is a process-wide filter set once from the
-command line. A module cannot narrow its own privileges, and an imported
-package runs with whatever the invoker allowed. Per-module capability
-declarations are on the roadmap and are not implemented.
-
-### Capability details
-
-| Capability | What it gates | Typical use |
-|---|---|---|
-| `net` | TCP/UDP/HTTP/WebSocket/DNS I/O | Servers, clients, DNS, HTTP |
-| `fs_write` | File writes, `dump x, "path"`, `mmap_open(..., "rw")`, `file_write`, `file_append`, `zip_write`, `file_delete`, `file_mkdir`, `file_copy`, `file_rename` | Persistent state, configs, logs |
-| `process` | `process_spawn`, `process_wait`, `process_stdout` | Spawning child processes |
-| `ffi` | `ffi_load`, `ffi_call`, `extern "C" { ... }` | Dynamic library calls |
-| `raw` | `net_raw_*` (raw sockets, ARP, ICMP) | Packet forging, ARP, raw sockets |
-| `gui` | `gui_window`, `gui_add`, `gui_on_click`, `gui_callback` | Desktop windows |
-| `secrets` | `env_get`, `env_set`, `secret_*` | Environment variables, credential store |
-| `asm` | `asm("...")` single-register intrinsic (interpreter-only) | Inline assembly |
-
-With `--sandbox` and no `--allow`, all eight are denied and only pure
-computation works.
-
-Two details worth knowing. Packet *builders* are not gated, because they only
-construct a `bytes` value and open no socket; `net_raw_send` and
-`net_raw_recv` are what need `raw`. And file *reads* are not gated, because
-imports would stop working. The reasoning is that anything able to exfiltrate
-data is denied, so a read alone cannot do damage.
-
-The limitation is real: the sandbox is a process-wide filter set once from the
-command line. A module cannot narrow its own privileges, and an imported
-package runs with whatever the invoker allowed. Per-module capability
-declarations are on the roadmap and are not implemented.
-
-### Static analysis
-
-`rakc lint` has style rules and security rules. The security ones exist
-because string literals used to be invisible to the linter, so nothing could
-check them.
+`rakc lint` ships nine security rules on top of its five style rules. They
+are advisory; `--deny` makes them fail the run.
 
 | Rule | What it catches |
 |---|---|
-| `hardcoded-secret` | A literal assigned to a name containing `secret`, `password`, `token`, `api_key`, `private_key` and similar. Also known vendor token formats (`sk-`, `ghp_`, `AKIA`, `xoxb-`) and key-length hex. |
-| `plaintext-url` | An `http://` URL that is not localhost. |
-| `weak-crypto` | `md5`, `sha1`, `rot13`, `xor`, or `file_hash(..., "md5")`. |
-| `secret-compare` | `==` between secret-looking values. See constant-time below. |
-| `ffi-raw-pointer` | `ffi_ptr`, `ffi_read`, `ffi_write`, `ffi_alloc`, `ffi_free`, `ffi_call`. |
-| `insecure-transport` | `ws_connect` and `net_connect`, which carry no TLS. |
-| `unsafe-thin-reason` | An `unsafe` block whose justification is a placeholder. |
-| `unescaped-interpolation` | An f-string that builds a SQL statement or a shell command around a value no `*_escape` call wraps. |
-| `inline-asm` | An `asm(...)` call, which the capability sandbox cannot mediate at the call site (it is gated when the builtin runs). |
+| `hardcoded-secret` | A credential-looking name assigned a string literal, or a literal that looks like a token (a known prefix, `password=`/`token=`/`api_key=`, or 32/40/64/128 hex digits). |
+| `plaintext-url` | An `http://` URL whose host is not localhost. |
+| `weak-crypto` | `md5`, `sha1`, `rot13` and repeating-key `xor`. |
+| `secret-compare` | `==` on a value that looks secret — it leaks the common-prefix length through timing. |
+| `ffi-raw-pointer` | Any `ffi_*` call other than `ffi_load` and the string conversions. |
+| `insecure-transport` | `ws_connect` and `net_connect` — an unencrypted connection. |
+| `unescaped-interpolation` | An f-string that looks like a SQL or shell command, interpolating a value that is not wrapped in an escape function. |
+| `inline-asm` | Any `asm` call. |
+| `unsafe-thin-reason` | An unsafe block whose justification is not a justification. |
 
-All are advisory. `--deny` makes them exit non-zero for CI:
+**Where they have false negatives.** They are pattern matchers over the AST,
+not a dataflow analysis. A secret assembled at runtime, a value that only
+*becomes* secret after a call, or an interpolation whose template does not
+look like SQL or a shell will pass. They are a review aid, not a guarantee.
 
-```
-rakc lint tool.rak --deny
-```
-
-Detection is heuristic. A credential assembled at runtime will not be found,
-and a long path or SQL fragment will not be flagged as a secret.
-
-### Release hardening
-
-`Cargo.toml` sets `lto = "fat"`, `codegen-units = 1`,
-`overflow-checks = true`, `panic = "abort"`, and `strip = "symbols"` for
-release builds. The arithmetic one matters most: Cargo's default is
-`overflow-checks = false` in release, which silently wraps and turns a length
-calculation into a heap overflow. Keep it on.
-
-`.cargo/config.toml` adds target-specific linker flags. On MSVC:
-`/guard:cf`, `/CETCOMPAT`, `/DYNAMICBASE`, `/HIGHENTROPYVA`, `/NXCOMPAT`. On
-Linux: full RELRO, non-executable stack, a stack canary, and forced frame
-pointers.
-
-Be precise about what Control Flow Guard does and does not do here. `/guard:cf`
-marks the PE CFG-compatible and initialises the guard dispatch table with
-load-time validation, which blocks the attack that overwrites that table. It
-does **not** mean every indirect call is instrumented: rustc does not emit CFG
-check calls for Rust code, the way Clang's `-fsanitize=cfi` instruments C and
-Rust. An attacker who gains execution can still redirect an uninstrumented
-indirect call. `/CETCOMPAT` has the same caveat. Neither is a substitute for
-compiling the C parts of a program with an instrumenting compiler and linking
-that object in, which is what `rakc bindgen` exists to help with.
-
-Because a linker flag is only a claim, `dist/verify_hardening.py` reads the
-produced binary back and asserts the bits are really there, and both release
-jobs run it. A typo like passing `/NXCOMPAT` and `/NXCOMPAT:NO` together, which
-silently disables DEP, is caught that way.
-
-```
-python dist/verify_hardening.py --self-test
-python dist/verify_hardening.py target/release/rakc.exe
-```
+The style rules are `unused-var`, `shadowed`, `unreachable`,
+`missing-ret-type` and `duplicate-import`.
 
 ## Crypto
 
-All crypto is pure Rust. Nothing calls OpenSSL or libcrypto. That is a real
-property, not a claim: the `ffi` capability exists for your own
-`extern "C"` declarations and is never used by the crypto path.
+The primitives Rak actually has:
 
-| | |
+| Purpose | Builtins |
 |---|---|
-| Symmetric | AES-256-GCM, ChaCha20-Poly1305 |
-| Hashing | SHA-256, SHA-1, MD5 (weak, lint-flagged) |
-| MAC | HMAC-SHA256, HKDF-SHA256, PBKDF2-HMAC-SHA256 |
-| Signatures | Ed25519, ECDSA P-256, RSA PKCS#1 v1.5 with SHA-256 |
-| Key agreement | X25519 |
-| Key transport | RSA-OAEP with SHA-256 |
+| Hashing | `sha256`, `hmac_sha256` (and `md5`/`sha1`, which print a deprecation warning to stderr) |
+| Symmetric | `aes_gcm_encrypt` / `aes_gcm_decrypt` (AES-256-GCM), `chacha20_encrypt` / `chacha20_decrypt` (ChaCha20-Poly1305) |
+| Signatures | `ed25519_keypair` / `ed25519_sign` / `ed25519_verify`, `ecdsa_keypair` / `ecdsa_sign` / `ecdsa_verify` (NIST P-256), `rsa_keypair` / `rsa_sign` / `rsa_verify` / `rsa_encrypt` / `rsa_decrypt` |
+| Key agreement | `x25519_keypair` / `x25519_shared` |
+| Key derivation | `tunnel_preshared_key` (PBKDF2), `kdf_next` (HKDF ratchet) |
+| Constant time | `ct_eq`, `ct_eq_hex`, `ct_select` |
 
-RSA and ECDSA keys are DER, so they interoperate with OpenSSL for reading and
-writing, but no OpenSSL code is linked into the binary.
+`md5` and `sha1` print this on stderr, once per primitive per process:
 
-### Constant-time comparison
-
-`==` on a Rak value is a data-dependent branch. It returns as soon as it finds
-a differing byte, so the wall-clock time reveals how much of a prefix two
-values share. Against an attacker who can time your comparison, that is enough
-to recover a MAC or a session token one byte at a time.
-
-Use these instead:
-
-```
-dump ct_eq(got, expected)        // bytes
-dump ct_eq_hex(got, expected)    // hex, case-insensitive
-let masked = ct_select(choice, a, b)   // branchless select
+```text
+rak: warning: `md5` is deprecated: MD5 is broken for anything adversarial. Use `sha256` unless you are analysing data that uses it, in which case suppress this with unsafe { "md5 is the subject of this analysis" { md5() } }
 ```
 
-`rakc lint` flags `==` between secret-looking names, but it cannot see that a
-value came from a computation.
+`ct_eq` compares bytes in time independent of their contents; `ct_eq_hex` does
+the same for hex strings, case-insensitively; `ct_select` picks one of two
+equal-length buffers without branching on the choice. Use them instead of `==`
+on anything secret — see the `secret-compare` rule above.
 
-### Deprecated primitives
-
-`md5()`, `sha1()`, `rot13()` and `xor()` still work. They are **deprecated**: calling
-one prints a warning on stderr, once per primitive per run.
-
-```console
-$ rakc run tool.rak
-rak: warning: `md5` is deprecated: it is broken for anything adversarial. Use
-`sha256` unless you are analysing data that uses it, in which case suppress this
-with unsafe { "md5 is the subject of this analysis" { md5() } }
-```
-
-Deprecation rather than removal is deliberate. Rak exists to analyse things, and
-analysing a legacy protocol or a collision sample means calling the broken primitive
-on purpose. Removing `md5` would make Rak unable to do the job it is for, while a
-warning plus the `weak-crypto` lint tells you when you did not mean to.
-
-The warning goes to **stderr**, once per primitive, so a digest inside a loop does
-not bury the output and a pipeline reading stdout is unaffected.
-
-The supported primitives are `sha256`, `sha512`, `hmac_sha256`, `aes_gcm_encrypt`,
-`chacha20poly1305`, `ed25519_sign`, `x25519_*`, `hkdf_derive`, `rsa_*` and `p256_*`.
+`rsa_encrypt` and `rsa_decrypt` are OAEP with a label; `rsa_sign` is
+PKCS#1 v1.5 with SHA-256.
 
 ## Escaping untrusted data
 
-Four helpers, one per context. Each is the *fallback*, not the recommendation — the
-table below says what to use instead, and the structural option is always better.
+| Builtin | For |
+|---|---|
+| `sql_escape` | ANSI SQL, PostgreSQL, SQLite (and MySQL with `NO_BACKSLASH_ESCAPES`) |
+| `sql_escape_mysql` | MySQL's default `sql_mode` |
+| `shell_escape` | A shell command line |
+| `html_escape` | HTML text and attributes |
+| `regex_escape` | A regex pattern |
 
-| Helper | For | Use this instead |
-| --- | --- | --- |
-| `sql_escape(s)` | a value inside a `'...'` SQL literal | a parameterised query |
-| `shell_escape(s)` | one `argv` entry for a POSIX shell | `exec` with an argv array |
-| `html_escape(s)` | element text or a quoted attribute | the template layer's escaping |
-| `regex_escape(s)` | a string that must match itself | `contains` / `index_of` |
-
-```rak
-let hostile = "x'; DROP TABLE users; --"
-dump sql_escape(hostile)      // x''; DROP TABLE users; --
-dump shell_escape("$(id)")    // '$(id)'
-dump html_escape("<b>")       // <b>
-dump regex_escape("a.c*")     // a\.c\*
-```
-
-Notes on what each one does *not* do:
-
-* `sql_escape` does not add quotes. It escapes a value for inside a literal you have
-  already opened, because a function that added its own quotes would produce
-  `"it''s"` inside `'...'` — a syntax error at best.
-* `shell_escape` is safe for *passing* an argument. It is not safe for printing
-  something for a human to retype, which is a different problem.
-* `html_escape` escapes `'` as `'` rather than `&apos;`, so the output is safe
-  in a single-quoted attribute and decodes in XHTML.
-
-### The lint that goes with them
-
-`unescaped-interpolation` fires when an f-string builds a SQL or shell command
-around a value no `*_escape` call wraps:
-
-```rak
-let q = f"SELECT * FROM users WHERE id = {uid}"
-// warning[unescaped-interpolation]: an f-string building a sql command
-// interpolates a value that is not wrapped in `sql_escape`
-
-let q = f"SELECT * FROM users WHERE id = {sql_escape(uid)}"   // silent
-```
-
-The judgement is on the template, not the value: the same line is an injection with
-untrusted input and correct with trusted input, and only the template says which
-context the value is landing in. One finding is reported per f-string however many
-holes it has.
+For SQL, a parameterised query is better than either escaper. For the shell,
+an argv array is better than a command string. The linter's
+`unescaped-interpolation` rule says so too, when it recognises a template that
+looks like one or the other.
 
 ## Bounded decompression
 
-`gunzip`, `inflate` and `zip_extract` refuse to produce more than
-**100 MiB**, and say so:
+Decompression is bounded at 100 MiB, and the bound is checked *while* reading,
+not after. A gzip bomb is refused with a message that says what it thinks it
+saw:
 
-```console
-$ rakc run tool.rak
-Error: Runtime error: gunzip: output exceeds the 104857600-byte limit; this looks
-like a decompression bomb rather than a 8174-byte input
+```text
+gzip_decompress: output exceeds the 104857600-byte limit (this looks like a decompression bomb, not a gzip stream)
 ```
 
-A deflate stream can expand by a factor of a thousand, so a few dozen bytes from an
-untrusted source could otherwise exhaust memory. The bound is enforced *while*
-reading, because the allocation is the damage: checking the length afterwards would
-be measuring a heap that is already too big.
+The same bound applies to zip entries.
 
 ## Zeroization
 
-`Vec::clear` and `drop` free memory without overwriting it, so a key in a heap
-buffer survives in freed pages until something reuses them.
+`zeroize(bytes)` wipes a buffer and returns it. The wipe is not elided by the
+optimizer.
 
-- `zeroize(bytes)` overwrites a buffer through a volatile path the optimizer
-  cannot remove as a dead store, and returns it.
-- `secret_delete(name)` wipes the value from memory and overwrites the store
-  file with zeroes before rewriting it.
-- `secret_delete_all()` does the same for the whole store.
-
-What this does not cover: `secret_get` returns a `String` by value, so your
-copy is yours to wipe. A process that is killed mid-write can still leave
-plaintext in swap or a core dump.
+The secrets store has a stronger guarantee: `secret_delete` and
+`secret_delete_all` overwrite the on-disk file with zeroes before removing
+it, and wipe the in-memory values. The store itself is created with mode 0600
+on unix. On Windows the file inherits the directory's ACL and the mode bits do
+not apply.
 
 ## Packet forging
 
-Pure builders, available inside a sandbox because they run no code and open
-no socket. All are cross-platform; only `net_raw_send` / `net_raw_recv` are
-unix-only, since they need `CAP_NET_RAW`.
+The packet builders are pure computation and are **not** gated by the
+sandbox. Sending is: `net_raw_send` and `net_raw_recv` need the `raw`
+capability, and on unix they need `CAP_NET_RAW` or root.
 
+`net_raw_send` and `net_raw_recv` return a `Result` value rather than
+raising, so a program can handle a refusal:
+
+```rak
+let sent = net_raw_send(pkt)
+if sent is Err(e) { dump e }
 ```
-net_raw_ipv4(src, dst, proto, payload)
-net_raw_tcp(src, dst, sport, dport, flags, seq, ack, payload)
-net_raw_udp(src, dst, sport, dport, payload)
-net_raw_tcp_syn(src, dst, sport, dport)
-net_raw_icmp(src, dst, id, seq, payload)          // echo request
-net_raw_icmp_ping(src, dst, id, seq)
-net_raw_icmp_echo_reply(src, dst, id, seq, payload)
-net_raw_arp_request(src_mac, src_ip, target_ip)
-net_raw_arp_reply(src_mac, src_ip, target_mac, target_ip)
-net_raw_arp_parse(frame) -> map | nil
-net_raw_csum(bytes) -> int
-```
-
-`net_raw_arp_parse` accepts a frame with or without the Ethernet header and
-returns `nil` on anything that is not ARP, so you can feed it raw capture bytes
-without filtering first. It returns a map with `opcode`, `sender_mac`,
-`sender_ip`, `target_mac`, and `target_ip`.
-
-For declaration-heavy formats, `binstruct` gives you pack and unpack with
-bitfields and length-prefixed arrays. See
-[Forensic structs](forensics.html).
 
 ## Fuzzing
 
-`rakc fuzz` runs a deterministic mutation loop against the lexer, parser,
-interpreter, and the stdlib parsers. It is on the stable toolchain, so it runs
-in ordinary CI and on a Windows dev box.
+Two fuzzers, with different jobs.
 
+`rakc fuzz <target>` is a deterministic mutation loop that runs in ordinary
+CI on any platform. It needs a debug build, because the harness uses
+`catch_unwind` and the release profile sets `panic = "abort"`.
+
+```text
+rakc fuzz all
+rakc fuzz dns --seed 0xC0FFEE
 ```
-rakc fuzz all                        # 20000 runs per target
-rakc fuzz parse --runs 100000
-rakc fuzz dns --seed 0xC0FFEE        # reproducible
-rakc fuzz --list
-```
 
-Targets: `lex`, `parse`, `eval`, `dns`, `tls`, `json`, `websocket`, `tunnel`,
-`netraw`, `csv`, `gzip`, `zip`, `all`. A crashing input is written to
-`fuzz-crash-<target>.bin`, and the printed `--seed` replays the run.
-
-Run it from a debug build. The harness uses `catch_unwind`, and the release
-profile sets `panic = "abort"`.
-
-This is not coverage-guided. The `fuzz/` directory has 13 `cargo-fuzz` targets
-that are, but they need nightly and `-fsanitize=fuzzer`, which MSVC cannot
-provide. Use `rakc fuzz` as the always-on regression net and cargo-fuzz when
-you have a Linux or WSL box for a long run.
+`fuzz/` holds the coverage-guided `cargo-fuzz` targets for long Linux or WSL
+runs: the lexer, the parser, the evaluator, and the DNS, TLS, JSON, WebSocket,
+tunnel, raw-packet, CSV, gzip and zip parsers.
 
 ## What Rak does not do
 
-These are not oversights to be patched later. Each one is a different order of
-magnitude of work, and pretending otherwise would be dishonest.
-
-**No ownership or borrowing.** There is no `&` reference type; `&` is
-bitwise-and. Values are shared and copied rather than moved, and there is no
-lifetime tracking, so a use-after-free in Rak is a bug in the runtime or in an
-FFI call, not in your source. Adding borrow checking means rewriting the type
-checker and every value-cloning site across a 7,600-line interpreter.
-
-What exists instead: `unsafe` blocks that mark and justify every exemption,
-runtime `let mut` enforcement, a capability sandbox that keeps FFI behind a
-switch, and a lint rule that names the unchecked-memory builtins. The realistic
-path to real memory safety is a Rust or Zig FFI target with a narrow API, not a
-borrow checker bolted onto a dynamic language.
-
-**No instrumented control-flow integrity.** The binary is CFG-compatible and
-carries a guarded dispatch table, full RELRO, ASLR, and DEP, all verified by
-`dist/verify_hardening.py`. What is missing is instrumentation: rustc does not
-emit CFG check calls for Rust code the way Clang's `-fsanitize=cfi` does for C.
-So the dispatch table cannot be hijacked, but an uninstrumented indirect call
-can still be redirected once you have execution. Closing that needs an LLVM
-backend, and the `inkwell` dependency in `Cargo.toml` is commented out.
-
-**No inline assembly.** `extern "C"` FFI is the escape hatch, which is
-functionally comparable but not the same thing, and it is capability-gated.
-
-**No formal verification.** No theorem prover and no symbolic execution. Rak
-does have `requires`/`ensures` clauses, enforced at runtime by `rakc run` and
-checked in bulk by `rakc verify` (which distinguishes PASS, FAIL and
-INCONCLUSIVE), plus match-exhaustiveness checking in `rakc check`. What it does
-not have is proof: a clause is checked on the paths a bounded execution actually
-takes, so a violation on an unexercised path is not found.
-
-**No enclaves.** No SGX, no TrustZone, no seccomp or landlock filtering. The
-capability sandbox is name-based and in-process; it does not confine the
-process from the kernel.
-
-**No event loop.** Concurrency is thread-per-task with a counting semaphore
-sized at `cpus * 16`. `task_group` is the well-behaved path. The HTTP server
-handles connections serially, so one slow client blocks the rest. Thousands of
-concurrent connections needs epoll/kqueue/io_uring, which is a runtime rework.
-
-`docs/V8-ROADMAP.md` has the reasoning and cost for each of these.
+- It does not make a program safe to run untrusted code. The sandbox reduces
+  what a program can reach; it does not make a bug in the program disappear.
+- It does not verify a package's provenance. `oyvey audit` checks that the
+  installed files match the lockfile's checksum, which is integrity, not
+  trust: the checksum comes from the same source as the code.
+- It does not sandbox a native library. A granted `ffi` capability hands a
+  program the whole process, and the library's own bugs are not Rak's to
+  contain.
+- It does not have a memory-safe core. The compiler is Rust, but a Rak
+  program that walks a raw pointer can still read out of bounds.
+- It does not have control-flow integrity. The release binaries are built
+  with ASLR, high-entropy VA, DEP and a CFG-compatible image, but the
+  instrumented CFI that would actually enforce it is not available.
+- It does not protect a value once it is in memory. `zeroize` is explicit and
+  best-effort; a copy made by the runtime is not tracked.

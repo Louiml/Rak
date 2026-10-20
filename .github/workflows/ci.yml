@@ -113,6 +113,14 @@ jobs:
           cargo test --workspace --exclude app
           --lib --tests --no-fail-fast -- --test-threads=1
 
+      - name: Check the documentation set
+        # The site renders the Markdown at run time, so a link to a page that
+        # does not exist, or to an anchor that does not exist, is invisible in
+        # the source and only shows up as a dead link in the browser. The
+        # checker reads the same manifest the site builds its navigation from,
+        # so a page that is not registered is caught too.
+        run: python scripts/check-docs.py
+
       - name: Summarise the test results
         # Re-runs nothing; reads what is already in the log. GitHub collapses
         # long output, and the one number that matters is how many suites passed.

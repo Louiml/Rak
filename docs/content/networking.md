@@ -12,7 +12,7 @@ tcp_close(stream)
 ```
 
 `net_listen`, `net_accept`, `net_connect`, `net_local_addr`, `tcp_read`,
-`tcp_read_line`, `tcp_write`, `tcp_close`. Also `tcp_stream(addr)` (0.7) for a
+`tcp_read_line`, `tcp_write`, `tcp_close`. Also `tcp_stream(addr)` for a
 pull-based stream, and `tcp_read_line` for line protocols.
 
 ## HTTP server (pull-based)
@@ -86,7 +86,7 @@ dump net_raw_csum(pkt[0..20])  // 0 (the IP header is self-checking)
 Send/recv are unix-only in this build (Windows returns a clear `Err`). An
 invalid checksum is not an error — forging malformed packets is intentional.
 
-### ICMP and ARP (8.0.0)
+### ICMP and ARP
 
 ```rak
 // Echo request / reply. id and seq are echoed, so a reply can be matched
@@ -120,7 +120,10 @@ capability.
 
 Hand-rolled DNS wire-format builder/parser + UDP query (no external DNS crate
 — works air-gapped). TLS ClientHello SNI extraction and DER cert-chain parsing.
-PCAP offline capture behind the `pcap` cargo feature (libpcap/Npcap).
+PCAP offline capture behind the `pcap` cargo feature of the standard library
+(libpcap on unix, Npcap on Windows). `rakc` does not enable that feature, so
+in a normal build `pcap_open` returns an `Err` saying it was not built — it
+is a capability of the standard library, not of the compiler.
 
 ```rak
 dump dns_query("example.com", "A")       // Ok({answers: [...], truncated})

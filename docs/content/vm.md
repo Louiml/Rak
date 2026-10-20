@@ -1,168 +1,163 @@
 # Bytecode VM
 
-## Overview
+`rakc vm` runs bytecode. The compiler lowers the shared AST to chunks, and a
+stack machine executes them. Benchmarks show about a 6x speedup over the
+tree-walking interpreter on compute-heavy code; `rakc bench file.rak` compares
+them on the same script.
 
-`rakc vm` runs bytecode. The compiler (`compiler.rs`) lowers the shared AST to
-bytecode (`bytecode.rs` chunks) executed by a stack-based VM (`vm.rs`).
-Benchmarks show about 6x speedup over the tree-walking interpreter; run
-`rakc bench file.rak` to compare both on the same script.
+```bash
+rakc run file.rak     # the interpreter
+rakc vm file.rak      # the bytecode VM
+rakc bench file.rak   # both, timed
+```
 
-The VM never produces wrong results for unsupported features: the compiler's
-`compile_stmt`/`compile_expr`/`compile_pattern` return
-`Err("VM does not support ...")`, so interpreter-only programs fail fast with a
-clear message.
+The VM never produces a wrong result for a feature it does not support: the
+compiler refuses, with a message naming the construct.
 
-## Coverage matrix
+## The two backends
+
+They are two implementations of one language, so they are compared against
+each other in the test suite rather than tested separately.
+
+- A **structural gate** reads the registration sites in both backends and
+  requires the name sets to be identical. A builtin added to one side and
+  forgotten on the other fails the build.
+- **Behavioural tests** run a program on both and require identical output.
+  This is the kind that catches a *different answer* rather than a missing
+  name.
+
+The v8.0.0 release shipped nineteen builtins that existed only on the VM, and
+the suite did not notice: a per-backend test suite cannot catch a per-backend
+omission. The registration gap is now closed — 31 interpreter-only builtins
+reached the VM, and the count that tracked the gap is gone.
+
+## Coverage
 
 | Feature | Interpreter | VM |
 |---------|:-----------:|:--:|
-| Pipeline `\|>` | yes | yes (desugar) |
+| Pipeline `\|>` | yes | yes (desugared in the front end) |
 | Regex literals | yes (methods + builtins) | yes (builtins) |
-| Binary pattern matching | yes | yes (`Op::MatchPat` descriptors) |
-| Trait protocols | yes | yes (`__method_*` globals, `Op::CallMethod`) |
-| Method-call dispatch | yes | yes (`Op::CallMethod`) |
-| User enum patterns (`Event::Variant(..)`) | yes | yes (`Op::MatchPat`) |
-| Generic functions (`fn f<T>`) | yes | yes |
-| `defer` (LIFO cleanup) | yes | yes (`Op::DeferCall`) |
-| `char` type | yes | yes |
-| Base literals (`0b`/`0o`) | yes | yes |
-| Cross-numeric equality (`0xA == 10`) | yes | yes |
+| Binary pattern matching | yes | yes |
+| Trait protocols | yes | yes |
+| Method-call dispatch | yes | yes |
+| User enum patterns | yes | yes |
+| Generic functions (`fn f<T>`) | yes | yes (the type argument is discarded) |
+| `defer` (LIFO cleanup) | yes | yes |
+| `char`, base literals, cross-numeric equality | yes | yes |
 | Mutability (`let mut`) | yes | yes (compile-time check) |
-| FFI | yes | yes (natives + `Op::FFICall`/`Op::FFIClose`) |
-| Memory-mapped files | yes (slice/range/pattern) | yes (natives + single-byte index) |
-| Async (`async fn`/`await`/I/O futures) | yes (deferred bodies + I/O) | yes (`Op::Await` + I/O natives; `async fn` runs sync) |
-| Raw sockets (packet forging) | yes (builders + unix send/recv) | yes (builders + `Result` send/recv) |
-| DNS / TLS / PCAP | yes | yes (same builtins; `Result` for query/open) |
-| Compile-time macros (`macro`/`name!`/`const`) | yes (expand + exec) | yes (expand at compile time) |
-| Imports & exports (`import`/`from`/`pub`) | yes (whole/from/star/pkg/cycles) | yes (whole/from/star/pkg/cycles) |
-| Forensic structs (`binstruct`/`.decode`/`.encode`) | yes (registry + codec) | yes (compile-time baked natives, no new opcodes) |
-| Evidence provenance (`evidence<T>`/`cite`/`report`) | yes | yes (mirrored value + natives) |
+| FFI | yes | yes |
+| Memory-mapped files | yes (slice, range slice, pattern match) | yes (natives; single-byte index only) |
+| Async (`async fn` / `await` / I/O futures) | yes (deferred bodies, I/O) | yes (`async fn` bodies run synchronously) |
+| Raw sockets (forging and sending) | yes | yes |
+| DNS / TLS / PCAP | yes | yes |
+| Compile-time macros | yes | yes (expanded in the front end) |
+| Imports and exports | yes | yes (whole, from, star, package, cycles) |
+| Forensic structs (`binstruct`) | yes | yes (baked natives, no new opcodes) |
+| Evidence provenance | yes | yes |
 | Structured errors (`err_*`) | yes | yes |
-| Streaming (`stream_*`) | yes | yes (`Value::Stream`; lazy `for` lowering) |
-| Sets (`set_*`, `for s in set`) | yes | yes (`Value::Set`, insertion-ordered) |
-| GUI (`gui_*`, `rak_call` from JS) | yes | yes (same process-wide manager) |
+| Streaming (`stream_*`) | yes | yes |
+| Sets (`set_*`) | yes | yes |
+| Threads, channels, `select`, `task_group` | yes | yes |
+| GUI | yes | yes (the same process-wide manager) |
 | CLI (`argv()`, `parse_args`) | yes | yes |
-| Tunnel / UDP transport | yes | yes (`Value::UdpTransport`, `tunnel` lowering) |
-| Inline assembly (`asm`) | yes | **no**, by design (see below) |
-| WebSocket | yes | yes (`Value::TcpStream`, RFC 6455 framing) |
-| Threads (`spawn`, `thread_join`) | yes | yes (OS thread, `Value::JoinHandle`) |
-| Channels & select (`channel`, `chan_send`, `chan_recv`, `select`, `timeout`, `task_group`, `await_all`) | yes | yes (`Value::Channel`; `select` races a thread per future) |
+| Tunnel and UDP transport | yes | yes |
+| WebSocket | yes | yes |
+| `scan` statement | yes | **no** |
+| `fetch` statement | yes | **no** |
+| `trace` statement | yes | **no** |
+| `assert` statement | yes | **no** |
+| `async { }` block | yes | **no** |
+| Inline assembly (`asm`) | yes | **no**, by design |
+| `exit` | yes | **no**, by design |
 
-The `yes`/`no` column is the authoritative backend-parity list, and it is
-checked rather than maintained by hand: `tests/backend_parity.rs` compares the
-two backends' registration tables and fails when they diverge, so a builtin
-cannot be added to one side and forgotten on the other. The v8.0.0 release
-shipped nineteen builtins that existed only in the VM, and the suite did not
-notice.
+The last four are *statements* rather than builtins, so the registration gate
+cannot see them: it compares names, and these are not names. The VM's
+refusal is loud — "VM does not support statement: Fetch" — but a program that
+uses `fetch` runs under `rakc run` and not under `rakc vm`, and that is a
+real difference. `docs/V8-BACKEND-PARITY.md` records it.
 
-**The registration gap is closed.** The two backends register the same
-builtins, and the gate that compares their registration tables fails the
-build when they diverge.
+Two more differ by design: `asm`, because a bytecode VM has no instructions to
+escape into, and `exit`, because the CLI owns the process.
 
-The last of the gap was closed by recognising that most of it was never a
-coroutine problem. A VM native has the signature `fn(&[Value])`, so it cannot
-*call* a Rak function - but it can block, and the interpreter's versions of
-the channel, socket, DNS and future builtins block too. They are now plain
-natives on the VM, with the two that genuinely need the machine
-(`task_group`, `expect_error`, `gui_callback`) intercepted in `Vm::call_value`.
+## Two differences worth knowing
 
-`asm` and `exit` are still interpreter-only, by design rather than by gap: a
-bytecode VM has no instructions to escape into, and the CLI exits the process
-itself.
+**`async fn` runs synchronously on the VM.** The interpreter defers an
+`async fn` body to a worker; the VM runs it in place and `await` resolves
+immediately. The result is the same, the concurrency is not.
 
-`ensures` postconditions and closure captures are on both backends now. A
-postcondition is compiled into the callee's own body -- every `return` parks
-the value in a local and jumps to a trampoline that runs the deferred calls,
-checks the clause and returns -- and the failure names the function and the
-clause, in the same words the interpreter uses. A closure sees the function it
-was written in: the VM copies the enclosing frame's values out when the
-closure is made, which is the interpreter's copy-of-environment semantics, so
-an assignment inside a closure lands in the closure's own copy and the
-enclosing function never sees it. A *global* is not copied: a closure reads
-and writes the program's globals on both backends.
-`docs/V8-BACKEND-PARITY.md` has the reasoning and the list.
-`docs/V8-ROADMAP.md` has what closing it would take.
+**`string(bytes)` renders differently.** The interpreter prints the debug
+form (`b"\x41\x42"`), the VM prints the text (`"AB"`). A program that builds a
+printable glyph gets different bytes depending on the backend, which is the
+worst shape of divergence — but it is a rendering difference, not a semantic
+one.
 
-## New in 0.9.0
+## Implementation notes
 
-### Full VM pipeline on big stack
+- Regex values are compiled at **compile time** on the VM, so it never pays
+  for regex construction at run time.
+- `binstruct` decode and encode are baked at compile time into native
+  functions — no new opcodes.
+- `|>` is a parse-time desugar, so the VM evaluates it with no new opcode.
+- `evidence<T> from expr` lowers to a call to a native.
+- `defer f(args)` compiles to a defer op with the pre-evaluated callee and
+  arguments. Each frame holds a defer stack, and the return runs it LIFO
+  before the caller's result is populated, so the return value survives the
+  deferred calls.
+- A function with postconditions does not return directly: the value is parked
+  in a local and a trampoline at the end of the body runs the deferred calls,
+  checks the clauses, and returns. The failure names the function and the
+  clause in the interpreter's words.
 
-`rakc vm` now runs the entire pipeline (lexer, parser, compiler, VM execution)
-on the big stack via `run_on_big_stack`. Deeply nested expressions no longer
-overflow the default 1 MiB stack.
+## The error model
 
-### Capability sandbox
+- **Lexer** errors carry line and column.
+- **Parser** errors carry line and column.
+- **Runtime** errors are structured — message, kind, span, cause, context —
+  and `try`/`catch`/`raise` and the `?` operator propagate them. FFI, mmap
+  and raw-socket failures become runtime errors; the VM does not panic.
 
-The VM now enforces the capability sandbox at the native level. The following
-builtins are gated:
+## The debugger
 
-| Builtin | Capability |
-|---|---|
-| `dump x, "path"` | `fs_write` |
-| `env_get` / `env_set` | `secrets` |
-| `mmap_open(..., "rw")` | `fs_write` |
-| `mmap_write` | `fs_write` |
-| `extern "C" { ... }` | `ffi` |
+`rakc debug program.rak` is a source debugger on the bytecode VM, with
+statement-to-bytecode line mapping.
 
-Programs must be run with `--sandbox --allow <capability>` to use these
-features. The gate sits at the native call site in `Vm::call_value`; `extern`
-is gated one step earlier, where the compiler creates the foreign native, so
-`rakc vm --sandbox` refuses the declaration itself (the interpreter checks it
-when the statement executes). `asm` does not appear in this table: it is
-interpreter-only.
-
-## Error model
-
-- **Lexer** errors carry line/column; `rakc check` emits them in an
-  IDE-friendly form.
-- **Parser** errors carry line/column.
-- **Runtime** errors are structured (`message`, `kind`, span, cause, context,
-  backtrace — see [Error handling](errors.html)); `try`/`catch`/`raise` and
-  the `?` operator propagate them. FFI/mmap/net_raw failures convert OS errors
-  into runtime errors, never panicking the VM.
-
-## The debugger (0.7)
-
-`rakc debug program.rak` is a bytecode-VM source debugger with
-statement-to-bytecode line mapping: breakpoints (`break <line>`), stepping
-(`step`, `next`, `finish`), inspection (`locals`, `stack`, `print`,
-`frame`), and `disassemble` for the full line-annotated bytecode listing. See
-[CLI reference](cli.html#rakc-debug-07).
-
-## Debug Adapter Protocol (0.7.2)
-
-`rakc dap program.rak` speaks DAP over stdio (VS Code / any LSP-based editor):
-
+```text
+dbg> break 12
+dbg> c
+[stopped] line 12
+dbg> locals
+  count = 3
+dbg> print count
+  3
 ```
+
+The commands are `break <line|file:line>`, `continue`/`c`, `step`/`s`,
+`next`/`n`, `finish`, `locals`, `stack`/`bt`/`backtrace`, `print <name>`,
+`disassemble`, `frame` and `quit`. An empty line prints the locals. There is
+no watchpoint, no conditional breakpoint, and no distinction between stepping
+into and stepping over: `s` and `n` are the same single-line step.
+
+## The Debug Adapter Protocol
+
+`rakc dap program.rak` speaks DAP over stdio, so VS Code and similar editors
+get breakpoints, stepping and variable inspection.
+
+```bash
 rakc dap program.rak
 ```
 
 The server implements the standard session flow — `initialize`,
-`setBreakpoints` (verified per-line), `configurationDone`, then drives the VM
-on a worker thread. While the program is paused you can:
+`setBreakpoints`, `configurationDone` — and then drives the VM on a worker
+thread. While the program is paused you can continue, step, inspect the stack,
+the scopes and the variables, and evaluate a local or global by name. Program
+output streams as DAP `output` events, and the session ends with
+`terminated`.
 
-- **continue** / **next** — breakpoint-triggered pauses resume with either
-  run-to-completion or single-step-over semantics (line-granular; repeated
-  opcodes of the same source line don't re-trigger).
-- **stackTrace / scopes / variables** — the current source line plus `Locals`
-  and `Globals` snapshots rendered at each stop.
-- **evaluate** — look up a local/global by name while paused.
-- **pause / disconnect** — interrupt a running program or terminate cleanly.
+**What it does not do.** `stackTrace` returns exactly one frame — there is no
+real call stack in the DAP yet. `setVariable` and `restart` are advertised as
+unsupported. Exception breakpoints are accepted and ignored. `evaluate`
+resolves a bare identifier; it does not evaluate an expression. The "stopped"
+reason is always `breakpoint`, even for a step.
 
-Program output (`dump` etc.) streams as `output` events; the session ends with
-`terminated`. Because the hook runs at statement boundaries in the VM, only
-the bytecode backend is supported (`rakc dap`), the same one `rakc debug`
-uses.
-
-## Implementation notes
-
-- Regex values are compiled at **compile time** on the VM (a `Value::Regex`
-  constant), so the VM never pays for regex construction at runtime.
-- `binstruct` decode/encode are baked at compile time into self-contained
-  native-fn globals (`__bin_decode_<Name>` / `__bin_encode_<Name>`) — no new
-  opcodes.
-- `|>` is a parse-time desugar, so the VM evaluates it with no new opcode.
-- `evidence<T> from expr` lowers to a call to the `__evidence_from` native.
-- `defer f(args)` compiles to `Op::DeferCall` with the pre-evaluated callee and
-  args. Each frame holds a defer stack; `Op::Return` runs it LIFO before
-  populating the caller's result, so the return value survives deferred calls.
+Only the bytecode backend is supported, because the hook runs at statement
+boundaries in the VM.
