@@ -438,6 +438,9 @@ dump zeroize(b"\x01\x02\x03\x04")
     );
 }
 
+/// Key generation is seeded from the OS random number generator, and the
+/// browser build of the playground has none -- the `rand` feature is off there.
+#[cfg(feature = "rand")]
 #[test]
 fn parity_v8_rsa() {
     // Round-trip through RSA. Key generation is seeded from the OS RNG in the
@@ -456,6 +459,9 @@ dump rsa_decrypt(sk, ct, b"")
     );
 }
 
+/// Signing needs a random nonce, so this test belongs to the build that has a
+/// random number generator.
+#[cfg(feature = "rand")]
 #[test]
 fn parity_v8_ecdsa() {
     agree(
@@ -2212,6 +2218,42 @@ dump chan_recv(rx)
 "#,
     );
     agree(
+        "task_group runs functions concurrently, results in input order",
+        r#"
+let out = task_group([fn() { return 1 }, fn() { return 2 }, fn() { return 3 }])
+dump out
+"#,
+    );
+    agree(
+        "expect_error passes when the function raises",
+        r#"
+dump expect_error(fn() { raise "boom" })
+"#,
+    );
+    agree(
+        "expect_error fails when nothing is raised",
+        r#"
+try {
+    expect_error(fn() { return 1 })
+    dump "not-reached"
+} catch e {
+    dump "caught"
+}
+"#,
+    );
+}
+
+/// The future family: `await_all`, `select` and `timeout` over a pending
+/// future.
+///
+/// A pending future is a Tokio task, and the browser build of the playground
+/// has no runtime to schedule one on -- the `async` feature is off there, and
+/// the builtins are not registered at all. The test belongs to the build that
+/// has a runtime.
+#[cfg(feature = "async")]
+#[test]
+fn parity_futures_and_orchestration() {
+    agree(
         "await_all resolves every future, results in input order",
         r#"
 let out = await_all([async_sleep(10), async_sleep(20)])
@@ -2240,30 +2282,6 @@ try {
     dump "resolved"
 } catch e {
     dump "timed-out"
-}
-"#,
-    );
-    agree(
-        "task_group runs functions concurrently, results in input order",
-        r#"
-let out = task_group([fn() { return 1 }, fn() { return 2 }, fn() { return 3 }])
-dump out
-"#,
-    );
-    agree(
-        "expect_error passes when the function raises",
-        r#"
-dump expect_error(fn() { raise "boom" })
-"#,
-    );
-    agree(
-        "expect_error fails when nothing is raised",
-        r#"
-try {
-    expect_error(fn() { return 1 })
-    dump "not-reached"
-} catch e {
-    dump "caught"
 }
 "#,
     );

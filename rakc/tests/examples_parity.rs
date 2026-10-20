@@ -98,6 +98,31 @@ const ENVIRONMENTAL: &[(&str, &str)] = &[
     ("dap_demo", "drives an editor session over stdio"),
 ];
 
+/// Examples that need a feature the build may not have, and which one.
+///
+/// The browser build of the playground turns `http`, `async`, `rand` and
+/// `html` off, because what they need does not compile to WebAssembly. An
+/// example that uses one of them cannot run in that build, so it is skipped
+/// rather than counted as a divergence between the two backends -- the
+/// backends do not disagree about it; the build simply has less language in
+/// it.
+const FEATURE_GATED: &[(&str, &str)] = &[
+    ("async", "async"),
+    ("async_orchestration", "async"),
+    ("batteries_demo", "rand"),
+];
+
+/// Whether this build has a feature.
+fn feature_enabled(name: &str) -> bool {
+    match name {
+        "async" => cfg!(feature = "async"),
+        "rand" => cfg!(feature = "rand"),
+        "http" => cfg!(feature = "http"),
+        "html" => cfg!(feature = "html"),
+        _ => true,
+    }
+}
+
 /// Examples the VM still cannot run, with the reason.
 ///
 /// This list was 29 entries long, each naming an interpreter-only builtin.
@@ -229,6 +254,13 @@ fn examples_behave_the_same_on_both_backends() {
 
         if ENVIRONMENTAL.iter().any(|(n, _)| *n == name) {
             continue;
+        }
+        // An example that needs a feature this build does not have cannot run
+        // here at all.
+        if let Some((_, feature)) = FEATURE_GATED.iter().find(|(n, _)| *n == name) {
+            if !feature_enabled(feature) {
+                continue;
+            }
         }
         // Portable examples run everywhere. A platform-specific example runs
         // only on its own platform, so on Windows the three Windows-only ones

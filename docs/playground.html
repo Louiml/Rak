@@ -81,12 +81,19 @@
         <p>
             This is Rak's own interpreter, compiled to WebAssembly and running in this
             page &mdash; the same lexer, parser and evaluator as <code>rakc run</code>.
-            It is loaded on first use, so nothing is downloaded until you press Run.
+            The module is fetched when the page opens, so the first run starts
+            straight away.
         </p>
         <p>
-            No network, no FFI and no async in the browser build: those builtins need a
-            TLS stack and an event loop, and a page has neither. They report
-            &ldquo;Unknown function&rdquo; rather than pretending to work.
+            A browser has no TLS stack, no event loop and no file system, so the
+            browser build has no network, no async and no filesystem. Those
+            builtins say so rather than pretending to work: <code>fetch</code>
+            reports that the build has no HTTP client, and the async builtins
+            are not registered at all.
+        </p>
+        <p>
+            Randomness does work here: the module asks the page for it, and the
+            page uses the browser&rsquo;s own cryptographic generator.
         </p>
     </div>
 </main>

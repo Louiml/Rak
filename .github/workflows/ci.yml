@@ -131,6 +131,70 @@ jobs:
         run: |
           cargo test -p rakc --test backend_parity -- --ignored --nocapture parity_backlog_report || true
 
+  browser:
+    name: browser build (the playground's configuration)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the pinned toolchain
+        # The wasm target as well: the playground is a WebAssembly module, and
+        # a target that is not installed fails at the build rather than at the
+        # test.
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup target add wasm32-unknown-unknown
+          rustc -vV
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ci-browser-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ci-browser-
+
+      - name: Test the build without the features a browser cannot have
+        # The playground runs the interpreter compiled to WebAssembly, and that
+        # build turns `http`, `async`, `rand` and `html` off: their
+        # dependencies do not compile to wasm. The default test run never
+        # exercises that configuration, so a feature gate that only breaks the
+        # browser build would ship unnoticed -- and the browser build is the
+        # one every visitor to the docs site runs.
+        #
+        # `--no-default-features` is passed to `rakc` alone: the standard
+        # library's own features are selected by `rakc`'s, so this is the
+        # browser's configuration and not a different one.
+        run: >-
+          cargo test -p rakc --no-default-features
+          --lib --tests --no-fail-fast -- --test-threads=1
+
+      - name: Build the playground
+        # The wasm payload is committed to the repository, so a change to the
+        # interpreter that breaks the browser build has to fail here rather
+        # than in the page.
+        run: >-
+          cargo build -p rak-playground --profile playground
+          --target wasm32-unknown-unknown
+
+      - name: The playground module runs a program
+        # The page loads `docs/rak.wasm` from the repository, so the file in
+        # the tree has to be checked, not just the source it was built from.
+        # The check is behavioural rather than a comparison of file sizes: a
+        # byte-for-byte or size comparison would fail on every toolchain
+        # bump, and a permanently red job is a job people stop reading.
+        #
+        # Both modules are checked: the one just built, which proves the
+        # source still compiles to a module that works, and the one committed,
+        # which proves the site serves a module that works.
+        run: |
+          node playground/check.mjs target/wasm32-unknown-unknown/playground/rak_playground.wasm
+          node playground/check.mjs docs/rak.wasm
+
   lint:
     name: clippy and fmt
     runs-on: ubuntu-latest
@@ -155,38 +219,26 @@ jobs:
           key: ci-lint-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ci-lint-
       - name: Formatting
-        # Reported, not enforced. `cargo fmt --all` wants to reformat 1313
-        # locations across the tree, the overwhelming majority in code this
-        # project has never been formatted with rustfmt. Reformatting it as part
-        # of a feature release would put an 8000-line diff through code nobody
-        # has read, on a release that already has enough real changes to
-        # review. Making it a hard failure instead would mean a permanently red
-        # job, which is the same mistake as an unenforced check in the other
-        # direction: both end up ignored.
+        # A hard failure.
         #
-        # This becomes a gate when the tree is formatted, in its own commit, with
-        # the test suite run against it.
-        run: |
-          if ! cargo fmt --all --check 2>/dev/null; then
-            n=$(cargo fmt --all --check 2>/dev/null | grep -c '^Diff in' || true)
-            echo "::warning title=rustfmt::the tree is not rustfmt-clean ($n locations). Not a hard failure; see the comment in ci.yml."
-          fi
+        # This was a warning, on the reasoning that the tree was not
+        # rustfmt-clean and reformatting it would put a large diff through
+        # code nobody had read. The tree *is* rustfmt-clean now, and a check
+        # that cannot fail is not a check: the one job in this file that
+        # prevents a class of review friction was reporting success on a tree
+        # it had never actually formatted.
+        run: cargo fmt --all --check
       - name: Clippy
         # `-D warnings` so a new lint is a failure rather than noise to be
-        # triaged later. The existing code does not pass this cleanly yet, so
-        # the step is allowed to continue on error and the summary below says
-        # so explicitly. Turning it into a hard failure is a separate change,
-        # done with the fixes it implies rather than as part of adding CI.
-        run: |
-          cargo clippy --workspace --all-targets -- -D warnings 2>&1 | tee clippy.log
-          echo "::warning title=clippy::clippy reported findings; see the log. This is not yet a hard failure."
-      - name: Clippy summary
-        run: |
-          if [ -s clippy.log ]; then
-            count=$(grep -c '^warning\|^error' clippy.log || true)
-            echo "::warning title=clippy::$count finding(s)"
-            grep '^warning: ' clippy.log | sort -u | head -n 20
-          fi
+        # triaged later.
+        #
+        # This was also a warning, with the comment "the existing code does
+        # not pass this cleanly yet". It does now: the tree is clippy-clean
+        # under `-D warnings`, with two documented project-wide allowances
+        # (`clippy::type_complexity` in `rakc/src/lib.rs` and
+        # `stdlib/src/lib.rs`) for a lint that asks for type aliases on the
+        # value model's own types.
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
   hardening:
     name: hardening self-test

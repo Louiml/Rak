@@ -895,14 +895,12 @@ mod tests {
     fn battery_time_parse_fmt_roundtrip() {
         for out in [
             run_interp(
-                &"let ts = time_parse(\"2023-11-14 22:13:20\")?\n\
-             dump time_fmt(ts, \"%Y-%m-%d %H:%M:%S\")"
-                    .to_string(),
+                "let ts = time_parse(\"2023-11-14 22:13:20\")?\n\
+             dump time_fmt(ts, \"%Y-%m-%d %H:%M:%S\")",
             ),
             run_vm(
-                &"let ts = time_parse(\"2023-11-14 22:13:20\")?\n\
-             dump time_fmt(ts, \"%Y-%m-%d %H:%M:%S\")"
-                    .to_string(),
+                "let ts = time_parse(\"2023-11-14 22:13:20\")?\n\
+             dump time_fmt(ts, \"%Y-%m-%d %H:%M:%S\")",
             ),
         ] {
             assert!(
@@ -940,6 +938,12 @@ mod tests {
             .any(|l| l.contains("[DUMP] 1970-01-01")));
     }
 
+    // The random number generator is a feature, because it needs `getrandom`,
+    // whose browser backend pulls in `wasm-bindgen`. A build without it has
+    // no randomness at all, and the tests that need randomness are not about
+    // the build's shape -- they are about the generator. The build without it
+    // has its own test, below.
+    #[cfg(feature = "rand")]
     #[test]
     fn battery_rand_int_range_and_real_range() {
         let src = "rand_seed(33)\nlet mut ok = true\nfor i in 0..200 {\n let v = rand_int(-5, 5)\n if v < -5 || v >= 5 { ok = false }\n}\nlet f1 = rand_float()\nlet f2 = rand_float()\nif f1 >= 0.0 && f2 < 1.0 { ok = true }\ndump ok";
@@ -952,6 +956,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "rand")]
     #[test]
     fn battery_rand_helpers() {
         for out in [run_interp("rand_seed(9)\ndump len(rand_bytes(16))\ndump len(rand_hex(24))\ndump len(rand_shuffle([1, 2, 3, 4, 5, 6]))"),
@@ -962,6 +967,48 @@ mod tests {
         }
     }
 
+    /// A build with no random number generator must say so, on both backends.
+    ///
+    /// The browser build of the playground is such a build. A program that
+    /// asks for randomness there gets an error naming the missing capability,
+    /// not a number that is always the same and not a crash.
+    #[cfg(not(feature = "rand"))]
+    #[test]
+    fn a_build_without_a_random_number_generator_says_so() {
+        // The snippets raise, so the error is the result -- `run_interp` and
+        // `run_vm` unwrap, which would panic on the very thing being tested.
+        for out in [interp_error("rand_int(1, 10)"), vm_error("rand_int(1, 10)")] {
+            assert!(
+                out.contains("no random number generator"),
+                "the build without a generator must say it has none: got: {:?}",
+                out
+            );
+        }
+    }
+
+    /// Run a snippet through the interpreter and keep the error, if any.
+    #[cfg(not(feature = "rand"))]
+    fn interp_error(src: &str) -> String {
+        match crate::eval(src) {
+            Ok(lines) => lines.join("\n"),
+            Err(e) => format!("{}", e),
+        }
+    }
+
+    /// Run a snippet through the VM and keep the error, if any.
+    #[cfg(not(feature = "rand"))]
+    fn vm_error(src: &str) -> String {
+        let tokens = crate::lexer::tokenize(src).unwrap();
+        let module = crate::parser::parse(&tokens, src).unwrap();
+        let chunk = compile_module(&module).unwrap();
+        let mut vm = crate::vm::Vm::new();
+        match vm.run(&chunk) {
+            Ok(lines) => lines.join("\n"),
+            Err(e) => e,
+        }
+    }
+
+    #[cfg(feature = "rand")]
     #[test]
     fn battery_rand_choice_result() {
         for out in [

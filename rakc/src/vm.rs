@@ -1,4 +1,4 @@
-﻿use crate::bytecode::{Chunk, Op};
+use crate::bytecode::{Chunk, Op};
 use crate::value::Value;
 use std::collections::HashMap;
 use std::ffi::CString;
@@ -680,7 +680,6 @@ impl Vm {
         self.insert_native("keys", |args| match args.first() {
             Some(Value::Map(m)) => Ok(Value::Array(Arc::from(
                 m.keys()
-                    .cloned()
                     .map(|k| Value::String(Arc::from(k.as_str())))
                     .collect::<Vec<_>>(),
             ))),
@@ -2767,11 +2766,7 @@ impl Vm {
                 Op::JumpIfNil => {
                     let target = frame.code.read_u16(frame.ip) as usize;
                     frame.ip += 2;
-                    let isnil = match frame.peek() {
-                        Value::Nil => true,
-                        Value::Option(None) => true,
-                        _ => false,
-                    };
+                    let isnil = matches!(frame.peek(), Value::Nil | Value::Option(None));
                     if isnil {
                         frame.ip = target;
                     }
@@ -2819,10 +2814,7 @@ impl Vm {
                     let template = frame.code.constants[ci].clone();
                     match template {
                         Value::Closure {
-                            code,
-                            params,
-                            name,
-                            ..
+                            code, params, name, ..
                         } => {
                             frame.push(Value::Closure {
                                 code,
@@ -2831,12 +2823,7 @@ impl Vm {
                                 captures: Arc::new(std::sync::Mutex::new(caps)),
                             });
                         }
-                        _ => {
-                            return Err(format!(
-                                "MakeClosure: constant {} is not a closure",
-                                ci
-                            ))
-                        }
+                        _ => return Err(format!("MakeClosure: constant {} is not a closure", ci)),
                     }
                 }
                 Op::GetCapture => {
@@ -2881,9 +2868,8 @@ impl Vm {
                             guard[idx] = v;
                         }
                         None => {
-                            return Err(
-                                "a capture was written outside the closure that owns it".to_string()
-                            )
+                            return Err("a capture was written outside the closure that owns it"
+                                .to_string())
                         }
                     }
                 }
@@ -3657,11 +3643,8 @@ impl Vm {
 
         if name == "collect" {
             let mut out: Vec<Value> = Vec::new();
-            loop {
-                match pull()? {
-                    Some(v) => out.push(v),
-                    None => break,
-                }
+            while let Some(v) = pull()? {
+                out.push(v);
             }
             frame.push(Value::Array(Arc::from(out)));
             return Ok(());
@@ -5473,7 +5456,6 @@ fn vm_index_set(obj: &mut Value, idx: &Value, val: Value) -> Result<(), String> 
 /// `obj.field = value` ג€” copy-on-write mutation for structs and maps.
 /// The module case does not copy: its namespace *is* the module's state, so
 /// the write lands there and needs no store-back.
-
 fn vm_field_set(obj: &mut Value, field: &str, val: Value) -> Result<(), String> {
     match obj {
         Value::Map(m) => {
@@ -5962,6 +5944,9 @@ mod tests {
         );
     }
 
+    // The async builtins need a Tokio runtime, and the browser build of the
+    // playground has none -- the `async` feature is off there.
+    #[cfg(feature = "async")]
     #[test]
     fn test_vm_async_tcp_probe() {
         let out = run("dump await tcp_probe(\"127.0.0.1\", 9999, 100)");

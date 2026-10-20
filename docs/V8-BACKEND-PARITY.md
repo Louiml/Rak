@@ -126,6 +126,53 @@ recorded where they belong rather than here as a count:
 
 - `extern_call` is an honest stub on both backends, as above.
 
+- **`fetch` is a statement, and the VM does not have it.** The registration
+  gate compares *builtin* names, and `fetch` is not a builtin: it is a
+  statement with a body block, so the gate cannot see it. The interpreter
+  runs it, and the VM refuses to compile the program at all -- "VM does not
+  support statement: Fetch". That is loud rather than silent, and a program
+  that uses `fetch` therefore runs under `rakc run` and not under `rakc vm`.
+
+  The C target refuses it too, and says why: "the C target has no HTTP
+  client". The VM's refusal has no such reason attached, and it should: the
+  honest version of this gap is "the VM has no HTTP client yet", not "the VM
+  does not support statements".
+
+  This is a *statement* gap and not a builtin gap, which is why the count in
+  this document reached zero without closing it. The measurement that would
+  catch it is a comparison of the statement forms the two backends accept,
+  and there is no such gate yet.
+
+### A build with less language in it
+
+The browser build of the playground -- the interpreter compiled to
+WebAssembly -- turns `http`, `async` and `html` off, because what they need
+does not compile to a wasm module and a page has neither a TLS stack nor an
+event loop. `rand` used to be off for the same reason, and is not any more:
+the module asks the page for entropy through the one import it already had,
+so the browser's own cryptographic generator is the source.
+
+A build with less language in it has to *say* so, or a program that works
+under `rakc run` fails in the browser for a reason the page cannot explain.
+The rule the browser build follows is that a missing capability is an error
+and never a silent answer:
+
+| Missing | What the program sees |
+| --- | --- |
+| HTTP client | `fetch: this build has no HTTP client (the `http` feature is off)` -- raised, not printed and passed over |
+| Random number generator | `rand: this build has no random number generator (the `rand` feature is off)` -- raised |
+| Async runtime | the builtins are not registered, so the call is an "Unknown function" |
+
+The first of those was a bug until recently: `fetch` reported a failed
+request and the program carried on as if the request had come back empty.
+The browser build is exactly the build where that matters, because it is the
+build where every request fails.
+
+The configuration is tested. `cargo test -p rakc --no-default-features` runs
+the suite against the build the browser uses, and CI runs it on every push
+along with a build of the wasm module and a check that the committed
+`docs/rak.wasm` -- the file the site actually serves -- runs a program.
+
 ### Two gaps that closed
 
 - **`ensures` postconditions.** The VM used to refuse the program outright --

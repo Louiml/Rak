@@ -189,7 +189,7 @@ fn invariant_tsc_hz() -> i64 {
     #[cfg(target_arch = "x86_64")]
     {
         use std::arch::x86_64::__cpuid;
-        unsafe {
+        {
             // Leaf 0x15: TSC frequency = crystal * (EBX / EAX).
             //
             // The register assignment is EAX = denominator, EBX = numerator,
@@ -923,9 +923,7 @@ impl Clone for Env {
         Env {
             global: self.global.clone(),
             scopes: self.scopes.clone(),
-            immutable_scopes: Arc::new(Mutex::new(
-                self.immutable_scopes.lock().unwrap().clone(),
-            )),
+            immutable_scopes: Arc::new(Mutex::new(self.immutable_scopes.lock().unwrap().clone())),
             global_immutable: self.global_immutable.clone(),
         }
     }
@@ -2990,6 +2988,15 @@ impl Interpreter {
         body: &Option<Vec<Stmt>>,
     ) -> crate::Result<()> {
         crate::caps::check_builtin("fetch")?;
+        // A build with no HTTP client cannot fetch at all. That is a missing
+        // capability, not a failed request, so it is raised: a program that
+        // asks for the network in such a build has to hear about it, rather
+        // than carry on as if the request had merely come back empty.
+        if !rak_stdlib::net::HAS_HTTP {
+            return Err(crate::RakError::Runtime(
+                "fetch: this build has no HTTP client (the `http` feature is off)".to_string(),
+            ));
+        }
         let target_val = self.eval_expr(target)?;
         let target_str = match target_val {
             Value::String(s) => s,
@@ -3069,11 +3076,11 @@ impl Interpreter {
     /// eval_expr stack frame. Handles mmap zero-copy slicing, range slicing
     /// (`xs[a..b]`, negatives, clamping), and generic indexing.
     #[inline(never)]
-    fn eval_index(&mut self, obj: &Box<Expr>, idx: &Box<Expr>) -> crate::Result<Value> {
+    fn eval_index(&mut self, obj: &Expr, idx: &Expr) -> crate::Result<Value> {
         let obj_val = self.eval_expr(obj)?;
         // Zero-copy indexing/slicing for memory maps.
         if let Value::Mmap(h) = &obj_val {
-            if let Expr::Range(lo, hi) = idx.as_ref() {
+            if let Expr::Range(lo, hi) = idx {
                 // mmap slice; bounds support negatives and clamp.
                 let lo_v = lo.as_ref().map(|e| self.eval_expr(e)).transpose()?;
                 let hi_v = hi.as_ref().map(|e| self.eval_expr(e)).transpose()?;
@@ -3089,7 +3096,7 @@ impl Interpreter {
             return Ok(Value::Int(data[i] as i64));
         }
         if let Value::MmapSlice(h, base, n) = &obj_val {
-            if let Expr::Range(lo, hi) = idx.as_ref() {
+            if let Expr::Range(lo, hi) = idx {
                 let lo_v = lo.as_ref().map(|e| self.eval_expr(e)).transpose()?;
                 let hi_v = hi.as_ref().map(|e| self.eval_expr(e)).transpose()?;
                 let (s, e) = slice_bounds(*n, lo_v.as_ref(), hi_v.as_ref())?;
@@ -3103,7 +3110,7 @@ impl Interpreter {
             return Ok(Value::Int(h.as_slice()[base + i] as i64));
         }
         if let Value::Bytes(b) = &obj_val {
-            if let Expr::Range(lo, hi) = idx.as_ref() {
+            if let Expr::Range(lo, hi) = idx {
                 // bytes slice; bounds support negatives and clamp.
                 let lo_v = lo.as_ref().map(|e| self.eval_expr(e)).transpose()?;
                 let hi_v = hi.as_ref().map(|e| self.eval_expr(e)).transpose()?;
@@ -3122,7 +3129,7 @@ impl Interpreter {
         // Slice indexing: `xs[1..4]`, `xs[..3]`, `xs[2..]` for
         // arrays, tuples and strings. Negative indices count from the
         // end; bounds clamp to the container; char-based for strings.
-        if let Expr::Range(lo, hi) = idx.as_ref() {
+        if let Expr::Range(lo, hi) = idx {
             let lo_v = match lo {
                 Some(e) => Some(self.eval_expr(e)?),
                 None => None,
@@ -4373,22 +4380,19 @@ impl Interpreter {
                 }
                 _ => {}
             }
-            if let Some(val) = self.env.get(name) {
-                if let Value::Function {
-                    params,
-                    body,
-                    closure,
-                    is_async,
-                    name: fname,
-                    requires,
-                    ensures,
-                } = val
-                {
-                    return self.call_function(
-                        &params, &body, &closure, is_async, &fname, &requires, &ensures, args,
-                        named,
-                    );
-                }
+            if let Some(Value::Function {
+                params,
+                body,
+                closure,
+                is_async,
+                name: fname,
+                requires,
+                ensures,
+            }) = self.env.get(name)
+            {
+                return self.call_function(
+                    &params, &body, &closure, is_async, &fname, &requires, &ensures, args, named,
+                );
             }
             if let Some(decl) = self.foreign_fns.get(name).cloned() {
                 if !named.is_empty() {
@@ -4449,22 +4453,19 @@ impl Interpreter {
                 return self.call_method_value(func, obj_val, args);
             }
             // Fallback: a field that itself holds a callable (modules, etc.).
-            if let Some(v) = self.field_value(&obj_val, method) {
-                if let Value::Function {
-                    params,
-                    body,
-                    closure,
-                    is_async,
-                    name: fname,
-                    requires,
-                    ensures,
-                } = v
-                {
-                    return self.call_function(
-                        &params, &body, &closure, is_async, &fname, &requires, &ensures, args,
-                        named,
-                    );
-                }
+            if let Some(Value::Function {
+                params,
+                body,
+                closure,
+                is_async,
+                name: fname,
+                requires,
+                ensures,
+            }) = self.field_value(&obj_val, method)
+            {
+                return self.call_function(
+                    &params, &body, &closure, is_async, &fname, &requires, &ensures, args, named,
+                );
             }
             return Err(crate::RakError::Runtime(format!(
                 "No method '{}' on {}",
@@ -8782,8 +8783,8 @@ impl Interpreter {
                         i += 1;
                         continue;
                     }
-                    if a.starts_with("--") {
-                        let body = a[2..].to_string();
+                    if let Some(rest) = a.strip_prefix("--") {
+                        let body = rest.to_string();
                         let (key, inline) = match body.find('=') {
                             Some(pos) => {
                                 (body[..pos].to_string(), Some(body[pos + 1..].to_string()))
@@ -9498,9 +9499,9 @@ impl Interpreter {
     /// A non-negative byte offset from an argument, accepting `Int`, `Hex` and
     /// `Float`.
     ///
-    /// Byte offsets arrive written three ways in practice - `0`, `0x10`, `16.0`
-    /// - and rejecting the first two would make `mmap_write(m, 0x10, 0xFF)` fail
-    /// for no good reason.
+    /// Byte offsets arrive written three ways in practice: `0`, `0x10` and
+    /// `16.0`. Rejecting the first two would make `mmap_write(m, 0x10, 0xFF)`
+    /// fail for no good reason.
     fn offset_arg(&self, val: Option<&Value>, what: &str) -> crate::Result<usize> {
         match val {
             Some(Value::Int(i)) if *i >= 0 => Ok(*i as usize),
@@ -10986,6 +10987,11 @@ mod tests {
         );
     }
 
+    // The async builtins need a Tokio runtime to schedule the future on,
+    // and the browser build of the playground has none -- the `async`
+    // feature is off there, and the builtins are simply not registered. A
+    // test that needs one belongs to the build that has one.
+    #[cfg(feature = "async")]
     #[test]
     fn test_interpreter_async_tcp_probe() {
         let mut interp = Interpreter::new();

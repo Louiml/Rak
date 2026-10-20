@@ -19,7 +19,7 @@ path = "src/lib.rs"
 # `http` and `async` are off: the TLS stack the HTTP client needs cannot be
 # compiled to wasm, and there is no event loop in a page to drive Tokio's
 # multi-thread runtime. The builtins that need them are not registered there.
-rakc = { path = "../rakc", default-features = false }
+rakc = { path = "../rakc", default-features = false, features = ["rand"] }
 # `getrandom` needs a backend on wasm, and the browser's own entropy is the
 # only sensible source. The `custom` backend lets this crate supply it without
 # pulling in `wasm-bindgen` and a pile of generated glue: the module would

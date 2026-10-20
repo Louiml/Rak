@@ -47,6 +47,14 @@ pub fn http_get(
     })
 }
 
+/// Whether this build has an HTTP client.
+///
+/// The browser build of the playground does not: `ureq` needs a TLS stack that
+/// does not compile to WebAssembly, so the `http` feature is off there. A
+/// program that calls `fetch` there must be told so by an error, not by a line
+/// of output that scrolls past.
+pub const HAS_HTTP: bool = cfg!(feature = "http");
+
 /// Fetch a URL via HTTP GET, in a build without the HTTP client.
 #[cfg(not(feature = "http"))]
 pub fn http_get(
