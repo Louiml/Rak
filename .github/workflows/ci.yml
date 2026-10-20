@@ -250,24 +250,24 @@ jobs:
         # it had never actually formatted.
         run: cargo fmt --all --check
       - name: Clippy
-          # `-D warnings` so a new lint is a failure rather than noise to be
-          # triaged later.
-          #
-          # This was also a warning, with the comment "the existing code does
-          # not pass this cleanly yet". It does now: the tree is clippy-clean
-          # under `-D warnings`, with two documented project-wide allowances
-          # (`clippy::type_complexity` in `rakc/src/lib.rs` and
-          # `stdlib/src/lib.rs`) for a lint that asks for type aliases on the
-          # value model's own types.
-          #
-          # `--exclude app` for the same reason the test job excludes it: the
-          # Tauri IDE crate links against GTK and WebKitGTK, which this job
-          # does not install, and its build script fails when the bundled
-          # `rakc*` resources match nothing on a clean checkout. Excluding it
-          # here is what lets the lint job be a hard gate at all: before, the
-          # clippy output went through a pipe, so a *build* failure was
-          # swallowed and the job reported success.
-          run: cargo clippy --workspace --exclude app --all-targets -- -D warnings
+        # `-D warnings` so a new lint is a failure rather than noise to be
+        # triaged later.
+        #
+        # This was also a warning, with the comment "the existing code does
+        # not pass this cleanly yet". It does now: the tree is clippy-clean
+        # under `-D warnings`, with two documented project-wide allowances
+        # (`clippy::type_complexity` in `rakc/src/lib.rs` and
+        # `stdlib/src/lib.rs`) for a lint that asks for type aliases on the
+        # value model's own types.
+        #
+        # `--exclude app` for the same reason the test job excludes it: the
+        # Tauri IDE crate links against GTK and WebKitGTK, which this job
+        # does not install, and its build script fails when the bundled
+        # `rakc*` resources match nothing on a clean checkout. Excluding it
+        # here is what lets the lint job be a hard gate at all: before, the
+        # clippy output went through a pipe, so a *build* failure was
+        # swallowed and the job reported success.
+        run: cargo clippy --workspace --exclude app --all-targets -- -D warnings
 
   hardening:
     name: hardening self-test
