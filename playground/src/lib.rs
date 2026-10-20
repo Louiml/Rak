@@ -149,7 +149,7 @@ pub extern "C" fn out_len() -> usize {
 /// A static NUL-terminated string, so JavaScript can read it as a C string.
 #[cfg_attr(target_arch = "wasm32", no_mangle)]
 pub extern "C" fn rak_version() -> usize {
-    c"1.0.1".as_ptr() as usize
+    c"1.1.0".as_ptr() as usize
 }
 
 /// Run a program, returning the bytes to show in the console.

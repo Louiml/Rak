@@ -1004,9 +1004,23 @@ function initPlayground() {
   // module is there, rather than pretending to be ready.
   setStatus('loading the interpreter', '');
   pgLoad().then(
-    function () {
+    function (exports) {
       runBtn.disabled = false;
       setStatus('ready', '');
+      // The module reports which Rak it is, so the page can say so rather than
+      // leaving the reader to guess.
+      var versionEl = document.getElementById('pg-version');
+      if (versionEl && exports.rak_version) {
+        try {
+          var ptr = exports.rak_version() >>> 0;
+          var view = new Uint8Array(exports.memory.buffer, ptr, 32);
+          var end = view.indexOf(0);
+          if (end < 0) end = view.length;
+          versionEl.textContent = 'This page is running Rak ' + new TextDecoder().decode(view.subarray(0, end)) + '.';
+        } catch (e) {
+          // The version is a nicety; a page that cannot read it still runs.
+        }
+      }
     },
     function () {
       setStatus('could not load the interpreter', 'badge-pill-warning');
