@@ -195,6 +195,27 @@ jobs:
           node playground/check.mjs target/wasm32-unknown-unknown/playground/rak_playground.wasm
           node playground/check.mjs docs/rak.wasm
 
+      - name: Is the committed payload older than the interpreter?
+        # `docs/rak.wasm` is a build artifact in the tree, so it can fall
+        # behind the source it was built from. This reports it rather than
+        # failing the run: a rebuild takes a minute and a half and produces a
+        # three-megabyte diff, so a hard failure here would be a tax on every
+        # commit that touches the interpreter, including the ones that change
+        # nothing the playground can run.
+        #
+        # Rebuild it with:
+        #   cargo build -p rak-playground --profile playground --target wasm32-unknown-unknown
+        # and copy the result to docs/rak.wasm.
+        run: |
+          interp=$(git log -1 --format=%ct -- rakc/src stdlib/src)
+          payload=$(git log -1 --format=%ct -- docs/rak.wasm)
+          if [ "$interp" -gt "$payload" ]; then
+            echo "::warning title=playground::docs/rak.wasm is older than the interpreter; rebuild it and copy it to docs/rak.wasm"
+            git log -1 --format='the interpreter changed in %h %s' -- rakc/src stdlib/src
+          else
+            echo "the committed payload is up to date"
+          fi
+
   lint:
     name: clippy and fmt
     runs-on: ubuntu-latest

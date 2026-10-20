@@ -173,6 +173,19 @@ the suite against the build the browser uses, and CI runs it on every push
 along with a build of the wasm module and a check that the committed
 `docs/rak.wasm` -- the file the site actually serves -- runs a program.
 
+`docs/rak.wasm` is a build artifact in the tree, so it can fall behind the
+interpreter it was built from. Rebuild it with:
+
+```
+cargo build -p rak-playground --profile playground --target wasm32-unknown-unknown
+```
+
+and copy the result to `docs/rak.wasm`. CI reports when the committed file
+is older than the interpreter, rather than failing the run: the rebuild
+takes a minute and a half and produces a three-megabyte diff, which is a tax
+on every commit that touches the interpreter, including the ones that change
+nothing the playground can run.
+
 ### Two gaps that closed
 
 - **`ensures` postconditions.** The VM used to refuse the program outright --
