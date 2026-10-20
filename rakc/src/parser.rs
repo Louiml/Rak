@@ -1018,26 +1018,29 @@ impl<'a> Parser<'a> {
     fn parse_try(&mut self) -> Result<Stmt> {
         self.expect(Token::Try)?;
         let body = self.parse_block()?;
-        let catch_name;
-        let catch_body;
+        // The catch clause is optional, so its two parts are built in the
+        // branch that has them rather than declared and filled in later.
         if self.match_token(&Token::Catch) {
-            catch_name = if let Some(Token::Ident(n)) = self.peek() {
+            let catch_name = if let Some(Token::Ident(n)) = self.peek() {
                 let n = n.clone();
                 self.advance();
                 Some(n)
             } else {
                 None
             };
-            catch_body = self.parse_block()?;
+            let catch_body = self.parse_block()?;
+            Ok(Stmt::Try {
+                body,
+                catch_name,
+                catch_body,
+            })
         } else {
-            catch_name = None;
-            catch_body = vec![];
+            Ok(Stmt::Try {
+                body,
+                catch_name: None,
+                catch_body: vec![],
+            })
         }
-        Ok(Stmt::Try {
-            body,
-            catch_name,
-            catch_body,
-        })
     }
 
     fn parse_type_alias(&mut self) -> Result<Stmt> {
