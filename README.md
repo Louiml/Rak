@@ -41,6 +41,7 @@ The full notes are in the [1.1.0 release](https://github.com/Louiml/Rak/releases
 
 ## Contents
 
+- [What's new in 1.1.0](#whats-new-in-110)
 - [Try it in the browser](#try-it-in-the-browser)
 - [Install](#install)
 - [Quick start](#quick-start)
