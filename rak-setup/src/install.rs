@@ -288,8 +288,7 @@ fn extract_ide_from_bundle(bundle: &Path, dst: &Path) -> Result<()> {
         for entry in ar.entries()? {
             let mut e = entry?;
             let path = e.path()?.to_string_lossy().to_string();
-            if path.starts_with("ide/") {
-                let rel = &path["ide/".len()..];
+            if let Some(rel) = path.strip_prefix("ide/") {
                 let out = dst.join(rel);
                 e.unpack(&out)?;
             }
