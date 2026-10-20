@@ -396,7 +396,6 @@ struct LoopCtx {
 
 struct Gen {
     out: String,
-    opts: CodegenOptions,
     temp: usize,
     fn_counter: usize,
     fn_names: HashMap<String, String>,
@@ -416,10 +415,9 @@ struct Gen {
 }
 
 impl Gen {
-    fn new(opts: CodegenOptions, support: Support) -> Gen {
+    fn new(support: Support) -> Gen {
         Gen {
             out: String::new(),
-            opts,
             temp: 0,
             fn_counter: 0,
             fn_names: HashMap::new(),
@@ -447,16 +445,6 @@ impl Gen {
         // the value is read. `flush_decls` emits them.
         self.pending_decls.push(format!("rak_val {};", name));
         name
-    }
-
-    /// Emit the declarations accumulated by `fresh` and clear them.
-    fn flush_decls(&mut self) -> String {
-        let mut out = String::new();
-        for d in self.pending_decls.drain(..) {
-            out.push_str(&d);
-            out.push('\n');
-        }
-        out
     }
 
     fn fresh_fn(&mut self) -> String {
@@ -519,10 +507,6 @@ impl Gen {
 
     fn is_global(&self, name: &str) -> bool {
         self.globals.contains(name)
-    }
-
-    fn is_fn(&self, name: &str) -> bool {
-        self.fn_names.contains_key(name)
     }
 
     fn fn_c_name(&self, name: &str) -> Option<String> {
@@ -1863,7 +1847,6 @@ impl Gen {
                 // Flush the literal before the placeholder.
                 let lit = &template[lit_start..lit_start + lit_len];
                 flush_lit(&mut pre, lit);
-                lit_len = 0;
                 // Skip to the closing brace.
                 for (_, c2) in char_indices.by_ref() {
                     if c2 == '}' {
@@ -2028,13 +2011,6 @@ impl Gen {
                 out.push_str(&format!(
                     "{{ {} = {}; if (!rak_val_eq({}, rak_nil())) _ok = 0; rak_drop({}); }}\n",
                     t, scrut, t, t
-                ));
-            }
-            Pattern::Int(i) => {
-                let t = self.fresh("t");
-                out.push_str(&format!(
-                    "{{ {} = {}; if (!rak_val_eq({}, rak_int({}))) _ok = 0; rak_drop({}); }}\n",
-                    t, scrut, t, i, t
                 ));
             }
             Pattern::Tuple(pats) => {
@@ -2295,25 +2271,20 @@ impl Gen {
                         self.c_ident(name),
                         v
                     ));
-                    } else {
-                        // Top-level or function-level let: declare a local.
-                        //
-                        // The declaration needs the type. Without it this
-                        // emitted a bare `v_x = ...`, which is an assignment
-                        // to a variable that was never declared -- so the C
-                        // compiler rejected the program, and *any* function
-                        // with a local was unbuildable through this target.
-                        // The two branches below are the two halves of one
-                        // binding: this one declares the variable, the other
-                        // assigns to it again.
-                        self.declare(name);
-                        out.push_str(&format!(
-                            "{}rak_val {} = {};\n",
-                            ind,
-                            self.c_ident(name),
-                            v
-                        ));
-                    }
+                } else {
+                    // Top-level or function-level let: declare a local.
+                    //
+                    // The declaration needs the type. Without it this
+                    // emitted a bare `v_x = ...`, which is an assignment
+                    // to a variable that was never declared -- so the C
+                    // compiler rejected the program, and *any* function
+                    // with a local was unbuildable through this target.
+                    // The two branches below are the two halves of one
+                    // binding: this one declares the variable, the other
+                    // assigns to it again.
+                    self.declare(name);
+                    out.push_str(&format!("{}rak_val {} = {};\n", ind, self.c_ident(name), v));
+                }
                 Ok(())
             }
             Stmt::Expr(e) => {
@@ -2898,10 +2869,7 @@ impl Gen {
                 // closure-creation time -- and a closure that read a global
                 // would see a different value from the interpreter, which
                 // reads the global when the closure is called.
-                if !params.contains(name.as_str())
-                    && self.is_local(name)
-                    && !out.contains(name)
-                {
+                if !params.contains(name.as_str()) && self.is_local(name) && !out.contains(name) {
                     out.push(name.clone());
                 }
             }
@@ -3146,7 +3114,7 @@ fn fmt_float(f: f64) -> String {
 /// Translate a module to a complete C11 translation unit.
 pub fn translate(module: &Module, opts: &CodegenOptions) -> Result<String, String> {
     let support = Support::check(module)?;
-    let mut gen = Gen::new(opts.clone(), support);
+    let mut gen = Gen::new(support);
 
     // First pass: collect top-level function declarations.
     for item in &module.items {
@@ -3224,7 +3192,19 @@ pub fn translate(module: &Module, opts: &CodegenOptions) -> Result<String, Strin
 
     // Build the final C file.
     let mut c = String::new();
-    c.push_str("/* Generated by rakc ג€” do not edit. */\n\n");
+    c.push_str("/* Generated by rakc — do not edit. */\n\n");
+    // The panic strategy is a property of the *source*, not of the command
+    // line that compiles it. The runtime honours it at the raise site: with
+    // `panic = abort` a `raise` with no catch exits immediately instead of
+    // unwinding to `main`.
+    //
+    // It used to be a `-DRAK_PANIC_ABORT` flag on the compiler's command
+    // line, which meant the C source was only correct for the one command
+    // that produced it: the conformance harness compiles the source directly
+    // and silently got the other behaviour, and the wasm build did too.
+    if matches!(opts.panic, super::super::PanicStrategy::Abort) {
+        c.push_str("#define RAK_PANIC_ABORT 1\n");
+    }
     c.push_str(RUNTIME_C);
     c.push_str("\n\n");
 

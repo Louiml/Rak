@@ -1,3 +1,17 @@
+//! # Lint policy
+//!
+//! CI runs clippy with `-D warnings`, so a new warning fails the build. One
+//! lint is allowed outright:
+//!
+//! - `type_complexity` asks for a type alias wherever a signature mentions
+//!   more than a couple of nested generics. Several of the ones it flags here
+//!   are the value model's own types -- `Arc<dyn Fn(&[Value]) -> Result<Value,
+//!   String> + Send + Sync>` and the closure's shape -- and an alias for each
+//!   would move the definition away from the thing it names. The lint is
+//!   advice, not a defect, and this project has chosen not to take it.
+
+#![allow(clippy::type_complexity)]
+
 pub mod ast;
 pub mod async_rt;
 pub mod bytecode;

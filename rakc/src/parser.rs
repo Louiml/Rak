@@ -146,11 +146,9 @@ impl<'a> Parser<'a> {
         let mut imports = Vec::new();
         let mut items = Vec::new();
         while self.peek().is_some() {
-            if self.check(&Token::Use) {
-                self.advance();
-                imports.push(self.parse_import(false)?);
-                self.semi()?;
-            } else if self.check(&Token::Import) {
+            // `use` and `import` are the same statement spelled two ways, so
+            // they parse the same way.
+            if self.check(&Token::Use) || self.check(&Token::Import) {
                 self.advance();
                 imports.push(self.parse_import(false)?);
                 self.semi()?;
@@ -776,9 +774,10 @@ impl<'a> Parser<'a> {
 
     fn parse_return(&mut self) -> Result<Stmt> {
         self.expect(Token::Return)?;
-        if self.match_token(&Token::Semi) {
-            Ok(Stmt::Return(None))
-        } else if self.check(&Token::RBrace) || self.peek().is_none() {
+        // A `return` with nothing after it, and a `return` at the end of a
+        // block, both mean "no value". The two cases are the same answer, so
+        // they are one condition rather than two.
+        if self.match_token(&Token::Semi) || self.check(&Token::RBrace) || self.peek().is_none() {
             Ok(Stmt::Return(None))
         } else {
             let expr = self.parse_expr()?;

@@ -368,7 +368,6 @@ fn check_embedded_payload() -> Option<String> {
     rakc::targets::exe::embedded_source(&data)
 }
 
-
 /// The `rakc build` command: multi-target compilation.
 ///
 /// `rakc build <file> [--emit=...] [--target=...] [-C key=value] [-o path] [--release]`
@@ -1148,8 +1147,6 @@ fn main() {
             let file = file.clone();
             let source_for_compare = source.clone();
             let file_for_print = file.clone();
-            let write = write;
-            let check = check;
             let source_for_big = source.clone();
             let _file_for_big = file.clone();
             let result =
@@ -1207,8 +1204,6 @@ fn main() {
                 .any(|f| f.as_str() == "--audit" || f.as_str() == "-a");
             let source = source.clone();
             let file = file.clone();
-            let deny = deny;
-            let audit = audit;
             let _file_for_print = file.clone();
             let result =
                 rakc::run_on_big_stack(move || match rakc::lint::lint_source_full(&source) {
@@ -1244,7 +1239,6 @@ fn main() {
                 .map(|p| p.to_string_lossy().to_string())
                 .unwrap_or_else(|| ".".to_string());
             let source = source.clone();
-            let base_dir = base_dir;
             let md = max_depth;
             let _argv_for_vm = script_args.clone();
             let result = rakc::run_on_big_stack(move || match rakc::lexer::tokenize(&source) {
@@ -1361,7 +1355,7 @@ fn main() {
 
                 // Median, not mean: one scheduler interrupt in twenty samples moves a
                 // mean by 5% and a median by nothing.
-                fn median(v: &mut Vec<u64>) -> f64 {
+                fn median(v: &mut [u64]) -> f64 {
                     v.sort_unstable();
                     v[v.len() / 2] as f64 / 1_000_000.0
                 }

@@ -635,11 +635,10 @@ impl<'a> TypeChecker<'a> {
             Stmt::Dump { value, .. } | Stmt::Trace { value } | Stmt::Expr(value) => {
                 self.infer(value);
             }
-            Stmt::Return(expr) => {
-                if let Some(e) = expr {
-                    self.infer(e);
-                }
+            Stmt::Return(Some(e)) => {
+                self.infer(e);
             }
+            Stmt::Return(None) => {}
             Stmt::If {
                 cond,
                 then_branch,

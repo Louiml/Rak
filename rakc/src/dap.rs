@@ -352,11 +352,7 @@ pub fn run(file: &str, source: &str) {
     let mut worker: Option<std::thread::JoinHandle<()>> = None;
     let mut configured = false;
 
-    loop {
-        let msg = match conn.read_frame() {
-            Ok(m) => m,
-            Err(_) => break,
-        };
+    while let Ok(msg) = conn.read_frame() {
         let seq = msg.get("seq").and_then(|s| s.as_u64()).unwrap_or(0);
         let command = msg
             .get("command")

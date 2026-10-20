@@ -185,7 +185,7 @@ fn fold_int_binary(op: &BinOp, l: &Expr, r: &Expr) -> Option<crate::value::Value
     let (Expr::Int(a), Expr::Int(b)) = (l, r) else {
         return None;
     };
-    let (a, b) = (*a as i64, *b as i64);
+    let (a, b) = ((*a), (*b));
     let v = match op {
         BinOp::Add => a.checked_add(b)?,
         BinOp::Sub => a.checked_sub(b)?,
@@ -272,6 +272,12 @@ fn collect_aliases(items: &[Stmt], out: &mut Vec<(String, crate::ast::Type)>) {
             Stmt::Export(inner) => collect_aliases(std::slice::from_ref(inner), out),
             _ => {}
         }
+    }
+}
+
+impl Default for Compiler {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -1052,7 +1058,7 @@ impl Compiler {
                     self.emit_copy_exports(&exports);
                     return Ok(());
                 }
-                for (n, alias) in &import.from_names {
+                for (n, _alias) in &import.from_names {
                     if !names.contains(n) {
                         return Err(format!(
                             "from {} import {}: '{}' is not exported (module exports: {})",
@@ -1364,7 +1370,11 @@ impl Compiler {
         self.emit_op(Op::StoreLocal);
         self.emit_byte(err_slot);
         self.load_const(Value::String(Arc::from(
-            format!("postcondition failed in {}: {} (evaluating it failed: ", name, text).as_str(),
+            format!(
+                "postcondition failed in {}: {} (evaluating it failed: ",
+                name, text
+            )
+            .as_str(),
         )));
         self.emit_op(Op::LoadLocal);
         self.emit_byte(err_slot);
@@ -1711,7 +1721,7 @@ impl Compiler {
     fn compile_stmt(&mut self, stmt: &Stmt) -> Result<(), String> {
         match stmt {
             Stmt::Let {
-                name,
+                name: _,
                 pattern: Some(pattern),
                 value,
                 mutable,
@@ -3728,7 +3738,7 @@ fn interp_to_fmt(template: &str) -> String {
             } else {
                 out.push_str("{}");
                 let mut depth = 1;
-                while let Some(c2) = chars.next() {
+                for c2 in chars.by_ref() {
                     if c2 == '{' {
                         depth += 1;
                     } else if c2 == '}' {
@@ -4065,7 +4075,7 @@ fn make_bin_encode_native(name: String, fields: Vec<ResolvedBinField>) -> Value 
             for f in &fields {
                 bit = encode_resolved(f, &map, &mut out, bit)?;
             }
-            if bit % 8 != 0 {
+            if !bit.is_multiple_of(8) {
                 // Flush trailing partial byte (zero-padded).
                 out.push(0);
             }

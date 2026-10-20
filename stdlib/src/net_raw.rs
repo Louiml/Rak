@@ -79,6 +79,11 @@ fn parse_flags(s: &str) -> u8 {
 /// Build a TCP segment (20-byte header) with the given flags, sequence,
 /// acknowledgement, and payload. The checksum is computed over the IPv4
 /// pseudo-header (src/dst from `src_ip`/`dst_ip`).
+///
+/// Eight arguments is one over clippy's default, and the alternative -- a
+/// struct of header fields -- would be a change to the shape of every caller
+/// for a lint about the *count*. The names are what make it readable.
+#[allow(clippy::too_many_arguments)]
 pub fn tcp(
     src_ip: &str,
     dst_ip: &str,
@@ -331,8 +336,7 @@ pub fn arp_parse(frame: &[u8]) -> Option<Vec<(String, String)>> {
             .collect::<Vec<_>>()
             .join(".")
     };
-    let mut out = Vec::new();
-    out.push(("opcode".to_string(), opcode.to_string()));
+    let mut out = vec![("opcode".to_string(), opcode.to_string())];
     out.push(("sender_mac".to_string(), fmt_mac(&body[8..14])));
     out.push(("sender_ip".to_string(), fmt_ip(&body[14..18])));
     out.push(("target_mac".to_string(), fmt_mac(&body[18..24])));

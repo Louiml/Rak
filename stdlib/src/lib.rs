@@ -1,3 +1,14 @@
+//! The Rak standard library.
+//!
+//! # Lint policy
+//!
+//! CI runs clippy with `-D warnings`. `type_complexity` is allowed outright,
+//! for the same reason as in the compiler: the value types this library
+//! passes around are named in their signatures, and an alias for each would
+//! move the definition away from the thing it names.
+
+#![allow(clippy::type_complexity)]
+
 pub mod crypto;
 pub mod dns;
 pub mod encoding;

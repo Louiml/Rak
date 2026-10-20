@@ -793,6 +793,10 @@ should not claim them as open.
 | A-8a | Dependency **names** are validated as plain path components before anything is deleted or written under `packages/` | `oyvey/src/project.rs` |
 | A-8c | Symlinks inside a vendored package are skipped rather than followed and copied | `oyvey/src/project.rs` |
 | B-1a | The capability table was rewritten: a new `fs_read` capability, `--fs-root` scope enforcement at the layer that opens files, and more builtins gated (`reverse_dns`, `scan_subdomains`, `log_init`, `pcap_*`, `extern_call`) | `rakc/src/caps.rs`, `stdlib/src/fs_scope.rs` |
+| B-1b | **The sandbox could be switched off by compiling the program first.** `rakc vm --sandbox program.rkbc` enabled no sandbox at all: the `.rkbc` branch returned from `main` before the sandbox was switched on, so the same program was refused a capability when run from source and reached the network when run from the bytecode it had been compiled into. `.rkbc` is the format Rak ships, so this was the *likely* path. The sandbox is now applied before anything runs. | `rakc/src/main.rs` |
+| B-1c | **A completed `try` left a catch region behind on the VM.** `Op::Try` pushes a catch frame and only the code after the body can pop it, but the `CatchEnd` was emitted at the end of the *handler*. A `try` that completed without raising therefore left its frame in place, and a later unrelated error in the same frame was caught by the wrong handler — running the catch body, with its side effects, and re-running the code after the `try` from the top. The `CatchEnd` moved to the path that leaves the region normally. | `rakc/src/compiler.rs` |
+| B-2a | **The VM computed `1 + "a"` as `1`.** A binary operation between a number and a non-number was coerced through `f64` with a `0.0` fallback, so `1 + "a"` was `1` and `"a" - 1` was `-1` — plausible numbers on the VM and an error on the interpreter. The VM now follows the interpreter's rule exactly: a float on either side makes it a float operation, two integers make it an integer operation, and anything else is an error. | `rakc/src/vm.rs` |
+| B-2b | **The C target could not compile a function with a local.** Every `let` in a function body emitted a bare `v_x = ...` — an assignment to a variable that was never declared — so any function with a local produced C the C compiler rejected. The conformance corpus had no such case. A closure that captured a local had the same shape of bug for a different reason, and now reads the captured value out of the closure's environment. The corpus has a case for each. | `rakc/src/targets/c/codegen.rs`, `rakc/tests/target_conformance.rs` |
 
 ---
 
@@ -961,15 +965,24 @@ Every PoC in §3 was re-run against the patched build. Summary:
 
 | Suite | Result |
 | --- | --- |
-| `cargo test -p rakc` | **389** lib + 87 parity + 11 + 59 + 14 + 11 + 33 + 9 + 8 + 6 + 4 + 2 + 1 — **0 failed** |
+| `cargo test -p rakc` | **393** lib + 95 parity + 13 sandbox + 11 + 59 + 14 + 11 + 33 + 9 + 8 + 6 + 4 + 2 + 1 — **0 failed** |
 | `cargo test -p rak-stdlib` | **115** lib + **4** integration — **0 failed** |
-| `cargo test` (oyvey) | **118** — **0 failed** |
+| `cargo test` (oyvey) | **120** — **0 failed** |
+| `cargo fmt --all --check` | clean, in both repositories |
+| `cargo clippy --workspace --all-targets -- -D warnings` | clean, in both repositories |
 
 The `rustdoc.exe` doctest step fails in this environment ("the 'rustdoc.exe'
 binary, normally provided by the 'rustc' component, is not applicable to the
 'stable-x86_64-pc-windows-msvc' toolchain"). That is a pre-existing
 toolchain issue, unrelated to these changes, and it affects the baseline
-identically.
+identically. CI avoids it with `--lib --tests`.
+
+The formatting and clippy steps in `ci.yml` were warnings before this
+engagement and are hard failures now. Both were only warnings because the
+tree was not clean under either: `cargo fmt --all` wanted to reformat 1313
+locations, and clippy reported roughly 200 findings. The tree is clean under
+both now, with two documented project-wide allowances for
+`clippy::type_complexity`.
 
 ---
 

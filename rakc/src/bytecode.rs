@@ -237,7 +237,12 @@ pub enum Op {
 impl Op {
     pub fn from_u8(b: u8) -> Option<Op> {
         if (b as usize) <= Op::FailRuntime as usize {
-            Some(unsafe { std::mem::transmute(b) })
+            // The transmute is sound because `Op` is `#[repr(u8)]`, has no
+            // data, and the bound above is exactly the range of its
+            // discriminants. The annotation is not decoration: it is what
+            // makes the compiler check that the two types have the same size,
+            // so a future variant with a payload cannot slip past this.
+            Some(unsafe { std::mem::transmute::<u8, Op>(b) })
         } else {
             None
         }
@@ -416,10 +421,10 @@ fn operand_width(op: Op) -> usize {
         | Op::BindModule => 2,
         // A 16-bit jump or handler offset.
         Op::Jump | Op::JumpIfFalse | Op::JumpIfTrue | Op::Try => 2,
-    // A 16-bit constant index plus a count byte.
-    Op::CallMethod | Op::StructNew => 3,
-    // A 16-bit constant index plus a capture count.
-    Op::MakeClosure => 3,
+        // A 16-bit constant index plus a count byte.
+        Op::CallMethod | Op::StructNew => 3,
+        // A 16-bit constant index plus a capture count.
+        Op::MakeClosure => 3,
         // Two constant indices (pattern descriptor, then bind names).
         Op::MatchPat => 4,
         // Namespace global, exported name, and a mutability flag.

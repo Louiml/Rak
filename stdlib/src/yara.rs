@@ -582,7 +582,7 @@ pub fn scan(rules: &RuleSet, data: &[u8]) -> Vec<RuleMatch> {
             }
         }
         let present = matches_present(&hits, &rule.strings);
-        if eval_cond(&rule.condition, &hits, &present) {
+        if eval_cond(&rule.condition, &present) {
             out.push(RuleMatch {
                 rule: rule.name.clone(),
                 hits: hits.into_iter().map(|h| (h.id, h.offset)).collect(),
@@ -604,10 +604,10 @@ fn matches_present(hits: &[Hit], strings: &[RuleString]) -> HashMap<String, Vec<
 }
 
 fn has_hit(present: &HashMap<String, Vec<u64>>, id: &str) -> bool {
-    present.get(id).map(|v| !v.is_empty()).unwrap_or(false)
+    present.get(id).is_some_and(|v| !v.is_empty())
 }
 
-fn eval_cond(cond: &Cond, hits: &[Hit], present: &HashMap<String, Vec<u64>>) -> bool {
+fn eval_cond(cond: &Cond, present: &HashMap<String, Vec<u64>>) -> bool {
     match cond {
         Cond::Id(id) => has_hit(present, id),
         Cond::At(id, pos) => present
@@ -624,9 +624,9 @@ fn eval_cond(cond: &Cond, hits: &[Hit], present: &HashMap<String, Vec<u64>>) -> 
         Cond::AllOf(ids) => !ids.is_empty() && ids.iter().all(|id| has_hit(present, id)),
         Cond::AnyOf(ids) => ids.iter().any(|id| has_hit(present, id)),
         Cond::NoneOf(ids) => ids.iter().all(|id| !has_hit(present, id)),
-        Cond::And(a, b) => eval_cond(a, hits, present) && eval_cond(b, hits, present),
-        Cond::Or(a, b) => eval_cond(a, hits, present) || eval_cond(b, hits, present),
-        Cond::Not(a) => !eval_cond(a, hits, present),
+        Cond::And(a, b) => eval_cond(a, present) && eval_cond(b, present),
+        Cond::Or(a, b) => eval_cond(a, present) || eval_cond(b, present),
+        Cond::Not(a) => !eval_cond(a, present),
     }
 }
 

@@ -568,10 +568,6 @@ impl Formatter {
                     self.line("}");
                 }
             }
-            other => {
-                let _ = other;
-                return Err("formatter: unsupported statement".to_string());
-            }
         }
         Ok(())
     }
@@ -993,7 +989,6 @@ impl Formatter {
             }
             Expr::EvidenceFrom { value } => Ok(format!("evidence from {}", self.expr(value)?)),
             Expr::As(inner, ty) => Ok(format!("{} as {}", self.expr(inner)?, type_str(ty))),
-            other => Err(format!("formatter: unsupported expression {:?}", other)),
         }
     }
 

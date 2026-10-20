@@ -34,7 +34,6 @@ fn normalise(line: &str) -> String {
             return re_hex_addresses(rest);
         }
     }
-    let line = line;
     re_hex_addresses(line)
 }
 

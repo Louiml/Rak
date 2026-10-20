@@ -5,6 +5,7 @@
 //!   1. in-memory session store (`secret_set`)
 //!   2. env var (name as given)
 //!   3. `~/.rak/secrets.json` (0600, user-owned) — a durable store
+//!
 //! Returns `None` when unset. Values are never logged.
 //!
 //! The file store is deliberately simple JSON with user-only permissions. For
@@ -84,13 +85,10 @@ fn secrets_path() -> Option<PathBuf> {
         .ok()
         .and_then(|p| {
             #[cfg(windows)]
-            let parts = p.split(';');
+            let mut parts = p.split(';');
             #[cfg(not(windows))]
-            let parts = p.split(':');
-            parts
-                .filter(|s| !s.is_empty())
-                .next()
-                .map(|s| s.to_string())
+            let mut parts = p.split(':');
+            parts.find(|s| !s.is_empty()).map(|s| s.to_string())
         })
         .map(PathBuf::from)
         .or_else(|| {

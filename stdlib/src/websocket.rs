@@ -173,8 +173,8 @@ pub fn client_handshake(stream: &mut TcpStream, host: &str, path: &str) -> Resul
             break;
         }
         let t = h.trim().to_lowercase();
-        if t.starts_with("sec-websocket-protocol:") {
-            subprotocol = t["sec-websocket-protocol:".len()..].trim().to_string();
+        if let Some(rest) = t.strip_prefix("sec-websocket-protocol:") {
+            subprotocol = rest.trim().to_string();
         }
     }
     Ok(subprotocol)

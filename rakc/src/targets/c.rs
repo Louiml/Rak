@@ -105,11 +105,9 @@ pub fn compile_to_native(
     if opts.debuginfo > 0 {
         args.push("-g".to_string());
     }
-    if matches!(opts.panic, super::PanicStrategy::Abort) {
-        // The runtime honours this at the raise site: a `raise` with no catch
-        // exits immediately instead of unwinding to `main`.
-        args.push("-DRAK_PANIC_ABORT".to_string());
-    }
+    // The panic strategy travels in the C source itself -- `translate` emits
+    // `#define RAK_PANIC_ABORT` -- so that every consumer of the source gets
+    // the same behaviour, not just this command line.
     args.push(c_path.to_string_lossy().to_string());
     let out_flag = match cc.kind {
         toolchain::CcKind::Msvc => "/Fe".to_string(),

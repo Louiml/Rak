@@ -315,6 +315,8 @@ fn parse_list(
     Ok(YamlV::List(items))
 }
 
+/// Parse the documented YAML subset: nested maps by indentation, `- ` list
+/// items, inline scalars (int/float/bool/null/quoted/bare strings), and
 /// `#` comments. Flow style, anchors and aliases are errors naming the
 /// line number.
 pub fn parse_yaml(text: &str) -> Result<YamlV, String> {
@@ -354,9 +356,6 @@ pub fn parse_yaml(text: &str) -> Result<YamlV, String> {
     }
     Ok(v)
 }
-
-/// Parse the documented YAML subset: nested maps by indentation, `- ` list
-/// items, inline scalars (int/float/bool/null/quoted/bare strings), and
 
 #[cfg(test)]
 mod tests {

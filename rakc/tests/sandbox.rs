@@ -45,11 +45,6 @@ fn write_program(dir: &Path, name: &str, source: &str) -> PathBuf {
     path
 }
 
-/// Run `rakc` with `args`, and return `(stdout, stderr)`.
-fn rakc(args: &[&str]) -> (String, String) {
-    rakc_in(None, args)
-}
-
 /// Run `rakc` with `args` in `dir`, and return `(stdout, stderr)`.
 ///
 /// Rak resolves a relative path against the *current directory*, not against

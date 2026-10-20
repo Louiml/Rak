@@ -80,6 +80,15 @@ impl MmapHandle {
     pub fn len(&self) -> usize {
         self.as_slice().len()
     }
+
+    /// Whether the mapping is empty.
+    ///
+    /// Clippy's `len_without_is_empty` is right to ask: a public `len` with
+    /// no `is_empty` is an invitation to write `x.len() == 0` where
+    /// `x.is_empty()` says what it means.
+    pub fn is_empty(&self) -> bool {
+        self.as_slice().is_empty()
+    }
 }
 
 /// Open and map a file. `mode` is `"r"` (read-only), `"rw"` (read+write,

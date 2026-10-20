@@ -332,11 +332,8 @@ mod tests {
     fn array_stream_yields_in_order() {
         let h = handle(ArrayStream::new(strings(&["a", "b", "c"])));
         let mut out = Vec::new();
-        loop {
-            match h.lock().unwrap().next(&mut no_call).unwrap() {
-                Some(v) => out.push(v.to_string()),
-                None => break,
-            }
+        while let Some(v) = h.lock().unwrap().next(&mut no_call).unwrap() {
+            out.push(v.to_string());
         }
         assert_eq!(out, vec!["a", "b", "c"]);
     }
