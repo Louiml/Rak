@@ -833,8 +833,8 @@ var PG_EXAMPLES = [
   }
 ];
 
-// The WebAssembly module, loaded on first Run so the page costs nothing
-// until someone actually uses the playground.
+// The WebAssembly module. The playground page loads it as soon as it opens, so
+// the cost is paid by the page that uses it and nothing else.
 var pgModule = null;
 var pgLoading = null;
 
@@ -923,25 +923,29 @@ function initPlayground() {
     statusEl.className = 'badge-pill' + (cls ? ' ' + cls : '');
   }
 
+  function escapeHtml(s) {
+    return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  }
+
   function show(text, isError) {
-    outputEl.textContent = text;
-    outputEl.className = 'playground-output';
-    if (isError) {
-      // Mark the last line as the error line, so a failure is visible in the
-      // output without having to read it.
-      var lines = text.split('\n');
-      for (var i = lines.length - 1; i >= 0; i--) {
-        if (lines[i].indexOf('error:') === 0) {
-          lines[i] = lines[i];
-          break;
-        }
-      }
+    var lines = text.split('\n');
+    var html = '';
+    for (var i = 0; i < lines.length; i++) {
+      var line = escapeHtml(lines[i]);
+      // The error line is highlighted, so a failure is visible in the output
+      // without having to read it.
+      if (isError && lines[i].indexOf('error:') === 0) line = '<span class="pg-err">' + line + '</span>';
+      html += line + (i < lines.length - 1 ? '\n' : '');
     }
+    outputEl.innerHTML = html;
+    outputEl.className = 'playground-output';
   }
 
   function run() {
-    setStatus('starting the interpreter', '');
-    outputEl.textContent = 'Running...';
+    if (!pgModule) {
+      setStatus('loading the interpreter', '');
+      outputEl.textContent = 'Loading the interpreter...';
+    }
     var source = codeEl.value;
     pgLoad()
       .then(function (exports) {
@@ -995,8 +999,19 @@ function initPlayground() {
   });
 
   loadExample(0);
-  runBtn.disabled = false;
-  setStatus('ready', '');
+  // The interpreter is fetched as soon as the playground opens, so pressing
+  // Run starts the program straight away. The button stays disabled until the
+  // module is there, rather than pretending to be ready.
+  setStatus('loading the interpreter', '');
+  pgLoad().then(
+    function () {
+      runBtn.disabled = false;
+      setStatus('ready', '');
+    },
+    function () {
+      setStatus('could not load the interpreter', 'badge-pill-warning');
+    }
+  );
 }
 
   document.addEventListener('DOMContentLoaded', function () {
