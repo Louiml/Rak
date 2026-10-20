@@ -198,7 +198,7 @@ fn ipv4_octets(s: &str) -> Result<[u8; 4], String> {
 fn mac_bytes(s: &str) -> Result<[u8; 6], String> {
     let hex: Vec<u8> = s
         .trim()
-        .split(|c| c == ':' || c == '-' || c == '.')
+        .split([':', '-', '.'])
         .filter(|p| !p.is_empty())
         .map(|p| u8::from_str_radix(p, 16))
         .collect::<Result<Vec<u8>, _>>()
@@ -350,7 +350,7 @@ pub fn icmp_ping(src: &str, dst: &str, id: u16, seq: u16) -> Result<Vec<u8>, Str
 /// Send a forged packet on a raw socket. Requires `CAP_NET_RAW` /
 /// Administrator. (Unix only — Windows raw-socket I/O needs Npcap and is not
 /// in this build; the packet builders are cross-platform.)
-#[cfg(unix)]
+#[cfg(all(unix, not(target_arch = "wasm32")))]
 pub fn send(pkt: &[u8]) -> Result<usize, String> {
     use socket2::{Domain, Protocol, SockAddr, Socket, Type};
     use std::net::{Ipv4Addr, SocketAddrV4};
@@ -381,7 +381,7 @@ pub fn send(pkt: &[u8]) -> Result<usize, String> {
         .map_err(|e| format!("net_raw: send failed: {}", e))
 }
 
-#[cfg(not(unix))]
+#[cfg(not(all(unix, not(target_arch = "wasm32"))))]
 pub fn send(_pkt: &[u8]) -> Result<usize, String> {
     Err(
         "net_raw: send/recv requires unix CAP_NET_RAW (Windows raw-socket I/O not in this build)"
@@ -391,7 +391,7 @@ pub fn send(_pkt: &[u8]) -> Result<usize, String> {
 
 /// Receive up to `max` bytes from a raw socket. Requires `CAP_NET_RAW` /
 /// Administrator. (Unix only.)
-#[cfg(unix)]
+#[cfg(all(unix, not(target_arch = "wasm32")))]
 pub fn recv(max: usize) -> Result<Vec<u8>, String> {
     use socket2::{Domain, Protocol, Socket, Type};
     let sock = Socket::new(
@@ -415,7 +415,7 @@ pub fn recv(max: usize) -> Result<Vec<u8>, String> {
     Ok(buf)
 }
 
-#[cfg(not(unix))]
+#[cfg(not(all(unix, not(target_arch = "wasm32"))))]
 pub fn recv(_max: usize) -> Result<Vec<u8>, String> {
     Err(
         "net_raw: send/recv requires unix CAP_NET_RAW (Windows raw-socket I/O not in this build)"

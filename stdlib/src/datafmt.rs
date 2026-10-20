@@ -315,6 +315,46 @@ fn parse_list(
     Ok(YamlV::List(items))
 }
 
+/// `#` comments. Flow style, anchors and aliases are errors naming the
+/// line number.
+pub fn parse_yaml(text: &str) -> Result<YamlV, String> {
+    let mut lines: Vec<(usize, String, usize)> = Vec::new();
+    for (i, raw) in text.lines().enumerate() {
+        let trimmed_end = raw.trim_end();
+        if trimmed_end.trim().is_empty() {
+            continue;
+        }
+        let indent = raw.len() - raw.trim_start().len();
+        let content = strip_comment(trimmed_end.trim_start());
+        if content.is_empty() {
+            continue;
+        }
+        if content.contains('{')
+            || content.contains('}')
+            || content.contains('&')
+            || content.starts_with('*')
+        {
+            return Err(format!(
+                "yaml_parse: line {}: flow style, anchors and aliases are not supported in the YAML subset",
+                i + 1
+            ));
+        }
+        lines.push((indent, content.to_string(), i + 1));
+    }
+    if lines.is_empty() {
+        return Ok(YamlV::Null);
+    }
+    let mut idx = 0usize;
+    let v = parse_block(&lines, &mut idx, lines[0].0, "yaml_parse")?;
+    if idx != lines.len() {
+        return Err(format!(
+            "yaml_parse: line {}: unexpected indentation structure",
+            lines[idx].2
+        ));
+    }
+    Ok(v)
+}
+
 /// Parse the documented YAML subset: nested maps by indentation, `- ` list
 /// items, inline scalars (int/float/bool/null/quoted/bare strings), and
 
@@ -396,44 +436,4 @@ mod tests {
             o => panic!("expected root map, got {:?}", o),
         }
     }
-}
-
-/// `#` comments. Flow style, anchors and aliases are errors naming the
-/// line number.
-pub fn parse_yaml(text: &str) -> Result<YamlV, String> {
-    let mut lines: Vec<(usize, String, usize)> = Vec::new();
-    for (i, raw) in text.lines().enumerate() {
-        let trimmed_end = raw.trim_end();
-        if trimmed_end.trim().is_empty() {
-            continue;
-        }
-        let indent = raw.len() - raw.trim_start().len();
-        let content = strip_comment(trimmed_end.trim_start());
-        if content.is_empty() {
-            continue;
-        }
-        if content.contains('{')
-            || content.contains('}')
-            || content.contains('&')
-            || content.starts_with('*')
-        {
-            return Err(format!(
-                "yaml_parse: line {}: flow style, anchors and aliases are not supported in the YAML subset",
-                i + 1
-            ));
-        }
-        lines.push((indent, content.to_string(), i + 1));
-    }
-    if lines.is_empty() {
-        return Ok(YamlV::Null);
-    }
-    let mut idx = 0usize;
-    let v = parse_block(&lines, &mut idx, lines[0].0, "yaml_parse")?;
-    if idx != lines.len() {
-        return Err(format!(
-            "yaml_parse: line {}: unexpected indentation structure",
-            lines[idx].2
-        ));
-    }
-    Ok(v)
 }

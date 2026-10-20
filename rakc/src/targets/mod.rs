@@ -309,7 +309,7 @@ pub trait Target {
 /// Every backend rakc ships. The order is only for error messages that list
 /// which backend could have handled an emit kind.
 pub fn backends() -> Vec<Box<dyn Target>> {
-    let mut v: Vec<Box<dyn Target>> = vec![
+    let v: Vec<Box<dyn Target>> = vec![
         Box::new(exe::SelfExe),
         Box::new(bytecode::BytecodeBackend),
         Box::new(c::CBackend),
@@ -334,7 +334,7 @@ pub fn compile_and_emit(source: &str, opts: &CodegenOptions) -> Result<Vec<Artif
     let mut tc = crate::typecheck::TypeChecker::new(source, &opts.source_path);
     let diagnostics = tc.check_module(&module);
     if let Some(d) = diagnostics.first() {
-        return Err(format!("{}", d.render()));
+        return Err(d.render().to_string());
     }
 
     let registry = backends();

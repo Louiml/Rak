@@ -584,13 +584,27 @@ impl LanguageServer for Backend {
 
 impl Backend {
     async fn publish_diagnostics(&self, uri: &Url, source: &str) {
-        let diags = match crate::lexer::tokenize(source) {
-            Ok(tokens) => match crate::parser::parse(&tokens, source) {
+        // The parse runs on the same 64 MiB stack the command line uses.
+        //
+        // Every other entry point in the compiler does this. The language
+        // server did not, and it could not: it parses on a tokio worker
+        // thread, which gets the default 2 MiB stack. A file that nests
+        // statements a few hundred deep -- about a kilobyte of source --
+        // overflowed that stack and took the language server with it, while
+        // the same file was fine on the command line.
+        //
+        // The parser's own depth limit is the real fix; this is the belt to
+        // that pair of braces, so that a source file which is legal but
+        // deep cannot kill the editor either.
+        let uri = uri.clone();
+        let source = source.to_string();
+        let diags = crate::run_on_big_stack(move || match crate::lexer::tokenize(&source) {
+            Ok(tokens) => match crate::parser::parse(&tokens, &source) {
                 Ok(_) => Vec::new(),
-                Err(e) => parse_error_to_diagnostic(source, &e.to_string()),
+                Err(e) => parse_error_to_diagnostic(&source, &e.to_string()),
             },
-            Err(e) => lex_error_to_diagnostic(source, &e.to_string()),
-        };
+            Err(e) => lex_error_to_diagnostic(&source, &e.to_string()),
+        });
         let _ = self
             .client
             .publish_diagnostics(uri.clone(), diags, None)

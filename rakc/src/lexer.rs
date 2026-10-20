@@ -309,10 +309,9 @@ fn parse_base_int(s: &str, radix: u32) -> Option<u64> {
 }
 
 fn parse_typed_int(s: &str) -> Option<TypedIntData> {
-    let (num, suffix) = if let Some(p) = s.find(|c: char| c == 'i' || c == 'u') {
+    let (num, suffix) = {
+        let p = s.find(['i', 'u'])?;
         (&s[..p], &s[p..])
-    } else {
-        return None;
     };
     let value = num.replace('_', "").parse::<i64>().ok()?;
     let kind = match suffix {
@@ -686,6 +685,10 @@ mod tests {
     }
 
     #[test]
+    // `3.14` is a decimal literal being lexed, not a use of PI. The lint
+    // cannot tell the difference, and the number is the point of the test:
+    // it has a fractional part, which is what makes it a float.
+    #[allow(clippy::approx_constant)]
     fn test_float_and_typed_int() {
         let toks = tokenize("3.14 42i32 10u8 7").unwrap();
         assert_eq!(toks[0].0, Token::Float(3.14));

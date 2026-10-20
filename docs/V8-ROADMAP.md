@@ -32,17 +32,24 @@ its native errors. Both are described in
 
 ## What 8.1.0 did not close, and why
 
-**31 builtins exist only on the interpreter.** All of them are blocked on one
-thing: a VM native has signature `fn(&[Value])`, so it cannot call a Rak
-function, suspend, or resume. That rules out `channel`, `select`, `timeout`,
-`await_all`, `task_group`, the socket family, and FFI trampolines. (`spawn` and
-`thread_join` are closed: the interpreter backs a task with an OS thread, and
-the VM now does too.)
+**The builtin gap is closed.** This section used to say that 31 builtins
+existed only on the interpreter, all blocked on one thing: a VM native has
+signature `fn(&[Value])`, so it cannot call a Rak function, suspend, or
+resume. That is how the gap was *described*, and the description turned out
+to be the wrong diagnosis.
 
-The fix is what this repo calls **coroutines in the VM**, and that is a project
-rather than a list of registrations. The parity gate fails on these 31
-deliberately, so the gap cannot be forgotten, and the backlog test prints them
-so the number cannot drift.
+The gap was closed in `40ba7c6`. The parity gate now reports
+`interpreter-only: 0 / vm-only: 0`, and the two builtins still on the
+interpreter alone — `asm` and `exit` — are there on purpose, for reasons the
+gate records.
+
+What the `fn(&[Value])` signature really blocked was not the builtins. It
+blocked *coroutines*: a native that cannot suspend or resume cannot implement
+a first-class suspension point. That is still true, and it is still worth
+doing — but it is a different project from the one this section described, and
+it is no longer blocking anything that ships. `select` works, by giving each
+future an OS thread; `timeout` works, by polling; `spawn` and `thread_join`
+work, by being OS threads on both backends.
 
 **Instrumented CFI** is a toolchain limitation, not a code one. The spike is in
 [CFI-SPIKE.md](CFI-SPIKE.md). What Rak ships is CFG-compatible with a guarded
@@ -145,17 +152,22 @@ All front-end commands now run on the big stack:
 
 ## What 0.9.0 did not close, and why
 
-**VM coroutines** are still the blocker for most of the 31 interpreter-only
-builtins. The VM native signature `fn(&[Value])` cannot call a Rak function,
-suspend, or resume. That rules out `channel`, `select`, `timeout`, `await_all`,
-`task_group`, the socket family, and FFI trampolines. `spawn` and `thread_join`
-are closed: the interpreter backs a task with an OS thread, and the VM now does
-too.
+**VM coroutines** are still not a thing, but they are no longer blocking
+anything. The VM native signature `fn(&[Value])` cannot call a Rak function,
+suspend, or resume, so there is no first-class suspension point in the VM.
+`spawn` and `thread_join` work by being OS threads on both backends;
+`select` gives each future an OS thread and races them; `timeout` polls. All
+of that works, and all of it costs a thread per concurrent operation.
 
-The fix is what this repo calls **coroutines in the VM**, and that is a project
-rather than a list of registrations. The parity gate fails on these 31
-deliberately, so the gap cannot be forgotten, and the backlog test prints them
-so the number cannot drift.
+The reason to want coroutines is not the builtins — it is that a thread per
+future is the wrong shape for a language whose whole purpose is talking to
+networks and processes. A real suspension point would let `select` be one
+thread with a queue rather than N threads with a race.
+
+The gate no longer fails on anything for this reason, because the gap is
+closed. `parity_backlog_report` prints `interpreter-only: 0 / vm-only: 0`, and
+the two remaining interpreter-only builtins — `asm` and `exit` — are there by
+design, with their reasons recorded in the gate.
 
 **Instrumented CFI** is a toolchain limitation, not a code one. The spike is in
 [CFI-SPIKE.md](CFI-SPIKE.md). What Rak ships is CFG-compatible with a guarded
@@ -197,8 +209,9 @@ last, because they are the part that cannot be added compatibly.
 
 In rough order of how much they would improve Rak:
 
-1. **VM coroutines.** Unblocks the remaining interpreter-only builtins above, and
-   is the precondition for `select`, `timeout` and structured concurrency on the VM.
+1. **VM coroutines.** The precondition for cheap `select` and `timeout` on the
+   VM — today each future costs an OS thread — and for structured concurrency.
+   It no longer unblocks any builtin; the gap it was blamed for is closed.
 2. **Insertion-ordered maps.** Small, and removes a real source of
    run-to-run nondeterminism.
 3. **A return-value lint.** A warning for a function body whose last statement is

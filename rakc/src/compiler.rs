@@ -16,9 +16,6 @@ pub struct Compiler {
     /// Current top-level statement index (1-based) used as the source-line
     /// marker for `chunk.lines`; enables the VM debugger's line breakpoints.
     statement_line: u32,
-    /// Monotonic counter for compiler-generated global names, so two imports
-    /// that stage the same module name do not collide.
-    temp_counter: u32,
     func_names: std::collections::HashSet<String>,
     func_closures: HashMap<String, Value>,
     /// `macro name(params) { body }` definitions, for compile-time expansion.
@@ -41,7 +38,7 @@ pub struct Compiler {
     loop_stack: Vec<LoopInfo>,
     /// Names exported by the module currently being compiled (`pub`/`export`).
     current_exports: Vec<String>,
-    /// Import-once cache: canonical module path → its exported global names and
+    /// Import-once cache: canonical module path ג†’ its exported global names and
     /// the global holding its namespace handle. The second half is what lets a
     /// second import of the same file bind the *same* live namespace rather than
     /// a second view that has drifted out of step with the first.
@@ -72,6 +69,68 @@ pub struct Compiler {
     compiling: std::collections::HashSet<std::path::PathBuf>,
     /// Base directory for resolving name-based imports of the current module.
     base_dir: String,
+    /// The local slot holding a function's return value while its postconditions
+    /// are checked.
+    ///
+    /// `result` is not a name the program declares: it is bound only for the
+    /// duration of a postcondition check, so it gets a slot of its own rather
+    /// than a name that would shadow a program variable called `result`.
+    post_result_slot: Option<u8>,
+    /// True while a postcondition *clause* is being compiled, which is the only
+    /// place the magic name `result` resolves to `post_result_slot`.
+    post_in_clause: bool,
+    /// True while the compiler is compiling the body of a function that
+    /// declares postconditions, so every `return` in that body routes through
+    /// the postcondition trampoline instead of returning directly.
+    post_active: bool,
+    /// The `return` sites in a postcondition-bearing body, as positions of
+    /// jumps that have to land on the trampoline. Patched once the body is
+    /// compiled and the trampoline's offset is known.
+    post_jumps: Vec<usize>,
+    /// How many `try` regions are open at this point in the code.
+    ///
+    /// A `return` out of a `try` body has to close the regions it left, or the
+    /// frame keeps a catch frame for a region it has already left -- and the
+    /// next error raised in that frame would be caught by it.
+    try_depth: usize,
+    /// The values the closure being compiled captured from the function it is
+    /// written in.
+    ///
+    /// Empty for a function that is not inside another one. A free name in the
+    /// body that is not a local of the closure resolves to one of these, and a
+    /// closure nested inside *this* one captures from them in turn.
+    captures: Vec<CaptureEntry>,
+}
+
+/// One value a closure captures from the function it is written in.
+#[derive(Clone, Debug)]
+struct CaptureEntry {
+    /// The name, as the enclosing function spells it.
+    name: String,
+    /// Where the enclosing function keeps the value.
+    from: CaptureFrom,
+    /// Whether the binding it comes from may be assigned to.
+    mutable: bool,
+}
+
+/// Where the enclosing function keeps a captured value.
+#[derive(Clone, Copy, Debug)]
+enum CaptureFrom {
+    /// A local of the enclosing function.
+    Local(u8),
+    /// A capture of the enclosing function: it is itself a closure, and this
+    /// is one of the values it captured.
+    Capture(u8),
+}
+
+/// A compiled function: the closure, and what it needs from its enclosing
+/// frame.
+struct CompiledFn {
+    /// The closure template. Its own capture list is empty -- a capture is
+    /// filled in when the closure is *made*, at run time.
+    closure: Value,
+    /// The captures, in the order they are pushed at the creation site.
+    captures: Vec<CaptureEntry>,
 }
 
 struct LoopInfo {
@@ -225,7 +284,6 @@ impl Compiler {
             immutable_globals: std::collections::HashSet::new(),
             scope_depth: 0,
             statement_line: 0,
-            temp_counter: 0,
             func_names: std::collections::HashSet::new(),
             func_closures: HashMap::new(),
             macros: HashMap::new(),
@@ -240,6 +298,12 @@ impl Compiler {
             rename: HashMap::new(),
             compiling: std::collections::HashSet::new(),
             base_dir: ".".to_string(),
+            post_result_slot: None,
+            post_in_clause: false,
+            post_active: false,
+            post_jumps: Vec::new(),
+            try_depth: 0,
+            captures: Vec::new(),
         }
     }
 
@@ -257,7 +321,7 @@ impl Compiler {
                 Stmt::Let { name, value, .. } => {
                     if let Expr::Function { .. } = value.as_ref() {
                         self.func_names.insert(name.clone());
-                        let closure = self.compile_function(name, value.as_ref())?;
+                        let closure = self.compile_function_const(name, value.as_ref())?;
                         self.func_closures.insert(name.clone(), closure);
                     }
                 }
@@ -265,7 +329,7 @@ impl Compiler {
                     Stmt::Let { name, value, .. } => {
                         if let Expr::Function { .. } = value.as_ref() {
                             self.func_names.insert(name.clone());
-                            let closure = self.compile_function(name, value.as_ref())?;
+                            let closure = self.compile_function_const(name, value.as_ref())?;
                             self.func_closures.insert(name.clone(), closure);
                         }
                         self.current_exports.push(name.clone());
@@ -315,7 +379,7 @@ impl Compiler {
                         {
                             if let Expr::Function { .. } = value.as_ref() {
                                 let key = format!("__method_{}_{}", type_name, mname);
-                                let closure = self.compile_function(&key, value.as_ref())?;
+                                let closure = self.compile_function_const(&key, value.as_ref())?;
                                 self.method_closures.push((key, closure));
                             }
                         }
@@ -326,7 +390,7 @@ impl Compiler {
         }
         // Bake a self-contained decode/encode native for each `binstruct` and
         // register it as a global (so `Name.decode(...)` lowers to a plain
-        // `Op::Call` on a `Value::NativeFn` — no new VM opcodes).
+        // `Op::Call` on a `Value::NativeFn` ג€” no new VM opcodes).
         let bin_names: Vec<String> = self.binstructs.keys().cloned().collect();
         for name in &bin_names {
             let resolved = resolve_binstruct(name, &self.binstructs)?;
@@ -561,7 +625,7 @@ impl Compiler {
                 Stmt::Let { name, value, .. } => {
                     if let Expr::Function { .. } = value.as_ref() {
                         self.func_names.insert(name.clone());
-                        let cl = self.compile_function(name, value.as_ref())?;
+                        let cl = self.compile_function_const(name, value.as_ref())?;
                         self.func_closures.insert(name.clone(), cl.clone());
                         local_closures.push((name.clone(), cl));
                     }
@@ -575,7 +639,7 @@ impl Compiler {
                     } => {
                         if let Expr::Function { .. } = value.as_ref() {
                             self.func_names.insert(name.clone());
-                            let cl = self.compile_function(name, value.as_ref())?;
+                            let cl = self.compile_function_const(name, value.as_ref())?;
                             self.func_closures.insert(name.clone(), cl.clone());
                             local_closures.push((name.clone(), cl));
                         }
@@ -628,7 +692,7 @@ impl Compiler {
                         {
                             if let Expr::Function { .. } = value.as_ref() {
                                 let key = format!("__method_{}_{}", type_name, mname);
-                                let cl = self.compile_function(&key, value.as_ref())?;
+                                let cl = self.compile_function_const(&key, value.as_ref())?;
                                 local_methods.push((key, cl));
                             }
                         }
@@ -640,8 +704,8 @@ impl Compiler {
         let result: Result<InlinedModule, String> = (|| {
             // Create this module's namespace *before* its body is emitted, so that
             // every `Op::StoreGlobal` the body makes has a namespace to republish
-            // into. The exported names are not known yet — a `pub use` re-export
-            // further down the module has not been compiled — so `ModulePublish`
+            // into. The exported names are not known yet ג€” a `pub use` re-export
+            // further down the module has not been compiled ג€” so `ModulePublish`
             // adds them at the end. The values are already correct by then because
             // the publish index writes them whether or not the name is public yet.
             self.emit_make_module(&cell_global);
@@ -668,7 +732,7 @@ impl Compiler {
             let bin_names: Vec<String> = self.binstructs.keys().cloned().collect();
             for name in &bin_names {
                 // Only bake binstructs defined in this module (not ones already
-                // present from a parent compile) — skip if already baked this run.
+                // present from a parent compile) ג€” skip if already baked this run.
                 let resolved = resolve_binstruct(name, &self.binstructs)?;
                 let dn = make_bin_decode_native(name.clone(), resolved.clone());
                 let en = make_bin_encode_native(name.clone(), resolved);
@@ -773,7 +837,7 @@ impl Compiler {
     /// A private global name to hold a module's namespace handle.
     ///
     /// Namespaced per inlined module rather than per import site, so `import m`
-    /// and `import m as k` — and `import a` plus `a`'s own `import m` — all
+    /// and `import m as k` ג€” and `import a` plus `a`'s own `import m` ג€” all
     /// resolve to the one namespace, which is what makes them the same module
     /// rather than two copies of it.
     fn next_cell_global(&mut self) -> String {
@@ -1013,11 +1077,14 @@ impl Compiler {
         }
     }
 
-    fn compile_function(&self, declared_name: &str, f: &Expr) -> Result<Value, String> {
-        // Takes the whole expression rather than `(name, params, body)` so a call
-        // site cannot leave the `ensures` clauses out -- which is precisely how
-        // they came to be silently unchecked: the signature never mentioned them,
-        // so no caller was able to supply them.
+    /// Compile a function into a closure, and say what it needs from the
+    /// function it is written in.
+    ///
+    /// Takes the whole expression rather than `(name, params, body)` so a call
+    /// site cannot leave the `ensures` clauses out -- which is precisely how
+    /// they came to be silently unchecked: the signature never mentioned them,
+    /// so no caller was able to supply them.
+    fn compile_function(&self, declared_name: &str, f: &Expr) -> Result<CompiledFn, String> {
         let Expr::Function {
             params,
             body,
@@ -1028,14 +1095,51 @@ impl Compiler {
             return Err("internal: compile_function given a non-function".to_string());
         };
 
-        // Postconditions are not evaluated on this backend.
-        if !ensures.is_empty() {
-            return Err(format!(
-                "VM does not support postconditions: `fn {}` declares `ensures`. \
-                 Run this program with `rakc run` (the interpreter), which checks them.",
-                declared_name
-            ));
+        // The captures.
+        //
+        // A closure sees the enclosing function's locals as they were when the
+        // closure was made -- the interpreter gives a closure a *copy* of the
+        // environment it was written in -- so the values are copied out of the
+        // enclosing frame at the creation site rather than shared with it.
+        //
+        // The list is everything the enclosing frame can be asked for: its
+        // locals, and the values it captured itself, because it may be a
+        // closure too and a closure inside it can want what it captured.
+        let mut captures: Vec<CaptureEntry> = Vec::new();
+        for (i, (name, _)) in self.locals.iter().enumerate() {
+            // Compiler-generated slots (`\0argc`) are not program names, and a
+            // program cannot refer to them.
+            if name.starts_with('\0') {
+                continue;
+            }
+            if captures.iter().any(|c| &c.name == name) {
+                continue;
+            }
+            captures.push(CaptureEntry {
+                name: name.clone(),
+                // The index in `locals` *is* the slot: `add_local` appends, and
+                // `end_scope` truncates the tail, so a slot is never reused
+                // while it is live and the two never drift apart.
+                from: CaptureFrom::Local(i as u8),
+                mutable: !self.local_is_immutable(name),
+            });
         }
+        for (i, c) in self.captures.iter().enumerate() {
+            if captures.iter().any(|e| e.name == c.name) {
+                continue;
+            }
+            captures.push(CaptureEntry {
+                name: c.name.clone(),
+                from: CaptureFrom::Capture(i as u8),
+                mutable: c.mutable,
+            });
+        }
+        assert!(
+            captures.len() < crate::bytecode::MAX_LOCALS,
+            "too many captured values in one closure: at most {}. Factor the \
+             scope out.",
+            crate::bytecode::MAX_LOCALS
+        );
 
         let mut sub = Compiler::new();
         sub.scope_depth = 1;
@@ -1063,6 +1167,10 @@ impl Compiler {
         // A module's functions must resolve the module's own top-level names,
         // which live in mangled globals.
         sub.rename = self.rename.clone();
+        // The closure's own capture list: a free name in its body that is not
+        // one of its locals resolves to one of these, and a closure nested
+        // inside it captures from them in turn.
+        sub.captures = captures.clone();
         // Default-value prologue. A default can reference an earlier parameter
         // (`fn f(a, b = a + 1)`), and the interpreter evaluates it in the callee
         // scope where that parameter is already bound; the VM has no `Expr` at
@@ -1090,17 +1198,195 @@ impl Compiler {
             sub.emit_byte(i as u8);
             sub.patch_jump(jfalse);
         }
+        // Postconditions.
+        //
+        // A postcondition is a promise about the value the *caller* receives, so
+        // it has to be checked after the body has produced that value -- and
+        // after the frame's deferred calls have run, which is the order the
+        // interpreter checks them in.
+        //
+        // The VM has no `Expr` to evaluate at call time, so the clauses are
+        // compiled into the callee's own body. Every `return` parks the value in
+        // a local and jumps to a trampoline at the end of the body; the
+        // trampoline runs the deferred calls, checks the clauses, and returns.
+        // A body that falls off the end returns nil, and the clauses are checked
+        // against that nil -- the interpreter checks them against nil too.
+        //
+        // The slot and the flag have to exist *before* the body is compiled,
+        // because the body's own `return` statements are what route through the
+        // trampoline.
+        let result_slot = if ensures.is_empty() {
+            None
+        } else {
+            let slot = sub.add_local("\u{0}result".to_string());
+            sub.post_result_slot = Some(slot);
+            sub.post_active = true;
+            Some(slot)
+        };
         for s in body {
             sub.compile_stmt(s)?;
         }
-        sub.emit_op(Op::Nil);
-        sub.emit_op(Op::Return);
+        match result_slot {
+            None => {
+                sub.emit_op(Op::Nil);
+                sub.emit_op(Op::Return);
+            }
+            Some(slot) => {
+                // The implicit return.
+                sub.emit_op(Op::Nil);
+                sub.emit_op(Op::StoreLocal);
+                sub.emit_byte(slot);
+                let j = sub.emit_jump(Op::Jump);
+                sub.post_jumps.push(j);
+                // The trampoline: every `return` in the body lands here.
+                let trampoline = sub.code_len_u16();
+                let jumps = std::mem::take(&mut sub.post_jumps);
+                for j in jumps {
+                    sub.patch_jump_to(j, trampoline);
+                }
+                // The deferred calls run before the clauses are checked, so a
+                // cleanup the function registered has already happened when the
+                // promise is judged.
+                sub.emit_op(Op::RunDefers);
+                // `result` is bound to the return value while a clause is
+                // checked, and the parameters are still in scope -- the same
+                // view the interpreter's `check_ensures` gives a clause.
+                sub.post_in_clause = true;
+                for clause in ensures {
+                    sub.compile_postcondition(declared_name, clause)?;
+                }
+                sub.post_in_clause = false;
+                sub.emit_op(Op::LoadLocal);
+                sub.emit_byte(slot);
+                sub.emit_op(Op::Return);
+            }
+        }
         let sub_chunk = std::mem::replace(&mut sub.chunk, Chunk::new());
-        Ok(Value::Closure {
-            code: Arc::from(sub_chunk),
-            params: Arc::from(shape),
-            name: Arc::from(declared_name),
+        Ok(CompiledFn {
+            closure: Value::Closure {
+                code: Arc::from(sub_chunk),
+                params: Arc::from(shape),
+                name: Arc::from(declared_name),
+                captures: Arc::new(std::sync::Mutex::new(Vec::new())),
+            },
+            captures,
         })
+    }
+
+    /// Compile a function that is not written inside another function.
+    ///
+    /// A top-level function has no enclosing frame to capture from, so it is a
+    /// constant in the chunk's constant pool. The check is not a formality: a
+    /// function written inside another one has to be *made* at run time, and
+    /// this path has nowhere to put the values it would capture.
+    fn compile_function_const(&self, declared_name: &str, f: &Expr) -> Result<Value, String> {
+        let plan = self.compile_function(declared_name, f)?;
+        if !plan.captures.is_empty() {
+            return Err(format!(
+                "internal: `fn {}` captures {} value(s), and a constant closure \
+                 has nowhere to put them",
+                declared_name,
+                plan.captures.len()
+            ));
+        }
+        Ok(plan.closure)
+    }
+
+    /// Emit the failure for an assignment to an immutable captured binding.
+    ///
+    /// A captured binding belongs to the function the closure was written in,
+    /// so the interpreter checks it where the assignment happens -- at run
+    /// time -- and the VM does the same. A compile error here would refuse a
+    /// program the interpreter runs, which is the one thing the two backends
+    /// must not do.
+    fn emit_immutable_capture_error(&mut self, name: &str) {
+        let msg = format!("cannot assign to immutable variable `{}`", name);
+        self.load_const(Value::String(Arc::from(msg.as_str())));
+        self.emit_op(Op::FailRuntime);
+    }
+
+    /// Compile one postcondition clause into a callee's body.
+    ///
+    /// The clause is evaluated with `result` bound to the return value and the
+    /// function's parameters still in scope, exactly as the interpreter's
+    /// `check_ensures` does. A clause that is false raises an error naming the
+    /// function and the clause, in the interpreter's wording, so the same
+    /// failure reads the same on either backend.
+    ///
+    /// Layout:
+    ///
+    /// ```text
+    ///   Try handler
+    ///     [clause]              ; the clause's value
+    ///     JumpIfTrue ok         ; peek, do not pop
+    ///     Pop
+    ///     Jump fail
+    ///   handler:                ; the clause could not even be evaluated
+    ///     StoreLocal e
+    ///     [text]                ; "postcondition failed in <fn>: <clause> (evaluating it failed: "
+    ///     [e]
+    ///     ")"
+    ///     Throw
+    ///   ok:
+    ///     Pop
+    ///     CatchEnd
+    ///     Jump next
+    ///   fail:
+    ///     CatchEnd
+    ///     [failure]             ; "postcondition failed in <fn>: <clause>"
+    ///     Throw
+    ///   next:
+    /// ```
+    ///
+    /// The failure path leaves the `try` region *before* it raises. A raise
+    /// inside the region would be caught by the region's own handler, and the
+    /// clause's failure would be reported as the clause having failed to
+    /// evaluate -- the wrong diagnosis, and one that hides the real cause.
+    fn compile_postcondition(&mut self, name: &str, clause: &Expr) -> Result<(), String> {
+        let text = crate::interpreter::expr_str(clause);
+        let failure = format!("postcondition failed in {}: {}", name, text);
+        self.emit_op(Op::Try);
+        let try_pos = self.chunk.code.len();
+        self.emit_byte(0xFF);
+        self.emit_byte(0xFF);
+        self.try_depth += 1;
+        self.compile_expr(clause)?;
+        let jok = self.emit_jump(Op::JumpIfTrue);
+        self.emit_op(Op::Pop);
+        let jfail = self.emit_jump(Op::Jump);
+        // The handler: the clause itself failed to evaluate. The VM has already
+        // popped this region's catch frame by the time the handler runs, so the
+        // raise here leaves the function.
+        let handler = self.code_len_u16();
+        self.chunk.code[try_pos] = (handler >> 8) as u8;
+        self.chunk.code[try_pos + 1] = (handler & 0xFF) as u8;
+        let err_slot = self.add_local("\u{0}posterr".to_string());
+        self.emit_op(Op::StoreLocal);
+        self.emit_byte(err_slot);
+        self.load_const(Value::String(Arc::from(
+            format!("postcondition failed in {}: {} (evaluating it failed: ", name, text).as_str(),
+        )));
+        self.emit_op(Op::LoadLocal);
+        self.emit_byte(err_slot);
+        self.emit_op(Op::AddI);
+        self.load_const(Value::String(Arc::from(")")));
+        self.emit_op(Op::AddI);
+        self.emit_op(Op::Throw);
+        // The clause held.
+        self.patch_jump(jok);
+        self.emit_op(Op::Pop);
+        self.emit_op(Op::CatchEnd);
+        self.try_depth = self.try_depth.saturating_sub(1);
+        let jnext = self.emit_jump(Op::Jump);
+        // The clause did not hold.
+        self.patch_jump(jfail);
+        self.emit_op(Op::CatchEnd);
+        self.try_depth = self.try_depth.saturating_sub(1);
+        self.load_const(Value::String(Arc::from(failure.as_str())));
+        self.emit_op(Op::Throw);
+        // The next clause.
+        self.patch_jump(jnext);
+        Ok(())
     }
 
     fn line(&self) -> u32 {
@@ -1163,6 +1449,17 @@ impl Compiler {
         self.chunk.code[pos + 1] = (target & 0xFF) as u8;
     }
 
+    /// Point a jump at a target that is not the current end of the chunk.
+    ///
+    /// `patch_jump` is for the common case, where the target is whatever comes
+    /// next. A postcondition trampoline is the exception: several `return`
+    /// sites forward-jump to it, and its offset is only known once the body has
+    /// been compiled.
+    fn patch_jump_to(&mut self, pos: usize, target: u16) {
+        self.chunk.code[pos] = (target >> 8) as u8;
+        self.chunk.code[pos + 1] = (target & 0xFF) as u8;
+    }
+
     fn add_local(&mut self, name: String) -> u8 {
         // Locals are addressed by an 8-bit slot. Wrapping aliased two locals
         // onto one, which reads as the wrong variable's value rather than as a
@@ -1205,22 +1502,19 @@ impl Compiler {
         self.emit_const(Value::String(Arc::from(s)))
     }
 
-    /// A unique suffix for compiler-generated globals.
-    ///
-    /// Needed because `import a.b` and `import c.b` both want a staging global
-    /// holding `b`'s module, and a fixed name would make the second import
-    /// overwrite the first. Monotonic rather than derived from the path, so two
-    /// imports of the same module in one file still get distinct names.
-    fn next_temp_id(&mut self) -> u32 {
-        self.temp_counter += 1;
-        self.temp_counter
-    }
-
     /// Emit a load of the named variable (local if bound, else global).
     fn compile_ident_load(&mut self, name: &str) -> Result<(), String> {
-        if let Some(slot) = self.resolve_local(name) {
+        if let Some(slot) = self.resolve_special_local(name) {
             self.emit_op(Op::LoadLocal);
             self.emit_byte(slot);
+        } else if let Some(slot) = self.resolve_local(name) {
+            self.emit_op(Op::LoadLocal);
+            self.emit_byte(slot);
+        } else if let Some(idx) = self.resolve_capture(name) {
+            // A captured value: the closure's own copy of it, taken when the
+            // closure was made.
+            self.emit_op(Op::GetCapture);
+            self.emit_byte(idx);
         } else {
             let global = self.global_for(name);
             let ci = self.const_str(&global);
@@ -1228,6 +1522,29 @@ impl Compiler {
             self.emit_u16(ci);
         }
         Ok(())
+    }
+
+    /// The slot a name resolves to when it is not an ordinary program variable.
+    ///
+    /// `result` is the only such name: it is bound for the duration of a
+    /// postcondition check and to nothing else, so it must not shadow a
+    /// program variable of the same name outside a clause.
+    fn resolve_special_local(&self, name: &str) -> Option<u8> {
+        if name == "result" && self.post_in_clause {
+            return self.post_result_slot;
+        }
+        None
+    }
+
+    /// The index of the captured value a name refers to, if it is captured.
+    ///
+    /// A name the function itself does not declare, and that the function it is
+    /// written in does, is captured from that function.
+    fn resolve_capture(&self, name: &str) -> Option<u8> {
+        self.captures
+            .iter()
+            .position(|c| c.name == name)
+            .map(|i| i as u8)
     }
 
     /// The chunk global that holds `name`.
@@ -1257,9 +1574,16 @@ impl Compiler {
 
     /// Emit a store of the top-of-stack value to the named variable.
     fn store_ident_to(&mut self, name: &str) -> Result<(), String> {
-        if let Some(slot) = self.resolve_local(name) {
+        if let Some(slot) = self.resolve_special_local(name) {
             self.emit_op(Op::StoreLocal);
             self.emit_byte(slot);
+        } else if let Some(slot) = self.resolve_local(name) {
+            self.emit_op(Op::StoreLocal);
+            self.emit_byte(slot);
+        } else if let Some(idx) = self.resolve_capture(name) {
+            // The closure's own copy: the enclosing function does not see it.
+            self.emit_op(Op::SetCapture);
+            self.emit_byte(idx);
         } else {
             let global = self.global_for(name);
             let ci = self.const_str(&global);
@@ -1302,7 +1626,7 @@ impl Compiler {
         // The salt, iteration count and key length are passed explicitly rather
         // than relying on the native's defaults. The native's default salt is
         // empty, and the interpreter's `exec_tunnel` uses
-        // `b"rak:secure-elb:tunnel"` — so omitting the salt here would derive a
+        // `b"rak:secure-elb:tunnel"` ג€” so omitting the salt here would derive a
         // *different key from the same passphrase* on the two backends, which
         // is exactly the kind of divergence that produces an
         // "it works under run, not under vm" bug report with no visible cause.
@@ -1367,7 +1691,7 @@ impl Compiler {
     /// arguments already on the stack.
     ///
     /// Used for lowering that has to name a native directly, where there is no
-    /// `Expr` to compile — the `tunnel` statement's key derivation and socket
+    /// `Expr` to compile ג€” the `tunnel` statement's key derivation and socket
     /// bind are the cases today.
     fn emit_global_call(&mut self, name: &str, args: &[Value]) -> Result<(), String> {
         // Callee first, then arguments: `Op::Call` pops the arguments in
@@ -1481,12 +1805,7 @@ impl Compiler {
                 }
             }
             Stmt::Return(e) => {
-                if let Some(e) = e {
-                    self.compile_expr(e)?;
-                } else {
-                    self.emit_op(Op::Nil);
-                }
-                self.emit_op(Op::Return);
+                self.compile_return(e)?;
             }
             Stmt::Try {
                 body,
@@ -1494,16 +1813,39 @@ impl Compiler {
                 catch_body,
             } => {
                 // Layout:
-                //   Op::Try <handler>   [body]   Jump end
-                //   handler: [StoreLocal e | Pop]  [catch_body]  CatchEnd
+                //   Op::Try <handler>   [body]   CatchEnd   Jump end
+                //   handler: [StoreLocal e | Pop]  [catch_body]
                 //   end:
+                //
+                // The `CatchEnd` belongs on the path that leaves the region
+                // *normally*, not at the end of the handler.
+                //
+                // `Op::Try` pushes a catch frame, and only the code that runs
+                // after the body can pop it again. The handler does not need
+                // one: when the VM unwinds into the handler it has already
+                // popped the frame, so a `CatchEnd` there would pop the
+                // *enclosing* try's frame and unbalance the two.
+                //
+                // The `CatchEnd` used to sit at the end of the handler, which
+                // left the frame behind whenever the body completed without
+                // raising. A later error in the same frame then found that
+                // stale frame and was caught by the wrong handler -- and since
+                // the handler falls through to the code after the `try`, that
+                // code ran again from the top. So `try { ... } catch e { ... }`
+                // followed by a `raise` ran the catch body, re-ran the raise,
+                // and reported the second failure as an uncaught one. The
+                // interpreter, whose `try` leaves nothing behind, did not.
                 self.emit_op(Op::Try);
                 let try_pos = self.chunk.code.len();
                 self.emit_byte(0xFF);
                 self.emit_byte(0xFF);
+                self.try_depth += 1;
                 for s in body {
                     self.compile_stmt(s)?;
                 }
+                // The body completed without raising: drop the catch frame.
+                self.emit_op(Op::CatchEnd);
+                self.try_depth = self.try_depth.saturating_sub(1);
                 let jend = self.emit_jump(Op::Jump);
                 // Handler: patch the Try operand to point here.
                 let handler = self.code_len_u16();
@@ -1521,7 +1863,6 @@ impl Compiler {
                     self.compile_stmt(s)?;
                 }
                 self.end_scope();
-                self.emit_op(Op::CatchEnd);
                 self.patch_jump(jend);
             }
             Stmt::Raise(expr) => {
@@ -1787,8 +2128,8 @@ impl Compiler {
             Stmt::Mod { name, items } => {
                 // The in-file spelling of a module, and the same machinery: its
                 // own namespace, its items compiled into this chunk, its exports
-                // published. `pub` is optional inside a `mod` block — the block is
-                // already explicit about being a boundary — but `export` is
+                // published. `pub` is optional inside a `mod` block ג€” the block is
+                // already explicit about being a boundary ג€” but `export` is
                 // accepted and treated the same way.
                 let mut exports: Vec<String> = Vec::new();
                 let mut mutable_names: Vec<String> = Vec::new();
@@ -1821,7 +2162,7 @@ impl Compiler {
                             ..
                         } => {
                             if let Expr::Function { .. } = value.as_ref() {
-                                let cl = self.compile_function(n, value.as_ref())?;
+                                let cl = self.compile_function_const(n, value.as_ref())?;
                                 closures.push((n.clone(), cl));
                             }
                             if !exports.contains(n) {
@@ -2138,7 +2479,7 @@ impl Compiler {
                 self.emit_op(Op::LoadLocal);
                 self.emit_byte(src_slot);
                 // Maps become (key, value) tuples; with a 2-tuple pattern,
-                // arrays/strings yield (index, item) — matching the interpreter.
+                // arrays/strings yield (index, item) ג€” matching the interpreter.
                 let indexed = matches!(pattern, Pattern::Tuple(p) if p.len() == 2);
                 self.emit_op(Op::IterItems);
                 self.emit_byte(if indexed { 1 } else { 0 });
@@ -2179,7 +2520,7 @@ impl Compiler {
                 // `option(none)` is falsy: the stream is exhausted.
                 let jdone = self.emit_jump(Op::JumpIfFalse);
                 self.emit_op(Op::Pop);
-                // Unwrap `option(some(v))` into `__for_elem_v` — the pattern
+                // Unwrap `option(some(v))` into `__for_elem_v` ג€” the pattern
                 // is the user's only at the join, so the unwrap is against a
                 // plain bind here.
                 let unwrap = Pattern::Some(Box::new(Pattern::Ident("__stream_v".to_string())));
@@ -2285,18 +2626,51 @@ impl Compiler {
         match last {
             Stmt::Expr(e) => self.compile_expr(e)?,
             Stmt::Return(e) => {
-                if let Some(e) = e {
-                    self.compile_expr(e)?;
-                } else {
-                    self.emit_op(Op::Nil);
-                }
-                self.emit_op(Op::Return);
+                self.compile_return(e)?;
             }
             other => {
                 self.compile_stmt(other)?;
                 self.emit_op(Op::Nil);
             }
         }
+        Ok(())
+    }
+
+    /// Compile a `return`.
+    ///
+    /// A function with postconditions does not return directly: the value is
+    /// parked in the result local and the postcondition trampoline does the
+    /// checking, because the promise is about the value the caller receives.
+    fn compile_return(&mut self, e: &Option<Box<Expr>>) -> Result<(), String> {
+        if self.post_active {
+            let slot = self.post_result_slot.expect(
+                "a function with postconditions has a result local; \
+                 the compiler sets both together",
+            );
+            if let Some(e) = e {
+                self.compile_expr(e)?;
+            } else {
+                self.emit_op(Op::Nil);
+            }
+            self.emit_op(Op::StoreLocal);
+            self.emit_byte(slot);
+            // A `return` out of a `try` body leaves the region behind. The
+            // trampoline is still in this frame, so the region has to be closed
+            // here -- otherwise the frame keeps a catch frame for a region it
+            // has already left.
+            for _ in 0..self.try_depth {
+                self.emit_op(Op::CatchEnd);
+            }
+            let j = self.emit_jump(Op::Jump);
+            self.post_jumps.push(j);
+            return Ok(());
+        }
+        if let Some(e) = e {
+            self.compile_expr(e)?;
+        } else {
+            self.emit_op(Op::Nil);
+        }
+        self.emit_op(Op::Return);
         Ok(())
     }
 
@@ -2464,6 +2838,19 @@ impl Compiler {
                 if let Some(slot) = self.resolve_local(name) {
                     self.emit_op(Op::StoreLocal);
                     self.emit_byte(slot);
+                } else if let Some(idx) = self.resolve_capture(name) {
+                    if self.captures[idx as usize].mutable {
+                        self.emit_op(Op::SetCapture);
+                        self.emit_byte(idx);
+                    } else {
+                        // A captured binding is as immutable as the one it came
+                        // from. The check happens where the assignment does --
+                        // at run time -- because the binding belongs to
+                        // another function, and a compile error here would
+                        // refuse a program the interpreter runs.
+                        self.emit_op(Op::Pop);
+                        self.emit_immutable_capture_error(name);
+                    }
                 } else {
                     let ci = self.global_index(name);
                     self.emit_op(Op::StoreGlobal);
@@ -2492,6 +2879,14 @@ impl Compiler {
                 if let Some(slot) = self.resolve_local(name) {
                     self.emit_op(Op::StoreLocal);
                     self.emit_byte(slot);
+                } else if let Some(idx) = self.resolve_capture(name) {
+                    if self.captures[idx as usize].mutable {
+                        self.emit_op(Op::SetCapture);
+                        self.emit_byte(idx);
+                    } else {
+                        self.emit_op(Op::Pop);
+                        self.emit_immutable_capture_error(name);
+                    }
                 } else {
                     let ci = self.global_index(name);
                     self.emit_op(Op::StoreGlobal);
@@ -2551,7 +2946,7 @@ impl Compiler {
                 if !named.is_empty() {
                     return Err("VM does not support named arguments".to_string());
                 }
-                // `Enum::Variant(args...)` — call the baked ctor native.
+                // `Enum::Variant(args...)` ג€” call the baked ctor native.
                 if let Expr::Path(segs) = callee.as_ref() {
                     if segs.len() == 2 {
                         let key = format!("__enum_new_{}_{}", segs[0], segs[1]);
@@ -2597,10 +2992,10 @@ impl Compiler {
                         return Ok(());
                     }
                     // `Name.decode(bytes)` / `Name.encode(value)` where `Name`
-                    // is a registered `binstruct` — lower to a call to a
+                    // is a registered `binstruct` ג€” lower to a call to a
                     // per-binstruct baked native global `__bin_decode_<Name>` /
                     // `__bin_encode_<Name>` (self-contained closure, built in
-                    // the pre-pass — matches the `make_foreign_native` precedent,
+                    // the pre-pass ג€” matches the `make_foreign_native` precedent,
                     // no new VM opcodes).
                     if let Expr::Ident(name) = obj.as_ref() {
                         if self.binstructs.contains_key(name) {
@@ -2622,7 +3017,7 @@ impl Compiler {
                             }
                         }
                     }
-                    // General method call `obj.method(args...)` — dispatch at
+                    // General method call `obj.method(args...)` ג€” dispatch at
                     // runtime via `Op::CallMethod` (regex natives, baked impl
                     // methods, then a field holding a callable).
                     if !named.is_empty() {
@@ -2730,10 +3125,35 @@ impl Compiler {
                 self.emit_byte(1);
             }
             f @ Expr::Function { .. } => {
-                // Compile a function literal to a closure constant (used by
-                // `pub fn` inlining and nested function values).
-                let closure = self.compile_function("<anon>", f)?;
-                self.load_const(closure);
+                // Compile a function literal to a closure.
+                //
+                // A closure that captures nothing is a constant: its code, its
+                // parameter shape and its name, with nothing to fill in at run
+                // time. A closure that captures something is *made* where it
+                // is written, and the values it captures are copied out of the
+                // enclosing frame at that moment -- which is what gives it the
+                // interpreter's copy-of-environment semantics.
+                let plan = self.compile_function("<anon>", f)?;
+                if plan.captures.is_empty() {
+                    self.load_const(plan.closure);
+                    return Ok(());
+                }
+                for entry in &plan.captures {
+                    match entry.from {
+                        CaptureFrom::Local(slot) => {
+                            self.emit_op(Op::LoadLocal);
+                            self.emit_byte(slot);
+                        }
+                        CaptureFrom::Capture(idx) => {
+                            self.emit_op(Op::GetCapture);
+                            self.emit_byte(idx);
+                        }
+                    }
+                }
+                let ci = self.emit_const(plan.closure);
+                self.emit_op(Op::MakeClosure);
+                self.emit_u16(ci);
+                self.emit_byte(plan.captures.len() as u8);
             }
             Expr::MacroVar(name) => {
                 return Err(format!(
@@ -2768,7 +3188,7 @@ impl Compiler {
                 self.emit_u16(ci);
             }
             Expr::EvidenceFrom { value } => {
-                // `evidence<T> from expr` — on the VM, evaluate the inner value
+                // `evidence<T> from expr` ג€” on the VM, evaluate the inner value
                 // and wrap it in a `Value::Evidence` with a root provenance via
                 // the `__evidence_from` native. Call convention: [callee, arg]
                 // then Call(argc=1).
@@ -2780,7 +3200,7 @@ impl Compiler {
                 self.emit_byte(1);
             }
             Expr::TryExpr(inner) => {
-                // `expr?` — unwrap Result/Option or raise (bindable by catch).
+                // `expr?` ג€” unwrap Result/Option or raise (bindable by catch).
                 self.compile_expr(inner)?;
                 self.emit_op(Op::TryUnwrap);
             }
@@ -2796,7 +3216,7 @@ impl Compiler {
                 self.patch_jump(je);
             }
             Expr::NilCoalesce(l, r) => {
-                // `a ?? b` — push `l`; if nil/None, jump to `r`. Keeps the
+                // `a ?? b` ג€” push `l`; if nil/None, jump to `r`. Keeps the
                 // value on the stack on the non-nil path.
                 self.compile_expr(l)?;
                 self.emit_op(Op::Dup);
@@ -2811,7 +3231,7 @@ impl Compiler {
                 self.patch_jump(je);
             }
             Expr::OptField(obj, field) => {
-                // `obj?.field` — nil if obj is nil/None, else field.
+                // `obj?.field` ג€” nil if obj is nil/None, else field.
                 self.compile_expr(obj)?;
                 self.emit_op(Op::Dup);
                 let jnil = self.emit_jump(Op::JumpIfNil);
@@ -2840,7 +3260,7 @@ impl Compiler {
                 self.patch_jump(je);
             }
             Expr::MultiAssign { targets, values } => {
-                // `a, b = x, y` — evaluate all RHS into temps, then store to
+                // `a, b = x, y` ג€” evaluate all RHS into temps, then store to
                 // each (Ident) target; yields nil.
                 if targets.len() != values.len() {
                     return Err("multi-assign: target/value count mismatch".to_string());
@@ -2892,7 +3312,7 @@ impl Compiler {
                 self.emit_byte(fields.len() as u8);
             }
             Expr::Path(segs) => {
-                // `Enum::Variant` (unit variant, no args) — call the baked
+                // `Enum::Variant` (unit variant, no args) ג€” call the baked
                 // ctor native with zero args.
                 if segs.len() == 2 {
                     let key = format!("__enum_new_{}_{}", segs[0], segs[1]);
@@ -3184,10 +3604,6 @@ impl Compiler {
         }
     }
 
-    fn val_str(&self, s: &str) -> Value {
-        Value::String(Arc::from(s))
-    }
-
     /// Collect, depth-first, every name bound by a pattern (for `MatchPat`
     /// bindings). `Ident` binds; `_`/`Wild` and scalar/byte literals do not.
     fn pattern_binds(&self, p: &Pattern) -> Vec<String> {
@@ -3455,7 +3871,7 @@ fn now_secs_vm() -> u64 {
 
 /// Build a self-contained `Value::NativeFn` that decodes raw bytes per the
 /// resolved binstruct layout, returning a `Value::Evidence` wrapping a
-/// `Value::Struct`. Used by the VM via `Op::Call` — no new opcode.
+/// `Value::Struct`. Used by the VM via `Op::Call` ג€” no new opcode.
 fn make_bin_decode_native(name: String, fields: Vec<ResolvedBinField>) -> Value {
     use crate::value::Provenance;
     let nm: Arc<str> = Arc::from(name.as_str());

@@ -6,6 +6,7 @@ pub mod interpreter;
 pub mod lexer;
 pub mod modules;
 pub mod parser;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod repl;
 pub mod targets;
 pub mod typecheck;

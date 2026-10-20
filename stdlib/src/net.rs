@@ -9,6 +9,13 @@ pub struct HttpResponse {
 }
 
 /// Fetch a URL via HTTP GET
+///
+/// The HTTP client is behind the `http` feature (on by default). It is off for
+/// the browser build, where the TLS stack it needs cannot be compiled - the
+/// `ureq` -> `rustls` -> `ring` chain needs a C compiler that targets wasm.
+/// The function still exists without the feature, and says so, so a program that
+/// calls it gets a clear error instead of a missing name.
+#[cfg(feature = "http")]
 pub fn http_get(
     url: &str,
     headers: Option<HashMap<String, String>>,
@@ -40,7 +47,19 @@ pub fn http_get(
     })
 }
 
+/// Fetch a URL via HTTP GET, in a build without the HTTP client.
+#[cfg(not(feature = "http"))]
+pub fn http_get(
+    _url: &str,
+    _headers: Option<HashMap<String, String>>,
+) -> anyhow::Result<HttpResponse> {
+    Err(anyhow::anyhow!(
+        "http_get: this build has no HTTP client (the `http` feature is off)"
+    ))
+}
+
 /// Fetch a URL via HTTP POST
+#[cfg(feature = "http")]
 pub fn http_post(
     url: &str,
     body: &str,
@@ -71,6 +90,18 @@ pub fn http_post(
         headers: response_headers,
         body,
     })
+}
+
+/// Fetch a URL via HTTP POST, in a build without the HTTP client.
+#[cfg(not(feature = "http"))]
+pub fn http_post(
+    _url: &str,
+    _body: &str,
+    _headers: Option<HashMap<String, String>>,
+) -> anyhow::Result<HttpResponse> {
+    Err(anyhow::anyhow!(
+        "http_post: this build has no HTTP client (the `http` feature is off)"
+    ))
 }
 
 /// TCP connect scan - checks if a port is open

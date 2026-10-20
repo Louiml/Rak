@@ -10,7 +10,7 @@
 //! what is needed.
 
 use super::c;
-use super::toolchain::{self, Cc};
+use super::toolchain::{self};
 use super::{Artifact, CodegenOptions, EmitKind, Target, Triple};
 use crate::ast::Module;
 use std::path::PathBuf;

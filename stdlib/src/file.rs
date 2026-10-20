@@ -1,13 +1,16 @@
+use crate::fs_scope;
 use std::fs;
 use std::path::Path;
 
 /// Read a file's contents as a string
 pub fn read(path: &str) -> anyhow::Result<String> {
+    fs_scope::check(path).map_err(|e| anyhow::anyhow!("{}", e))?;
     fs::read_to_string(path).map_err(|e| anyhow::anyhow!("{}", e))
 }
 
 /// Read a file as raw bytes
 pub fn read_bytes(path: &str) -> anyhow::Result<Vec<u8>> {
+    fs_scope::check(path).map_err(|e| anyhow::anyhow!("{}", e))?;
     fs::read(path).map_err(|e| anyhow::anyhow!("{}", e))
 }
 
@@ -17,12 +20,14 @@ pub fn read_bytes(path: &str) -> anyhow::Result<Vec<u8>> {
 /// `&str` and goes through UTF-8, so a buffer holding `0xFF` becomes U+FFFD and a
 /// binary file comes back corrupted.
 pub fn write_bytes(path: &str, content: &[u8]) -> anyhow::Result<()> {
+    fs_scope::check(path).map_err(|e| anyhow::anyhow!("{}", e))?;
     fs::write(path, content).map_err(|e| anyhow::anyhow!("{}", e))
 }
 
 /// Append raw bytes to a file, creating it if absent. Byte-exact; see
 /// [`write_bytes`].
 pub fn append_bytes(path: &str, content: &[u8]) -> anyhow::Result<()> {
+    fs_scope::check(path).map_err(|e| anyhow::anyhow!("{}", e))?;
     use std::io::Write;
     let mut file = fs::OpenOptions::new()
         .append(true)
@@ -34,11 +39,13 @@ pub fn append_bytes(path: &str, content: &[u8]) -> anyhow::Result<()> {
 
 /// Write content to a file (overwrites)
 pub fn write(path: &str, content: &str) -> anyhow::Result<()> {
+    fs_scope::check(path).map_err(|e| anyhow::anyhow!("{}", e))?;
     fs::write(path, content).map_err(|e| anyhow::anyhow!("{}", e))
 }
 
 /// Append content to a file
 pub fn append(path: &str, content: &str) -> anyhow::Result<()> {
+    fs_scope::check(path).map_err(|e| anyhow::anyhow!("{}", e))?;
     use std::io::Write;
     let mut file = fs::OpenOptions::new()
         .append(true)
@@ -50,16 +57,25 @@ pub fn append(path: &str, content: &str) -> anyhow::Result<()> {
 
 /// Check if a file or directory exists
 pub fn exists(path: &str) -> bool {
+    if fs_scope::check(path).is_err() {
+        return false;
+    }
     Path::new(path).exists()
 }
 
 /// Get file size in bytes
 pub fn size(path: &str) -> Option<u64> {
+    if fs_scope::check(path).is_err() {
+        return None;
+    }
     fs::metadata(path).ok().map(|m| m.len())
 }
 
 /// List files in a directory (returns names)
 pub fn list(path: &str) -> Vec<String> {
+    if fs_scope::check(path).is_err() {
+        return vec![];
+    }
     match fs::read_dir(path) {
         Ok(entries) => entries
             .filter_map(|e| e.ok())
@@ -71,21 +87,33 @@ pub fn list(path: &str) -> Vec<String> {
 
 /// Delete a file
 pub fn delete(path: &str) -> bool {
+    if fs_scope::check(path).is_err() {
+        return false;
+    }
     fs::remove_file(path).is_ok()
 }
 
 /// Create a directory (and parents)
 pub fn create_dir(path: &str) -> bool {
+    if fs_scope::check(path).is_err() {
+        return false;
+    }
     fs::create_dir_all(path).is_ok()
 }
 
 /// Copy a file
 pub fn copy(src: &str, dst: &str) -> bool {
+    if fs_scope::check(src).is_err() || fs_scope::check(dst).is_err() {
+        return false;
+    }
     fs::copy(src, dst).is_ok()
 }
 
 /// Rename or move a file
 pub fn rename(src: &str, dst: &str) -> bool {
+    if fs_scope::check(src).is_err() || fs_scope::check(dst).is_err() {
+        return false;
+    }
     fs::rename(src, dst).is_ok()
 }
 

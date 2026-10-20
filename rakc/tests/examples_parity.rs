@@ -108,8 +108,6 @@ const ENVIRONMENTAL: &[(&str, &str)] = &[
 /// - `cli_greeter` reassigns an immutable binding in a branch the interpreter
 ///   never executes on its no-argument path, while the VM's compile-time
 ///   mutability check rejects the whole file (fix the example: `let mut`).
-/// - `ffi_dynamic`'s dynamic-FFI demo skips itself under `rakc vm`, because
-///   the VM's lib.call path is a stub where the interpreter loads msvcrt.
 ///
 /// Everything else that still disagrees turned out to be example bugs
 /// (reassignment of immutable bindings, rejected by *both* backends) or
@@ -119,10 +117,6 @@ const VM_BLOCKED: &[(&str, &str)] = &[
     (
         "cli_greeter",
         "reassigns an immutable binding the VM's compile-time mutability check rejects",
-    ),
-    (
-        "ffi_dynamic",
-        "the dynamic-FFI demo skips itself under rakc vm; lib.call is a stub there",
     ),
     (
         "mmap",

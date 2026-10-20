@@ -224,7 +224,7 @@ impl Linter {
                 // A credential assigned directly from a literal is the classic
                 // leak. Assigned from a call or a variable, it is fine.
                 if pattern.is_none() && Self::is_secret_name(name) {
-                    if let Expr::String(s) = value.as_ref() {
+                    if let Expr::String(_s) = value.as_ref() {
                         self.findings.push(LintFinding {
                             rule: "hardcoded-secret",
                             message: format!("'{}' is assigned a literal credential; use secret_set(\"{}\", env_get(\"...\")) instead", name, name),
@@ -588,12 +588,12 @@ impl Linter {
         match e {
             Expr::Call { callee, args, .. } => {
                 let escaped = match callee.as_ref() {
-                    Expr::Ident(n) => n.ends_with("_escape"),
+                    Expr::Ident(n) => n.ends_with("_escape") || n.ends_with("_escape_mysql"),
                     _ => false,
                 };
                 // Either the interpolated value is the escape call itself, or the
                 // transform happened underneath: `f"{trim(sql_escape(x))}"` is safe.
-                escaped || args.iter().any(|a| Self::is_wrapped_in_escape(a))
+                escaped || args.iter().any(Self::is_wrapped_in_escape)
             }
             // A field access or a unary op on an escaped value still counts, because
             // the transform already happened underneath it.
@@ -794,10 +794,17 @@ impl Linter {
             None
         };
         let Some(context) = context else { return };
-        let escape_for = if context == "sql" {
-            "sql_escape"
+        // The SQL escapers are dialect-dependent, so naming one of them as
+        // "the fix" is not quite honest. `sql_escape` is right for ANSI SQL,
+        // PostgreSQL and SQLite, and wrong for MySQL's default `sql_mode`,
+        // where a backslash is an escape character; `sql_escape_mysql` is the
+        // one for MySQL's default mode. Saying which is which is more useful
+        // than saying "use sql_escape" and leaving the reader to guess.
+        let advice = if context == "sql" {
+            "a parameterised query is better than either escaper: `sql_escape` is for ANSI \
+             SQL, PostgreSQL and SQLite, `sql_escape_mysql` for MySQL's default sql_mode"
         } else {
-            "shell_escape"
+            "an argv array is better than a shell string"
         };
 
         for part in parts {
@@ -808,7 +815,7 @@ impl Linter {
                 rule: "unescaped-interpolation",
                 message: format!(
                     "an f-string building a {context} command interpolates a value that \
-                     is not wrapped in `{escape_for}`: \"{}\"",
+                     is not wrapped in an escape function -- {advice}: \"{}\"",
                     template.trim()
                 ),
             });
@@ -836,13 +843,13 @@ impl Linter {
             Expr::Binary(op, l, r) => {
                 // `==` between two secret-looking values leaks the length of
                 // the common prefix through its exit timing.
-                if matches!(op, BinOp::Eq | BinOp::NotEq) {
-                    if Self::looks_secret_expr(l) || Self::looks_secret_expr(r) {
-                        self.findings.push(LintFinding {
+                if matches!(op, BinOp::Eq | BinOp::NotEq)
+                    && (Self::looks_secret_expr(l) || Self::looks_secret_expr(r))
+                {
+                    self.findings.push(LintFinding {
                             rule: "secret-compare",
                             message: "comparing a secret-looking value with == leaks its common-prefix length through timing; use ct_eq / ct_eq_hex".to_string(),
                         });
-                    }
                 }
                 self.expr(l);
                 self.expr(r);

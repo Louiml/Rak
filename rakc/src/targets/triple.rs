@@ -168,7 +168,7 @@ pub fn host_triple() -> Triple {
         // plainly instead of guessing which supported triple it resembles.
         "unknown-host"
     };
-    find(name).unwrap_or_else(|| {
+    find(name).unwrap_or({
         // `find` only misses when `name` is "unknown-host", which the map above
         // deliberately produces for an unlisted host.
         Triple {
@@ -239,7 +239,7 @@ mod tests {
     fn wasm_and_windows_flags() {
         let wasm = find("wasm32-wasi").unwrap();
         assert!(wasm.is_wasm());
-        assert!(wasm.is_windows() == false);
+        assert!(!wasm.is_windows());
         let win = find("x86_64-pc-windows-msvc").unwrap();
         assert!(win.is_windows());
         assert_eq!(win.exe_suffix(), ".exe");

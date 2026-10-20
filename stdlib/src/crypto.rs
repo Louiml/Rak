@@ -50,6 +50,7 @@ pub fn rot13(input: &str) -> String {
 /// Calculate file hash
 pub fn file_hash(path: &str, algorithm: &str) -> anyhow::Result<String> {
     use std::fs;
+    crate::fs_scope::check(path).map_err(|e| anyhow::anyhow!("{}", e))?;
     let data = fs::read(path)?;
 
     match algorithm {
@@ -235,6 +236,7 @@ pub fn zeroize_string(mut s: String) {
 /// or page cache. Falls back to a plain remove if the file cannot be opened.
 pub fn secure_delete_file(path: &str) -> std::io::Result<()> {
     use std::io::{Seek, SeekFrom, Write};
+    crate::fs_scope::check(path).map_err(std::io::Error::other)?;
     if let Ok(mut f) = std::fs::OpenOptions::new().write(true).open(path) {
         let len = f.metadata().map(|m| m.len()).unwrap_or(0);
         let zeros = vec![0u8; 4096.min(len.max(1) as usize)];
@@ -258,6 +260,9 @@ pub fn secure_delete_file(path: &str) -> std::io::Result<()> {
 /// Generate an RSA keypair. `bits` must be 2048 or 4096. Returns
 /// (public_key_der, private_key_der), both DER so they survive `ffi_write`
 /// and can be fed to OpenSSL for interop.
+///
+/// Key generation needs a random source, so it is behind the `rand` feature.
+#[cfg(feature = "rand")]
 pub fn rsa_keypair(bits: u32) -> Result<(Vec<u8>, Vec<u8>), String> {
     use rsa::pkcs8::{EncodePrivateKey, EncodePublicKey};
     let mut rng = rand::thread_rng();
@@ -275,6 +280,12 @@ pub fn rsa_keypair(bits: u32) -> Result<(Vec<u8>, Vec<u8>), String> {
         .as_bytes()
         .to_vec();
     Ok((pub_der, priv_der))
+}
+
+/// Generate an RSA keypair, in a build without a random source.
+#[cfg(not(feature = "rand"))]
+pub fn rsa_keypair(_bits: u32) -> Result<(Vec<u8>, Vec<u8>), String> {
+    Err("rsa_keypair: this build has no random source (the `rand` feature is off)".to_string())
 }
 
 /// Sign a message with an RSA private key using PKCS#1 v1.5 over SHA-256.
@@ -303,6 +314,11 @@ pub fn rsa_verify(public_der: &[u8], signature: &[u8], message: &[u8]) -> Result
 }
 
 /// RSA-OAEP encrypt with SHA-256 and an empty label.
+///
+/// OAEP needs a random source, so this is behind the `rand` feature. Without
+/// it the browser build has no `getrandom`, and a function that cannot work
+/// says so rather than returning a value that would not decrypt.
+#[cfg(feature = "rand")]
 pub fn rsa_encrypt(public_der: &[u8], plaintext: &[u8], label: &[u8]) -> Result<Vec<u8>, String> {
     use rsa::pkcs8::DecodePublicKey;
     use rsa::RsaPublicKey;
@@ -312,6 +328,16 @@ pub fn rsa_encrypt(public_der: &[u8], plaintext: &[u8], label: &[u8]) -> Result<
     let oaep = oaep_sha256(label);
     key.encrypt(&mut rng, oaep, plaintext)
         .map_err(|e| format!("rsa_encrypt: {}", e))
+}
+
+/// RSA-OAEP encrypt, in a build without a random source.
+#[cfg(not(feature = "rand"))]
+pub fn rsa_encrypt(
+    _public_der: &[u8],
+    _plaintext: &[u8],
+    _label: &[u8],
+) -> Result<Vec<u8>, String> {
+    Err("rsa_encrypt: this build has no random source (the `rand` feature is off)".to_string())
 }
 
 /// RSA-OAEP decrypt with SHA-256 and an empty label.
@@ -340,6 +366,9 @@ fn oaep_sha256(label: &[u8]) -> rsa::Oaep {
 
 /// Generate a P-256 ECDSA keypair. Returns (public_key_der, private_key_der)
 /// as SEC1/PKCS#8 DER.
+///
+/// Key generation needs a random source, so it is behind the `rand` feature.
+#[cfg(feature = "rand")]
 pub fn ecdsa_keypair() -> Result<(Vec<u8>, Vec<u8>), String> {
     use p256::ecdsa::SigningKey;
     use p256::pkcs8::{EncodePrivateKey, EncodePublicKey};
@@ -357,6 +386,12 @@ pub fn ecdsa_keypair() -> Result<(Vec<u8>, Vec<u8>), String> {
         .as_bytes()
         .to_vec();
     Ok((pub_der, priv_der))
+}
+
+/// Generate a P-256 ECDSA keypair, in a build without a random source.
+#[cfg(not(feature = "rand"))]
+pub fn ecdsa_keypair() -> Result<(Vec<u8>, Vec<u8>), String> {
+    Err("ecdsa_keypair: this build has no random source (the `rand` feature is off)".to_string())
 }
 
 /// Sign a message with a P-256 ECDSA private key. Returns a 64-byte

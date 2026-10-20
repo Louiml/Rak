@@ -96,6 +96,12 @@ impl Writer {
     }
 }
 
+/// The largest DAP frame the adapter will read.
+///
+/// The frame length is named by the client, so it is a number the peer
+/// chooses. This is the ceiling on it.
+const MAX_FRAME: usize = 8 * 1024 * 1024;
+
 /// DAP reader on the main thread: stdin only (responses go through the
 /// shared [`Writer`]).
 struct Conn {
@@ -124,6 +130,21 @@ impl Conn {
             }
         }
         let len = content_length.ok_or_else(|| "dap: missing Content-Length".to_string())?;
+        // The length comes from the client, so it is attacker-controlled: an
+        // editor, or anything that can write to the DAP's stdin, can name any
+        // number it likes. `vec![0u8; len]` would then ask the allocator for
+        // that much before a single byte had been read -- and Rust aborts the
+        // process when an allocation fails, so the "failure" is a dead
+        // debugger rather than a diagnostic.
+        //
+        // A DAP frame is a JSON request. The largest ones in practice are a
+        // big `variables` response or a long `source` payload, and 8 MiB is
+        // far above any of them.
+        if len > MAX_FRAME {
+            return Err(format!(
+                "dap: frame of {len} bytes is over the {MAX_FRAME}-byte limit"
+            ));
+        }
         let mut buf = vec![0u8; len];
         stdin
             .read_exact(&mut buf)
@@ -210,7 +231,7 @@ fn spawn_worker(
             let st = state.clone();
             let cv_in = cvar.clone();
             let w_stopped = writer.clone();
-            vm.debugger(HashSet::new(), move |line, locals, globals, _callstack| {
+            vm.debugger(move |line, locals, globals, _callstack| {
                 let mut s = st.lock().unwrap();
                 // Pause once per source line: a breakpoint (or a requested step)
                 // only fires when `line` differs from the line we last paused on,

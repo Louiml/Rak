@@ -8,10 +8,12 @@ repository.workspace = true
 
 [dependencies]
 anyhow = "1.0"
-ureq = "2.9"
-libloading = "0.8"
+# The HTTP client is optional so the browser build can leave it out: `ureq`
+# pulls `rustls` -> `ring`, and `ring` compiles C that needs a wasm-capable
+# clang. Off means `http_get`/`http_post` answer with a clear error instead of
+# being missing.
+ureq = { version = "2.9", optional = true }
 memmap2 = "0.9"
-socket2 = "0.5"
 libc = "0.2"
 x509-parser = "0.16"
 pcap = { version = "2", optional = true }
@@ -32,13 +34,32 @@ zeroize = { version = "1", features = ["zeroize_derive"] }
 # RSA (PKCS#1 v1.5 signatures, OAEP encryption) and NIST P-256 ECDSA.
 rsa = { version = "0.9", features = ["sha2"] }
 p256 = { version = "0.13", features = ["ecdsa", "pkcs8"] }
-rand = "0.8"
+# The random number generator. Optional so the browser build can leave it out:
+# `rand` needs `getrandom`, whose browser backend pulls in `wasm-bindgen` and
+# generated glue. The module keeps its shape without the dependency.
+rand = { version = "0.8", optional = true }
 base64 = "0.22"
 urlencoding = "2.1"
-scraper = "0.20"
+# The HTML parser. Optional for the same reason: `scraper` needs `ahash`, which
+# needs `getrandom`.
+scraper = { version = "0.20", optional = true }
 serde_json = "1.0"
 flate2 = "1.0"
 zip = { version = "0.6", default-features = false, features = ["deflate"] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# Raw-socket I/O. `socket2` has no wasm support, and a browser has no raw
+# sockets anyway, so it is left out of the browser build.
+socket2 = "0.5"
+# Shared-library loading. A page cannot `dlopen`, and `libloading` has no wasm
+# implementation.
+libloading = "0.8"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# `getrandom` refuses to build for wasm unless it is told how to get entropy.
+# The browser build supplies its own - the `custom` backend, which the
+# playground registers - so no `wasm-bindgen` and no generated glue are needed.
+getrandom = { version = "0.2", features = ["custom"] }
 
 [dev-dependencies]
 # Only for testing `regex_escape`: the property that matters is that the escaped
@@ -47,6 +68,13 @@ zip = { version = "0.6", default-features = false, features = ["deflate"] }
 regex = "1"
 
 [features]
-default = []
+default = ["http", "rand", "html"]
+# The HTTP client. Off for the browser build, where the TLS stack it needs
+# cannot be compiled.
+http = ["dep:ureq"]
+# The random number generator and the HTML parser. Off for the browser build:
+# both need `getrandom`, whose browser backend pulls in `wasm-bindgen`.
+rand = ["dep:rand"]
+html = ["dep:scraper"]
 # PCAP live/offline capture needs libpcap (Linux) / Npcap (Windows) installed.
 pcap = ["dep:pcap"]

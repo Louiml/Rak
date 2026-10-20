@@ -37,18 +37,26 @@
 //! each have their own `Value` enum); this module stays Rak-agnostic so both
 //! backends share it.
 
+#[cfg(not(target_arch = "wasm32"))]
 use libloading::Library;
 use std::collections::HashMap;
 use std::os::raw::c_void;
 use std::sync::Mutex;
 
 /// A loaded shared library handle. Dropping it calls `dlclose`/`FreeLibrary`.
+///
+/// The browser build has no shared libraries: a page cannot `dlopen` anything,
+/// and `libloading` has no wasm implementation. The handle is still the same
+/// type, so the interpreter's value model does not need a second shape for it -
+/// loading simply reports why it cannot.
 pub struct LibHandle {
+    #[cfg(not(target_arch = "wasm32"))]
     pub lib: Library,
 }
 
 /// Load a shared library by path or SONAME (`libc.so.6`, `msvcrt.dll`,
 /// `libSystem.dylib`).
+#[cfg(not(target_arch = "wasm32"))]
 pub fn load(path: &str) -> Result<LibHandle, String> {
     unsafe {
         Library::new(path)
@@ -57,7 +65,14 @@ pub fn load(path: &str) -> Result<LibHandle, String> {
     }
 }
 
+/// Load a shared library, in the browser build.
+#[cfg(target_arch = "wasm32")]
+pub fn load(_path: &str) -> Result<LibHandle, String> {
+    Err("ffi: loading shared libraries is not available in the browser build".to_string())
+}
+
 /// Resolve a symbol to a raw address. Returns an OS error message on failure.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn sym_addr(h: &LibHandle, name: &str) -> Result<usize, String> {
     unsafe {
         h.lib
@@ -65,6 +80,12 @@ pub fn sym_addr(h: &LibHandle, name: &str) -> Result<usize, String> {
             .map(|s| *s as usize)
             .map_err(|e| format!("ffi: symbol '{}' not found: {}", name, e))
     }
+}
+
+/// Resolve a symbol, in the browser build.
+#[cfg(target_arch = "wasm32")]
+pub fn sym_addr(_h: &LibHandle, _name: &str) -> Result<usize, String> {
+    Err("ffi: resolving symbols is not available in the browser build".to_string())
 }
 
 /// Platform default C library names to try, in order. On Windows we prefer

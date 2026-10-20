@@ -137,6 +137,167 @@ arguments`). That is a loud stop, not a silent wrong answer; supporting them
 means either call-site reordering against a known signature or a binding map
 at the call, and neither was needed to close the silent cases above.
 
+## The VM refused every program with a postcondition — fixed in this release
+
+**Severity: high.** `fn f(x) { return x } ensures result > 0` was a compile
+error under `rakc vm`:
+
+```
+rakc vm: Compile error: VM does not support postconditions: `fn f` declares `ensures`.
+```
+
+**Cause.** The VM has no `Expr` to evaluate at call time, so a clause could
+not be checked when the function returned. The compiler read the clause list
+and then refused the program.
+
+**Why that was the wrong answer.** Refusing is honest, but it means a promise
+checked on one backend goes unchecked on the other, and a program using
+`ensures` ran under `rakc run` and not at all under `rakc vm`. A contract that
+only one backend keeps is worse than a feature that is missing from both.
+
+**Fix.** The clauses are compiled into the callee's own body. Every `return`
+parks the value in a local and jumps to a trampoline at the end of the body;
+the trampoline runs the frame's deferred calls, checks the clauses, and
+returns. A body that falls off the end returns nil, and the clauses are
+checked against that nil. The failure names the function and the clause, in
+the interpreter's words, so a diagnostic reads the same on either backend. A
+clause that cannot even be evaluated is reported with the same wording the
+interpreter uses.
+
+**The ordering matters.** The interpreter checks a postcondition *after* the
+deferred calls have run, so a cleanup the function registered has already
+happened when the promise is judged. The trampoline does the same, which is
+why `Op::RunDefers` exists: `Op::Return` runs the deferred calls too, but it
+also leaves the frame, and the check has to happen before that.
+
+## A completed `try` left a catch region behind on the VM — fixed in this release
+
+**Severity: high.** `Op::Try` pushes a catch frame, and only the code that
+runs after the body can pop it again. The `CatchEnd` was emitted at the end of
+the *handler* instead, so a `try` whose body completed without raising left its
+frame in place:
+
+```rak
+try { dump "fine" } catch e { dump "the catch body ran" }
+raise "boom"
+// interp: the raise propagates, the catch body never runs
+// vm:     the raise is caught by the stale frame, the catch body runs,
+//         and the code after the `try` runs again from the top
+```
+
+**Why it matters.** The catch body belongs to a `try` that already finished.
+Running it on a later, unrelated error is not a cosmetic difference: the catch
+body can have side effects, and it had them. The second run of the code after
+the `try` is the worse half — a `raise` inside a loop would be caught, the
+catch body would run, and the loop would restart.
+
+**Fix.** The `CatchEnd` moved to the path that leaves the region normally,
+right after the body. The handler does not need one: the VM pops the frame
+when it unwinds into the handler, so a `CatchEnd` there would pop the
+*enclosing* `try`'s frame and unbalance the two.
+
+## The VM computed `1 + "a"` as `1` — fixed in this release
+
+**Severity: high.** A binary operation between a number and something that is
+not a number was coerced through `f64` with a `0.0` fallback for the operand
+that was not a number:
+
+```rak
+dump 1 + "a"     // interp: Runtime error: Invalid operand types for binary operation
+                   // vm:     1
+dump "a" - 1     // interp: Runtime error: Invalid operand types for binary operation
+                   // vm:     -1
+```
+
+**Why that is the worst shape of divergence.** The program ran, it printed a
+number, and nothing said the number had been invented. A crash is loud and a
+wrong answer is not, and this was a wrong answer on the backend people use
+when they want speed.
+
+**Fix.** The VM follows the interpreter's rule exactly: an arithmetic operation
+with a float on either side is done in `f64`; an operation between two
+integers is integer arithmetic; anything else is an error.
+
+## The C target could not compile a function with a local — fixed in this release
+
+**Severity: high.** Every `let` in a function body emitted a bare
+`v_x = ...` — an assignment to a variable that was never declared:
+
+```c
+static rak_val rak_fn_1(rak_obj *env, rak_val *args, int argc) {
+    ...
+    v_x = rak_int(41);        /* 'v_x' undeclared */
+```
+
+The C compiler rejected the program, so **any** function with a local was
+unbuildable through this target. The conformance corpus had no such case,
+which is why it went unnoticed.
+
+**Fix.** The declaration carries its type: `rak_val v_x = rak_int(41);`. A
+closure that captured a local had the same shape of bug for a different
+reason — it read the *enclosing* function's C variable, which does not exist
+by the time the closure runs — and now reads the value out of the closure's
+environment instead. The conformance corpus now has a case for each.
+
+## The sandbox could be switched off by compiling the program first — fixed in this release
+
+**Severity: high.** `rakc vm --sandbox program.rkbc` enabled no sandbox at
+all. The `.rkbc` branch returned from `main` before the sandbox was switched
+on, so the same program was refused a capability when run from source and
+reached the network when run from the bytecode it had been compiled into:
+
+```rak
+dump net_connect("example.com", 80)
+// rakc run  --sandbox prog.rak  -> sandbox: builtin 'net_connect' blocked
+// rakc vm   --sandbox prog.rkbc -> reached net_connect
+```
+
+**Why it matters.** `.rkbc` is the format Rak ships — "compile once, run it
+anywhere with `rakc vm program.rkbc`" — so this was the *likely* path, not an
+edge case. A sandbox that a compile step switches off is not a sandbox.
+
+**Fix.** The sandbox is applied before anything runs, so every execution path
+is covered. The same release also closed four capability-table holes
+(`log_init` wrote a file; `reverse_dns` and `scan_subdomains` did DNS work;
+`extern_call` was an ungated FFI escape) and added a `fs_read` capability of
+its own, so that reading a file and reading a file *and posting it* stopped
+being the same request.
+
+## A closure on the VM could not see the function it was written in — fixed in this release
+
+**Severity: high.** A closure that mentioned an enclosing function's local
+resolved the name as a *global*:
+
+```rak
+fn read() {
+    let x = 41
+    let get = fn() { return x }
+    return get()
+}
+// interp: 41        vm: Undefined: x
+```
+
+**Cause.** The VM's closure value is a *constant* in the chunk's constant pool:
+its code, its parameter shape and its name, with nowhere to put a capture. A
+free name in a closure body therefore compiled to a global load, and the
+program read a global of that name if there happened to be one -- a silent
+wrong answer -- or failed with "Undefined variable" when there was not.
+
+**Fix.** A closure is now *made* where it is written: `Op::MakeClosure` copies
+the enclosing frame's values out into the closure, and `Op::GetCapture` /
+`Op::SetCapture` read and write them. That is the interpreter's
+copy-of-environment semantics, so a closure that assigns to an enclosing
+local writes to its own copy and the enclosing function never sees it. A
+*global* is not copied: a closure reads and writes the program's globals on
+both backends.
+
+**The interpreter had a bug here too.** Its scope-local immutability sets
+were shared while the scopes were not, and the two are consulted by index --
+a closure pushes a scope of its own, so the indices stopped lining up and an
+immutable binding captured by a closure was silently treated as mutable. A
+closure could assign to a `let` it had captured and nothing said so.
+`Env::clone` now copies the two together.
+
 ## Windows and Linux report socket timeouts differently — fixed, but the pattern may recur
 
 **Severity: low, fixed in this release.** Worth recording because the class of

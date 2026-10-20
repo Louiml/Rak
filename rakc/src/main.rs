@@ -1,6 +1,6 @@
 use std::env;
 use std::fs;
-use std::io::{self, Read, Write};
+use std::io::{self, Read};
 use std::path::PathBuf;
 
 use rakc::verify_bounded;
@@ -8,7 +8,6 @@ use rakc::verify_bounded;
 // From the manifest, so the banner cannot drift from what was built -- the
 // copy of this string was a literal here and drifted at least once.
 const VERSION: &str = env!("CARGO_PKG_VERSION");
-const PAYLOAD_MAGIC: u64 = 0x52414B5F50434B; // "RAK_PCK" as u64
 
 fn print_usage() {
     eprintln!("rakc {} - Rak language compiler", VERSION);
@@ -45,7 +44,7 @@ Limits (run/vm): --max-depth N   cap function-call recursion (default 256)"
     eprintln!();
     eprintln!("Use - for file to read from stdin");
     eprintln!();
-    eprintln!("Sandbox (run/vm/debug/test): --sandbox [--allow net,fs_write,process,ffi,raw,gui,secrets|all]");
+    eprintln!("Sandbox (run/vm/debug/test): --sandbox [--allow net,fs_read,fs_write,process,ffi,raw,gui,secrets|all] [--fs-root DIR]");
 }
 
 /// Run the `rakc verify` command: execute a script under finite resource
@@ -111,7 +110,7 @@ fn cmd_verify(args: &[String]) -> i32 {
             return 1;
         }
     };
-    let base_dir = std::path::Path::new(&file)
+    let _base_dir = std::path::Path::new(&file)
         .parent()
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_else(|| ".".to_string());
@@ -159,6 +158,33 @@ fn cmd_verify(args: &[String]) -> i32 {
     }
 }
 
+/// Turn parsed sandbox options into a live sandbox.
+///
+/// Called before anything runs, so that every execution path is covered — the
+/// `.rkbc` path included, which used to return from `main` before the
+/// sandbox was ever enabled.
+fn apply_sandbox(opts: &rakc::caps::SandboxOptions) {
+    if !opts.enabled {
+        return;
+    }
+    rakc::caps::enable(&opts.allow);
+    if let Some(root) = &opts.fs_root {
+        rakc::caps::set_fs_root(Some(std::path::PathBuf::from(root)));
+    }
+    eprintln!(
+        "sandbox: active (allow: {}){}",
+        if opts.allow.is_empty() {
+            "none".to_string()
+        } else {
+            opts.allow.clone()
+        },
+        match &opts.fs_root {
+            Some(root) => format!(" (fs-root: {})", root),
+            None => String::new(),
+        }
+    );
+}
+
 /// Run the `rakc test` command. Discovers `.rak` test files (an explicitly
 /// listed file, or `test.rak` / `tests/*.rak`), parses and runs them in the
 /// interpreter, and reports each `test "name" { ... }` block. Supports
@@ -169,6 +195,7 @@ fn cmd_test(args: &[String]) {
     let mut verbose = false;
     let mut sandbox = false;
     let mut sandbox_allow = String::new();
+    let mut fs_root: Option<String> = None;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -181,6 +208,10 @@ fn cmd_test(args: &[String]) {
             "--allow" => {
                 i += 1;
                 sandbox_allow = args.get(i).cloned().unwrap_or_default();
+            }
+            "--fs-root" => {
+                i += 1;
+                fs_root = args.get(i).cloned();
             }
             a if is_flag_token(a) => {
                 eprintln!("Unknown test flag: {}", a);
@@ -196,15 +227,12 @@ fn cmd_test(args: &[String]) {
     }
 
     if sandbox {
-        rakc::caps::enable(&sandbox_allow);
-        println!(
-            "sandbox: active (allow: {})",
-            if sandbox_allow.is_empty() {
-                "none".to_string()
-            } else {
-                sandbox_allow.clone()
-            }
-        );
+        apply_sandbox(&rakc::caps::SandboxOptions {
+            enabled: true,
+            allow: sandbox_allow,
+            max_depth: None,
+            fs_root,
+        });
     }
 
     // Discover test files.
@@ -340,52 +368,6 @@ fn check_embedded_payload() -> Option<String> {
     rakc::targets::exe::embedded_source(&data)
 }
 
-fn build_exe(source_path: &str) {
-    let source = match fs::read_to_string(source_path) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("Error reading source: {}", e);
-            std::process::exit(1);
-        }
-    };
-    let exe_name = if cfg!(windows) { "rakc.exe" } else { "rakc" };
-    let exe_path = env::current_exe().unwrap_or_else(|_| PathBuf::from(exe_name));
-    let exe_data = fs::read(&exe_path).unwrap_or_else(|e| {
-        eprintln!("Error reading rakc binary: {}", e);
-        std::process::exit(1);
-    });
-    let source_bytes = source.as_bytes();
-    let source_len = source_bytes.len() as u64;
-    let ext = if cfg!(windows) { ".exe" } else { "" };
-    let output_name = if source_path.ends_with(".rak") {
-        format!("{}{}", &source_path[..source_path.len() - 4], ext)
-    } else {
-        format!("{}{}", source_path, ext)
-    };
-    let mut output = fs::File::create(&output_name).unwrap_or_else(|e| {
-        eprintln!("Error creating output: {}", e);
-        std::process::exit(1);
-    });
-    output.write_all(&exe_data).unwrap();
-    output.write_all(source_bytes).unwrap();
-    output.write_all(&source_len.to_be_bytes()).unwrap();
-    output
-        .write_all(&rakc::targets::exe::PAYLOAD_MAGIC.to_be_bytes())
-        .unwrap();
-    output.flush().unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let perms = fs::Permissions::from_mode(0o755);
-        let _ = output.set_permissions(perms);
-    }
-    println!(
-        "Built: {} ({} bytes)",
-        output_name,
-        exe_data.len() + source_bytes.len() + 16
-    );
-    println!("  Source embedded: {} bytes", source_bytes.len());
-}
 
 /// The `rakc build` command: multi-target compilation.
 ///
@@ -396,8 +378,8 @@ fn build_exe(source_path: &str) {
 /// WebAssembly, LLVM IR, or a native binary.
 fn cmd_build(args: &[String]) -> i32 {
     use rakc::targets::{
-        accepted_emit_list, compile_and_emit, find_triple, host_triple, parse_emit_list,
-        write_artifact, CodegenOptions, OptLevel, PanicStrategy,
+        compile_and_emit, find_triple, host_triple, parse_emit_list, write_artifact,
+        CodegenOptions, OptLevel, PanicStrategy,
     };
 
     let mut opts = CodegenOptions::new("");
@@ -673,7 +655,7 @@ fn cmd_run_debug(file: &str, source: &str) {
         let bps = breakpoints.clone();
         let stp = stepping.clone();
         let chunk_d = chunk_arc.clone();
-        vm.debugger(std::collections::HashSet::new(), move |line, locals, _globals, callstack| {
+        vm.debugger(move |line, locals, _globals, callstack| {
             // Fast path: don't pause unless stepping or on a breakpoint.
             if !*stp.lock().unwrap() && !bps.lock().unwrap().contains(&line) {
                 return VmDebugAction::Continue;
@@ -814,6 +796,7 @@ fn main() {
             print_usage();
             return;
         }
+        #[cfg(not(target_arch = "wasm32"))]
         "repl" => {
             // On the big stack: each REPL line is parsed, and a pathological
             // line (deep nesting) would exhaust the main thread's 1 MiB before
@@ -908,7 +891,11 @@ fn main() {
             // argument -- which is exactly what happened to `--max-depth`: the
             // scanner removed the flag, `parse_cli` never saw it, and the number
             // was handed to the program instead.
-            if args[i] == "--allow" || args[i] == "-A" || args[i] == "--max-depth" {
+            if args[i] == "--allow"
+                || args[i] == "-A"
+                || args[i] == "--max-depth"
+                || args[i] == "--fs-root"
+            {
                 i += 1;
                 if i < scan_end {
                     flag_slots.insert(i);
@@ -922,6 +909,30 @@ fn main() {
     if let Some(sep) = arg_separator {
         flag_slots.insert(sep);
     }
+
+    // Read the sandbox decision from the raw tail and apply it *here*, before
+    // any program runs.
+    //
+    // The sandbox used to be enabled further down, after the `.rkbc` branch
+    // had already returned from `main`. That made `rakc vm --sandbox
+    // program.rkbc` sandbox nothing at all: the same program, run from
+    // source, was correctly refused a network capability, and run from the
+    // bytecode it had been compiled into, reached the network builtin. A
+    // sandbox that can be turned off by compiling the program first is not a
+    // sandbox — and `.rkbc` is the format Rak ships ("compile once, run it
+    // anywhere with `rakc vm program.rkbc`"), so this was the *likely* path,
+    // not an edge case.
+    //
+    // The tail is read rather than the script's own argv, because the argv
+    // has already had every `-` token filtered out of it. Reading the whole
+    // tail covers both orders the usage text allows, since the flags are
+    // found whether they come before or after the filename. It stops at `--`
+    // for the same reason the scanner does: a `--sandbox` written after the
+    // separator is the program's argument, not an instruction to sandbox this
+    // process.
+    let raw_tail: Vec<String> = args[2.min(scan_end)..scan_end].to_vec();
+    let (sandbox_opts, _) = rakc::caps::parse_cli(&raw_tail);
+    apply_sandbox(&sandbox_opts);
     // Read `--max-depth` straight out of `args`, here, rather than out of
     // `script_args` further down.
     //
@@ -1009,37 +1020,9 @@ fn main() {
 
     // `parse_cli` drops rakc's capability flags from the pre-separator portion;
     // `after_separator` is then appended unchanged.
-    let (_, _, parsed_depth, mut script_args) = rakc::caps::parse_cli(&pre_separator);
+    let (pre_opts, mut script_args) = rakc::caps::parse_cli(&pre_separator);
     script_args.extend(after_separator);
-    let max_depth = max_depth_override.or(parsed_depth);
-
-    // The sandbox decision is read from the raw tail instead, because
-    // `script_args` has already had every `-` token filtered out of it. The
-    // previous code took BOTH values from `parse_cli(&script_args)`, which meant
-    // `--sandbox` and `--allow`'s value were gone before the parser ran:
-    // `sandbox_on` was always false, `caps::enable` was never reached, and
-    // `rakc run --sandbox` sandboxed nothing at all. Only `rakc test`, which
-    // parses raw args on its own path, ever worked -- see the note above at the
-    // `--max-depth` scan, which describes this and fixed only the depth flag.
-    //
-    // Reading the whole tail covers both orders the usage text allows, because
-    // the flags are found whether they come before or after the filename.
-    // Stops at `--` for the same reason the scanner does: a `--sandbox` written
-    // after the separator is the program's argument, not an instruction to
-    // sandbox this process.
-    let raw_tail: Vec<String> = args[2.min(scan_end)..scan_end].to_vec();
-    let (sandbox_on, sandbox_allow, _, _) = rakc::caps::parse_cli(&raw_tail);
-    if sandbox_on {
-        rakc::caps::enable(&sandbox_allow);
-        eprintln!(
-            "sandbox: active (allow: {})",
-            if sandbox_allow.is_empty() {
-                "none".to_string()
-            } else {
-                sandbox_allow.clone()
-            }
-        );
-    }
+    let max_depth = max_depth_override.or(pre_opts.max_depth);
 
     match cmd.as_str() {
         "run" => {
@@ -1051,7 +1034,8 @@ fn main() {
             // above: everything after the file, with rakc's own flags removed and
             // anything past a `--` passed through verbatim.
             #[cfg(feature = "gui")]
-            let result = rakc::gui::eval_in_cli_with_gui(&source, &base_dir, &script_args, max_depth);
+            let result =
+                rakc::gui::eval_in_cli_with_gui(&source, &base_dir, &script_args, max_depth);
             #[cfg(not(feature = "gui"))]
             let result = rakc::eval_in_cli(&source, &base_dir, &script_args, max_depth);
             match result {
@@ -1167,7 +1151,7 @@ fn main() {
             let write = write;
             let check = check;
             let source_for_big = source.clone();
-            let file_for_big = file.clone();
+            let _file_for_big = file.clone();
             let result =
                 rakc::run_on_big_stack(move || match rakc::fmt::format_source(&source_for_big) {
                     Ok(formatted) => Ok(formatted),
@@ -1225,7 +1209,7 @@ fn main() {
             let file = file.clone();
             let deny = deny;
             let audit = audit;
-            let file_for_print = file.clone();
+            let _file_for_print = file.clone();
             let result =
                 rakc::run_on_big_stack(move || match rakc::lint::lint_source_full(&source) {
                     Ok(report) => Ok((report, deny, audit, file)),
@@ -1262,7 +1246,7 @@ fn main() {
             let source = source.clone();
             let base_dir = base_dir;
             let md = max_depth;
-            let argv_for_vm = script_args.clone();
+            let _argv_for_vm = script_args.clone();
             let result = rakc::run_on_big_stack(move || match rakc::lexer::tokenize(&source) {
                 Ok(tokens) => match rakc::parser::parse(&tokens, &source) {
                     Ok(ast) => match rakc::compiler::compile_module_in(&ast, &base_dir) {

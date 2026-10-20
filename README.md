@@ -128,10 +128,10 @@ is a user-facing error; float division by zero follows IEEE.
 
 **Written-down limits.** The bytecode VM still refuses a named list of constructs
 (`async {}`, `test {}`, `assert`, `trace`, `scan`, `fetch`, `Lambda`, `Spawn`, `Raise`,
-`Comprehension`, `as`, `TypedInt`, `Range`, `ensures`) instead of guessing, and several
+`Comprehension`, `as`, `TypedInt`, `Range`) instead of guessing, and several
 language features (generics, trait bounds and `where`, binding patterns, tail-call
-optimisation, doc comments, `while`/`for` `else`, closure capture of mutated locals)
-are still roadmap rather than release promises. `substr` returns `""` when out of
+optimisation, doc comments, `while`/`for` `else`) are still roadmap rather than
+release promises. `substr` returns `""` when out of
 range while `slice` clamps, and that difference is called out, not hidden. CI runs
 the full suite on both Linux and Windows, and the release binaries for `rakc`,
 `rak-setup` and `oyvey` ship behind the hardening verifier (ASLR, high-entropy VA,

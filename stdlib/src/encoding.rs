@@ -5,7 +5,7 @@ pub fn hex_encode(data: &[u8]) -> String {
 
 /// Decode hex string to bytes
 pub fn hex_decode(hex: &str) -> Option<Vec<u8>> {
-    if hex.len() % 2 != 0 {
+    if !hex.len().is_multiple_of(2) {
         return None;
     }
 

@@ -441,14 +441,14 @@ pub fn run_event_loop(manager: Arc<GuiManager>) -> i32 {
     };
 
     let app_state = state.clone();
-    let creator: eframe::AppCreator<'static> =
-        Box::new(move |_cc| -> Result<Box<dyn eframe::App>, Box<dyn std::error::Error + Send + Sync>>
-        {
+    let creator: eframe::AppCreator<'static> = Box::new(
+        move |_cc| -> Result<Box<dyn eframe::App>, Box<dyn std::error::Error + Send + Sync>> {
             Ok(Box::new(RakApp {
                 state: app_state.clone(),
                 rx,
             }))
-        });
+        },
+    );
 
     if eframe::run_native("Rak GUI", options, creator).is_err() {
         return 1;

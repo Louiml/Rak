@@ -4,6 +4,7 @@ members = [
     "ide/src-tauri",
     "stdlib",
     "rak-setup",
+    "playground",
 ]
 resolver = "2"
 
@@ -56,3 +57,18 @@ strip = "symbols"
 # their own profile rather than inheriting `panic = "abort"`.
 [profile.release.package."*"]
 opt-level = 2
+
+# The browser playground. The wasm payload is downloaded by every visitor to
+# the docs site, so it is built for size rather than speed: `opt-level = "s"`,
+# whole-program LTO, and stripped symbols. It inherits `panic = "abort"` from
+# `release`, which is what a wasm module wants anyway - there is no unwinding
+# to catch in a page.
+#
+# Build it with:
+#   cargo build -p rak-playground --profile playground --target wasm32-unknown-unknown
+[profile.playground]
+inherits = "release"
+opt-level = "s"
+lto = "fat"
+codegen-units = 1
+strip = "symbols"

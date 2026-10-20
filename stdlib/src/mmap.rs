@@ -86,6 +86,7 @@ impl MmapHandle {
 /// requires the file to be writable), or `"rw_new"` (create/truncate to the
 /// given size — not yet supported, falls back to `rw`).
 pub fn open(path: &str, mode: &str) -> Result<Arc<MmapHandle>, String> {
+    crate::fs_scope::check(path)?;
     let writable = match mode {
         "r" => false,
         "rw" | "rw_new" => true,

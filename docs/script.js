@@ -739,6 +739,266 @@
     });
   }
 
+// ============================================================
+// Playground
+//
+// The site's "try Rak" page. The interpreter is a WebAssembly module
+// built from Rak's own source, loaded on first use, and driven through
+// a small C ABI: write the program into the module's memory, call
+// `run`, read the output back.
+//
+// The editor is a textarea with a highlighted layer behind it, painted
+// by the same highlighter the docs use, so Rak code is coloured while
+// you type and the caret still sits where you expect it.
+// ============================================================
+
+var PG_EXAMPLES = [
+  {
+    name: 'Hello',
+    file: 'hello.rak',
+    code: '// Rak is a language for hackers and OSINT investigators.\n' +
+          '// Press Run, or edit and press Run again.\n\n' +
+          'dump "Hello, World"\n'
+  },
+  {
+    name: 'Hex and binary patterns',
+    file: 'sniff.rak',
+    code: '// Match a byte slice by its magic number.\n' +
+          'fn sniff(d: bytes) {\n' +
+          '    match d {\n' +
+          '        [0x89, \'P\', \'N\', \'G\', ..] => { return "png" },\n' +
+          '        [0xFF, 0xD8, 0xFF, ..] => { return "jpeg" },\n' +
+          '        _ => { return "unknown" },\n' +
+          '    }\n' +
+          '}\n\n' +
+          'dump sniff(b"\\x89PNG\\x0d\\x0a")\n'
+  },
+  {
+    name: 'Pipelines and regex',
+    file: 'pipeline.rak',
+    code: '// A pipeline reads left to right, like a sentence.\n' +
+          'fn inc(n) { return n + 1 }\n' +
+          'fn dbl(n) { return n * 2 }\n\n' +
+          'dump 5 |> inc |> dbl          // 12\n\n' +
+          '// Regex literals are written inline.\n' +
+          'let re = /\\d+/g\n' +
+          'dump re.find_all("a1 b22 c333")   // [1, 22, 333]\n'
+  },
+  {
+    name: 'Structs and traits',
+    file: 'traits.rak',
+    code: 'struct Point { x: int, y: int }\n\n' +
+          '// A trait implementation drives `dump`.\n' +
+          'impl Display for Point {\n' +
+          '    fn fmt(self) { return fmt("({}, {})", self.x, self.y) }\n' +
+          '}\n\n' +
+          'let p = Point { x: 3, y: 4 }\n' +
+          'dump p              // (3, 4)\n' +
+          'dump p.x            // 3\n'
+  },
+  {
+    name: 'Errors',
+    file: 'errors.rak',
+    code: '// `try` catches what `raise` throws.\n' +
+          'fn risky(n) {\n' +
+          '    if n > 10 { raise "too big" }\n' +
+          '    return n\n' +
+          '}\n\n' +
+          'try {\n' +
+          '    dump risky(3)\n' +
+          '    dump risky(99)\n' +
+          '} catch e {\n' +
+          '    dump "caught: " + e\n' +
+          '}\n'
+  },
+  {
+    name: 'Evidence provenance',
+    file: 'evidence.rak',
+    code: '// Every value can carry where it came from.\n' +
+          'let target = evidence<string> from "93.184.216.34"\n' +
+          'let finding = cite("TLS certificate issued", "tls_parse", "example.com")\n\n' +
+          'dump report(target, finding)\n'
+  },
+  {
+    name: 'Threads and channels',
+    file: 'threads.rak',
+    code: '// `spawn` runs a function on its own thread.\n' +
+          'let (tx, rx) = channel()\n\n' +
+          'let h = spawn(fn() {\n' +
+          '    chan_send(tx, "from another thread")\n' +
+          '    return 1\n' +
+          '})\n\n' +
+          'thread_join(h)\n' +
+          'dump chan_recv(rx)\n'
+  }
+];
+
+// The WebAssembly module, loaded on first Run so the page costs nothing
+// until someone actually uses the playground.
+var pgModule = null;
+var pgLoading = null;
+
+  function pgLoad() {
+    if (pgModule) return Promise.resolve(pgModule);
+    if (pgLoading) return pgLoading;
+    pgLoading = fetch('rak.wasm')
+      .then(function (r) {
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.arrayBuffer();
+      })
+      .then(function (buf) {
+        // The module imports one function: the browser's random bytes. `getrandom`
+        // has no wasm backend of its own that does not drag in wasm-bindgen, so
+        // the module asks the page for entropy instead.
+        var memory = null;
+        var imports = {
+          rak: {
+            random_bytes: function (ptr, len) {
+              try {
+                var view = new Uint8Array(memory.buffer, ptr, len);
+                (window.crypto || window.msCrypto).getRandomValues(view);
+                return 0;
+              } catch (e) {
+                return 1;
+              }
+            }
+          }
+        };
+        return WebAssembly.instantiate(buf, imports).then(function (inst) {
+          memory = inst.instance.exports.memory;
+          pgModule = inst.instance.exports;
+          return pgModule;
+        });
+      })
+      .catch(function (e) {
+        pgLoading = null;
+        throw e;
+      });
+    return pgLoading;
+  }
+
+function initPlayground() {
+  var codeEl = document.getElementById('pg-code');
+  if (!codeEl) return;
+
+  var highlightEl = document.getElementById('pg-highlight');
+  var gutterEl = document.getElementById('pg-gutter');
+  var outputEl = document.getElementById('pg-output');
+  var runBtn = document.getElementById('pg-run');
+  var statusEl = document.getElementById('pg-status');
+  var selectEl = document.getElementById('pg-example');
+  var fileEl = document.getElementById('pg-filename');
+  var resetBtn = document.getElementById('pg-reset');
+  var clearBtn = document.getElementById('pg-clear');
+
+  // The example picker.
+  PG_EXAMPLES.forEach(function (ex, i) {
+    var opt = document.createElement('option');
+    opt.value = String(i);
+    opt.textContent = ex.name;
+    selectEl.appendChild(opt);
+  });
+
+  function loadExample(i) {
+    var ex = PG_EXAMPLES[i];
+    if (!ex) return;
+    codeEl.value = ex.code;
+    fileEl.textContent = ex.file;
+    paint();
+  }
+
+  // Repaint the highlighted layer and the line-number gutter. The layer sits
+  // behind a transparent textarea, so this is the only colouring there is.
+  function paint() {
+    var text = codeEl.value;
+    highlightEl.innerHTML = highlightLine(text) + '\n';
+    var lines = text.split('\n').length;
+    var nums = [];
+    for (var i = 1; i <= lines; i++) nums.push(i);
+    gutterEl.textContent = nums.join('\n');
+  }
+
+  function setStatus(text, cls) {
+    statusEl.textContent = text;
+    statusEl.className = 'badge-pill' + (cls ? ' ' + cls : '');
+  }
+
+  function show(text, isError) {
+    outputEl.textContent = text;
+    outputEl.className = 'playground-output';
+    if (isError) {
+      // Mark the last line as the error line, so a failure is visible in the
+      // output without having to read it.
+      var lines = text.split('\n');
+      for (var i = lines.length - 1; i >= 0; i--) {
+        if (lines[i].indexOf('error:') === 0) {
+          lines[i] = lines[i];
+          break;
+        }
+      }
+    }
+  }
+
+  function run() {
+    setStatus('starting the interpreter', '');
+    outputEl.textContent = 'Running...';
+    var source = codeEl.value;
+    pgLoad()
+      .then(function (exports) {
+        var bytes = new TextEncoder().encode(source);
+        // Copy the program into the module's memory, at the address the module
+        // says its program buffer lives at.
+        var mem = new Uint8Array(exports.memory.buffer, exports.program_ptr() >>> 0, bytes.length);
+        mem.set(bytes);
+        var outLen = exports.run(0, bytes.length) >>> 0;
+        // The memory may have grown, which detaches the old view, so it is read
+        // again after the call.
+        var out = new Uint8Array(exports.memory.buffer, exports.out_ptr() >>> 0, outLen);
+        var text = new TextDecoder().decode(out);
+        var failed = text.indexOf('error:') !== -1;
+        show(text, failed);
+        setStatus(failed ? 'error' : 'ok', failed ? 'badge-pill-warning' : '');
+      })
+      .catch(function (e) {
+        show('could not start the interpreter: ' + e, true);
+        setStatus('error', 'badge-pill-warning');
+      });
+  }
+
+  codeEl.addEventListener('input', paint);
+  codeEl.addEventListener('keydown', function (e) {
+    if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+      e.preventDefault();
+      run();
+      return;
+    }
+    // Tab indents rather than leaving the field, which is what a code editor
+    // is expected to do.
+    if (e.key === 'Tab' && !e.shiftKey) {
+      e.preventDefault();
+      var s = codeEl.selectionStart;
+      var en = codeEl.selectionEnd;
+      codeEl.value = codeEl.value.slice(0, s) + '  ' + codeEl.value.slice(en);
+      codeEl.selectionStart = codeEl.selectionEnd = s + 2;
+      paint();
+    }
+  });
+  runBtn.addEventListener('click', run);
+  resetBtn.addEventListener('click', function () {
+    loadExample(Number(selectEl.value) || 0);
+  });
+  clearBtn.addEventListener('click', function () {
+    outputEl.textContent = '';
+  });
+  selectEl.addEventListener('change', function () {
+    loadExample(Number(selectEl.value) || 0);
+  });
+
+  loadExample(0);
+  runBtn.disabled = false;
+  setStatus('ready', '');
+}
+
   document.addEventListener('DOMContentLoaded', function () {
     initDocsViewer();
     highlightBlocks();
@@ -747,5 +1007,6 @@
     initProgressBars();
     initScrollSpy();
     initThemeToggle();
+    initPlayground();
   });
 })();

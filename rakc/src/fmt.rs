@@ -35,10 +35,6 @@ pub fn format_module(m: &Module) -> FmtResult<String> {
 }
 
 impl Formatter {
-    fn w(&mut self, s: &str) {
-        self.out.push_str(s);
-    }
-
     fn line(&mut self, s: &str) {
         for _ in 0..self.indent {
             self.out.push_str("  ");
@@ -521,7 +517,11 @@ impl Formatter {
                 self.indent -= 1;
                 self.line("}");
             }
-            Stmt::Scan { target, options, body } => {
+            Stmt::Scan {
+                target,
+                options,
+                body,
+            } => {
                 // The interpreter and linter both handle `scan`, but the
                 // formatter fell through to "unsupported statement", so
                 // `rakc fmt` failed on a file `rakc lint` accepted.
@@ -544,7 +544,11 @@ impl Formatter {
                     self.line("}");
                 }
             }
-            Stmt::Fetch { target, options, body } => {
+            Stmt::Fetch {
+                target,
+                options,
+                body,
+            } => {
                 let t = self.expr(target)?;
                 if options.is_empty() {
                     self.line(&format!("fetch {}", t));
@@ -1017,10 +1021,6 @@ fn break_target(t: &Option<BreakTarget>) -> String {
         Some(BreakTarget::Depth(n)) => format!(" {}", n),
         Some(BreakTarget::Label(l)) => format!(" '{}", l),
     }
-}
-
-fn param_default(p: &Param) -> Option<&Expr> {
-    p.default.as_deref()
 }
 
 fn float_str(f: f64) -> String {

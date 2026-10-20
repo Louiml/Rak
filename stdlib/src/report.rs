@@ -54,7 +54,7 @@ pub fn markdown_report(
 /// structure (leading `#`/`-`/numbers, pipe characters). Call before using a
 /// value in a section item if it came from untrusted input.
 pub fn escape_inline(s: &str) -> String {
-    s.replace('|', "\\|").replace('\n', " ").replace('\r', " ")
+    s.replace('|', "\\|").replace(['\n', '\r'], " ")
 }
 
 #[cfg(test)]

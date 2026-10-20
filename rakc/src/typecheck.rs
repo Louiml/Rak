@@ -76,7 +76,7 @@ impl Diagnostic {
                 "{:>width$} | {}{}",
                 "",
                 " ".repeat(self.col.saturating_sub(1).min(self.source_line.len())),
-                "^".repeat(1.max(1)),
+                "^",
                 width = digits
             ));
         }

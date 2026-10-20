@@ -193,11 +193,50 @@ pub enum Op {
     /// first NUL. A loop bound has to be a comparison against a length, not a
     /// test of the value being carried.
     Len,
+    /// Run this frame's deferred calls now, in LIFO order, without returning.
+    ///
+    /// A postcondition is a promise about the value the caller receives, and it
+    /// is checked after the deferred calls have run -- so a cleanup the function
+    /// registered has already happened when the promise is judged. `Op::Return`
+    /// runs the deferred calls too, but it also leaves the frame, and the
+    /// postcondition check has to happen before that.
+    RunDefers,
+    /// Make a closure that captures the values on the stack.
+    ///
+    /// Operands: u16 constant index of the closure template, u8 capture count.
+    /// Pops `count` values (the captures, in order) and pushes the closure.
+    ///
+    /// A closure in a chunk's constant pool is a *template*: its code, its
+    /// parameter shape and its name, but no captures. This instruction is
+    /// where a closure becomes a closure -- the captures are copied out of the
+    /// enclosing frame at the moment it is made, which is what gives a closure
+    /// the interpreter's copy-of-environment semantics: it sees the enclosing
+    /// function's locals as they were when it was made, and an assignment
+    /// inside it lands in its own copy rather than in the enclosing function.
+    MakeClosure,
+    /// Push the captured value at the given index.
+    ///
+    /// Operand: u8 index into the closure's capture list.
+    GetCapture,
+    /// Store the top of the stack into the captured value at the given index.
+    ///
+    /// Operand: u8 index into the closure's capture list. The value is popped.
+    SetCapture,
+    /// Fail the frame with the message on the stack, as a runtime error.
+    ///
+    /// Pops a message string and fails the frame with it.
+    ///
+    /// The difference from `Op::Throw` is the *kind* of the error: `raise` is
+    /// a user error, and this is a runtime one. The interpreter reports an
+    /// assignment to an immutable variable as a runtime error, so a program
+    /// that catches it and asks for the kind has to get the same answer on
+    /// either backend.
+    FailRuntime,
 }
 
 impl Op {
     pub fn from_u8(b: u8) -> Option<Op> {
-        if (b as usize) <= Op::Len as usize {
+        if (b as usize) <= Op::FailRuntime as usize {
             Some(unsafe { std::mem::transmute(b) })
         } else {
             None
@@ -377,8 +416,10 @@ fn operand_width(op: Op) -> usize {
         | Op::BindModule => 2,
         // A 16-bit jump or handler offset.
         Op::Jump | Op::JumpIfFalse | Op::JumpIfTrue | Op::Try => 2,
-        // A 16-bit constant index plus a count byte.
-        Op::CallMethod | Op::StructNew => 3,
+    // A 16-bit constant index plus a count byte.
+    Op::CallMethod | Op::StructNew => 3,
+    // A 16-bit constant index plus a capture count.
+    Op::MakeClosure => 3,
         // Two constant indices (pattern descriptor, then bind names).
         Op::MatchPat => 4,
         // Namespace global, exported name, and a mutability flag.

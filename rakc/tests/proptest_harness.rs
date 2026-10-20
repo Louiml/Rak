@@ -27,10 +27,7 @@ proptest! {
     #[test]
     fn parser_terminates(text in "\\PC{0,2000}") {
         let src = String::from_utf8_lossy(text.as_bytes()).to_string();
-        match rakc::lexer::tokenize(&src) {
-            Ok(tokens) => { let _ = rakc::parser::parse(&tokens, &src); }
-            Err(_) => {}
-        }
+        if let Ok(tokens) = rakc::lexer::tokenize(&src) { let _ = rakc::parser::parse(&tokens, &src); }
     }
 
     // --- DNS wire parser: never panics / OOB, bounded answers. ---

@@ -64,7 +64,7 @@ impl Drop for Scratch {
 
 /// Run `source` on both backends with `path` as the file it writes, requiring
 /// byte-identical output.
-fn agree_with_file(tag: &str, scratch: &Scratch, path: &str, source: &str) -> Vec<String> {
+fn agree_with_file(_tag: &str, scratch: &Scratch, path: &str, source: &str) -> Vec<String> {
     let full = source.replace("SCRATCH_PATH", &scratch.path(path));
     let parity = rakc::run_on_both(&full, scratch.dir.to_str().expect("utf-8 path"));
     if let Some(why) = parity.divergence() {

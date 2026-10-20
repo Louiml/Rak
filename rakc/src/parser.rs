@@ -51,6 +51,12 @@ struct Parser<'a> {
     /// expression crashed `rakc parse`/`fmt`/`check`/`lint` via stack overflow
     /// rather than returning an error.
     depth: usize,
+    /// Current statement/block nesting. The expression depth above does not
+    /// cover it: `parse_stmt` -> `parse_block` -> `parse_stmts_until_rbrace` ->
+    /// `parse_stmt` is a cycle that never passes back through `parse_expr`.
+    block_depth: usize,
+    /// Current pointer-type nesting. `**********u8` recurses once per star.
+    type_depth: usize,
     /// Type-parameter names currently in scope (inside `fn f<T>`, `struct S<T>`,
     /// `enum E<T>`). An identifier matching one of these parses as
     /// `Type::Generic` instead of `Type::Custom`.
@@ -68,6 +74,8 @@ impl<'a> Parser<'a> {
             source,
             pos: 0,
             depth: 0,
+            block_depth: 0,
+            type_depth: 0,
             generic_type_params: Vec::new(),
             unsafe_depth: 0,
         }
@@ -1308,6 +1316,26 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_stmts_until_rbrace(&mut self) -> Result<Vec<Stmt>> {
+        // This is the point where statement nesting recurses: a block holds
+        // statements, and a statement can hold a block. Counting here (rather
+        // than in `parse_stmt`) makes the counter track *nesting* rather than
+        // the number of statements: a flat list of ten thousand statements
+        // does not go through here again.
+        self.block_depth += 1;
+        if self.block_depth > Self::MAX_BLOCK_DEPTH {
+            self.block_depth -= 1;
+            return Err(format!(
+                "Block nesting exceeds {} levels; split it into a local variable",
+                Self::MAX_BLOCK_DEPTH
+            )
+            .into());
+        }
+        let res = self.parse_stmts_until_rbrace_inner();
+        self.block_depth -= 1;
+        res
+    }
+
+    fn parse_stmts_until_rbrace_inner(&mut self) -> Result<Vec<Stmt>> {
         let mut stmts = vec![];
         while !self.check(&Token::RBrace) && self.peek().is_some() {
             stmts.push(self.parse_stmt()?);
@@ -1371,9 +1399,17 @@ impl<'a> Parser<'a> {
     fn parse_type(&mut self) -> Result<Type> {
         // Pointer types: `*u8`, `*i8`, `*void`, `*SomeType`.
         if self.check(&Token::Star) {
+            // `**********u8` is one byte of source per level of recursion, so
+            // the depth has to be bounded the same way expression nesting is.
+            self.type_depth += 1;
+            if self.type_depth > Self::MAX_TYPE_DEPTH {
+                self.type_depth -= 1;
+                return Err(format!("Type nesting exceeds {} levels", Self::MAX_TYPE_DEPTH).into());
+            }
             self.advance();
-            let inner = self.parse_type()?;
-            return Ok(Type::Ptr(Box::new(inner)));
+            let inner = self.parse_type();
+            self.type_depth -= 1;
+            return Ok(Type::Ptr(Box::new(inner?)));
         }
         let base = match self.peek() {
             Some(Token::Ident(name)) => {
@@ -1756,6 +1792,26 @@ impl<'a> Parser<'a> {
     /// need protects the parser (and, transitively, `check`/`lint`/`fmt`) from a
     /// stack-overflow crash on a pathological input.
     const MAX_PARSE_DEPTH: usize = 64;
+
+    /// Max block nesting.
+    ///
+    /// The expression limit above does not cover statement nesting, because
+    /// `parse_stmt` -> `parse_block` -> `parse_stmts_until_rbrace` ->
+    /// `parse_stmt` is a cycle that never goes back through `parse_expr`. So
+    /// a file of nothing but `{ { { { ... } } } }` recursed without limit, and
+    /// the depth of the recursion decided whether the process survived.
+    ///
+    /// That matters most for the language server, which parses on a thread
+    /// with the default 2 MiB stack rather than the 64 MiB one the CLI uses:
+    /// the same file that the command line shrugged off killed the editor's
+    /// Rak support.
+    const MAX_BLOCK_DEPTH: usize = 64;
+
+    /// Max pointer-type nesting.
+    ///
+    /// `parse_type` recurses through `*`, and `**********u8` is one byte of
+    /// source per level of recursion.
+    const MAX_TYPE_DEPTH: usize = 64;
 
     fn parse_expr(&mut self) -> Result<Expr> {
         self.depth += 1;
@@ -2721,7 +2777,7 @@ fn parse_interp_parts(template: &str) -> Result<Vec<Expr>> {
             }
             let mut depth = 1;
             let mut expr_src = String::new();
-            while let Some(c2) = chars.next() {
+            for c2 in chars.by_ref() {
                 if c2 == '{' {
                     depth += 1;
                     expr_src.push(c2);
@@ -3097,5 +3153,54 @@ mod tests {
             },
             _ => panic!("expected Stmt::Export"),
         }
+    }
+
+    /// Deeply nested blocks must be a diagnostic, not a stack overflow.
+    ///
+    /// The expression nesting limit did not cover statement nesting, because
+    /// `parse_stmt` -> `parse_block` -> `parse_stmts_until_rbrace` ->
+    /// `parse_stmt` is a cycle that never passes back through `parse_expr`.
+    /// A file of nothing but nested blocks therefore recursed until the
+    /// native stack ran out.
+    ///
+    /// The command line runs the parser on a 64 MiB stack, so it survived
+    /// about six thousand levels. The language server parses on a tokio
+    /// worker with the default 2 MiB stack, and died at about two hundred --
+    /// which is a file of under a kilobyte.
+    #[test]
+    fn deeply_nested_blocks_are_a_diagnostic_not_a_crash() {
+        let source = format!("{} {}", "if 1 {".repeat(5000), "}".repeat(5000));
+        let tokens = tokenize(&source).unwrap();
+        let err = parse(&tokens, &source).unwrap_err();
+        let message = err.to_string();
+        assert!(
+            message.contains("Block nesting"),
+            "the error should say what is wrong: {}",
+            message
+        );
+    }
+
+    /// The same for pointer-type nesting: `**********u8` is one byte of
+    /// source per level of recursion.
+    #[test]
+    fn deeply_nested_pointer_types_are_a_diagnostic_not_a_crash() {
+        let source = format!("let p: {}u8 = 0;", "*".repeat(5000));
+        let tokens = tokenize(&source).unwrap();
+        let err = parse(&tokens, &source).unwrap_err();
+        let message = err.to_string();
+        assert!(
+            message.contains("Type nesting"),
+            "the error should say what is wrong: {}",
+            message
+        );
+    }
+
+    /// Ordinary nesting still parses. The limits are there to stop a
+    /// pathological input, not to refuse a program.
+    #[test]
+    fn ordinary_nesting_is_still_accepted() {
+        let source = format!("{} {}", "if 1 {".repeat(20), "}".repeat(20));
+        let tokens = tokenize(&source).unwrap();
+        assert!(parse(&tokens, &source).is_ok());
     }
 }

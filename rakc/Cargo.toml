@@ -14,7 +14,7 @@ anyhow.workspace = true
 serde.workspace = true
 
 # Standard library with real networking
-rak-stdlib = { path = "../stdlib", version = "1.0.1" }
+rak-stdlib = { path = "../stdlib", version = "1.0.1", default-features = false }
 serde_json = "1.0"
 
 
@@ -22,13 +22,10 @@ serde_json = "1.0"
 eframe = { version = "0.31", default-features = false, features = ["default_fonts", "glow", "x11", "wayland"], optional = true }
 egui = { version = "0.31", optional = true }
 
-# REPL
-rustyline = "15"
-
 # LSP
 tower-lsp = { version = "0.20", optional = true }
 # Async event loop (always on; powers http_get_async / tcp_probe / await).
-tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "io-std", "macros", "time", "sync"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "io-std", "macros", "time", "sync"], optional = true }
 
 # Bindgen
 bindgen = { version = "0.70", optional = true }
@@ -40,12 +37,41 @@ regex = "1.10"
 # inkwell = { workspace = true, optional = true }
 # cranelift = { optional = true }
 
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# The interactive line editor behind `rakc repl`. A browser has no terminal to
+# read from, and `rustyline` does not build for wasm.
+rustyline = "15"
+
 [dev-dependencies]
 pretty_assertions = "1.4"
 proptest = "1.4"
 
 [features]
-default = []
+default = ["http", "async", "rand", "html"]
+# The HTTP client in the standard library. On by default, and off for the
+# browser build: the TLS stack it needs cannot be compiled to wasm.
+http = ["rak-stdlib/http"]
+# The random number generator and the HTML parser. On by default, and off for
+# the browser build: both need `getrandom`, whose browser backend pulls in
+# `wasm-bindgen` and generated glue, which the playground would then have to
+# supply by hand.
+rand = ["rak-stdlib/rand"]
+html = ["rak-stdlib/html"]
+# The asynchronous builtins: `http_get_async`, `tcp_probe`,
+# `tcp_connect_async`, `async_sleep` and `async_yield`.
+#
+# They are behind a feature because a pending future is a Tokio task, and a
+# browser build has no runtime to schedule one on. The interpreter's future
+# state carries a *resolver* rather than a `JoinHandle` precisely so that the
+# value model does not name Tokio: with the feature off, the interpreter still
+# compiles, and the builtins that would need a runtime are simply not
+# registered.
+#
+# The feature is on by default, because these builtins are part of the
+# language. The VM registers the same five unconditionally, so a build with
+# this feature off would have an interpreter missing builtins the VM has --
+# which the backend-parity gate reports as a real divergence.
+async = ["dep:tokio"]
 llvm = [] # "inkwell"
 jit = []
 backtrace = []

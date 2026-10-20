@@ -32,9 +32,16 @@
 //! | Instead of | Use |
 //! | --- | --- |
 //! | `sql_escape(user_input)` | a parameterised query |
+//! | `sql_escape_mysql(user_input)` | a parameterised query |
 //! | `shell_escape(arg)` | `exec` with an argv array |
 //! | `html_escape(text)` | the templating layer's own escaping |
 //! | `regex_escape(text)` | `contains`/`index_of`, which take no pattern |
+//!
+//! The two SQL escapers differ because SQL dialects disagree about what a
+//! backslash means inside a string literal. `sql_escape` is for the dialects
+//! where a backslash is literal; `sql_escape_mysql` is for MySQL's default
+//! `sql_mode`, where it is not. Using the wrong one does not fail loudly --
+//! it produces output that looks escaped and is not.
 
 /// Escape a value for use inside a single-quoted SQL string literal.
 ///
@@ -42,10 +49,56 @@
 /// sql_escape("O'Brien")   //  O''Brien
 /// ```
 ///
-/// Backslashes are left alone, because the standard says they are literal inside a
-/// single-quoted literal and doubling them would corrupt the value on MySQL.
+/// # Which SQL dialect
+///
+/// SQL string escaping is dialect-dependent, and this function is for the
+/// dialects where a backslash is an ordinary character inside a literal:
+///
+/// * ANSI SQL, PostgreSQL (with `standard_conforming_strings` on, the
+///   default since 9.1), SQLite, and MySQL with `NO_BACKSLASH_ESCAPES`
+///   enabled.
+///
+/// In those dialects a single quote is escaped by doubling it, and a
+/// backslash needs no treatment at all.
+///
+/// # Not MySQL's default mode
+///
+/// MySQL's default `sql_mode` has `NO_BACKSLASH_ESCAPES` **off**, which makes
+/// a backslash an escape character: there, `\'` is an escaped quote and `\\`
+/// is a literal backslash. Doubling the quote alone is then not enough. A
+/// value of `\'` becomes `\''`, which MySQL reads as an escaped quote
+/// followed by a quote that **closes the literal** -- the injection survives.
+///
+/// Use [`sql_escape_mysql`] for MySQL's default mode.
+///
+/// A parameterised query is better than either: escaping is a
+/// string-substitution trick, and it is only as good as the dialect it was
+/// written for.
 pub fn sql_escape(s: &str) -> String {
     s.replace('\'', "''")
+}
+
+/// Escape a value for use inside a single-quoted SQL string literal on
+/// MySQL's default `sql_mode`.
+///
+/// ```text
+/// sql_escape_mysql("\\'")   //  \\''
+/// ```
+///
+/// MySQL's default mode treats a backslash as an escape character, so both
+/// the quote and the backslash have to be doubled. A value of `\'` becomes
+/// `\\''`, which MySQL reads as a literal backslash followed by a literal
+/// quote -- the literal does not close early.
+///
+/// This is wrong for ANSI SQL, PostgreSQL and SQLite, where a doubled
+/// backslash is two backslashes rather than one. Use [`sql_escape`] there.
+///
+/// A parameterised query is better than either.
+pub fn sql_escape_mysql(s: &str) -> String {
+    // Backslash first, then the quote. The order does not matter here --
+    // neither replacement introduces the character the other one looks for --
+    // but doing the backslash first reads as "escape the escape character".
+    s.replace('\\', "\\\\").replace('\'', "''")
 }
 
 /// Quote an argument for a POSIX shell so that the shell passes it as one word
@@ -165,6 +218,39 @@ mod tests {
 
     // ---- sql_escape ------------------------------------------------------
 
+    /// Where a single-quoted SQL literal ends, under a given dialect's rules.
+    ///
+    /// `backslash_escapes` selects the two dialects that disagree:
+    ///
+    /// * false -- ANSI SQL, PostgreSQL, SQLite, and MySQL with
+    ///   `NO_BACKSLASH_ESCAPES` on. A backslash is an ordinary character.
+    /// * true -- MySQL's default `sql_mode`. A backslash escapes the next
+    ///   character.
+    fn literal_end(s: &str, backslash_escapes: bool) -> usize {
+        let b: Vec<char> = s.chars().collect();
+        let mut i = 0;
+        while i < b.len() {
+            if backslash_escapes && b[i] == '\\' {
+                i += 2;
+            } else if b[i] == '\'' {
+                if i + 1 < b.len() && b[i + 1] == '\'' {
+                    i += 2;
+                } else {
+                    return i;
+                }
+            } else {
+                i += 1;
+            }
+        }
+        b.len()
+    }
+
+    /// The value stays inside the literal, under either dialect.
+    fn stays_inside(escaped: &str) -> bool {
+        literal_end(escaped, false) == escaped.chars().count()
+            && literal_end(escaped, true) == escaped.chars().count()
+    }
+
     #[test]
     fn sql_escape_doubles_a_single_quote() {
         assert_eq!(sql_escape("O'Brien"), "O''Brien");
@@ -185,6 +271,66 @@ mod tests {
         assert_eq!(escaped, "x''; DROP TABLE users; --");
         // Every quote in the output is part of a pair, so the literal never closes.
         assert_eq!(escaped.matches('\'').count() % 2, 0);
+    }
+
+    /// `sql_escape` is the ANSI/PostgreSQL/SQLite escaper, and it is *not*
+    /// safe on MySQL's default `sql_mode`, where a backslash is an escape
+    /// character.
+    ///
+    /// A value of `\'` becomes `\''` under `sql_escape`. MySQL reads the
+    /// `\'` as an escaped quote -- a literal quote, still inside the string --
+    /// and then the final `'` **closes the literal**. Everything after it is
+    /// SQL again.
+    #[test]
+    fn sql_escape_is_not_mysql_safe_and_says_so_in_its_behaviour() {
+        let hostile = "\\'";
+        let escaped = sql_escape(hostile);
+        assert_eq!(escaped, "\\''");
+        // Under the ANSI rules the literal holds to the end...
+        assert_eq!(literal_end(&escaped, false), escaped.chars().count());
+        // ...but under MySQL's default rules it closes early.
+        let end = literal_end(&escaped, true);
+        assert!(
+            end < escaped.chars().count(),
+            "the escaped text should close the MySQL literal early, but it did not"
+        );
+    }
+
+    /// `sql_escape_mysql` is the escaper for MySQL's default mode, and it
+    /// keeps the value inside the literal under *both* dialects' rules.
+    #[test]
+    fn sql_escape_mysql_keeps_the_value_inside_the_literal() {
+        for hostile in [
+            "\\'",
+            "a\\'b",
+            "\\",
+            "x'; DROP TABLE users; --",
+            "'",
+            "\\\\",
+        ] {
+            let escaped = sql_escape_mysql(hostile);
+            assert!(
+                stays_inside(&escaped),
+                "'{}' escaped to {:?}, which leaves the literal",
+                hostile,
+                escaped
+            );
+        }
+    }
+
+    /// The MySQL escaper doubles the backslash as well as the quote.
+    #[test]
+    fn sql_escape_mysql_doubles_the_backslash() {
+        assert_eq!(sql_escape_mysql("\\"), "\\\\");
+        assert_eq!(sql_escape_mysql("'"), "''");
+        assert_eq!(sql_escape_mysql("\\'"), "\\\\''");
+    }
+
+    /// The two escapers disagree, which is the whole point: a caller has to
+    /// know which dialect it is talking to.
+    #[test]
+    fn the_two_sql_escapers_disagree_on_a_backslash() {
+        assert_ne!(sql_escape("\\'"), sql_escape_mysql("\\'"));
     }
 
     // ---- shell_escape ----------------------------------------------------

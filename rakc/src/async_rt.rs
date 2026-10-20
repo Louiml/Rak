@@ -5,14 +5,21 @@
 //! `async fn` bodies onto a small worker pool (so thousands of concurrent
 //! logical operations share a handful of OS threads instead of spawning one
 //! thread each), plus helpers the interpreter uses to drive deferred futures.
+//!
+//! The runtime itself is behind the `async` feature. The browser build has no
+//! event loop to drive, and Tokio's multi-thread runtime does not compile for
+//! wasm, so that build leaves it out. The concurrency primitives below are
+//! plain `std` and are always available.
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, OnceLock};
 
+#[cfg(feature = "async")]
 static ASYNC_RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
 static NEXT_GROUP: AtomicU64 = AtomicU64::new(1);
 
 /// Get the process-wide async runtime, starting it on first use.
+#[cfg(feature = "async")]
 pub fn runtime() -> &'static tokio::runtime::Runtime {
     ASYNC_RUNTIME.get_or_init(|| {
         tokio::runtime::Builder::new_multi_thread()

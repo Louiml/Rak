@@ -70,11 +70,17 @@ natives on the VM, with the two that genuinely need the machine
 bytecode VM has no instructions to escape into, and the CLI exits the process
 itself.
 
-What remains is narrower, and it is behavioural rather than a missing name:
-`ensures` postconditions do not compile on the VM, and a closure that
-assigns to an enclosing function's local is only accepted by the
-interpreter's copy-of-environment semantics. `docs/V8-BACKEND-PARITY.md` has
-the reasoning and the list.
+`ensures` postconditions and closure captures are on both backends now. A
+postcondition is compiled into the callee's own body -- every `return` parks
+the value in a local and jumps to a trampoline that runs the deferred calls,
+checks the clause and returns -- and the failure names the function and the
+clause, in the same words the interpreter uses. A closure sees the function it
+was written in: the VM copies the enclosing frame's values out when the
+closure is made, which is the interpreter's copy-of-environment semantics, so
+an assignment inside a closure lands in the closure's own copy and the
+enclosing function never sees it. A *global* is not copied: a closure reads
+and writes the program's globals on both backends.
+`docs/V8-BACKEND-PARITY.md` has the reasoning and the list.
 `docs/V8-ROADMAP.md` has what closing it would take.
 
 ## New in 0.9.0

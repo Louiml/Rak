@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="theme-color" content="#ffffff">
+    <meta name="description" content="Try Rak in the browser: the real interpreter, compiled to WebAssembly, running on this page.">
+    <title>Rak Playground</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%23000'/%3E%3Cpath d='M10 9l12 0 0 14-12 0z' fill='none' stroke='%23fff' stroke-width='2.4'/%3E%3C/svg%3E">
+    <link rel="stylesheet" href="style.css">
+</head>
+<body class="playground-page">
+
+<header class="top-nav">
+    <div class="container top-nav-inner">
+        <a class="brand" href="index.html">
+            <span class="brand-mark">R</span>
+            <span class="brand-name">Rak</span>
+            <span class="brand-ver">v1.0.1</span>
+        </a>
+        <nav class="site-nav">
+            <a href="index.html#features">Features</a>
+            <a href="index.html#backends">Backends</a>
+            <a href="index.html#language">Language</a>
+            <a href="docs.html">Docs</a>
+        </nav>
+        <div class="header-actions">
+            <button id="theme-toggle" class="btn btn-ghost btn-sm" type="button" aria-label="Toggle theme"></button>
+            <a class="btn btn-ghost btn-sm" href="https://github.com/Louiml/Rak" target="_blank" rel="noopener">GitHub</a>
+            <a class="btn btn-primary btn-sm" href="playground.html">Playground</a>
+        </div>
+    </div>
+</header>
+
+<main class="playground">
+    <div class="playground-bar">
+        <div class="playground-bar-left">
+            <label class="playground-label" for="pg-example">Example</label>
+            <select id="pg-example" class="text-input playground-select"></select>
+            <button id="pg-reset" class="btn btn-secondary btn-sm" type="button">Reset</button>
+        </div>
+        <div class="playground-bar-right">
+            <span id="pg-status" class="badge-pill">loading the interpreter</span>
+            <button id="pg-run" class="btn btn-primary btn-sm" type="button" disabled>
+                Run
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M7 4l12 8-12 8z"/></svg>
+            </button>
+        </div>
+    </div>
+
+    <div class="playground-grid">
+        <section class="playground-editor" aria-label="Program">
+            <div class="playground-editor-head">
+                <span class="playground-filename" id="pg-filename">main.rak</span>
+                <span class="playground-hint">Ctrl+Enter to run</span>
+            </div>
+            <div class="playground-code">
+                <div class="playground-gutter" id="pg-gutter" aria-hidden="true"></div>
+                <div class="playground-input">
+                    <pre class="playground-highlight" id="pg-highlight" aria-hidden="true"></pre>
+                    <textarea id="pg-code" class="playground-textarea" spellcheck="false"
+                              autocomplete="off" autocorrect="off" autocapitalize="off"
+                              aria-label="Rak program"></textarea>
+                </div>
+            </div>
+        </section>
+
+        <section class="playground-console" aria-label="Output">
+            <div class="playground-editor-head">
+                <span class="playground-filename">console</span>
+                <button id="pg-clear" class="btn btn-ghost btn-sm" type="button">Clear</button>
+            </div>
+            <pre class="playground-output" id="pg-output">Press Run.</pre>
+        </section>
+    </div>
+
+    <div class="playground-foot">
+        <p>
+            This is Rak's own interpreter, compiled to WebAssembly and running in this
+            page &mdash; the same lexer, parser and evaluator as <code>rakc run</code>.
+            It is loaded on first use, so nothing is downloaded until you press Run.
+        </p>
+        <p>
+            No network, no FFI and no async in the browser build: those builtins need a
+            TLS stack and an event loop, and a page has neither. They report
+            &ldquo;Unknown function&rdquo; rather than pretending to work.
+        </p>
+    </div>
+</main>
+
+<script src="script.js"></script>
+</body>
+</html>

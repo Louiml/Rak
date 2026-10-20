@@ -131,51 +131,6 @@ fn base64(data: &[u8]) -> String {
     crate::encoding::base64_encode(data)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn rfc6455_accept_vector() {
-        // RFC 6455 §1.3 example: key -> s3pPLMBiTxaQ9kYGzzhZRbK+xOo=
-        assert_eq!(
-            accept_value("dGhlIHNhbXBsZSBub25jZQ=="),
-            "s3pPLMBiTxaQ9kYGzzhZRbK+xOo="
-        );
-    }
-
-    #[test]
-    fn frame_roundtrip_unmasked() {
-        let data = b"hello ws";
-        let f = encode_frame(OP_TEXT, data, false);
-        let (parsed, consumed) = parse_frame(&f).unwrap();
-        assert_eq!(consumed, f.len());
-        assert_eq!(parsed.opcode, OP_TEXT);
-        assert!(parsed.fin);
-        assert_eq!(parsed.payload, data);
-    }
-
-    #[test]
-    fn frame_roundtrip_masked() {
-        let data = b"masked payload";
-        let f = encode_frame(OP_BINARY, data, true);
-        let (parsed, consumed) = parse_frame(&f).unwrap();
-        assert_eq!(consumed, f.len());
-        assert_eq!(parsed.opcode, OP_BINARY);
-        assert_eq!(parsed.payload, data);
-    }
-
-    #[test]
-    fn frame_long_length() {
-        // 200 bytes must use the 16-bit extended length form.
-        let data = vec![0xABu8; 200];
-        let f = encode_frame(OP_TEXT, &data, false);
-        assert_eq!(f[1], 126);
-        let (parsed, _) = parse_frame(&f).unwrap();
-        assert_eq!(parsed.payload, data);
-    }
-}
-
 /// Compute the `Sec-WebSocket-Accept` server response for a client key.
 pub fn accept_value(key: &str) -> String {
     use sha1::{Digest, Sha1};
@@ -285,4 +240,49 @@ pub fn read_frame(reader: &mut BufReader<TcpStream>) -> Result<Option<Frame>, St
     buf.extend_from_slice(&payload);
     let (frame, _) = parse_frame(&buf)?;
     Ok(Some(frame))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rfc6455_accept_vector() {
+        // RFC 6455 §1.3 example: key -> s3pPLMBiTxaQ9kYGzzhZRbK+xOo=
+        assert_eq!(
+            accept_value("dGhlIHNhbXBsZSBub25jZQ=="),
+            "s3pPLMBiTxaQ9kYGzzhZRbK+xOo="
+        );
+    }
+
+    #[test]
+    fn frame_roundtrip_unmasked() {
+        let data = b"hello ws";
+        let f = encode_frame(OP_TEXT, data, false);
+        let (parsed, consumed) = parse_frame(&f).unwrap();
+        assert_eq!(consumed, f.len());
+        assert_eq!(parsed.opcode, OP_TEXT);
+        assert!(parsed.fin);
+        assert_eq!(parsed.payload, data);
+    }
+
+    #[test]
+    fn frame_roundtrip_masked() {
+        let data = b"masked payload";
+        let f = encode_frame(OP_BINARY, data, true);
+        let (parsed, consumed) = parse_frame(&f).unwrap();
+        assert_eq!(consumed, f.len());
+        assert_eq!(parsed.opcode, OP_BINARY);
+        assert_eq!(parsed.payload, data);
+    }
+
+    #[test]
+    fn frame_long_length() {
+        // 200 bytes must use the 16-bit extended length form.
+        let data = vec![0xABu8; 200];
+        let f = encode_frame(OP_TEXT, &data, false);
+        assert_eq!(f[1], 126);
+        let (parsed, _) = parse_frame(&f).unwrap();
+        assert_eq!(parsed.payload, data);
+    }
 }

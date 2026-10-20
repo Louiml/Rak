@@ -291,10 +291,8 @@ pub fn fuzz_target(target: &str, runs: u32, seed: u64, max_len: usize) -> Option
         }
         // Keep a bounded, deduplicated corpus so later iterations start from
         // the most interesting inputs seen rather than only the originals.
-        if corpus.len() < 256 {
-            if !corpus.contains(&input) {
-                corpus.push(input);
-            }
+        if corpus.len() < 256 && !corpus.contains(&input) {
+            corpus.push(input);
         }
     }
     None

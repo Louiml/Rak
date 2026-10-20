@@ -42,7 +42,7 @@ fn run_with_stdin_code(args: &[&str], source: &str) -> (String, Option<i32>) {
         .expect("stdin piped")
         .write_all(source.as_bytes())
         .expect("write stdin");
-    let mut out = child.wait_with_output().expect("wait for rakc");
+    let out = child.wait_with_output().expect("wait for rakc");
     let mut text = String::from_utf8_lossy(&out.stdout).to_string();
     text.push_str(&String::from_utf8_lossy(&out.stderr));
     (text, out.status.code())
@@ -278,11 +278,7 @@ fn sandbox_gates_the_statement_and_declaration_paths() {
         ("scan", "scan \"127.0.0.1\"\n", "net"),
         ("fetch", "fetch \"http://127.0.0.1/\"\n", "net"),
         ("tunnel", "tunnel t \"pass\" { }\n", "net"),
-        (
-            "extern",
-            "extern \"C\" { fn abs(n: i32) -> i32 }\n",
-            "ffi",
-        ),
+        ("extern", "extern \"C\" { fn abs(n: i32) -> i32 }\n", "ffi"),
     ];
     for (label, source, cap) in cases {
         let (out, ok) = run_with_stdin(&["run", "-", "--sandbox"], source);
@@ -626,15 +622,21 @@ fn vm_invokes_main_and_uses_its_exit_code() {
 /// The handlers only printed the diagnostic and `main` returns `()`, so a program
 /// that failed to compile exited 0 -- which in CI reads as a pass for a program
 /// that never ran.
+///
+/// The example is a named-argument call, which the VM rejects. It used to be a
+/// postcondition, back when `ensures` was a compile error on this backend; the
+/// VM checks postconditions now, so the example had to change -- the point of
+/// the test is that a *compile* failure exits non-zero, not which construct
+/// produces one.
 #[test]
 fn vm_compile_failure_exits_non_zero() {
     let (out, ok) = run_with_stdin(
         &["vm", "-"],
-        "fn f(x) { return x } ensures result > 0\ndump f(5)\n",
+        "fn f(a, b) { return a + b }\ndump f(b: 2, a: 1)\n",
     );
     assert!(!ok, "a compile error must not exit 0");
     assert!(
-        out.contains("does not support postconditions"),
+        out.contains("does not support named arguments"),
         "expected the unsupported-construct message, got: {:?}",
         out
     );
@@ -1288,8 +1290,7 @@ fn a_cast_to_an_alias_is_still_allowed() {
         &[],
         None,
     )
-    .err()
-    .expect("300 does not fit u8");
+    .expect_err("300 does not fit u8");
     assert!(err.to_string().contains("out of range"), "{}", err);
 }
 
@@ -1381,8 +1382,7 @@ dump 1.0 % 0.0
     assert_eq!(results, vec!["inf", "-inf", "NaN", "NaN"], "got: {:?}", out);
 
     let err = rakc::eval_in_cli("dump 1 / 0", ".", &[], None)
-        .err()
-        .expect("integer division by zero is still an error");
+        .expect_err("integer division by zero is still an error");
     assert!(err.to_string().contains("Division by zero"), "{}", err);
 }
 

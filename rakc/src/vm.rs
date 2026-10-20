@@ -1,13 +1,8 @@
-use crate::bytecode::{Chunk, Op};
+﻿use crate::bytecode::{Chunk, Op};
 use crate::value::Value;
 use std::collections::HashMap;
 use std::ffi::CString;
 use std::sync::{Arc, Mutex};
-
-/// VM-side tracking for native allocations made by `ffi_alloc` /
-/// `ffi_string_to_cstr`, so `ffi_free` can release them with the correct
-/// `Vec::from_raw_parts` layout.
-static FFI_ALLOC: Mutex<Option<HashMap<u64, usize>>> = Mutex::new(None);
 
 /// Holds a buffer alive for the duration of an FFI call so a `u64` argument
 /// pointing into it stays valid.
@@ -216,11 +211,15 @@ pub enum ChannelHandle {
     Receiver(std::sync::Mutex<std::sync::mpsc::Receiver<Value>>),
 }
 
-/// State of a VM `Value::Future`. Async I/O builtins produce `Pending`
-/// (Tokio `JoinHandle`); `await` resolves them.
+/// State of a VM `Value::Future`. Async I/O builtins produce `Pending`;
+/// `await` resolves them.
+///
+/// The pending case holds a *resolver* rather than a Tokio `JoinHandle`, so the
+/// value model does not name Tokio and the browser build - which has no runtime -
+/// compiles the same VM.
 pub enum VmFutureState {
     Ready(Value),
-    Pending(tokio::task::JoinHandle<Value>),
+    Pending(Box<dyn FnOnce() -> Result<Value, String> + Send + 'static>),
     Polled,
 }
 
@@ -236,8 +235,6 @@ pub struct Vm {
     pending_error: Option<Value>,
     // --- Debugger state ---
     debug_enabled: bool,
-    debug_breakpoints: std::collections::HashSet<u32>,
-    debug_step: bool,
     debug_handler: Option<
         Box<
             dyn FnMut(
@@ -274,7 +271,7 @@ struct CatchFrame {
     stack_len: usize,
     locals_len: usize,
     /// Depth of the frame's defer stack when `Op::Try` executed; defers
-    /// registered inside the try body (indices ≥ this) run before the handler.
+    /// registered inside the try body (indices ג‰¥ this) run before the handler.
     defers_len: usize,
 }
 
@@ -359,7 +356,7 @@ fn is_numeric_vm(v: &Value) -> bool {
 
 /// Iterator builtins (Part 7A.10). The pure transforms (zip/enumerate/skip)
 /// are computed here; the function-taking family (fold/reduce/any/all/
-/// flat_map/take_while) is handled with VM access in `Vm::vm_iter_call` —
+/// flat_map/take_while) is handled with VM access in `Vm::vm_iter_call` ג€”
 /// when reached through this path (a stray native call), it reports an error.
 fn iter_pure_native(name: &str, args: &[Value]) -> Result<Value, String> {
     fn items_of(args: &[Value], name: &str) -> Result<Vec<Value>, String> {
@@ -407,7 +404,7 @@ fn iter_pure_native(name: &str, args: &[Value]) -> Result<Value, String> {
     }
 }
 
-/// Membership test behind the `contains(collection, item)` native — the VM
+/// Membership test behind the `contains(collection, item)` native ג€” the VM
 /// runtime for the `in` operator. Mirrors the interpreter's `contains_member`.
 fn contains_vm(coll: &Value, item: &Value) -> Result<bool, String> {
     match (coll, item) {
@@ -510,6 +507,12 @@ fn slice_vm(args: &[Value]) -> Result<Value, String> {
     }
 }
 
+impl Default for Vm {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Vm {
     pub fn new() -> Self {
         let mut vm = Vm {
@@ -517,8 +520,6 @@ impl Vm {
             output: Vec::new(),
             pending_error: None,
             debug_enabled: false,
-            debug_breakpoints: std::collections::HashSet::new(),
-            debug_step: false,
             debug_handler: None,
             debug_callstack: Vec::new(),
             call_depth: 0,
@@ -552,10 +553,15 @@ impl Vm {
     }
 
     /// Enable the debugger, installing a handler that is invoked at source-line
-    /// boundaries. `breakpoints` are 1-based source lines. The handler receives
-    /// the current line, a snapshot of locals `(name, value)`, a snapshot of
-    /// globals, and the current call stack, and returns a `VmDebugAction`.
-    pub fn debugger<H>(&mut self, breakpoints: std::collections::HashSet<u32>, handler: H)
+    /// boundaries. The handler receives the current line, a snapshot of locals
+    /// `(name, value)`, a snapshot of globals, and the current call stack, and
+    /// returns a `VmDebugAction`.
+    ///
+    /// There is no breakpoint set here on purpose: the handler is called at
+    /// *every* line and owns the policy, so it knows which lines are
+    /// breakpoints and which are stepping. The DAP keeps its own set, and
+    /// passing a second copy in here would be a second thing to keep in step.
+    pub fn debugger<H>(&mut self, handler: H)
     where
         H: FnMut(
                 u32,
@@ -567,7 +573,6 @@ impl Vm {
             + 'static,
     {
         self.debug_enabled = true;
-        self.debug_breakpoints = breakpoints;
         self.debug_handler = Some(Box::new(handler));
     }
 
@@ -667,7 +672,7 @@ impl Vm {
         ] {
             self.insert_native(name, |args| crate::gui::vm_native(name, args));
         }
-        // Iterator builtins (Part 7A.10) — pure array transforms. The
+        // Iterator builtins (Part 7A.10) ג€” pure array transforms. The
         // function-taking fold family is intercepted in `call_value`.
         self.insert_native("zip", |args| iter_pure_native("zip", args));
         self.insert_native("enumerate", |args| iter_pure_native("enumerate", args));
@@ -783,6 +788,14 @@ impl Vm {
                 rak_stdlib::escape::sql_escape(&native_str(args.first())).as_str(),
             )))
         });
+        // The MySQL escaper. `sql_escape` is the ANSI/PostgreSQL/SQLite one:
+        // it doubles the quote and leaves the backslash alone, which is
+        // exactly what MySQL's default `sql_mode` does *not* want.
+        self.insert_native("sql_escape_mysql", |args| {
+            Ok(Value::String(Arc::from(
+                rak_stdlib::escape::sql_escape_mysql(&native_str(args.first())).as_str(),
+            )))
+        });
         self.insert_native("shell_escape", |args| {
             Ok(Value::String(Arc::from(
                 rak_stdlib::escape::shell_escape(&native_str(args.first())).as_str(),
@@ -815,7 +828,6 @@ impl Vm {
             let pt = native_bytes(args.get(2));
             rak_stdlib::aes_gcm_encrypt(&key, &nonce, &pt)
                 .map(|b| Value::Bytes(Arc::from(b.as_slice())))
-                .map_err(|e| e)
         });
         self.insert_native("aes_gcm_decrypt", |args| {
             let key = native_bytes(args.first());
@@ -823,33 +835,26 @@ impl Vm {
             let ct = native_bytes(args.get(2));
             rak_stdlib::aes_gcm_decrypt(&key, &nonce, &ct)
                 .map(|b| Value::Bytes(Arc::from(b.as_slice())))
-                .map_err(|e| e)
         });
         self.insert_native("ed25519_keypair", |args| {
             let seed = native_bytes(args.first());
-            rak_stdlib::ed25519_keypair(&seed)
-                .map(|(pk, sk)| {
-                    Value::Tuple(Arc::from([
-                        Value::Bytes(Arc::from(pk.as_slice())),
-                        Value::Bytes(Arc::from(sk.as_slice())),
-                    ]))
-                })
-                .map_err(|e| e)
+            rak_stdlib::ed25519_keypair(&seed).map(|(pk, sk)| {
+                Value::Tuple(Arc::from([
+                    Value::Bytes(Arc::from(pk.as_slice())),
+                    Value::Bytes(Arc::from(sk.as_slice())),
+                ]))
+            })
         });
         self.insert_native("ed25519_sign", |args| {
             let sk = native_bytes(args.first());
             let msg = native_bytes(args.get(1));
-            rak_stdlib::ed25519_sign(&sk, &msg)
-                .map(|s| Value::Bytes(Arc::from(s.as_slice())))
-                .map_err(|e| e)
+            rak_stdlib::ed25519_sign(&sk, &msg).map(|s| Value::Bytes(Arc::from(s.as_slice())))
         });
         self.insert_native("ed25519_verify", |args| {
             let pk = native_bytes(args.first());
             let sig = native_bytes(args.get(1));
             let msg = native_bytes(args.get(2));
-            rak_stdlib::ed25519_verify(&pk, &sig, &msg)
-                .map(Value::Bool)
-                .map_err(|e| e)
+            rak_stdlib::ed25519_verify(&pk, &sig, &msg).map(Value::Bool)
         });
         self.insert_native("ct_eq", |args| {
             let a = native_bytes(args.first());
@@ -865,9 +870,7 @@ impl Vm {
             let choice = args.first().and_then(|v| v.as_u64()).unwrap_or(0) as u8;
             let a = native_bytes(args.get(1));
             let b = native_bytes(args.get(2));
-            rak_stdlib::ct_select(choice, &a, &b)
-                .map(|v| Value::Bytes(Arc::from(v.as_slice())))
-                .map_err(|e| e)
+            rak_stdlib::ct_select(choice, &a, &b).map(|v| Value::Bytes(Arc::from(v.as_slice())))
         });
         self.insert_native("zeroize", |args| match args.first() {
             Some(Value::Bytes(b)) => {
@@ -884,29 +887,23 @@ impl Vm {
         });
         self.insert_native("rsa_keypair", |args| {
             let bits = args.first().and_then(|v| v.as_u64()).unwrap_or(2048) as u32;
-            rak_stdlib::rsa_keypair(bits)
-                .map(|(pk, sk)| {
-                    Value::Tuple(Arc::from([
-                        Value::Bytes(Arc::from(pk.as_slice())),
-                        Value::Bytes(Arc::from(sk.as_slice())),
-                    ]))
-                })
-                .map_err(|e| e)
+            rak_stdlib::rsa_keypair(bits).map(|(pk, sk)| {
+                Value::Tuple(Arc::from([
+                    Value::Bytes(Arc::from(pk.as_slice())),
+                    Value::Bytes(Arc::from(sk.as_slice())),
+                ]))
+            })
         });
         self.insert_native("rsa_sign", |args| {
             let sk = native_bytes(args.first());
             let msg = native_bytes(args.get(1));
-            rak_stdlib::rsa_sign(&sk, &msg)
-                .map(|s| Value::Bytes(Arc::from(s.as_slice())))
-                .map_err(|e| e)
+            rak_stdlib::rsa_sign(&sk, &msg).map(|s| Value::Bytes(Arc::from(s.as_slice())))
         });
         self.insert_native("rsa_verify", |args| {
             let pk = native_bytes(args.first());
             let sig = native_bytes(args.get(1));
             let msg = native_bytes(args.get(2));
-            rak_stdlib::rsa_verify(&pk, &sig, &msg)
-                .map(Value::Bool)
-                .map_err(|e| e)
+            rak_stdlib::rsa_verify(&pk, &sig, &msg).map(Value::Bool)
         });
         self.insert_native("rsa_encrypt", |args| {
             let pk = native_bytes(args.first());
@@ -915,9 +912,7 @@ impl Vm {
                 .get(2)
                 .map(|v| native_bytes(Some(v)))
                 .unwrap_or_default();
-            rak_stdlib::rsa_encrypt(&pk, &pt, &label)
-                .map(|s| Value::Bytes(Arc::from(s.as_slice())))
-                .map_err(|e| e)
+            rak_stdlib::rsa_encrypt(&pk, &pt, &label).map(|s| Value::Bytes(Arc::from(s.as_slice())))
         });
         self.insert_native("rsa_decrypt", |args| {
             let sk = native_bytes(args.first());
@@ -926,52 +921,41 @@ impl Vm {
                 .get(2)
                 .map(|v| native_bytes(Some(v)))
                 .unwrap_or_default();
-            rak_stdlib::rsa_decrypt(&sk, &ct, &label)
-                .map(|s| Value::Bytes(Arc::from(s.as_slice())))
-                .map_err(|e| e)
+            rak_stdlib::rsa_decrypt(&sk, &ct, &label).map(|s| Value::Bytes(Arc::from(s.as_slice())))
         });
         self.insert_native("ecdsa_keypair", |_args| {
-            rak_stdlib::ecdsa_keypair()
-                .map(|(pk, sk)| {
-                    Value::Tuple(Arc::from([
-                        Value::Bytes(Arc::from(pk.as_slice())),
-                        Value::Bytes(Arc::from(sk.as_slice())),
-                    ]))
-                })
-                .map_err(|e| e)
+            rak_stdlib::ecdsa_keypair().map(|(pk, sk)| {
+                Value::Tuple(Arc::from([
+                    Value::Bytes(Arc::from(pk.as_slice())),
+                    Value::Bytes(Arc::from(sk.as_slice())),
+                ]))
+            })
         });
         self.insert_native("ecdsa_sign", |args| {
             let sk = native_bytes(args.first());
             let msg = native_bytes(args.get(1));
-            rak_stdlib::ecdsa_sign(&sk, &msg)
-                .map(|s| Value::Bytes(Arc::from(s.as_slice())))
-                .map_err(|e| e)
+            rak_stdlib::ecdsa_sign(&sk, &msg).map(|s| Value::Bytes(Arc::from(s.as_slice())))
         });
         self.insert_native("ecdsa_verify", |args| {
             let pk = native_bytes(args.first());
             let sig = native_bytes(args.get(1));
             let msg = native_bytes(args.get(2));
-            rak_stdlib::ecdsa_verify(&pk, &sig, &msg)
-                .map(Value::Bool)
-                .map_err(|e| e)
+            rak_stdlib::ecdsa_verify(&pk, &sig, &msg).map(Value::Bool)
         });
         self.insert_native("x25519_keypair", |args| {
             let seed = native_bytes(args.first());
-            rak_stdlib::tunnel::x25519_keypair(&seed)
-                .map(|(pk, sk)| {
-                    Value::Tuple(Arc::from([
-                        Value::Bytes(Arc::from(pk.as_slice())),
-                        Value::Bytes(Arc::from(sk.as_slice())),
-                    ]))
-                })
-                .map_err(|e| e)
+            rak_stdlib::tunnel::x25519_keypair(&seed).map(|(pk, sk)| {
+                Value::Tuple(Arc::from([
+                    Value::Bytes(Arc::from(pk.as_slice())),
+                    Value::Bytes(Arc::from(sk.as_slice())),
+                ]))
+            })
         });
         self.insert_native("x25519_shared", |args| {
             let secret = native_bytes(args.first());
             let peer = native_bytes(args.get(1));
             rak_stdlib::tunnel::x25519_shared(&secret, &peer)
                 .map(|b| Value::Bytes(Arc::from(b.as_slice())))
-                .map_err(|e| e)
         });
         self.insert_native("chacha20_encrypt", |args| {
             let key = native_bytes(args.first());
@@ -980,7 +964,6 @@ impl Vm {
             let pt = native_bytes(args.get(3));
             rak_stdlib::tunnel::chacha20_encrypt(&key, &nonce, &aad, &pt)
                 .map(|b| Value::Bytes(Arc::from(b.as_slice())))
-                .map_err(|e| e)
         });
         self.insert_native("chacha20_decrypt", |args| {
             let key = native_bytes(args.first());
@@ -989,7 +972,6 @@ impl Vm {
             let ct = native_bytes(args.get(3));
             rak_stdlib::tunnel::chacha20_decrypt(&key, &nonce, &aad, &ct)
                 .map(|b| Value::Bytes(Arc::from(b.as_slice())))
-                .map_err(|e| e)
         });
         self.insert_native("tunnel_preshared_key", |args| {
             let pass = native_str(args.first());
@@ -998,7 +980,6 @@ impl Vm {
             let len = args.get(3).and_then(|v| v.as_u64()).unwrap_or(32) as u32;
             rak_stdlib::tunnel::psk_derive(&pass, &salt, iters, len)
                 .map(|b| Value::Bytes(Arc::from(b.as_slice())))
-                .map_err(|e| e)
         });
         self.insert_native("kdf_next", |args| {
             let prev = native_bytes(args.first());
@@ -1006,7 +987,6 @@ impl Vm {
             let len = args.get(2).and_then(|v| v.as_u64()).unwrap_or(32) as u32;
             rak_stdlib::tunnel::kdf_next(&prev, counter, len)
                 .map(|b| Value::Bytes(Arc::from(b.as_slice())))
-                .map_err(|e| e)
         });
         self.insert_native("tunnel_frame", |args| {
             let seq = args.first().and_then(|v| v.as_u64()).unwrap_or(0);
@@ -1017,14 +997,12 @@ impl Vm {
         });
         self.insert_native("tunnel_unframe", |args| {
             let frame = native_bytes(args.first());
-            rak_stdlib::tunnel::tunnel_unframe(&frame)
-                .map(|(seq, payload)| {
-                    Value::Tuple(Arc::from([
-                        Value::I64(seq as i64),
-                        Value::Bytes(Arc::from(payload.as_slice())),
-                    ]))
-                })
-                .map_err(|e| e)
+            rak_stdlib::tunnel::tunnel_unframe(&frame).map(|(seq, payload)| {
+                Value::Tuple(Arc::from([
+                    Value::I64(seq as i64),
+                    Value::Bytes(Arc::from(payload.as_slice())),
+                ]))
+            })
         });
         self.insert_native("tunnel_nonce", |args| {
             let seq = args.first().and_then(|v| v.as_u64()).unwrap_or(0);
@@ -1237,7 +1215,7 @@ impl Vm {
             // `off` to an allocation.
             ffi_regions().check(ptr as u64, off, 1)?;
             unsafe {
-                *((ptr as usize).wrapping_add(off as usize) as *mut u8) = byte;
+                *(ptr.wrapping_add(off as usize) as *mut u8) = byte;
             }
             Ok(Value::Nil)
         });
@@ -1248,7 +1226,7 @@ impl Vm {
             };
             let off = args.get(1).and_then(|v| v.as_u64()).unwrap_or(0);
             ffi_regions().check(ptr as u64, off, 1)?;
-            let b = unsafe { *((ptr as usize).wrapping_add(off as usize) as *const u8) };
+            let b = unsafe { *(ptr.wrapping_add(off as usize) as *const u8) };
             Ok(Value::I64(b as i64))
         });
         // Present on the interpreter but was missing here, which is the same class of
@@ -1282,7 +1260,7 @@ impl Vm {
             // buffer with no NUL in it walked off the end and killed the process.
             let cap = ffi_regions().cstr_cap(ptr as u64, 0)?;
             let s = unsafe {
-                let base = ptr as usize;
+                let base = ptr;
                 let mut len = 0usize;
                 while len < cap && *((base + len) as *const u8) != 0 {
                     len += 1;
@@ -1335,6 +1313,11 @@ impl Vm {
             Ok(Value::I64(ret as i64))
         });
         // --- Async I/O (Tokio-backed futures) ---
+        //
+        // Gated on the `async` feature, for the same reason as the
+        // interpreter's: a browser has no event loop, and the multi-thread
+        // runtime does not compile for wasm.
+        #[cfg(feature = "async")]
         self.insert_native("http_get_async", |args| {
             let url = native_str(args.first());
             let jh =
@@ -1345,20 +1328,22 @@ impl Vm {
                     Err(e) => Value::String(Arc::from(format!("error: {}", e).as_str())),
                 });
             Ok(Value::Future(Arc::new(FutureHandle {
-                state: Mutex::new(VmFutureState::Pending(jh)),
+                state: Mutex::new(VmFutureState::Pending(vm_pending_from_task(jh))),
             })))
         });
+        #[cfg(feature = "async")]
         self.insert_native("tcp_probe", |args| {
             let host = native_str(args.first());
             let port = args.get(1).and_then(|v| v.as_u64()).unwrap_or(80) as u16;
-            let timeout_ms = args.get(2).and_then(|v| v.as_u64()).unwrap_or(1000) as u64;
+            let timeout_ms = args.get(2).and_then(|v| v.as_u64()).unwrap_or(1000);
             let jh = crate::async_rt::runtime().spawn_blocking(move || {
                 Value::Bool(rak_stdlib::net::tcp_scan(&host, port, timeout_ms))
             });
             Ok(Value::Future(Arc::new(FutureHandle {
-                state: Mutex::new(VmFutureState::Pending(jh)),
+                state: Mutex::new(VmFutureState::Pending(vm_pending_from_task(jh))),
             })))
         });
+        #[cfg(feature = "async")]
         self.insert_native("async_sleep", |args| {
             let ms = args.first().and_then(|v| v.as_u64()).unwrap_or(0);
             let jh = crate::async_rt::runtime().spawn(async move {
@@ -1366,16 +1351,17 @@ impl Vm {
                 Value::Nil
             });
             Ok(Value::Future(Arc::new(FutureHandle {
-                state: Mutex::new(VmFutureState::Pending(jh)),
+                state: Mutex::new(VmFutureState::Pending(vm_pending_from_task(jh))),
             })))
         });
-        self.insert_native("async_yield", |args| {
+        #[cfg(feature = "async")]
+        self.insert_native("async_yield", |_args| {
             let jh = crate::async_rt::runtime().spawn(async move {
                 tokio::task::yield_now().await;
                 Value::Nil
             });
             Ok(Value::Future(Arc::new(FutureHandle {
-                state: Mutex::new(VmFutureState::Pending(jh)),
+                state: Mutex::new(VmFutureState::Pending(vm_pending_from_task(jh))),
             })))
         });
         // --- Raw sockets / packet forging ---
@@ -2030,9 +2016,7 @@ impl Vm {
             )))
         });
         self.insert_native("secret_delete_all", |_args| {
-            rak_stdlib::secrets::delete_all()
-                .map(|_| Value::Bool(true))
-                .map_err(|e| e)
+            rak_stdlib::secrets::delete_all().map(|_| Value::Bool(true))
         });
         // --- HTTP server framework (#4) ---
         self.insert_native("http_server_start", |args| {
@@ -2074,7 +2058,7 @@ impl Vm {
                 _ => Vec::new(),
             };
             let body = native_str(args.get(3));
-            rak_stdlib::http_server::respond(id, status, &headers, &body).map_err(|e| e)?;
+            rak_stdlib::http_server::respond(id, status, &headers, &body)?;
             Ok(Value::Nil)
         });
         self.insert_native("http_server_stop", |_args| {
@@ -2091,12 +2075,8 @@ impl Vm {
         self.insert_native("channel", |_args| {
             let (tx, rx) = std::sync::mpsc::channel::<Value>();
             Ok(Value::Tuple(Arc::from(vec![
-                Value::Channel(Arc::new(ChannelHandle::Sender(std::sync::Mutex::new(
-                    tx,
-                )))),
-                Value::Channel(Arc::new(ChannelHandle::Receiver(std::sync::Mutex::new(
-                    rx,
-                )))),
+                Value::Channel(Arc::new(ChannelHandle::Sender(std::sync::Mutex::new(tx)))),
+                Value::Channel(Arc::new(ChannelHandle::Receiver(std::sync::Mutex::new(rx)))),
             ])))
         });
         self.insert_native("chan_send", |args| match (args.first(), args.get(1)) {
@@ -2165,10 +2145,9 @@ impl Vm {
                 }
                 drop(tx);
                 match rx.recv() {
-                    Ok((idx, val)) => Ok(Value::Tuple(Arc::from(vec![
-                        Value::I64(idx as i64),
-                        val,
-                    ]))),
+                    Ok((idx, val)) => {
+                        Ok(Value::Tuple(Arc::from(vec![Value::I64(idx as i64), val])))
+                    }
                     Err(_) => Err("select: no future resolved".to_string()),
                 }
             }
@@ -2317,19 +2296,21 @@ impl Vm {
             }
             _ => Err("tcp_close(stream)".to_string()),
         });
+        #[cfg(feature = "async")]
         self.insert_native("tcp_connect_async", |args| {
             let addr = native_str(args.first());
-            let jh = crate::async_rt::runtime().spawn_blocking(move || {
-                match std::net::TcpStream::connect(&addr) {
-                    Ok(s) => {
-                        s.set_nonblocking(false).ok();
-                        Value::TcpStream(Arc::new(std::sync::Mutex::new(s)))
-                    }
-                    Err(_) => Value::Nil,
-                }
-            });
+            let jh =
+                crate::async_rt::runtime().spawn_blocking(
+                    move || match std::net::TcpStream::connect(&addr) {
+                        Ok(s) => {
+                            s.set_nonblocking(false).ok();
+                            Value::TcpStream(Arc::new(std::sync::Mutex::new(s)))
+                        }
+                        Err(_) => Value::Nil,
+                    },
+                );
             Ok(Value::Future(Arc::new(FutureHandle {
-                state: std::sync::Mutex::new(VmFutureState::Pending(jh)),
+                state: std::sync::Mutex::new(VmFutureState::Pending(vm_pending_from_task(jh))),
             })))
         });
         // --- WebSocket (RFC 6455 framing over the TCP handle) ---
@@ -2415,7 +2396,10 @@ impl Vm {
                     Some(f) => {
                         let mut m = HashMap::new();
                         m.insert("opcode".to_string(), Value::I64(f.opcode as i64));
-                        m.insert("payload".to_string(), Value::Bytes(Arc::from(f.payload.as_slice())));
+                        m.insert(
+                            "payload".to_string(),
+                            Value::Bytes(Arc::from(f.payload.as_slice())),
+                        );
                         Ok(Value::Map(Arc::new(m)))
                     }
                     None => Ok(Value::Nil),
@@ -2425,11 +2409,8 @@ impl Vm {
         });
         self.insert_native("ws_close", |args| match args.first() {
             Some(Value::TcpStream(stream)) => {
-                let frame = rak_stdlib::websocket::encode_frame(
-                    rak_stdlib::websocket::OP_CLOSE,
-                    b"",
-                    true,
-                );
+                let frame =
+                    rak_stdlib::websocket::encode_frame(rak_stdlib::websocket::OP_CLOSE, b"", true);
                 use std::io::Write;
                 stream
                     .lock()
@@ -2493,6 +2474,7 @@ impl Vm {
             stack: Vec::new(),
             locals: Vec::new(),
             defers: Vec::new(),
+            captures: None,
             catches: Vec::new(),
         };
         self.exec_frame(&mut frame)?;
@@ -2534,6 +2516,7 @@ impl Vm {
             stack: Vec::new(),
             locals: Vec::new(),
             defers: Vec::new(),
+            captures: None,
             catches: Vec::new(),
         };
         // A `fn main()` that declares no parameter takes no argument, so the
@@ -2713,7 +2696,7 @@ impl Vm {
                         _ => return Err("BindModule: name must be a string".to_string()),
                     };
                     let v = frame.pop();
-                    // Deliberately no republishing — see `Op::BindModule`.
+                    // Deliberately no republishing ג€” see `Op::BindModule`.
                     self.globals.insert(name, v);
                 }
                 Op::Pop => {
@@ -2810,6 +2793,100 @@ impl Vm {
                     frame.push(ret);
                     return Ok(());
                 }
+                Op::RunDefers => {
+                    // The deferred calls, without leaving the frame. A function
+                    // with postconditions runs them before the clauses are
+                    // checked, so a cleanup the function registered has already
+                    // happened when the promise is judged.
+                    self.run_frame_defers(frame)?;
+                }
+                Op::MakeClosure => {
+                    // Make a closure out of a template and the values on the
+                    // stack. The captures are copied here, at the point the
+                    // closure is written, which is what gives it the
+                    // interpreter's copy-of-environment semantics: it sees the
+                    // enclosing function's locals as they were when it was
+                    // made, and an assignment inside it lands in its own copy.
+                    let ci = frame.code.read_u16(frame.ip) as usize;
+                    frame.ip += 2;
+                    let n = frame.code.code[frame.ip] as usize;
+                    frame.ip += 1;
+                    let mut caps = Vec::with_capacity(n);
+                    for _ in 0..n {
+                        caps.push(frame.pop());
+                    }
+                    caps.reverse();
+                    let template = frame.code.constants[ci].clone();
+                    match template {
+                        Value::Closure {
+                            code,
+                            params,
+                            name,
+                            ..
+                        } => {
+                            frame.push(Value::Closure {
+                                code,
+                                params,
+                                name,
+                                captures: Arc::new(std::sync::Mutex::new(caps)),
+                            });
+                        }
+                        _ => {
+                            return Err(format!(
+                                "MakeClosure: constant {} is not a closure",
+                                ci
+                            ))
+                        }
+                    }
+                }
+                Op::GetCapture => {
+                    let idx = frame.code.code[frame.ip] as usize;
+                    frame.ip += 1;
+                    let v = match &frame.captures {
+                        Some(caps) => {
+                            let guard = caps.lock().unwrap();
+                            match guard.get(idx) {
+                                Some(v) => v.clone(),
+                                None => {
+                                    return Err(format!(
+                                        "capture {} is out of range (the closure has {})",
+                                        idx,
+                                        guard.len()
+                                    ))
+                                }
+                            }
+                        }
+                        None => {
+                            return Err(
+                                "a capture was read outside the closure that owns it".to_string()
+                            )
+                        }
+                    };
+                    frame.push(v);
+                }
+                Op::SetCapture => {
+                    let idx = frame.code.code[frame.ip] as usize;
+                    frame.ip += 1;
+                    let v = frame.pop();
+                    match &frame.captures {
+                        Some(caps) => {
+                            let mut guard = caps.lock().unwrap();
+                            if idx >= guard.len() {
+                                return Err(format!(
+                                    "capture {} is out of range (the closure has {})",
+                                    idx,
+                                    guard.len()
+                                ));
+                            }
+                            guard[idx] = v;
+                        }
+                        None => {
+                            return Err(
+                                "a capture was written outside the closure that owns it".to_string()
+                            )
+                        }
+                    }
+                }
                 Op::DeferCall => {
                     let n = frame.code.code[frame.ip];
                     frame.ip += 1; // skips the operand byte, handled below
@@ -2842,6 +2919,7 @@ impl Vm {
                     match &target {
                         Value::String(path) => {
                             crate::caps::check_str("dump:file_write")?;
+                            crate::caps::check_fs_root(path.as_ref())?;
                             match std::fs::write(path.as_ref(), format!("{}", v)) {
                                 Ok(_) => self.output.push(format!("[DUMP] Written to {}", path)),
                                 Err(e) => self.output.push(format!("[DUMP] File error: {}", e)),
@@ -3057,10 +3135,8 @@ impl Vm {
                             );
                             match state {
                                 VmFutureState::Ready(v) => v,
-                                VmFutureState::Pending(jh) => {
-                                    let joined = crate::async_rt::runtime()
-                                        .block_on(async { jh.await })
-                                        .map_err(|e| format!("await: task failed: {}", e))?;
+                                VmFutureState::Pending(resolve) => {
+                                    let joined = resolve()?;
                                     *h.state.lock().unwrap() = VmFutureState::Ready(joined.clone());
                                     joined
                                 }
@@ -3184,8 +3260,8 @@ impl Vm {
                     match self.globals.get(name.as_ref()) {
                         Some(Value::Map(m)) => frame.push(Value::Map(m.clone())),
                         Some(Value::Module(ns)) => frame.push(Value::Module(ns.clone())),
-                        // Either the global is unbound — a file that does
-                        // `import pkg.sub` without importing `pkg` — or it holds
+                        // Either the global is unbound ג€” a file that does
+                        // `import pkg.sub` without importing `pkg` ג€” or it holds
                         // something that is not a module. Both start empty,
                         // matching the interpreter.
                         _ => frame.push(Value::Module(Arc::new(std::sync::Mutex::new(
@@ -3202,7 +3278,7 @@ impl Vm {
                     // rather than replace it. `BuildModule` cannot do that,
                     // because it always starts from an empty map, and building
                     // a fresh `{sub: ...}` would throw away `pkg`'s own
-                    // exports — which is exactly what `pkg.pkgver` then failed
+                    // exports ג€” which is exactly what `pkg.pkgver` then failed
                     // to find.
                     // Stack order is (module, name, entry) bottom-up, matching
                     // how `BuildModule` reads its (name, value) pairs.
@@ -3459,7 +3535,7 @@ impl Vm {
                         Value::Option(None) => Vec::new(),
                         Value::Bytes(b) => b.iter().map(|b| Value::I64(*b as i64)).collect(),
                         // Sets iterate in insertion order, which is the
-                        // reason `SetRepr` keeps one — see `setrepr`.
+                        // reason `SetRepr` keeps one ג€” see `setrepr`.
                         Value::Set(s) => s.lock().unwrap().to_vec(),
                         Value::MmapSlice(h, off, n) => h.as_slice()[*off..off + n]
                             .iter()
@@ -3492,8 +3568,17 @@ impl Vm {
                     });
                     return Err(msg);
                 }
+                Op::FailRuntime => {
+                    // A runtime failure, not a `raise`: the error carries the
+                    // Runtime kind, so a program that catches it and asks for
+                    // the kind gets the same answer here as on the
+                    // interpreter. `pending_error` is left alone, so the
+                    // handler builds a Runtime-kind error from the message.
+                    let v = frame.pop();
+                    return Err(v.to_string());
+                }
                 Op::TryUnwrap => {
-                    // `expr?` — unwrap Result/Option or raise.
+                    // `expr?` ג€” unwrap Result/Option or raise.
                     let v = frame.pop();
                     let unwrapped: Option<Value> = match &v {
                         Value::Result(ok, err) => {
@@ -3534,7 +3619,7 @@ impl Vm {
     ///
     /// This is the only place a VM stream can be advanced, and the reason is
     /// structural rather than stylistic. A native has signature
-    /// `fn(&[Value]) -> Result<Value, String>` — no `&mut Vm`, no frame — so it
+    /// `fn(&[Value]) -> Result<Value, String>` ג€” no `&mut Vm`, no frame ג€” so it
     /// cannot invoke a Rak function. But a stream produced by `stream_map` or
     /// `filter` holds a closure and has to call it for each element, so pulling
     /// the next element *is* a VM operation.
@@ -3582,7 +3667,7 @@ impl Vm {
             return Ok(());
         }
 
-        // `stream_next` — one element, as an `option`.
+        // `stream_next` ג€” one element, as an `option`.
         let item = pull()?;
         frame.push(match item {
             Some(v) => Value::Option(Some(Box::new(v))),
@@ -3594,7 +3679,7 @@ impl Vm {
 
     /// `set_add` / `set_discard`: mutate a set value.
     ///
-    /// A set is a shared value, so there is nothing to mutate in place — the
+    /// A set is a shared value, so there is nothing to mutate in place ג€” the
     /// update produces a new `SetRepr` which is then written back through the
     /// `Arc`. This mirrors the interpreter, where the same value sits in an
     /// `Arc<Mutex<_>>` and the guard is held across the insert.
@@ -3628,14 +3713,14 @@ impl Vm {
         &mut self,
         frame: &mut Frame,
         callee: Value,
-        mut args: Vec<Value>,
+        args: Vec<Value>,
     ) -> Result<(), String> {
         match callee {
             Value::NativeFn(name, f) => {
                 // Sandbox gate (`rakc vm --sandbox`).
                 crate::caps::check_str(name.as_ref())?;
                 // Iterator builtins take function arguments and must drive the
-                // VM per element — handle them here where `self` is available.
+                // VM per element ג€” handle them here where `self` is available.
                 match name.as_ref() {
                     "zip" | "enumerate" | "skip" => {
                         let result = iter_pure_native(&name, &args)?;
@@ -3653,8 +3738,8 @@ impl Vm {
                         frame.push(result);
                         return Ok(());
                     }
-                    // Pulling a stream element may have to call a Rak function —
-                    // that is what `map` and `filter` hold — so it needs the
+                    // Pulling a stream element may have to call a Rak function ג€”
+                    // that is what `map` and `filter` hold ג€” so it needs the
                     // machine, which a `fn(&[Value])` native does not have.
                     "stream_next" | "collect" => {
                         return self.vm_stream_call(frame, &name, &args);
@@ -3693,9 +3778,7 @@ impl Vm {
                                 if frame.stack.len() > base {
                                     frame.stack.pop();
                                 }
-                                return Err(
-                                    "expected error, but no error was raised".to_string()
-                                );
+                                return Err("expected error, but no error was raised".to_string());
                             }
                             Err(_) => {
                                 self.pending_error = None;
@@ -3738,6 +3821,7 @@ impl Vm {
                 code,
                 params: shape,
                 name,
+                captures,
             } => {
                 // The VM had no depth accounting, so recursive Rak exhausted the
                 // native Rust stack exactly as the interpreter did --
@@ -3810,6 +3894,10 @@ impl Vm {
                     stack: Vec::new(),
                     locals,
                     defers: Vec::new(),
+                    // The closure's captures: what it saw of the function it
+                    // was written in, copied out of that frame when it was
+                    // made.
+                    captures: Some(captures.clone()),
                     catches: Vec::new(),
                 };
                 let stepped = self.exec_frame(&mut sub);
@@ -3862,6 +3950,7 @@ impl Vm {
                         stack: Vec::new(),
                         locals: Vec::new(),
                         defers: Vec::new(),
+                        captures: None,
                         catches: Vec::new(),
                     };
                     match vm.call_value(&mut frame, callee, Vec::new()) {
@@ -3884,7 +3973,7 @@ impl Vm {
         }
     }
 
-    /// `task_group([f, ...], limit?)` — run each function on its own machine
+    /// `task_group([f, ...], limit?)` ג€” run each function on its own machine
     /// over an OS thread, bounded by `limit`, results in input order.
     ///
     /// Mirrors the interpreter's, including the resource limit (the shared
@@ -3911,8 +4000,7 @@ impl Vm {
         let permit = crate::async_rt::permit_count_raw(limit);
         let fns = Arc::new(fns);
         let results = Arc::new(std::sync::Mutex::new(vec![Value::Nil; fns.len()]));
-        let err_cell: Arc<std::sync::Mutex<Option<String>>> =
-            Arc::new(std::sync::Mutex::new(None));
+        let err_cell: Arc<std::sync::Mutex<Option<String>>> = Arc::new(std::sync::Mutex::new(None));
         let next = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let globals = self.globals.clone();
         let mut handles = Vec::new();
@@ -3941,6 +4029,7 @@ impl Vm {
                             stack: Vec::new(),
                             locals: Vec::new(),
                             defers: Vec::new(),
+                            captures: None,
                             catches: Vec::new(),
                         };
                         match vm.call_value(&mut fr, f, Vec::new()) {
@@ -4126,6 +4215,14 @@ impl Vm {
         if let Value::Regex(_) = &recv {
             return self.call_regex_method_vm(frame, &recv, &method, args);
         }
+        // A foreign library carries its own methods (`call`, `sym`, `close`).
+        // Dispatching them here, on the receiver's runtime type, is what makes
+        // the whole family work rather than the two the compiler happened to
+        // recognise: `lib.sym` used to have no lowering at all, so the method
+        // was reported as missing on a library that had it.
+        if let Value::ForeignLib(_) = &recv {
+            return self.call_foreign_lib_method_vm(frame, &recv, &method, args);
+        }
         // Structs/enums dispatch on their type *name* (mirrors the
         // interpreter, where `Value::Struct.type_name()` returns the name).
         let tn = match &recv {
@@ -4158,8 +4255,67 @@ impl Vm {
         Err(format!("No method '{}' on {}", method, tn))
     }
 
+    /// Dispatch `lib.method(args)` on a `Value::ForeignLib`.
+    ///
+    /// Mirrors the interpreter's `call_foreign_lib_method`, method for method
+    /// and word for word in the errors, so a program that loads a library
+    /// behaves the same on either backend.
+    fn call_foreign_lib_method_vm(
+        &mut self,
+        frame: &mut Frame,
+        lib_val: &Value,
+        method: &str,
+        args: Vec<Value>,
+    ) -> Result<(), String> {
+        let lib = match lib_val {
+            Value::ForeignLib(h) => h.clone(),
+            _ => return Err("not an ffi library".to_string()),
+        };
+        let result = match method {
+            "call" => {
+                let symbol = native_str(args.first());
+                let c_args: Vec<Value> = match args.get(1) {
+                    Some(Value::Array(a)) => a.to_vec(),
+                    Some(Value::Nil) | None => Vec::new(),
+                    Some(other) => {
+                        return Err(format!(
+                            "ffi: lib.call(symbol, args) expects an array of args, got {}",
+                            other.type_name()
+                        ))
+                    }
+                };
+                let (marshalled, _guards) = marshal_vm_args(&c_args)?;
+                let addr = {
+                    let h = lib.lock().unwrap();
+                    rak_stdlib::ffi::sym_addr(&h, &symbol)?
+                };
+                let ret = unsafe { rak_stdlib::ffi::call_int(addr, &marshalled) };
+                Value::I64(ret as i64)
+            }
+            "sym" => {
+                let symbol = native_str(args.first());
+                let addr = {
+                    let h = lib.lock().unwrap();
+                    rak_stdlib::ffi::sym_addr(&h, &symbol)?
+                };
+                Value::ForeignPtr(addr as u64)
+            }
+            "close" => {
+                // The handle is released when the last strong reference drops;
+                // the method exists so a program can say so explicitly, and so
+                // the interpreter and the VM agree that it returns nil.
+                Value::Nil
+            }
+            _ => {
+                return Err(format!("ffi library has no method '{}'", method));
+            }
+        };
+        frame.push(result);
+        Ok(())
+    }
+
     /// Regex method dispatch on the VM (`re.match/hay`, `find`, `find_all`,
-    /// `replace`) — mirrors the interpreter's `call_regex_method`.
+    /// `replace`) ג€” mirrors the interpreter's `call_regex_method`.
     fn call_regex_method_vm(
         &mut self,
         frame: &mut Frame,
@@ -4307,18 +4463,21 @@ impl Vm {
         }
     }
 
-    /// Formerly a lenient numeric-coercion path. Now reports the same
-    /// operand-type error the interpreter does; the previous "coerce unknown
-    /// pairs through f64 with 0.0 fallback" made `"abc" - 1` a plausible
-    /// number on this backend and an error on the other.
-    /// Lenient numeric coercion for mixed/unknown operands (matches the original
-    /// `bin_int` `(a, b)` arm).
+    /// The arithmetic the interpreter would do for an operand pair this
+    /// function was handed.
     ///
-    /// The interpreter does the same: if either operand is not an `Int` or `Hex`,
-    /// it attempts to coerce both to `f64` and performs the operation there.
-    /// This mirrors the interpreter's fallback, which is `0.0` for completely
-    /// non-numeric values.
-    #[allow(clippy::float_cmp)]
+    /// The interpreter's rule, which this has to match exactly:
+    ///
+    /// - an arithmetic operation with a float on either side is done in `f64`,
+    ///   and a side that is not a number at all counts as `0.0`;
+    /// - an arithmetic operation between two integers is integer arithmetic;
+    /// - anything else is an error.
+    ///
+    /// The old version coerced *every* unrecognised pair through `f64` with a
+    /// `0.0` fallback, so `1 + "a"` came out as `1` and `"a" - 1` as `-1` --
+    /// plausible numbers on this backend and an error on the other. A silent
+    /// wrong answer is the worst shape of divergence: the program ran, it
+    /// printed a number, and nothing said the number had been invented.
     fn numeric_fallback(
         &mut self,
         frame: &mut Frame,
@@ -4326,16 +4485,65 @@ impl Vm {
         r: &Value,
         op: BinArith,
     ) -> Result<(), String> {
-        let av = l.as_f64().unwrap_or(0.0);
-        let bv = r.as_f64().unwrap_or(0.0);
-        frame.push(Value::F64(match op {
-            BinArith::Add => av + bv,
-            BinArith::Sub => av - bv,
-            BinArith::Mul => av * bv,
-            BinArith::Div => av / bv,
-            BinArith::Rem => av % bv,
-        }));
-        Ok(())
+        let l_is_float = matches!(l, Value::F32(_) | Value::F64(_));
+        let r_is_float = matches!(r, Value::F32(_) | Value::F64(_));
+        if l_is_float || r_is_float {
+            let av = l.as_f64().unwrap_or(0.0);
+            let bv = r.as_f64().unwrap_or(0.0);
+            frame.push(Value::F64(match op {
+                BinArith::Add => av + bv,
+                BinArith::Sub => av - bv,
+                BinArith::Mul => av * bv,
+                BinArith::Div => av / bv,
+                BinArith::Rem => av % bv,
+            }));
+            return Ok(());
+        }
+        // Both sides have to be integers for the integer path. A `char` is
+        // not one: the interpreter has no integer form for it, so `1 + 'a'`
+        // is an error there and has to be an error here.
+        let int_like = |v: &Value| {
+            matches!(
+                v,
+                Value::I8(_)
+                    | Value::I16(_)
+                    | Value::I32(_)
+                    | Value::I64(_)
+                    | Value::U8(_)
+                    | Value::U16(_)
+                    | Value::U32(_)
+                    | Value::U64(_)
+                    | Value::Hex(_)
+            )
+        };
+        if !int_like(l) || !int_like(r) {
+            return Err("Invalid operand types for binary operation".to_string());
+        }
+        let (a, b) = (l.as_i64().unwrap_or(0), r.as_i64().unwrap_or(0));
+        let res = match op {
+            BinArith::Add => a.checked_add(b),
+            BinArith::Sub => a.checked_sub(b),
+            BinArith::Mul => a.checked_mul(b),
+            BinArith::Div => {
+                if b == 0 {
+                    return Err("Division by zero".to_string());
+                }
+                a.checked_div(b)
+            }
+            BinArith::Rem => {
+                if b == 0 {
+                    return Err("Division by zero".to_string());
+                }
+                a.checked_rem(b)
+            }
+        };
+        match res {
+            Some(v) => {
+                frame.push(Value::I64(v));
+                Ok(())
+            }
+            None => Err(vm_overflow(op.suffix(), a, b)),
+        }
     }
 
     /// Checked arithmetic for hex operands. Mirrors the interpreter path, which
@@ -4482,6 +4690,12 @@ struct Frame<'a> {
     ip: usize,
     stack: Vec<Value>,
     locals: Vec<Value>,
+    /// The captures of the closure this frame is running, if any.
+    ///
+    /// `Op::GetCapture` and `Op::SetCapture` read and write them. A frame
+    /// that is not running a closure -- the top level of a program -- has
+    /// none, and a capture there is an error rather than a silent nil.
+    captures: Option<Arc<std::sync::Mutex<Vec<Value>>>>,
     /// Deferred calls (callee value + pre-evaluated args) registered by
     /// `defer f(...)`, run in LIFO order when this frame returns.
     defers: Vec<(Value, Vec<Value>)>,
@@ -4698,10 +4912,7 @@ fn bin_float(frame: &mut Frame, f: impl Fn(f64, f64) -> f64) {
 /// with no machine of its own; `gui_callback`'s interception hands over a
 /// snapshot of the globals for exactly this purpose.
 #[cfg(feature = "gui")]
-pub fn run_closure_standalone(
-    func: &Value,
-    globals: HashMap<String, Value>,
-) -> Option<Value> {
+pub fn run_closure_standalone(func: &Value, globals: HashMap<String, Value>) -> Option<Value> {
     let Value::Closure { code, .. } = func else {
         return None;
     };
@@ -4714,6 +4925,7 @@ pub fn run_closure_standalone(
         stack: Vec::new(),
         locals: Vec::new(),
         defers: Vec::new(),
+        captures: None,
         catches: Vec::new(),
     };
     match vm.call_value(&mut frame, func.clone(), Vec::new()) {
@@ -4731,6 +4943,22 @@ fn native_str(v: Option<&Value>) -> String {
     }
 }
 
+/// Wrap a Tokio task in the resolver a pending future carries.
+///
+/// The future's state is a boxed closure rather than a `JoinHandle` so the
+/// value model does not name Tokio, which keeps the browser build - where there
+/// is no runtime - compiling the same VM.
+#[cfg(feature = "async")]
+fn vm_pending_from_task(
+    jh: tokio::task::JoinHandle<Value>,
+) -> Box<dyn FnOnce() -> Result<Value, String> + Send + 'static> {
+    Box::new(move || {
+        crate::async_rt::runtime()
+            .block_on(jh)
+            .map_err(|e| format!("await: task failed: {}", e))
+    })
+}
+
 /// Resolve a VM future to a value, blocking until it is ready.
 ///
 /// The same resolution `Op::Await` performs, factored out so `await_all`,
@@ -4742,10 +4970,8 @@ fn resolve_vm_future_blocking(v: &Value) -> Result<Value, String> {
             let state = std::mem::replace(&mut *h.state.lock().unwrap(), VmFutureState::Polled);
             match state {
                 VmFutureState::Ready(v) => Ok(v),
-                VmFutureState::Pending(jh) => {
-                    let joined = crate::async_rt::runtime()
-                        .block_on(async { jh.await })
-                        .map_err(|e| format!("await: task failed: {}", e))?;
+                VmFutureState::Pending(resolve) => {
+                    let joined = resolve()?;
                     *h.state.lock().unwrap() = VmFutureState::Ready(joined.clone());
                     Ok(joined)
                 }
@@ -4873,7 +5099,7 @@ fn vm_log(level: &rak_stdlib::log::Level, args: &[Value]) -> Result<Value, Strin
         }
         None => std::collections::HashMap::new(),
     };
-    rak_stdlib::log::log(level.clone(), &key, &fields)?;
+    rak_stdlib::log::log(*level, &key, &fields)?;
     Ok(Value::Nil)
 }
 
@@ -4903,7 +5129,7 @@ fn pat_tag(d: &[Value]) -> &str {
     }
 }
 
-fn pat_arg<'a>(d: &'a [Value], i: usize) -> Option<&'a Value> {
+fn pat_arg(d: &[Value], i: usize) -> Option<&Value> {
     d.get(i + 1)
 }
 
@@ -5194,7 +5420,7 @@ fn has_byte_literal(e: &[Value], byte: u8) -> bool {
     }
 }
 
-/// `obj[idx] = value` — copy-on-write mutation (fast path when `obj` is the
+/// `obj[idx] = value` ג€” copy-on-write mutation (fast path when `obj` is the
 /// only reference). Mirrors the interpreter's `Expr::IndexAssign`.
 fn vm_index_set(obj: &mut Value, idx: &Value, val: Value) -> Result<(), String> {
     match obj {
@@ -5244,7 +5470,7 @@ fn vm_index_set(obj: &mut Value, idx: &Value, val: Value) -> Result<(), String> 
     }
 }
 
-/// `obj.field = value` — copy-on-write mutation for structs and maps.
+/// `obj.field = value` ג€” copy-on-write mutation for structs and maps.
 /// The module case does not copy: its namespace *is* the module's state, so
 /// the write lands there and needs no store-back.
 
@@ -5265,7 +5491,7 @@ fn vm_field_set(obj: &mut Value, field: &str, val: Value) -> Result<(), String> 
         }
         // `m.X = v` lands in the module's own namespace, so the module's code
         // and every other importer see it. No store-back is needed because the
-        // namespace is shared state rather than an owned copy — and the caller's
+        // namespace is shared state rather than an owned copy ג€” and the caller's
         // `store_ident_to` writes the handle back unchanged, which is harmless.
         Value::Module(ns) => {
             if ns.lock().unwrap().set(field, val) {
@@ -5394,7 +5620,7 @@ fn format_rak(fmt: &str, args: &[Value]) -> String {
                 continue;
             }
             let mut spec = String::new();
-            while let Some(c2) = chars.next() {
+            for c2 in chars.by_ref() {
                 if c2 == '}' {
                     break;
                 }
@@ -5475,7 +5701,7 @@ mod tests {
             out
         );
         assert!(
-            out.iter().any(|l| l.contains("[DUMP] 'α'")),
+            out.iter().any(|l| l.contains("[DUMP] '\u{03B1}'")),
             "got: {:?}",
             out
         );
@@ -6593,15 +6819,35 @@ impl Neg for Temp {
 }
 let t = Temp { c: 5 }
 let z = -t
-dump z.c
-// Non-numeric + non-numeric without an impl falls back to the old coercion.
-let m = {}
-let n = 1
-dump (m + n)"#);
+dump z.c"#);
         assert!(
             out.iter().any(|l| l.contains("[DUMP] -5")),
             "got: {:?}",
             out
+        );
+    }
+
+    /// A non-numeric operand is an error on both backends, not a silent
+    /// coercion.
+    ///
+    /// The VM used to push every unrecognised pair through `f64` with a `0.0`
+    /// fallback, so `1 + "a"` came out as `1` while the interpreter called it
+    /// an error. A plausible number on one backend and an error on the other is
+    /// the worst shape of divergence, so the VM was changed to agree with the
+    /// interpreter. This pins that agreement, including the message.
+    #[test]
+    fn test_vm_non_numeric_operands_are_an_error_on_both_backends() {
+        let tokens = crate::lexer::tokenize("let m = {}\nlet n = 1\ndump (m + n)").unwrap();
+        let module = crate::parser::parse(&tokens, "t").unwrap();
+        let chunk = compile_module(&module).unwrap();
+        let mut vm = Vm::new();
+        let err = vm
+            .run(&chunk)
+            .expect_err("map + int should be an error, not a coerced number");
+        assert!(
+            err.contains("Invalid operand types for binary operation"),
+            "got: {:?}",
+            err
         );
     }
 

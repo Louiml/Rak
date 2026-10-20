@@ -58,6 +58,20 @@ pub fn parse_client_hello(bytes: &[u8]) -> Result<ClientHelloInfo, String> {
     }
     let cs_len = u16::from_be_bytes([body[p], body[p + 1]]) as usize;
     p += 2;
+    // The cipher-list length is a wire field, so it can claim more than the
+    // body actually holds -- and the bytes it claims are not there to be
+    // read. A hostile ClientHello is exactly the input this function exists
+    // to survive, so a length that overruns the body is an error.
+    //
+    // It is an error rather than a bound to be clamped: clamping would leave
+    // `p` pointing into the middle of the cipher list, and the compression
+    // and extension lengths after it would be read from the wrong offset.
+    //
+    // `p` is within the body here (the length field was checked above), so
+    // the subtraction cannot underflow.
+    if cs_len > body.len() - p {
+        return Err("tls: cipher list overruns the ClientHello".to_string());
+    }
     let ciphers_end = p + cs_len;
     let mut ciphers = Vec::new();
     while p + 1 < ciphers_end {
@@ -168,5 +182,60 @@ mod tests {
         let info = parse_client_hello(&rec).unwrap();
         assert_eq!(info.sni, "example.com");
         assert_eq!(info.ciphers, vec![0x1301]);
+    }
+
+    /// A ClientHello whose cipher-list length claims more bytes than the
+    /// message holds must be rejected, not read past the end of the body.
+    ///
+    /// The cipher-list length is a 2-byte wire field. It used to be used
+    /// directly as the end of the cipher list, so a 46-byte message claiming
+    /// 65535 bytes of cipher suites walked off the end of the buffer.
+    #[test]
+    fn a_cipher_list_that_overruns_the_body_is_rejected() {
+        let mut body = Vec::new();
+        body.extend_from_slice(&[0x03, 0x03]); // version TLS 1.2
+        body.extend_from_slice(&[0u8; 32]); // random
+        body.push(0); // session id len 0
+        body.extend_from_slice(&[0xFF, 0xFF]); // cipher list len 65535 -- a lie
+        let mut hs = vec![1u8];
+        hs.push((body.len() >> 16) as u8);
+        hs.push((body.len() >> 8) as u8);
+        hs.push(body.len() as u8);
+        hs.extend_from_slice(&body);
+        let mut rec = vec![0x16u8, 0x03, 0x03];
+        rec.push((hs.len() >> 8) as u8);
+        rec.push(hs.len() as u8);
+        rec.extend_from_slice(&hs);
+
+        let err = parse_client_hello(&rec).unwrap_err();
+        assert!(
+            err.contains("overruns"),
+            "the error should say what is wrong: {}",
+            err
+        );
+    }
+
+    /// The same overrun, reached with a cipher-list length that is only
+    /// slightly too large -- the case a fuzzer mutating a length byte is
+    /// most likely to find.
+    #[test]
+    fn a_cipher_list_one_byte_past_the_body_is_rejected() {
+        let mut body = Vec::new();
+        body.extend_from_slice(&[0x03, 0x03]);
+        body.extend_from_slice(&[0u8; 32]);
+        body.push(0);
+        body.extend_from_slice(&[0x00, 0x04]); // claims 4 bytes of ciphers
+        body.extend_from_slice(&[0x13, 0x01]); // ...but only 2 are present
+        let mut hs = vec![1u8];
+        hs.push((body.len() >> 16) as u8);
+        hs.push((body.len() >> 8) as u8);
+        hs.push(body.len() as u8);
+        hs.extend_from_slice(&body);
+        let mut rec = vec![0x16u8, 0x03, 0x03];
+        rec.push((hs.len() >> 8) as u8);
+        rec.push(hs.len() as u8);
+        rec.extend_from_slice(&hs);
+
+        assert!(parse_client_hello(&rec).is_err());
     }
 }

@@ -82,11 +82,11 @@ identical output. Two contracts on that promise are pinned in
 importing a module that declares a struct and a trait impl compiles on both.
 
 **Contracts.** `match_at` carries `requires len(pat) > 0`. `scan_file`'s
-postcondition — `ensures len(result) <= len(data)` — is written in the comment
-rather than declared, because `ensures` is a hard compile error on the VM today.
-The precondition that matters is checked on both backends. This is the one
-documented place where the two backends are not equal, and the example is honest
-about it rather than quietly picking a subset.
+postcondition — `ensures len(result) <= len(data)` — is declared, and both
+kinds of clause are checked on both backends: a precondition before the body,
+a postcondition against the value the caller receives. The postcondition is
+the one that earns its keep here, because "the result can never be longer than
+the file" is a property of the scan that no test of the *output* would catch.
 
 **Evidence provenance.** `evidence<T> from expr` tags a value with where it came
 from; `cite(value, tool, target)` chains a provenance record onto it;
@@ -99,8 +99,6 @@ standard library, with no native extensions.
 
 ## Known limits, stated
 
-- `ensures` postconditions do not compile under `rakc vm` (documented
-  limitation; see `docs/V8-KNOWN-ISSUES.md`).
 - The signature table is hard-coded. It is a list of `{ name, kind, pattern }`
   maps, so adding a format is one line.
 - Scanning is `O(n · signatures)` with a byte-at-a-time compare. That is fine for

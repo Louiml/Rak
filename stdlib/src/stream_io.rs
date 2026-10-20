@@ -117,13 +117,15 @@ pub fn zip_list(data: &[u8]) -> anyhow::Result<Vec<String>> {
 }
 
 /// Extract a named file from a ZIP archive.
+///
+/// The output is bounded by [`crate::archive::MAX_DECOMPRESS`]. A zip entry
+/// can inflate by a factor of a thousand, so an entry that is a few hundred
+/// kilobytes on the wire can otherwise be a gigabyte of zeroes in memory.
 pub fn zip_extract(data: &[u8], name: &str) -> anyhow::Result<Vec<u8>> {
     let reader = std::io::Cursor::new(data);
     let mut archive = zip::ZipArchive::new(reader)?;
-    let mut file = archive.by_name(name)?;
-    let mut out = Vec::new();
-    file.read_to_end(&mut out)?;
-    Ok(out)
+    crate::archive::zip_entry_limited(&mut archive, name, crate::archive::MAX_DECOMPRESS)
+        .map_err(|e| anyhow::anyhow!("{}", e))
 }
 
 /// Parse one CSV line (RFC-4180-ish: handles quoted fields with commas) into a

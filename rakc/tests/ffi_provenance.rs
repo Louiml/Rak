@@ -83,7 +83,7 @@ fn agree(source: &str) -> (Vec<String>, Vec<String>) {
             String::from_utf8_lossy(&out.stderr)
                 .lines()
                 .filter(|l| !l.trim().is_empty())
-                .map(|l| normalise(l))
+                .map(normalise)
                 .collect::<Vec<_>>(),
         );
     }

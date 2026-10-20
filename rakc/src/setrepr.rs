@@ -29,7 +29,6 @@
 //! `"1"` distinct.
 
 use std::collections::HashSet;
-use std::sync::Arc;
 
 /// A set of `V` that iterates in insertion order.
 #[derive(Clone, Debug)]
@@ -266,6 +265,7 @@ mod tests {
         // Sets cross the thread boundary when a closure captures one, so the
         // representation has to be Send + Sync.
         fn assert_send_sync<T: Send + Sync>(_: &T) {}
+        use std::sync::Arc;
         let set = Arc::new(s(&[V::Int(1)]));
         assert_send_sync(&set);
     }

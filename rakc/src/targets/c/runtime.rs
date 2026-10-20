@@ -509,6 +509,17 @@ static rak_obj *rak_env_new(rak_val *items, size_t n) {
     return o;
 }
 
+/* Read a captured value out of a closure's environment.
+ *
+ * The environment holds the values the closure captured, in the order the
+ * code generator chose. A closure with no environment, or an index past its
+ * end, reads as nil rather than crashing: a capture that is missing is a
+ * wrong value, and a wrong value is easier to diagnose than a dead program. */
+static rak_val rak_env_get(rak_obj *env, size_t i) {
+    if (!env || i >= env->u.seq.len) return rak_nil();
+    return env->u.seq.items[i];
+}
+
 /* ------------------------------------------------------------- predicates */
 
 static int rak_truthy(rak_val v) {

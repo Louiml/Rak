@@ -29,7 +29,13 @@ pub const MAGIC: &[u8; 4] = b"RKBC";
 /// The container format version. Bumped when any encoding changes in a way an
 /// older `rakc` could misread; `rakc vm` refuses a newer version rather than
 /// decoding garbage.
-pub const FORMAT_VERSION: u16 = 1;
+///
+/// Version 2 added the capture list to a serialized closure. A closure in a
+/// compiled chunk has no captures -- they are filled in when the closure is
+/// made, at run time -- so the field is empty in practice, but the encoding
+/// now describes the value rather than the subset of it that happens to
+/// serialize.
+pub const FORMAT_VERSION: u16 = 2;
 
 // ---------------------------------------------------------------------------
 // Primitives: a big-endian writer/reader pair.
@@ -40,6 +46,12 @@ pub const FORMAT_VERSION: u16 = 1;
 /// stable ג€” and the container is never on a per-instruction hot path.
 pub struct Writer {
     buf: Vec<u8>,
+}
+
+impl Default for Writer {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Writer {
@@ -349,10 +361,21 @@ impl Reader<'_> {
                 let code = std::sync::Arc::new(self.chunk()?);
                 let params = rkbc_ast::read_param_shapes(self)?;
                 let name = self.str()?;
+                // The captures a closure holds. A closure in a *compiled*
+                // chunk has none -- a capture is filled in when the closure is
+                // made, at run time -- but the field is written so the format
+                // describes the value rather than the subset of it that
+                // happens to be serializable today.
+                let n = self.count("closure captures")?;
+                let mut captures = Vec::with_capacity(n);
+                for _ in 0..n {
+                    captures.push(self.value()?);
+                }
                 Ok(Value::Closure {
                     code,
                     params: std::sync::Arc::from(params.into_boxed_slice()),
                     name: std::sync::Arc::from(name.as_str()),
+                    captures: std::sync::Arc::new(std::sync::Mutex::new(captures)),
                 })
             }
             T_RESULT => {
@@ -648,11 +671,21 @@ impl Writer {
                 self.u8(T_NATIVE);
                 self.str(name);
             }
-            Value::Closure { code, params, name } => {
+            Value::Closure {
+                code,
+                params,
+                name,
+                captures,
+            } => {
                 self.u8(T_CLOSURE);
                 self.chunk(code)?;
                 rkbc_ast::write_param_shapes(self, params)?;
                 self.str(name);
+                let caps = captures.lock().unwrap();
+                self.u32(caps.len() as u32);
+                for v in caps.iter() {
+                    self.value(v)?;
+                }
             }
             Value::Result(ok, err) => {
                 self.u8(T_RESULT);

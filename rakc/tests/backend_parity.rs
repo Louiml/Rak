@@ -559,6 +559,81 @@ g()
     );
 }
 
+/// A `try` whose body completes must not leave a catch region behind.
+///
+/// The VM pushed a catch frame when it entered the region and only popped it
+/// on the path that *raised*, so a `try` that completed left its frame in
+/// place. A later error in the same function then found that stale frame and
+/// was caught by the wrong handler -- and since the handler falls through to
+/// the code after the `try`, that code ran again from the top.
+///
+/// The observable effect is a catch body running that should not have: the
+/// handler here writes a file, so on the VM the file appeared and on the
+/// interpreter it did not.
+#[test]
+fn a_completed_try_does_not_catch_a_later_error() {
+    let dir = std::env::temp_dir().join(format!("rak_stale_try_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let marker = dir.join("caught.txt");
+    let src = format!(
+        r#"
+try {{ dump "fine" }} catch e {{ file_write("{}", "the catch body ran") }}
+raise "boom"
+"#,
+        marker.to_string_lossy()
+    );
+
+    // The program fails on both backends -- that is the point -- so this
+    // cannot use `agree`, which wants a program that completes. What has to
+    // hold is that the catch body did not run.
+    let _ = rakc::eval_in_cli(&src, ".", &[], None);
+    assert!(
+        !marker.exists(),
+        "the catch body of a completed `try` ran, so a later error was caught by it"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// An arithmetic operation between a number and a non-number is an error.
+///
+/// The VM used to coerce the pair through `f64` with a `0.0` fallback, so
+/// `1 + "a"` came out as `1` and `"a" - 1` as `-1`: plausible numbers on one
+/// backend and an error on the other. A silent wrong answer is the worst
+/// shape of divergence, because the program ran and printed a number.
+///
+/// The catch here is what makes the difference visible: the error is caught, so
+/// the program *completes*, and the two backends can be compared on their
+/// output rather than on their exit codes.
+#[test]
+fn arithmetic_with_a_non_number_operand_is_an_error_on_both_backends() {
+    agree(
+        "a number and a non-number do not make a number",
+        r#"
+try { dump 1 + "a" } catch e { dump "refused" }
+try { dump "a" - 1 } catch e { dump "refused" }
+try { dump 1 + 'a' } catch e { dump "refused" }
+"#,
+    );
+}
+
+/// A float on either side makes the whole operation a float one.
+///
+/// The other half of the rule: `1.5 + "a"` is `1.5`, not an error, because a
+/// float on one side makes the operation a float operation and the other side
+/// is simply not a number.
+#[test]
+fn a_float_operand_makes_the_operation_a_float_one() {
+    agree(
+        "a float on one side makes the operation a float one",
+        r#"
+dump 1 + 2.5
+dump 1.5 + "a"
+dump 7.0 / 2
+"#,
+    );
+}
+
 /// `defer` must run when the function that registered it exits by raising.
 ///
 /// A raising function still owes its caller the cleanup it registered. The
@@ -618,49 +693,166 @@ dump "survived"
     );
 }
 
-/// Postconditions: the interpreter checks them, the VM refuses the program.
+/// Both backends must enforce `ensures`, and report the same failure.
 ///
-/// Not an `agree` test, and deliberately so. The VM has no way to evaluate a clause
-/// against the callee's frame -- `compiler.rs` compiles a function without ever
-/// looking at `ensures` -- so rather than accept a program whose promise would go
-/// unchecked, it reports the construct and names the backend that does check it.
+/// The VM used to refuse the program outright -- "VM does not support
+/// postconditions" -- which is honest but means a promise checked on one
+/// backend goes unchecked on the other, and a program using `ensures` ran
+/// under `rakc run` and not at all under `rakc vm`. The VM grew a
+/// postcondition trampoline, so the clause is now checked in both.
 ///
-/// Rejecting is not the same as supporting, but it is the difference between a
-/// promise nobody keeps and an honest "not on this backend". When the VM grows
-/// `ensures` support this test fails, which is the signal to delete it rather than
-/// flip it.
+/// The message has to match too. A postcondition failure names the function
+/// and the clause, and a diagnostic that reads differently on the two
+/// backends is a diagnostic nobody can grep for.
 #[test]
-fn postconditions_are_enforced_by_run_and_rejected_by_vm() {
-    let src = r#"
+fn postconditions_are_enforced_by_both_backends() {
+    agree(
+        "a violated postcondition fails the same way on both backends",
+        r#"
 fn f(x) { return x } ensures result > 0
-f(-5)
-"#;
-
-    // The interpreter must still reject the violated postcondition.
-    //
-    // A violation is a runtime error, so it arrives on the `Err` arm -- the exit
-    // code in `eval_in_cli` is for a program that ran to completion and chose a
-    // code, which is a different thing.
-    let err = rakc::eval_in_cli(src, ".", &[], None)
-        .err()
-        .expect("the interpreter must reject a violated postcondition");
-    assert!(
-        err.to_string().contains("postcondition failed"),
-        "expected a postcondition diagnostic, got: {}",
-        err
+try { f(-5) } catch e { dump e }
+"#,
     );
+}
 
-    // The VM must refuse the program rather than silently ignore the clause.
-    match rakc::eval_vm_in(src, ".") {
-        Ok(_) => {
-            panic!("the VM now accepts postconditions; delete this test and use `agree` instead")
-        }
-        Err(e) => assert!(
-            e.contains("does not support postconditions"),
-            "expected a clear unsupported-construct error, got: {}",
-            e
-        ),
+/// A postcondition that holds must not stop the call, on either backend.
+///
+/// The other half of the promise: a clause that is satisfied has to let the
+/// value through. A VM that checked the clause but then dropped the result
+/// would satisfy the first test and be useless.
+#[test]
+fn a_satisfied_postcondition_lets_the_value_through() {
+    agree(
+        "a satisfied postcondition returns the value",
+        r#"
+fn f(x) { return x } ensures result > 0
+dump f(5)
+"#,
+    );
+}
+
+/// `result` is the value the *caller* receives, and the parameters are still
+/// in scope inside the clause.
+///
+/// `ensures result == a + b` is the useful form of a postcondition, so it has
+/// to work on both backends: `result` bound to the return value, and `a` and
+/// `b` still readable.
+#[test]
+fn a_postcondition_can_name_the_parameters() {
+    agree(
+        "a postcondition may refer to the parameters and to `result`",
+        r#"
+fn add(a, b) { return a + b } ensures result == a + b
+dump add(2, 3)
+try { add(2, 2) } catch e { dump e }
+"#,
+    );
+}
+
+/// A closure has to see the function it was written in.
+///
+/// The VM used to resolve a free name inside a closure as a *global*, so a
+/// closure that mentioned an enclosing local read a global of that name, or
+/// failed with "Undefined variable" when there was none. The interpreter has
+/// always given a closure a copy of the environment it was written in, and
+/// the VM now does the same.
+#[test]
+fn a_closure_sees_the_function_it_was_written_in() {
+    agree(
+        "a closure reads the enclosing function's local",
+        r#"
+fn read() {
+    let x = 41
+    let get = fn() { return x }
+    return get()
+}
+dump read()
+fn param(n) {
+    let f = fn() { return n + 1 }
+    return f()
+}
+dump param(10)
+"#,
+    );
+}
+
+/// A closure that assigns to an enclosing local writes to its own copy.
+///
+/// The interpreter gives a closure a *copy* of the environment, so the
+/// assignment lands in the copy and the enclosing function never sees it.
+/// That is the semantics, and the VM has to match it: a VM that shared the
+/// binding would make a closure's assignment visible to its caller, and the
+/// two backends would answer different questions.
+#[test]
+fn a_closure_assigning_to_an_enclosing_local_writes_to_its_own_copy() {
+    agree(
+        "an assignment inside a closure does not reach the enclosing function",
+        r#"
+fn make() {
+    let mut count = 0
+    let bump = fn() { count = count + 1 }
+    bump()
+    bump()
+    return count
+}
+dump make()
+"#,
+    );
+}
+
+/// A *global* is not copied. A closure reads and writes the program's globals,
+/// so an assignment to one is seen by everybody -- on both backends.
+#[test]
+fn a_closure_assigning_to_a_global_is_seen_by_everybody() {
+    agree(
+        "an assignment inside a closure to a global is live",
+        r#"
+let mut g = 0
+let bump = fn() { g = g + 1 }
+bump()
+dump g
+"#,
+    );
+}
+
+/// An immutable binding stays immutable inside a closure that captured it.
+///
+/// The interpreter checks this where the assignment happens, and the VM does
+/// the same: a compile error would refuse a program the interpreter runs,
+/// which is the one thing the two backends must not do.
+#[test]
+fn a_closure_cannot_assign_to_an_immutable_enclosing_local() {
+    agree(
+        "an immutable captured binding refuses the assignment",
+        r#"
+fn immutable() {
+    let x = 1
+    let f = fn() { x = 2 }
+    f()
+    return 0
+}
+try { immutable() } catch e { dump e }
+"#,
+    );
+}
+
+/// A closure inside a closure captures through the closure that holds it.
+#[test]
+fn a_nested_closure_captures_through_its_enclosing_closure() {
+    agree(
+        "a nested closure sees the outermost function's local",
+        r#"
+fn nested() {
+    let a = 1
+    let outer_fn = fn() {
+        let inner_fn = fn() { return a + 10 }
+        return inner_fn()
     }
+    return outer_fn()
+}
+dump nested()
+"#,
+    );
 }
 
 /// `fn main` must run on both backends.
@@ -828,9 +1020,8 @@ fn a_type_alias_still_checks_the_underlying_type() {
 type Meters = int
 let x: Meters = "nope"
 "#;
-    let err = rakc::eval_in_cli(src, ".", &[], None)
-        .err()
-        .expect("a string is not an int, alias or not");
+    let err =
+        rakc::eval_in_cli(src, ".", &[], None).expect_err("a string is not an int, alias or not");
     let msg = err.to_string();
     assert!(
         msg.contains("type mismatch"),
@@ -1507,7 +1698,7 @@ dump c
 ///
 /// The prefixes differ by design -- `Error: Runtime error:` for the interpreter, `VM error:`
 /// for the VM -- so a test comparing wording has to strip them.
-fn run_body(backend: &str, src: &str) -> (&'static str, String) {
+fn run_body(_backend: &str, src: &str) -> (&'static str, String) {
     match rakc::eval_vm_in(src, ".").err() {
         Some(e) => ("error", strip_prefix(&e)),
         None => match rakc::eval_in(src, ".") {

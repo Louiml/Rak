@@ -47,6 +47,11 @@ pub fn filter_within(names: Vec<String>, domain: &str) -> Vec<String> {
 
 /// Search crt.sh for certificates matching `%.<domain>` and return the
 /// deduplicated subdomains (including the bare apex for matched names).
+///
+/// The live search needs the HTTP client, which the browser build leaves out;
+/// there the function answers with a clear error instead of being missing. The
+/// offline half -- parsing a crt.sh response body -- is always available.
+#[cfg(feature = "http")]
 pub fn subdomains(domain: &str) -> anyhow::Result<Vec<String>> {
     let domain = domain.trim().trim_start_matches("*.").to_lowercase();
     if domain.is_empty() {
@@ -65,6 +70,13 @@ pub fn subdomains(domain: &str) -> anyhow::Result<Vec<String>> {
         anyhow::bail!("crt.sh returned HTTP {}", resp.status);
     }
     Ok(filter_within(parse_crtsh(&resp.body)?, &domain))
+}
+
+/// Certificate-transparency subdomain discovery, in a build without the HTTP
+/// client.
+#[cfg(not(feature = "http"))]
+pub fn subdomains(_domain: &str) -> anyhow::Result<Vec<String>> {
+    anyhow::bail!("ct: this build has no HTTP client (the `http` feature is off)")
 }
 
 #[cfg(test)]

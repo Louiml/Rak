@@ -172,6 +172,21 @@ pub enum Value {
         /// required argument -- none of which the compiled body carries.
         params: Arc<[ParamShape]>,
         name: Arc<str>,
+        /// The values this closure captured from the function it was written
+        /// in.
+        ///
+        /// Empty for a function that captures nothing, and for every closure
+        /// in a compiled chunk's constant pool: a capture is filled in when
+        /// the closure is *made*, at run time, by `Op::MakeClosure`.
+        ///
+        /// The interpreter gives a closure a **copy** of the environment it
+        /// was written in, so a closure that assigns to an enclosing local
+        /// writes to its own copy and the enclosing function never sees it.
+        /// This is the same shape: a private cell per closure instance,
+        /// holding the values as they were when the closure was made. A
+        /// *global* is not captured -- a closure reads and writes the global
+        /// itself, on both backends.
+        captures: Arc<std::sync::Mutex<Vec<Value>>>,
     },
     Result(Option<Box<Value>>, Option<Box<Value>>),
     Option(Option<Box<Value>>),

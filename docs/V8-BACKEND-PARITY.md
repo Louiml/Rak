@@ -57,7 +57,7 @@ cannot catch a per-backend omission; only a comparison can.
 | Call semantics | Both backends. Defaults (compiled into the callee prologue, keyed off a hidden `__argc`), rest parameters, optional parameters, arity errors with identical wording, and `fn main()` taking argv only when declared. Named arguments remain a VM compile error, not a silent difference. |
 | 7A.6 `import pkg.sub` | Both backends. `Op::MergeModule`, `Op::LoadGlobalOrMap`. |
 | Module namespaces | Both backends. `modns::ModuleNamespace`, `Op::MakeModule`/`ModulePublish`, `Op::StoreGlobal` republishing. `import m; m.X` is live and `pub` is enforced on both; `from m import x as y` copies on both. Three residual differences, all from the VM's flat global namespace, in [V8-KNOWN-ISSUES.md](V8-KNOWN-ISSUES.md). |
-| GUI | Both backends. Nine natives (`gui_window`, `gui_add`, `gui_set_text`, `gui_get_text`, `gui_set_visible`, `gui_on_click`, `gui_close`, `gui_wait`, `gui_quit`), native egui windows, no webview. `gui_callback` is interpreter-only: it needs a Rak callback from a native, which is the same boundary as the other 31. |
+| GUI | Both backends. Nine natives (`gui_window`, `gui_add`, `gui_set_text`, `gui_get_text`, `gui_set_visible`, `gui_on_click`, `gui_close`, `gui_wait`, `gui_quit`), native egui windows, no webview. `gui_callback` is on both: it needs a Rak callback from a native, so the VM intercepts it in `Vm::call_value`, where the machine can hand the closure and a snapshot of the chunk globals to the GUI's registry. |
 | ~100 stdlib builtins | Both backends, via `ext_stdlib.rs`. |
 | `impl Display` drives `dump` | Both backends. `Op::Print` looks up `__method_<Type>_fmt` exactly as `Interpreter::display_value` does, so a struct with a `Display` impl prints the same on each. It worked for locally-declared structs only: the VM's module inliner skipped `struct`/`enum`/`impl`/`trait`/`type` when inlining an imported module, and the imported module's baked methods were never emitted into the running chunk. |
 | Importing a module with a `struct` and an `impl` | Both backends. The inliner's skip list covered functions, macros, externs and binstructs but not type declarations, so `pub struct Finding` was `VM does not support statement: Impl { ... }`. |
@@ -124,13 +124,36 @@ have passed every one of them.
 The registration sets now match; the *behavioural* gaps that remain are
 recorded where they belong rather than here as a count:
 
-- `ffi_dynamic` skips its dynamic-FFI demo under `rakc vm`, because the VM's
-  `lib.call` path is a stub where the interpreter loads a real library
-  (`examples_parity.rs`, `VM_BLOCKED`).
-- A closure that assigns to an enclosing function's local still works only by
-  the interpreter's copy-of-environment semantics; the VM rejects the compile.
-  See `docs/rak-features-spec.md` (7B) for the capture story.
 - `extern_call` is an honest stub on both backends, as above.
+
+### Two gaps that closed
+
+- **`ensures` postconditions.** The VM used to refuse the program outright --
+  "VM does not support postconditions" -- which is honest but means a promise
+  checked on one backend goes unchecked on the other, and a program using
+  `ensures` ran under `rakc run` and not at all under `rakc vm`. The VM now
+  compiles the clauses into the callee's own body: every `return` parks the
+  value in a local and jumps to a trampoline that runs the deferred calls,
+  checks the clauses and returns. A body that falls off the end returns nil,
+  and the clauses are checked against that nil. The failure names the function
+  and the clause, in the interpreter's words, so a diagnostic reads the same on
+  either backend.
+
+- **Closure captures.** A closure that mentioned an enclosing function's local
+  used to resolve the name as a *global* on the VM: it read a global of that
+  name if there was one, and failed with "Undefined variable" when there was
+  not. The interpreter has always given a closure a copy of the environment it
+  was written in, and the VM does the same now -- the values are copied out of
+  the enclosing frame when the closure is made, so an assignment inside a
+  closure lands in the closure's own copy and the enclosing function never
+  sees it. A *global* is not copied: a closure reads and writes the program's
+  globals on both backends.
+
+  The interpreter had a bug here that the VM would have inherited: the
+  scope-local immutability sets were shared while the scopes were not, and the
+  two are consulted by index, so a closure that pushed a scope of its own read
+  the wrong set -- an immutable binding captured by a closure was silently
+  treated as mutable. `Env::clone` now copies the two together.
 
 ### Two entries that are allowed to differ
 

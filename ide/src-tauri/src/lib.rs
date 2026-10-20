@@ -51,18 +51,14 @@ fn rakc_binary() -> Option<String> {
             .to_string_lossy()
             .to_string(),
     );
-    for c in candidates {
-        if Command::new(&c)
+    candidates.into_iter().find(|c| {
+        Command::new(c)
             .arg("--version")
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()
             .is_ok()
-        {
-            return Some(c);
-        }
-    }
-    None
+    })
 }
 
 #[tauri::command]
@@ -111,7 +107,7 @@ fn run_rak(app: AppHandle, mode: String, source: String) -> Result<(), String> {
     if let Some(out) = stdout {
         let app2 = app.clone();
         std::thread::spawn(move || {
-            for line in BufReader::new(out).lines().flatten() {
+            for line in BufReader::new(out).lines().map_while(Result::ok) {
                 let _ = app2.emit(
                     "rak-output",
                     RakLine {
@@ -125,7 +121,7 @@ fn run_rak(app: AppHandle, mode: String, source: String) -> Result<(), String> {
     if let Some(err) = stderr {
         let app2 = app.clone();
         std::thread::spawn(move || {
-            for line in BufReader::new(err).lines().flatten() {
+            for line in BufReader::new(err).lines().map_while(Result::ok) {
                 let _ = app2.emit(
                     "rak-output",
                     RakLine {
@@ -205,7 +201,7 @@ fn run_shell(app: AppHandle, cmd: String, cwd: String) -> Result<(), String> {
     if let Some(out) = stdout {
         let app2 = app.clone();
         std::thread::spawn(move || {
-            for line in BufReader::new(out).lines().flatten() {
+            for line in BufReader::new(out).lines().map_while(Result::ok) {
                 let _ = app2.emit(
                     "shell-output",
                     RakLine {
@@ -219,7 +215,7 @@ fn run_shell(app: AppHandle, cmd: String, cwd: String) -> Result<(), String> {
     if let Some(err) = stderr {
         let app2 = app.clone();
         std::thread::spawn(move || {
-            for line in BufReader::new(err).lines().flatten() {
+            for line in BufReader::new(err).lines().map_while(Result::ok) {
                 let _ = app2.emit(
                     "shell-output",
                     RakLine {
@@ -341,7 +337,7 @@ fn list_files_recursive(path: String, ext: String) -> Result<Vec<FileEntry>, Str
         }
     }
     walk(&PathBuf::from(&path), &ext, &mut results);
-    results.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    results.sort_by_key(|a| a.name.to_lowercase());
     Ok(results)
 }
 

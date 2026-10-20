@@ -872,7 +872,7 @@ pub fn vm_natives() -> Vec<(&'static str, fn(&[VV]) -> Result<VV, String>)> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+
     use crate::compiler::compile_module;
 
     /// Run a snippet through the interpreter backend.
@@ -894,14 +894,16 @@ mod tests {
     #[test]
     fn battery_time_parse_fmt_roundtrip() {
         for out in [
-            run_interp(&format!(
-                "let ts = time_parse(\"2023-11-14 22:13:20\")?\n\
+            run_interp(
+                &"let ts = time_parse(\"2023-11-14 22:13:20\")?\n\
              dump time_fmt(ts, \"%Y-%m-%d %H:%M:%S\")"
-            )),
-            run_vm(&format!(
-                "let ts = time_parse(\"2023-11-14 22:13:20\")?\n\
+                    .to_string(),
+            ),
+            run_vm(
+                &"let ts = time_parse(\"2023-11-14 22:13:20\")?\n\
              dump time_fmt(ts, \"%Y-%m-%d %H:%M:%S\")"
-            )),
+                    .to_string(),
+            ),
         ] {
             assert!(
                 out.iter().any(|l| l.contains("[DUMP] 2023-11-14 22:13:20")),

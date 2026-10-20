@@ -408,7 +408,7 @@ pub fn vm_natives() -> Vec<(&'static str, fn(&[VV]) -> Result<VV, String>)> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+
     use crate::compiler::compile_module;
 
     fn run_interp(src: &str) -> Vec<String> {

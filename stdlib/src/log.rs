@@ -115,7 +115,7 @@ impl Json {
 }
 
 thread_local! {
-    static LEVEL: RefCell<Level> = RefCell::new(Level::Info);
+    static LEVEL: RefCell<Level> = const { RefCell::new(Level::Info) };
 }
 
 // File destination, shared across threads via a global mutex. `None` means sink
@@ -139,6 +139,9 @@ pub fn set_level(s: &str) {
 
 /// Open an append-only log file. Passing "" resets back to stdout.
 pub fn init_file(path: &str) -> Result<(), String> {
+    if !path.is_empty() {
+        crate::fs_scope::check(path)?;
+    }
     let mut guard = FILE.lock().map_err(|e| format!("log: lock: {}", e))?;
     if path.is_empty() {
         *guard = None;

@@ -21,6 +21,7 @@
 
 use std::collections::HashMap;
 use std::fs;
+use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Mutex;
 use zeroize::Zeroize;
@@ -38,6 +39,18 @@ fn wipe_string(mut s: String) {
 /// Overwrite an existing file with zeroes, keeping its length, so a rewrite
 /// does not leave the previous contents in the filesystem's freed blocks or
 /// page cache. Missing file is not an error: there is nothing to wipe.
+///
+/// The zeroes are written **before** the length is changed. The other order
+/// -- truncate first, then write zeroes -- reads as more thorough and is
+/// less: `set_len(0)` releases the extents, and on ext4, XFS and APFS the
+/// subsequent write lands on *freshly allocated* blocks. The old plaintext
+/// is still in the blocks that were freed, and in the journal, and on an SSD
+/// in the wear-levelling pool. Overwriting in place is what actually
+/// reaches the bytes that held the secret.
+///
+/// This is still not a guarantee against a copy-on-write filesystem, a
+/// journalling one, or an SSD that has already moved the block. A real
+/// secure delete needs filesystem-specific support, or an OS keyring.
 fn shred_file(p: &PathBuf) {
     use std::io::{Seek, SeekFrom, Write};
     let Ok(len) = fs::metadata(p).map(|m| m.len()) else {
@@ -49,9 +62,7 @@ fn shred_file(p: &PathBuf) {
     let Ok(mut f) = fs::OpenOptions::new().write(true).open(p) else {
         return;
     };
-    if f.set_len(0).is_err() {
-        return;
-    }
+    // In place: the file keeps its length, so the same blocks are overwritten.
     let zeros = [0u8; 4096];
     let mut written = 0u64;
     while written < len {
@@ -61,6 +72,9 @@ fn shred_file(p: &PathBuf) {
         }
         written += n as u64;
     }
+    let _ = f.sync_all();
+    // Only now is the length changed, and only to what it already was.
+    let _ = f.set_len(len);
     let _ = f.seek(SeekFrom::Start(0));
     let _ = f.sync_all();
 }
@@ -110,19 +124,41 @@ fn write_file(map: &HashMap<String, String>) -> Result<(), String> {
             let _ = fs::set_permissions(dir, fs::Permissions::from_mode(0o700));
         }
     }
-    // Set the permissions before the data lands, not after. Writing first means
-    // the file exists on disk with the process umask (often 0644) for a moment.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = fs::set_permissions(&p, fs::Permissions::from_mode(0o600));
-    }
+    // Create the file with 0600 from the start, rather than creating it and
+    // then tightening it.
+    //
+    // The order matters. `set_permissions` on a file that does not exist yet
+    // fails, and the error was being swallowed -- so the file was then
+    // created by the write itself, with the process umask, which is 0644 on
+    // a typical system. It stayed that way until the *second* persist, when
+    // the file existed and the chmod succeeded. Any local user could read
+    // the secrets in that window.
+    //
+    // `OpenOptions::mode` applies when the file is created, and the umask can
+    // only remove bits from it, so 0600 is the floor rather than the ceiling.
+    // The `set_permissions` on the open handle covers the other case: a file
+    // that already existed with looser permissions.
     let mut json = serde_json::to_string(map).map_err(|e| format!("secrets: serialize: {}", e))?;
-    let res = fs::write(&p, &json).map_err(|e| format!("secrets: write: {}", e));
+    let write_result = (|| -> std::io::Result<()> {
+        let mut opts = fs::OpenOptions::new();
+        opts.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        let mut f = opts.open(&p)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            f.set_permissions(fs::Permissions::from_mode(0o600))?;
+        }
+        f.write_all(json.as_bytes())
+    })();
     // The serialized buffer holds every secret value in plaintext. Wipe it
     // rather than leaving it for the allocator to hand to the next string.
     json.zeroize();
-    res
+    write_result.map_err(|e| format!("secrets: write: {}", e))
 }
 
 /// Get a secret. Resolution: session -> env var -> file store.

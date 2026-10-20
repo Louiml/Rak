@@ -273,7 +273,7 @@ fn pbkdf2_hmac_sha256(password: &[u8], salt: &[u8], iterations: u32, out: &mut [
     use hmac::{Hmac, Mac};
     use sha2::Sha256;
     type HmacSha256 = Hmac<Sha256>;
-    let blocks = (out.len() + 31) / 32;
+    let blocks = out.len().div_ceil(32);
     let mut block = vec![0u8; out.len()];
     let mut offset = 0usize;
     for block_index in 1..=blocks {

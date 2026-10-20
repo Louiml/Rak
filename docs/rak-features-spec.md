@@ -371,10 +371,14 @@ ffi_free(buf)                             // release an ffi_alloc/ffi_string_to_
   `ffi_*` free-function builtins.
 - VM (`value.rs` + `vm.rs` + `compiler.rs`): mirrored `Value::ForeignLib` /
   `Value::ForeignPtr` variants, `ffi_*` natives registered in
-  `register_natives`, two new opcodes `Op::FFICall` / `Op::FFIClose`, and
-  `make_foreign_native` which bakes each `extern` declaration into a
-  `Value::NativeFn` global (lazy library cache + typed marshalling) so the VM
-  runs `extern`-declared calls via `Op::Call` and `lib.call` via `Op::FFICall`.
+  `register_natives`, `make_foreign_native` which bakes each `extern`
+  declaration into a `Value::NativeFn` global (lazy library cache + typed
+  marshalling) so the VM runs `extern`-declared calls via `Op::Call`, and
+  `lib.call`/`lib.sym`/`lib.close` dispatched on the receiver's runtime type
+  in `Vm::call_method` -- the same place the interpreter dispatches them.
+  The two used to be special-cased in the compiler, one method at a time and
+  with the argument count baked in, so `lib.sym` had no lowering at all and
+  the method was reported as missing on a library that had it.
 
 #### Error handling & edge cases
 - **Safety**: FFI is inherently `unsafe`. Every foreign call goes through a
@@ -1579,6 +1583,21 @@ Making `Map` insertion-ordered too is still open, and is a separate decision
 with a wider blast radius.
 
 ### 7B — Type system & tooling  **[SPEC → SHIPPED for fmt/lint]**
+
+- **Closure captures: by value, and the same on both backends.** **[SHIPPED]**
+  A closure sees the function it was written in. The interpreter has always
+  given a closure a *copy* of the environment at the moment it was made, so a
+  closure that assigns to an enclosing local writes to its own copy and the
+  enclosing function never sees it. The VM used to resolve a free name inside a
+  closure as a *global* -- it read a global of that name if there was one, and
+  failed with "Undefined variable" when there was not -- and it now copies the
+  enclosing frame's values out when the closure is made, which is the same
+  semantics. A *global* is not copied on either backend: a closure reads and
+  writes the program's globals, so an assignment to one is seen by everybody.
+  An immutable binding stays immutable inside a closure that captured it, and
+  the check happens where the assignment does -- at run time -- because the
+  binding belongs to another function and a compile error would refuse a
+  program the interpreter runs.
 
 - **`rakc check` v2** (`typecheck.rs`): function-signature table, inference
   through function bodies, `?`-propagation checks (return type must admit

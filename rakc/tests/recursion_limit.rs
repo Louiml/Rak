@@ -95,7 +95,7 @@ fn the_limit_can_be_raised_from_the_command_line() {
 fn the_limit_can_also_be_given_before_the_filename() {
     // Both orders, because the scanner strips flags from the script's argv and a
     // flag written after the file is the one that was being dropped.
-    let (text, code) = run("run", &recursive(300), &[]);
+    let (_text, code) = run("run", &recursive(300), &[]);
     assert_ne!(code, 0, "precondition: the default should clamp 300");
     let dir = std::env::temp_dir().join(format!("rak_depth_pre_{}", std::process::id()));
     let _ = std::fs::create_dir_all(&dir);

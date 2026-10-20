@@ -18,7 +18,7 @@
 //! one that quietly miscompiles.
 
 use super::runtime::RUNTIME_C;
-use super::{CodegenOptions, EmitKind};
+use super::CodegenOptions;
 use crate::ast::*;
 use std::collections::{HashMap, HashSet};
 
@@ -506,6 +506,17 @@ impl Gen {
         self.vars.iter().any(|s| s.iter().any(|n| n == name))
     }
 
+    /// The index of `name` in the capture list of the closure currently being
+    /// emitted, if it is captured at all.
+    ///
+    /// A captured name is *not* a local of the closure that captured it: it
+    /// belongs to the enclosing function, and by the time the closure runs
+    /// that function's C variable is gone. The closure therefore reads it out
+    /// of its environment, at the index the capture list gives it.
+    fn capture_index(&self, name: &str) -> Option<usize> {
+        self.captures.iter().position(|c| c == name)
+    }
+
     fn is_global(&self, name: &str) -> bool {
         self.globals.contains(name)
     }
@@ -658,6 +669,16 @@ impl Gen {
     }
 
     fn ident_value(&mut self, name: &str) -> Result<Emit, String> {
+        // A name the closure captured comes out of its environment, and that
+        // check has to come first: the captured name is also a local of the
+        // *enclosing* function, and `is_local` searches every scope, so it
+        // would otherwise find the enclosing function's C variable -- which
+        // does not exist by the time the closure runs. The generated C then
+        // referenced a variable that was never declared, and the C compiler
+        // rejected the program.
+        if let Some(i) = self.capture_index(name) {
+            return Ok(Emit::simple(format!("rak_dup(rak_env_get(env, {}))", i)));
+        }
         if self.is_local(name) {
             return Ok(Emit::simple(format!("rak_dup({})", self.c_ident(name))));
         }
@@ -872,6 +893,25 @@ impl Gen {
     }
 
     fn assign(&mut self, name: &str, e: &Expr) -> Result<Emit, String> {
+        // Assigning to a captured variable is not something this backend can
+        // do. The interpreter's closures share the enclosing function's
+        // environment, so an assignment inside the closure is visible outside
+        // it. Here the environment is an array of *copies* taken when the
+        // closure was created, so the assignment would land in the copy and
+        // the enclosing function would never see it -- a silent wrong answer,
+        // and a different one on each backend.
+        //
+        // Saying so is better than generating the wrong program: the caller
+        // learns the construct is unsupported here, and the interpreter still
+        // runs it.
+        if self.capture_index(name).is_some() {
+            return Err(format!(
+                "the C target cannot assign to a captured variable ('{}'): \
+                 a closure's captured values are copies here and the enclosing \
+                 function would not see the assignment",
+                name
+            ));
+        }
         let v = self.value(e)?;
         let target = if self.is_local(name) {
             self.c_ident(name)
@@ -1049,7 +1089,7 @@ impl Gen {
         let t = self.fresh("t");
         let lv = self.fresh("l");
         let hv = self.fresh("h");
-        let pre = format!(
+        let _pre = format!(
             "{{ {} = {}; rak_val {} = {}; {} = rak_array_of((rak_val[]){{}}, 0); }}",
             t,
             l.expr,
@@ -1241,7 +1281,13 @@ impl Gen {
         let env_items: Vec<String> = captures
             .iter()
             .map(|c| {
-                if self.is_local(c) {
+                // A name the *enclosing* closure captured is read out of that
+                // closure's environment, not out of a C variable: there is no
+                // C variable for it, because the enclosing function that had
+                // one is a frame away and gone.
+                if let Some(j) = self.capture_index(c) {
+                    format!("rak_env_get(env, {})", j)
+                } else if self.is_local(c) {
                     format!("rak_dup({})", self.c_ident(c))
                 } else if self.is_global(c) {
                     format!("rak_dup({})", self.c_global(c))
@@ -1264,9 +1310,13 @@ impl Gen {
         for p in params {
             self.declare(&p.name);
         }
+        // The body reads the captured names out of the environment, so the
+        // capture list has to be in force while it is emitted.
+        let saved_captures = std::mem::replace(&mut self.captures, captures.clone());
         for s in body {
             self.emit_stmt(&mut body_out, s)?;
         }
+        self.captures = saved_captures;
         self.drop_scope(&mut body_out);
         // Only the declarations minted *during* this body (from `decls_start`
         // on) belong to this definition; earlier ones belong to the enclosing
@@ -1322,7 +1372,11 @@ impl Gen {
         let env_items: Vec<String> = captures
             .iter()
             .map(|c| {
-                if self.is_local(c) {
+                // As in `function_value`: a name the enclosing closure
+                // captured comes out of that closure's environment.
+                if let Some(j) = self.capture_index(c) {
+                    format!("rak_env_get(env, {})", j)
+                } else if self.is_local(c) {
                     format!("rak_dup({})", self.c_ident(c))
                 } else if self.is_global(c) {
                     format!("rak_dup({})", self.c_global(c))
@@ -1344,12 +1398,15 @@ impl Gen {
         for p in params {
             self.declare(&p.name);
         }
+        // The body reads the captured names out of the environment.
+        let saved_captures = std::mem::replace(&mut self.captures, captures.clone());
         for line in &body_val.pre {
             body_out.push_str("    ");
             body_out.push_str(line);
             body_out.push('\n');
         }
         body_out.push_str(&format!("    return {};\n", body_val.expr));
+        self.captures = saved_captures;
         self.drop_scope(&mut body_out);
         let body_decls = if self.pending_decls.len() > decls_start {
             self.pending_decls.split_off(decls_start)
@@ -1417,7 +1474,7 @@ impl Gen {
                 let t = self.fresh("rest");
                 lines.push(format!("rak_val {} = rak_array_of((rak_val[]){{}}, 0);", t));
                 lines.push(format!("for (int _i = {}; _i < argc; _i++) {{", idx));
-                lines.push(format!("  rak_val _a = rak_dup(args[_i]);",));
+                lines.push("  rak_val _a = rak_dup(args[_i]);".to_string());
                 lines.push(format!("  {} = bi_push((rak_val[]){{{}, _a}}, 2);", t, t));
                 lines.push("}".to_string());
                 lines.push(format!("{} = rak_dup({});", self.c_ident(&p.name), t));
@@ -1459,22 +1516,22 @@ impl Gen {
         let c = self.value(cond)?;
         let t = self.fresh("t");
         let mut pre = c.pre;
-        pre.push(format!("{{"));
+        pre.push("{".to_string());
         pre.push(format!("  rak_val _c = {};", c.expr));
-        pre.push(format!("  if (rak_truthy(_c)) {{"));
-        pre.push(format!("    rak_drop(_c);"));
+        pre.push("  if (rak_truthy(_c)) {".to_string());
+        pre.push("    rak_drop(_c);".to_string());
         pre.push(format!("    {}", self.block_value_stmts(then_branch, &t)?));
         if let Some(else_body) = else_branch {
-            pre.push(format!("  }} else {{"));
+            pre.push("  } else {".to_string());
             pre.push(format!("    {}", self.block_value_stmts(else_body, &t)?));
-            pre.push(format!("  }}"));
+            pre.push("  }".to_string());
         } else {
             // An if without an else evaluates to nil — the only branch left.
-            pre.push(format!("  }} else {{"));
+            pre.push("  } else {".to_string());
             pre.push(format!("    {} = rak_nil();", t));
-            pre.push(format!("  }}"));
+            pre.push("  }".to_string());
         }
-        pre.push(format!("}}"));
+        pre.push("}".to_string());
         Ok(Emit {
             pre,
             expr: format!("rak_dup({})", t),
@@ -1492,11 +1549,11 @@ impl Gen {
         // `self.temp` at the goto/label sites gave them different numbers.
         let end_label = self.fresh("match_end");
         let mut pre = v.pre;
-        pre.push(format!("{{"));
+        pre.push("{".to_string());
         pre.push(format!("  rak_val _m = {};", v.expr));
         for (i, (pat, guard, body)) in arms.iter().enumerate() {
-            pre.push(format!("  {{"));
-            pre.push(format!("    int _ok = 1;"));
+            pre.push("  {".to_string());
+            pre.push("    int _ok = 1;".to_string());
             let mut binds = Vec::new();
             // `emit_pattern` writes to a buffer; this builder collects into
             // `pre`, which is what the value-producing match assembles.
@@ -1513,20 +1570,20 @@ impl Gen {
                     gv.expr, gv.expr
                 ));
             }
-            pre.push(format!("    if (_ok) {{"));
+            pre.push("    if (_ok) {".to_string());
             pre.push(format!("      {}", self.block_value_stmts(body, &t)?));
-            pre.push(format!("      rak_drop(_m);"));
+            pre.push("      rak_drop(_m);".to_string());
             pre.push(format!("      goto {};", end_label));
-            pre.push(format!("    }}"));
+            pre.push("    }".to_string());
             // Bind drops are emitted by the scope exit: `emit_pattern`
             // declared each binding, so a manual drop here would free the
             // value twice.
-            pre.push(format!("  }}"));
+            pre.push("  }".to_string());
             let _ = i;
         }
-        pre.push(format!("  rak_drop(_m);"));
+        pre.push("  rak_drop(_m);".to_string());
         pre.push(format!("  {}: ;", end_label));
-        pre.push(format!("}}"));
+        pre.push("}".to_string());
         Ok(Emit {
             pre,
             expr: format!("rak_dup({})", t),
@@ -1536,9 +1593,9 @@ impl Gen {
     fn block_expr(&mut self, body: &[Stmt]) -> Result<Emit, String> {
         let t = self.fresh("t");
         let mut pre = Vec::new();
-        pre.push(format!("{{"));
+        pre.push("{".to_string());
         pre.push(format!("  {}", self.block_value_stmts(body, &t)?));
-        pre.push(format!("}}"));
+        pre.push("}".to_string());
         Ok(Emit {
             pre,
             expr: format!("rak_dup({})", t),
@@ -1569,7 +1626,7 @@ impl Gen {
     fn try_expr(&mut self, inner: &Expr) -> Result<Emit, String> {
         let v = self.value(inner)?;
         let t = self.fresh("t");
-        let pre = format!(
+        let _pre = format!(
             "{{ {} = {}; {} = rak_call({}, 1, (rak_val[]){{{}}}); }}",
             t, v.expr, t, t, t
         );
@@ -1590,19 +1647,19 @@ impl Gen {
         let c = self.value(cond)?;
         let t = self.fresh("t");
         let mut pre = c.pre;
-        pre.push(format!("{{"));
+        pre.push("{".to_string());
         pre.push(format!("  rak_val _c = {};", c.expr));
-        pre.push(format!("  if (rak_truthy(_c)) {{"));
-        pre.push(format!("    rak_drop(_c);"));
+        pre.push("  if (rak_truthy(_c)) {".to_string());
+        pre.push("    rak_drop(_c);".to_string());
         let tv = self.value(then)?;
         pre.extend(tv.pre);
         pre.push(format!("    {} = {};", t, tv.expr));
-        pre.push(format!("  }} else {{"));
+        pre.push("  } else {".to_string());
         let ev = self.value(els)?;
         pre.extend(ev.pre);
         pre.push(format!("    {} = {};", t, ev.expr));
-        pre.push(format!("  }}"));
-        pre.push(format!("}}"));
+        pre.push("  }".to_string());
+        pre.push("}".to_string());
         Ok(Emit {
             pre,
             expr: format!("rak_dup({})", t),
@@ -1613,18 +1670,18 @@ impl Gen {
         let av = self.value(a)?;
         let t = self.fresh("t");
         let mut pre = av.pre;
-        pre.push(format!("{{"));
+        pre.push("{".to_string());
         pre.push(format!("  rak_val _a = {};", av.expr));
-        pre.push(format!("  if (_a.t != RAK_NIL && _a.t != RAK_NONE) {{"));
+        pre.push("  if (_a.t != RAK_NIL && _a.t != RAK_NONE) {".to_string());
         pre.push(format!("    {} = rak_dup(_a);", t));
-        pre.push(format!("    rak_drop(_a);"));
-        pre.push(format!("  }} else {{"));
-        pre.push(format!("    rak_drop(_a);"));
+        pre.push("    rak_drop(_a);".to_string());
+        pre.push("  } else {".to_string());
+        pre.push("    rak_drop(_a);".to_string());
         let bv = self.value(b)?;
         pre.extend(bv.pre);
         pre.push(format!("    {} = {};", t, bv.expr));
-        pre.push(format!("  }}"));
-        pre.push(format!("}}"));
+        pre.push("  }".to_string());
+        pre.push("}".to_string());
         Ok(Emit {
             pre,
             expr: format!("rak_dup({})", t),
@@ -1740,7 +1797,7 @@ impl Gen {
                 Self::c_str_lit(fname)
             ));
         }
-        pre.push(format!("}}"));
+        pre.push("}".to_string());
         Ok(Emit {
             pre,
             expr: format!("rak_dup({})", t),
@@ -1785,7 +1842,7 @@ impl Gen {
         let mut part_idx = 0;
         let mut lit_start = 0usize;
         let mut lit_len = 0usize;
-        let mut flush_lit = |pre: &mut Vec<String>, lit: &str| {
+        let flush_lit = |pre: &mut Vec<String>, lit: &str| {
             if !lit.is_empty() {
                 pre.push(format!(
                     "{{ rak_val _l = rak_strn({}, {}); {} = rak_add({}, _l); }}",
@@ -1808,7 +1865,7 @@ impl Gen {
                 flush_lit(&mut pre, lit);
                 lit_len = 0;
                 // Skip to the closing brace.
-                while let Some((_, c2)) = char_indices.next() {
+                for (_, c2) in char_indices.by_ref() {
                     if c2 == '}' {
                         break;
                     }
@@ -1837,7 +1894,7 @@ impl Gen {
         }
         let lit = &template[lit_start..lit_start + lit_len];
         flush_lit(&mut pre, lit);
-        pre.push(format!("}}"));
+        pre.push("}".to_string());
         Ok(Emit {
             pre,
             expr: format!("rak_dup({})", t),
@@ -1900,7 +1957,7 @@ impl Gen {
                 kv.expr, vv.expr, t
             ));
         }
-        pre.push(format!("}}"));
+        pre.push("}".to_string());
         Ok(Emit {
             pre,
             expr: format!("rak_dup({})", t),
@@ -2229,12 +2286,7 @@ impl Gen {
     fn emit_stmt(&mut self, out: &mut String, stmt: &Stmt) -> Result<(), String> {
         let ind = self.indent();
         match stmt {
-            Stmt::Let {
-                name,
-                value,
-                mutable,
-                ..
-            } => {
+            Stmt::Let { name, value, .. } => {
                 let v = self.emit_expr(value, out)?;
                 if self.is_local(name) {
                     out.push_str(&format!(
@@ -2243,11 +2295,25 @@ impl Gen {
                         self.c_ident(name),
                         v
                     ));
-                } else {
-                    // Top-level or function-level let: declare a local.
-                    self.declare(name);
-                    out.push_str(&format!("{}{} {} = {};\n", ind, "", self.c_ident(name), v));
-                }
+                    } else {
+                        // Top-level or function-level let: declare a local.
+                        //
+                        // The declaration needs the type. Without it this
+                        // emitted a bare `v_x = ...`, which is an assignment
+                        // to a variable that was never declared -- so the C
+                        // compiler rejected the program, and *any* function
+                        // with a local was unbuildable through this target.
+                        // The two branches below are the two halves of one
+                        // binding: this one declares the variable, the other
+                        // assigns to it again.
+                        self.declare(name);
+                        out.push_str(&format!(
+                            "{}rak_val {} = {};\n",
+                            ind,
+                            self.c_ident(name),
+                            v
+                        ));
+                    }
                 Ok(())
             }
             Stmt::Expr(e) => {
@@ -2826,8 +2892,14 @@ impl Gen {
     fn collect_captures_expr(&mut self, e: &Expr, params: &HashSet<&str>, out: &mut Vec<String>) {
         match e {
             Expr::Ident(name) => {
+                // Only a *local* of the enclosing function needs capturing. A
+                // global is read from its own C variable when the closure
+                // runs, so capturing it would freeze a snapshot of it at
+                // closure-creation time -- and a closure that read a global
+                // would see a different value from the interpreter, which
+                // reads the global when the closure is called.
                 if !params.contains(name.as_str())
-                    && (self.is_local(name) || self.is_global(name))
+                    && self.is_local(name)
                     && !out.contains(name)
                 {
                     out.push(name.clone());

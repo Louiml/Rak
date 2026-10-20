@@ -8,16 +8,39 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
+#[cfg(feature = "async")]
 fn async_runtime() -> &'static tokio::runtime::Runtime {
     crate::async_rt::runtime()
+}
+
+/// Wrap a Tokio task in the resolver a pending future carries.
+///
+/// The future's state is a boxed closure rather than a `JoinHandle` so the
+/// value model does not name Tokio, which keeps the browser build - where there
+/// is no runtime - compiling the same interpreter.
+#[cfg(feature = "async")]
+fn pending_from_task(
+    jh: tokio::task::JoinHandle<Value>,
+) -> Box<dyn FnOnce() -> crate::Result<Value> + Send + 'static> {
+    Box::new(move || {
+        async_runtime()
+            .block_on(jh)
+            .map_err(|e| crate::RakError::Runtime(format!("await: task failed: {}", e)))
+    })
 }
 
 /// The state of a `Value::Future`. A future is either already resolved, pending
 /// on a Tokio task (async I/O builtins), or a deferred `async fn` body that the
 /// interpreter runs on the first `await`.
+///
+/// The pending case holds a *resolver* rather than a Tokio `JoinHandle`
+/// directly, so the type does not depend on Tokio being compiled in. With
+/// Tokio (the normal build) the resolver blocks on the task's `JoinHandle`;
+/// without it - the browser build - the async builtins that would create one
+/// are not registered at all, so a future is never pending on a task.
 pub enum FutureState {
     Ready(Value),
-    Pending(tokio::task::JoinHandle<Value>),
+    Pending(Box<dyn FnOnce() -> crate::Result<Value> + Send + 'static>),
     Deferred {
         params: Vec<Param>,
         body: Vec<Stmt>,
@@ -87,6 +110,11 @@ pub fn call_in_env(func: Value, env: Env, args: Vec<Value>) -> crate::Result<Val
 /// Anything not in this table is an error naming what *is* available. Returning
 /// an "unknown instruction" error rather than a wrong answer matters: a
 /// silently-ignored instruction would look like a working feature.
+///
+/// The real instructions are x86-64 only, so the body is compiled for that
+/// target alone. Elsewhere the intrinsic still exists and still names what it
+/// cannot do, rather than disappearing.
+#[cfg(target_arch = "x86_64")]
 fn asm_intrinsic(template: &str, value: i64) -> crate::Result<i64> {
     use std::arch::x86_64;
     let key = template.to_ascii_lowercase().replace(' ', "_");
@@ -133,6 +161,22 @@ fn asm_intrinsic(template: &str, value: i64) -> crate::Result<i64> {
             other
         ))),
     }
+}
+
+/// The `asm` intrinsic, on a target with no x86-64 to read.
+///
+/// The instructions are CPU-feature probes and a raw timestamp read; there is
+/// nothing to report on a target that has neither, so the answer says so
+/// instead of inventing a value.
+#[cfg(not(target_arch = "x86_64"))]
+fn asm_intrinsic(template: &str, _value: i64) -> crate::Result<i64> {
+    Err(crate::RakError::Runtime(format!(
+        "asm: '{}' is an x86-64 instruction, and this build targets {}. \
+         The available instructions are cpuid_sse2, cpuid_pclmulqdq, cpuid_aes, \
+         cpuid_rdrand, rdtsc, rdtscp_aux, tsc_invariant_hz, add.",
+        template,
+        std::env::consts::ARCH
+    )))
 }
 
 /// The invariant-TSC frequency in Hz, where the platform reports one.
@@ -213,6 +257,7 @@ pub struct LinesStream {
 impl LinesStream {
     pub fn open(path: &str) -> crate::Result<Self> {
         use std::io::BufRead;
+        crate::caps::check_fs_root(path).map_err(crate::RakError::Runtime)?;
         let f = std::fs::File::open(path)
             .map_err(|e| crate::RakError::Runtime(format!("read_lines: {}: {}", path, e)))?;
         Ok(LinesStream {
@@ -851,7 +896,6 @@ impl fmt::Display for Value {
     }
 }
 
-#[derive(Clone)]
 pub struct Env {
     global: Arc<Mutex<HashMap<String, Value>>>,
     scopes: Vec<HashMap<String, Value>>,
@@ -859,6 +903,32 @@ pub struct Env {
     immutable_scopes: Arc<Mutex<Vec<HashSet<String>>>>,
     /// Names bound as immutable at global scope.
     global_immutable: Arc<Mutex<HashSet<String>>>,
+}
+
+/// Copy the environment, with the copy-of-environment semantics a closure
+/// relies on.
+///
+/// The global cell and the global's immutability are *shared*: a closure reads
+/// and writes the program's globals, not a copy of them, so a closure that
+/// assigns to a global is seen by everybody.
+///
+/// The scopes are copied, and so is the immutability that goes with them. That
+/// pairing used to be broken: the immutability sets were shared while the
+/// scopes were not, and the two are consulted by index -- a closure pushes a
+/// scope of its own, so the indices no longer lined up, and an immutable
+/// binding captured by a closure was silently treated as mutable. A closure
+/// could then assign to a `let` it had captured, and nothing said so.
+impl Clone for Env {
+    fn clone(&self) -> Self {
+        Env {
+            global: self.global.clone(),
+            scopes: self.scopes.clone(),
+            immutable_scopes: Arc::new(Mutex::new(
+                self.immutable_scopes.lock().unwrap().clone(),
+            )),
+            global_immutable: self.global_immutable.clone(),
+        }
+    }
 }
 
 impl Default for Env {
@@ -1007,11 +1077,6 @@ pub struct Interpreter {
     program_argv: Vec<String>,
     /// Captured `fn main` value (if defined) so a CLI entry survives scope pop.
     main_entry: Option<Value>,
-    /// Lines at which `run_debug` should pause (1-based).
-    debug_breakpoints: HashSet<u32>,
-    /// When in `run_debug`, the handler is invoked at each statement boundary
-    /// with (file, line, env); returns whether to stop (await user input).
-    debug_active: bool,
     returning: bool,
     return_value: Value,
     #[cfg(feature = "gui")]
@@ -1267,6 +1332,12 @@ impl Drop for LoopGuard {
     }
 }
 
+impl Default for Interpreter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Interpreter {
     /// Install resource ceilings for bounded execution. Passing
     /// `Limits::default()` restores unlimited execution.
@@ -1311,8 +1382,6 @@ impl Interpreter {
             limits: Limits::default(),
             call_depth: 0,
             main_entry: None,
-            debug_breakpoints: HashSet::new(),
-            debug_active: false,
             returning: false,
             return_value: Value::Nil,
             #[cfg(feature = "gui")]
@@ -1347,8 +1416,6 @@ impl Interpreter {
             limits: Limits::default(),
             call_depth: 0,
             main_entry: None,
-            debug_breakpoints: HashSet::new(),
-            debug_active: false,
             returning: false,
             return_value: Value::Nil,
             #[cfg(feature = "gui")]
@@ -2018,10 +2085,10 @@ impl Interpreter {
                 else_branch,
             } => {
                 let v = self.eval_expr(value)?;
-                let matched = self.pattern_matches(&pattern, &v)?;
+                let matched = self.pattern_matches(pattern, &v)?;
                 if matched {
                     self.env.push_scope();
-                    self.bind_pattern(&pattern, &v)?;
+                    self.bind_pattern(pattern, &v)?;
                     for s in then_branch {
                         self.exec_stmt(s)?;
                         if self.returning {
@@ -2060,7 +2127,7 @@ impl Interpreter {
                         self.env.pop_scope();
                         break;
                     }
-                    let ctrl = self.resolve_loop_signal(&label);
+                    let ctrl = self.resolve_loop_signal(label);
                     self.env.pop_scope();
                     if ctrl == LoopCtrl::Break {
                         break;
@@ -2087,7 +2154,7 @@ impl Interpreter {
                         self.env.pop_scope();
                         break;
                     }
-                    let ctrl = self.resolve_loop_signal(&label);
+                    let ctrl = self.resolve_loop_signal(label);
                     self.env.pop_scope();
                     if ctrl == LoopCtrl::Break {
                         break;
@@ -2133,7 +2200,7 @@ impl Interpreter {
                 loop {
                     let v = self.eval_expr(value)?;
                     self.env.push_scope();
-                    if !self.pattern_matches(&pattern, &v)? {
+                    if !self.pattern_matches(pattern, &v)? {
                         self.env.pop_scope();
                         break;
                     }
@@ -2142,7 +2209,7 @@ impl Interpreter {
                         self.env.pop_scope();
                         return Err(e);
                     }
-                    self.bind_pattern(&pattern, &v)?;
+                    self.bind_pattern(pattern, &v)?;
                     for s in body {
                         self.exec_stmt(s)?;
                         if self.returning {
@@ -2302,6 +2369,7 @@ impl Interpreter {
                     match &target_val {
                         Value::String(path) => {
                             crate::caps::check_builtin("dump:file_write")?;
+                            crate::caps::check_fs_root(path).map_err(crate::RakError::Runtime)?;
                             let s = self.display_value(&val)?;
                             match std::fs::write(path, s) {
                                 Ok(_) => self.output.push(format!("[DUMP] Written to {}", path)),
@@ -2896,7 +2964,7 @@ impl Interpreter {
 
         self.env.push_scope();
         self.env
-            .define(name.to_string().as_str(), Value::Bytes(key.clone().into()));
+            .define(name.to_string().as_str(), Value::Bytes(key.clone()));
         let udp_value = Value::UdpTransport(std::sync::Arc::new(transport));
         self.env.define(format!("{}_udp", name).as_str(), udp_value);
         self.env.define(
@@ -2904,7 +2972,7 @@ impl Interpreter {
             Value::String(local.to_string()),
         );
         // Expose a stable bare `tunnel_key` alias inside the block too.
-        self.env.define("tunnel_key", Value::Bytes(key.into()));
+        self.env.define("tunnel_key", Value::Bytes(key));
         for s in body {
             self.exec_stmt(s)?;
             if self.returning {
@@ -3184,7 +3252,7 @@ impl Interpreter {
                             let v = self.eval_expr(&parts[idx])?;
                             result.push_str(&v.to_string());
                             idx += 1;
-                            while let Some(c2) = chars.next() {
+                            for c2 in chars.by_ref() {
                                 if c2 == '}' {
                                     break;
                                 }
@@ -3621,7 +3689,7 @@ impl Interpreter {
                     )));
                 }
                 let mut last = Value::Nil;
-                for (t, v) in targets.iter().zip(vals.into_iter()) {
+                for (t, v) in targets.iter().zip(vals) {
                     match t {
                         Expr::Ident(name) => self.env.assign(name, v.clone())?,
                         _ => self.store_back(t, v.clone())?,
@@ -4017,7 +4085,7 @@ impl Interpreter {
         for f in &fields {
             bit = self.encode_field(name, f, &map, &mut out, bit)?;
         }
-        if bit % 8 != 0 {
+        if !bit.is_multiple_of(8) {
             out.push(0); // flush a trailing partial byte (zero-padded)
         }
         Ok(Value::Bytes(out))
@@ -4098,7 +4166,7 @@ impl Interpreter {
                 let nbytes = (*bits as usize) / 8;
                 let mut v = n;
                 if signed {
-                    v = v & (u64::MAX >> (64 - *bits as u32));
+                    v &= u64::MAX >> (64 - *bits as u32);
                 }
                 let buf: Vec<u8> = match endian {
                     Endian::Big => (0..nbytes)
@@ -4531,7 +4599,18 @@ impl Interpreter {
                     }
                 }
                 Err(e) => {
-                    failed = Some(format!("{} (evaluating it failed: {})", expr_str(c), e));
+                    // The *message*, not the error's `Display`. `RakError`'s
+                    // display carries a kind prefix ("Runtime error: ", "Raised: "),
+                    // and that prefix is how this backend reports a failure to a
+                    // human -- it is not part of the message. The VM backend has
+                    // no such prefix, so quoting the display here would make the
+                    // same postcondition failure read differently on the two
+                    // backends.
+                    failed = Some(format!(
+                        "{} (evaluating it failed: {})",
+                        expr_str(c),
+                        error_message(&e)
+                    ));
                     break;
                 }
             }
@@ -4840,10 +4919,8 @@ impl Interpreter {
         let state = std::mem::replace(&mut *handle.state.lock().unwrap(), FutureState::Polled);
         match state {
             FutureState::Ready(v) => Ok(v),
-            FutureState::Pending(jh) => {
-                let joined = async_runtime()
-                    .block_on(async { jh.await })
-                    .map_err(|e| crate::RakError::Runtime(format!("await: task failed: {}", e)))?;
+            FutureState::Pending(resolve) => {
+                let joined = resolve()?;
                 *handle.state.lock().unwrap() = FutureState::Ready(joined.clone());
                 Ok(joined)
             }
@@ -4898,17 +4975,10 @@ impl Interpreter {
                 });
                 Ok(th)
             }
-            FutureState::Pending(jh) => {
+            FutureState::Pending(resolve) => {
                 let th = std::thread::spawn(move || {
                     let _p = permit.acquire();
-                    let _ = jh;
-                    match async_runtime().block_on(async { jh.await }) {
-                        Ok(v) => Ok(v),
-                        Err(e) => Err(crate::RakError::Runtime(format!(
-                            "async task failed: {}",
-                            e
-                        ))),
-                    }
+                    resolve()
                 });
                 Ok(th)
             }
@@ -4950,9 +5020,7 @@ impl Interpreter {
                         }
                         Ok(())
                     })();
-                    if let Err(e) = r {
-                        return Err(e);
-                    }
+                    r?;
                     let ret = if interp.returning {
                         std::mem::replace(&mut interp.return_value, Value::Nil)
                     } else {
@@ -6215,7 +6283,7 @@ impl Interpreter {
         }
         match name {
             "assert_eq" => {
-                let a = args.get(0).cloned().unwrap_or(Value::Nil);
+                let a = args.first().cloned().unwrap_or(Value::Nil);
                 let b = args.get(1).cloned().unwrap_or(Value::Nil);
                 if a != b {
                     return Err(crate::RakError::Runtime(format!(
@@ -6226,7 +6294,7 @@ impl Interpreter {
                 Ok(Value::Bool(true))
             }
             "assert_ne" => {
-                let a = args.get(0).cloned().unwrap_or(Value::Nil);
+                let a = args.first().cloned().unwrap_or(Value::Nil);
                 let b = args.get(1).cloned().unwrap_or(Value::Nil);
                 if a == b {
                     return Err(crate::RakError::Runtime(format!(
@@ -6237,7 +6305,7 @@ impl Interpreter {
                 Ok(Value::Bool(true))
             }
             "assert_true" => {
-                let a = args.get(0).cloned().unwrap_or(Value::Nil);
+                let a = args.first().cloned().unwrap_or(Value::Nil);
                 if !is_truthy(&a) {
                     return Err(crate::RakError::Runtime(
                         "assertion failed: assert_true()".to_string(),
@@ -6246,7 +6314,7 @@ impl Interpreter {
                 Ok(Value::Bool(true))
             }
             "assert_false" => {
-                let a = args.get(0).cloned().unwrap_or(Value::Nil);
+                let a = args.first().cloned().unwrap_or(Value::Nil);
                 if is_truthy(&a) {
                     return Err(crate::RakError::Runtime(
                         "assertion failed: assert_false()".to_string(),
@@ -6278,8 +6346,8 @@ impl Interpreter {
                     .unwrap_or_else(|| "panic".to_string());
                 Err(crate::RakError::Runtime(format!("panic: {}", msg)))
             }
-            "report" => return self.builtin_report(args),
-            "cite" => return self.builtin_cite(args),
+            "report" => self.builtin_report(args),
+            "cite" => self.builtin_cite(args),
             "strip_evidence" => {
                 let v = args.first().cloned().unwrap_or(Value::Nil);
                 Ok(unwrap_evidence(&v))
@@ -6309,6 +6377,9 @@ impl Interpreter {
                 )))
             }
             "sql_escape" => Ok(Value::String(rak_stdlib::escape::sql_escape(
+                &self.val_to_string(args.first())?,
+            ))),
+            "sql_escape_mysql" => Ok(Value::String(rak_stdlib::escape::sql_escape_mysql(
                 &self.val_to_string(args.first())?,
             ))),
             "shell_escape" => Ok(Value::String(rak_stdlib::escape::shell_escape(
@@ -6886,17 +6957,23 @@ impl Interpreter {
                 }
                 Ok(Value::Array(out))
             }
-            "read" => match std::fs::read_to_string(self.val_to_string(args.first())?) {
-                Ok(c) => Ok(Value::String(c)),
-                Err(e) => Err(crate::RakError::Runtime(format!("Read error: {}", e))),
-            },
-            "write" => match std::fs::write(
-                self.val_to_string(args.first())?,
-                self.val_to_string(args.get(1))?,
-            ) {
-                Ok(_) => Ok(Value::Bool(true)),
-                Err(e) => Err(crate::RakError::Runtime(format!("Write error: {}", e))),
-            },
+            "read" => {
+                let path = self.val_to_string(args.first())?;
+                crate::caps::check_fs_root(&path).map_err(crate::RakError::Runtime)?;
+                match std::fs::read_to_string(&path) {
+                    Ok(c) => Ok(Value::String(c)),
+                    Err(e) => Err(crate::RakError::Runtime(format!("Read error: {}", e))),
+                }
+            }
+            "write" => {
+                let path = self.val_to_string(args.first())?;
+                let content = self.val_to_string(args.get(1))?;
+                crate::caps::check_fs_root(&path).map_err(crate::RakError::Runtime)?;
+                match std::fs::write(&path, &content) {
+                    Ok(_) => Ok(Value::Bool(true)),
+                    Err(e) => Err(crate::RakError::Runtime(format!("Write error: {}", e))),
+                }
+            }
             "file_read" => match rak_stdlib::file::read(&self.val_to_string(args.first())?) {
                 Ok(c) => Ok(Value::String(c)),
                 Err(e) => Err(crate::RakError::Runtime(format!("{}", e))),
@@ -7277,12 +7354,12 @@ impl Interpreter {
                                 break;
                             }
                         }
-                        let ret = if interp.returning {
+
+                        if interp.returning {
                             std::mem::replace(&mut interp.return_value, Value::Nil)
                         } else {
                             Value::Nil
-                        };
-                        ret
+                        }
                     });
                     let _ = params;
                     Ok(Value::JoinHandle(Arc::new(Mutex::new(Some(handle)))))
@@ -7577,7 +7654,7 @@ impl Interpreter {
             }
             "to_string" => Ok(Value::String(self.val_to_string(args.first())?)),
             "extern_call" => {
-                let fname = self.val_to_string(args.get(0))?;
+                let fname = self.val_to_string(args.first())?;
                 Err(crate::RakError::Runtime(format!(
                     "extern_call(\"{}\"): C FFI bindings are not linked into this build. Link the generated Rust wrapper to enable it.",
                     fname
@@ -7677,15 +7754,8 @@ impl Interpreter {
                 Ok(Value::Nil)
             }
             #[cfg(not(feature = "gui"))]
-            "gui_window"
-            | "gui_add"
-            | "gui_set_text"
-            | "gui_get_text"
-            | "gui_set_visible"
-            | "gui_on_click"
-            | "gui_close"
-            | "gui_wait"
-            | "gui_callback" => {
+            "gui_window" | "gui_add" | "gui_set_text" | "gui_get_text" | "gui_set_visible"
+            | "gui_on_click" | "gui_close" | "gui_wait" | "gui_callback" => {
                 Err(crate::RakError::Runtime(
                     "GUI support not enabled (build with --features gui)".to_string(),
                 ))
@@ -8009,6 +8079,11 @@ impl Interpreter {
                 ))
             }
             // --- Async I/O (Tokio-backed futures) ---
+            //
+            // Gated on the `async` feature. A browser has no event loop to
+            // drive and Tokio's multi-thread runtime does not build for wasm, so
+            // in that build these builtins are not registered at all.
+            #[cfg(feature = "async")]
             "http_get_async" => {
                 let url = self.val_to_string(args.first())?;
                 let jh = async_runtime().spawn_blocking(move || {
@@ -8018,20 +8093,22 @@ impl Interpreter {
                     }
                 });
                 Ok(Value::Future(Arc::new(FutureHandle {
-                    state: Mutex::new(FutureState::Pending(jh)),
+                    state: Mutex::new(FutureState::Pending(pending_from_task(jh))),
                 })))
             }
+            #[cfg(feature = "async")]
             "tcp_probe" => {
                 let host = self.val_to_string(args.first())?;
                 let port = args.get(1).and_then(|v| v.as_u64()).unwrap_or(80) as u16;
-                let timeout_ms = args.get(2).and_then(|v| v.as_u64()).unwrap_or(1000) as u64;
+                let timeout_ms = args.get(2).and_then(|v| v.as_u64()).unwrap_or(1000);
                 let jh = async_runtime().spawn_blocking(move || {
                     Value::Bool(rak_stdlib::net::tcp_scan(&host, port, timeout_ms))
                 });
                 Ok(Value::Future(Arc::new(FutureHandle {
-                    state: Mutex::new(FutureState::Pending(jh)),
+                    state: Mutex::new(FutureState::Pending(pending_from_task(jh))),
                 })))
             }
+            #[cfg(feature = "async")]
             "tcp_connect_async" => {
                 let addr = self.val_to_string(args.first())?;
                 let jh = async_runtime().spawn_blocking(move || {
@@ -8045,7 +8122,7 @@ impl Interpreter {
                     }
                 });
                 Ok(Value::Future(Arc::new(FutureHandle {
-                    state: Mutex::new(FutureState::Pending(jh)),
+                    state: Mutex::new(FutureState::Pending(pending_from_task(jh))),
                 })))
             }
             // --- Raw sockets / packet forging ---
@@ -8383,8 +8460,8 @@ impl Interpreter {
             }
             // --- Async orchestration ---
             "await_all" => {
-                let arr = match args.first().map(|v| v.clone()).unwrap_or(Value::Nil) {
-                    Value::Array(items) => items.iter().cloned().collect::<Vec<_>>(),
+                let arr = match args.first().cloned().unwrap_or(Value::Nil) {
+                    Value::Array(items) => items.to_vec(),
                     other => {
                         return Err(crate::RakError::Runtime(format!(
                             "await_all: expected an array of futures, got {}",
@@ -8400,8 +8477,8 @@ impl Interpreter {
                 Ok(Value::Array(results))
             }
             "select" => {
-                let arr = match args.first().map(|v| v.clone()).unwrap_or(Value::Nil) {
-                    Value::Array(items) => items.iter().cloned().collect::<Vec<_>>(),
+                let arr = match args.first().cloned().unwrap_or(Value::Nil) {
+                    Value::Array(items) => items.to_vec(),
                     other => {
                         return Err(crate::RakError::Runtime(format!(
                             "select: expected an array of futures, got {}",
@@ -8418,7 +8495,10 @@ impl Interpreter {
                     handles.push(self.drive_future_concurrent(f)?);
                 }
                 // Race all tasks to a shared channel; the first producer wins.
-                let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<(usize, Value)>();
+                // `std::sync::mpsc` rather than Tokio's: the race is between OS
+                // threads, not tasks, so a blocking channel is the right shape
+                // and it keeps this off the async runtime.
+                let (tx, rx) = std::sync::mpsc::channel::<(usize, Value)>();
                 for (i, h) in handles.into_iter().enumerate() {
                     let tx = tx.clone();
                     std::thread::spawn(move || {
@@ -8431,15 +8511,13 @@ impl Interpreter {
                     });
                 }
                 drop(tx);
-                let (idx, val) = async_runtime()
-                    .block_on(async move { rx.recv().await })
-                    .ok_or_else(|| {
-                        crate::RakError::Runtime("select: no future resolved".to_string())
-                    })?;
+                let (idx, val) = rx.recv().map_err(|_| {
+                    crate::RakError::Runtime("select: no future resolved".to_string())
+                })?;
                 Ok(Value::Tuple(vec![Value::Int(idx as i64), val]))
             }
             "timeout" => {
-                let future = args.first().map(|v| v.clone()).unwrap_or(Value::Nil);
+                let future = args.first().cloned().unwrap_or(Value::Nil);
                 let ms = args.get(1).and_then(|v| v.as_u64()).unwrap_or(1000);
                 match self.drive_future_concurrent(future) {
                     Ok(h) => {
@@ -8494,6 +8572,7 @@ impl Interpreter {
                     Err(e) => Err(e),
                 }
             }
+            #[cfg(feature = "async")]
             "async_sleep" => {
                 let ms = args.first().and_then(|v| v.as_u64()).unwrap_or(0);
                 let h = async_runtime().spawn(async move {
@@ -8501,16 +8580,17 @@ impl Interpreter {
                     Value::Nil
                 });
                 Ok(Value::Future(Arc::new(FutureHandle {
-                    state: Mutex::new(FutureState::Pending(h)),
+                    state: Mutex::new(FutureState::Pending(pending_from_task(h))),
                 })))
             }
+            #[cfg(feature = "async")]
             "async_yield" => {
                 let h = async_runtime().spawn(async move {
                     tokio::task::yield_now().await;
                     Value::Nil
                 });
                 Ok(Value::Future(Arc::new(FutureHandle {
-                    state: Mutex::new(FutureState::Pending(h)),
+                    state: Mutex::new(FutureState::Pending(pending_from_task(h))),
                 })))
             }
             "task_group" => {
@@ -8519,8 +8599,8 @@ impl Interpreter {
                 // bounded parallelism. Each function is called with no args in its
                 // own Interpreter; results are joined in input order. An error in
                 // any member propagates (fail-fast) after all dispatched tasks settle.
-                let fns = match args.first().map(|v| v.clone()).unwrap_or(Value::Nil) {
-                    Value::Array(items) => items.iter().cloned().collect::<Vec<_>>(),
+                let fns = match args.first().cloned().unwrap_or(Value::Nil) {
+                    Value::Array(items) => items.to_vec(),
                     other => {
                         return Err(crate::RakError::Runtime(format!(
                             "task_group: expected an array of functions, got {}",
@@ -8577,7 +8657,7 @@ impl Interpreter {
             }
             // --- Streaming (lazy, pull-based) ---
             "stream_from_array" => {
-                let arr = match args.first().map(|v| v.clone()).unwrap_or(Value::Nil) {
+                let arr = match args.first().cloned().unwrap_or(Value::Nil) {
                     Value::Array(items) => items,
                     other => {
                         return Err(crate::RakError::Runtime(format!(
@@ -8590,12 +8670,12 @@ impl Interpreter {
             }
             "stream_map" => {
                 let inner = self.stream_handle(args.first())?;
-                let f = args.get(1).map(|v| v.clone()).unwrap_or(Value::Nil);
+                let f = args.get(1).cloned().unwrap_or(Value::Nil);
                 Ok(make_stream(MapStream { inner, f }))
             }
             "filter" => {
                 let inner = self.stream_handle(args.first())?;
-                let f = args.get(1).map(|v| v.clone()).unwrap_or(Value::Nil);
+                let f = args.get(1).cloned().unwrap_or(Value::Nil);
                 Ok(make_stream(FilterStream { inner, f }))
             }
             "take" => {
@@ -8657,8 +8737,8 @@ impl Interpreter {
             )),
             "stdin_read_line" => {
                 let mut line = String::new();
-                use std::io::Read;
-                let mut stdin = std::io::stdin();
+
+                let stdin = std::io::stdin();
                 match stdin.read_line(&mut line) {
                     Ok(0) => Ok(Value::Nil),
                     Ok(_) => Ok(Value::String(line.trim_end_matches('\n').to_string())),
@@ -8680,7 +8760,7 @@ impl Interpreter {
             // spec is a map of flag -> "bool"|"string"|"int". Handles --flag value,
             // --flag=value, and bare boolean --flag. Positional args go under "".
             "parse_args" => {
-                let spec = match args.get(0).map(|v| v.clone()) {
+                let spec = match args.first().cloned() {
                     Some(Value::Map(m)) => m.clone(),
                     _ => {
                         return Err(crate::RakError::Runtime(
@@ -8688,7 +8768,7 @@ impl Interpreter {
                         ))
                     }
                 };
-                let argv = match args.get(1).map(|v| v.clone()) {
+                let argv = match args.get(1).cloned() {
                     Some(Value::Array(a)) => a.iter().map(|v| v.to_string()).collect::<Vec<_>>(),
                     _ => self.program_argv.clone(),
                 };
@@ -8784,7 +8864,7 @@ impl Interpreter {
             }
             "zip_archive" => {
                 // files: map name -> bytes (or array of [name, bytes])
-                let files_val = args.first().map(|v| v.clone()).unwrap_or(Value::Nil);
+                let files_val = args.first().cloned().unwrap_or(Value::Nil);
                 let mut files: Vec<(String, Vec<u8>)> = Vec::new();
                 match files_val {
                     Value::Map(m) => {
@@ -8796,7 +8876,7 @@ impl Interpreter {
                         for item in a.iter() {
                             if let Value::Tuple(t) = item {
                                 if let (Some(Value::String(name)), Some(bytes)) =
-                                    (t.get(0), t.get(1))
+                                    (t.first(), t.get(1))
                                 {
                                     files.push((name.to_string(), self.val_to_bytes(Some(bytes))?));
                                 }
@@ -9608,7 +9688,7 @@ impl Interpreter {
                     result.push('{');
                 } else {
                     let mut spec = String::new();
-                    while let Some(c) = chars.next() {
+                    for c in chars.by_ref() {
                         if c == '}' {
                             break;
                         }
@@ -9714,11 +9794,11 @@ pub fn substitute_expr(expr: &Expr, bindings: &HashMap<String, Expr>) -> Expr {
             .cloned()
             .unwrap_or_else(|| Expr::MacroVar(name.clone())),
         Expr::Binary(op, l, r) => Expr::Binary(
-            op.clone(),
+            *op,
             Box::new(substitute_expr(l, bindings)),
             Box::new(substitute_expr(r, bindings)),
         ),
-        Expr::Unary(op, e) => Expr::Unary(op.clone(), Box::new(substitute_expr(e, bindings))),
+        Expr::Unary(op, e) => Expr::Unary(*op, Box::new(substitute_expr(e, bindings))),
         Expr::Call {
             callee,
             args,
@@ -10012,9 +10092,28 @@ fn collect_provenance(
     }
 }
 
+/// The error's message without the transport-level prefix.
+///
+/// `RakError`'s `Display` is a report *about* the error ("Runtime error: x",
+/// "Raised: x"). A diagnostic that embeds it inherits that prefix, and a
+/// second backend that does not use one would then report the same failure
+/// with different wording. This is the message proper.
+fn error_message(e: &crate::RakError) -> String {
+    match e {
+        crate::RakError::Lexer(s)
+        | crate::RakError::Parser(s)
+        | crate::RakError::Runtime(s)
+        | crate::RakError::Raise(s) => s.clone(),
+    }
+}
+
 /// Render an expression back to (approximate) source text for diagnostics in
 /// assertions and type errors.
-fn expr_str(e: &Expr) -> String {
+///
+/// Public to the crate because the VM backend reports the same diagnostics:
+/// a postcondition clause that fails has to name the clause, and the only
+/// text of it is what this function prints.
+pub(crate) fn expr_str(e: &Expr) -> String {
     use Expr::*;
     match e {
         Int(i) => i.to_string(),

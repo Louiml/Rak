@@ -61,6 +61,7 @@ pub fn gzip_decompress(data: &[u8]) -> Result<Vec<u8>, String> {
 
 /// One zip entry: (name, size, compressed_size).
 pub fn zip_list(path: &str) -> Result<Vec<(String, u64, u64)>, String> {
+    crate::fs_scope::check(path)?;
     let f = std::fs::File::open(path)
         .map_err(|e| format!("zip_list: cannot open '{}': {}", path, e))?;
     let mut z =
@@ -73,25 +74,54 @@ pub fn zip_list(path: &str) -> Result<Vec<(String, u64, u64)>, String> {
     Ok(out)
 }
 
-/// Read one entry's bytes out of a zip archive.
+/// Read one entry's bytes out of a zip archive, bounded by `limit`.
+///
+/// The bound is enforced while reading, for the same reason
+/// [`gzip_decompress_limited`] enforces it: the allocation is what does the
+/// damage, so the check has to happen before the buffer exists rather than
+/// after.
+///
+/// `saturating_add` rather than `+ 1`, so an explicit `usize::MAX` means
+/// "unbounded" instead of overflowing in debug and wrapping to 0 in release.
+pub fn zip_entry_limited<R: Read + std::io::Seek>(
+    archive: &mut zip::ZipArchive<R>,
+    name: &str,
+    limit: usize,
+) -> Result<Vec<u8>, String> {
+    let mut entry = archive
+        .by_name(name)
+        .map_err(|e| format!("no entry '{}' in the archive: {}", name, e))?;
+    let mut out = Vec::new();
+    let cap = (limit as u64).saturating_add(1);
+    let read = std::io::Read::take(&mut entry, cap).read_to_end(&mut out);
+    match read {
+        Ok(_) => {
+            if out.len() > limit {
+                return Err(format!(
+                    "output exceeds the {limit}-byte limit \
+                     (this looks like a decompression bomb, not a zip entry)"
+                ));
+            }
+            Ok(out)
+        }
+        Err(e) => Err(format!("reading entry '{}': {}", name, e)),
+    }
+}
+
+/// Read one entry's bytes out of a zip archive, bounded by [`MAX_DECOMPRESS`].
 pub fn zip_read(path: &str, name: &str) -> Result<Vec<u8>, String> {
+    crate::fs_scope::check(path)?;
     let f = std::fs::File::open(path)
         .map_err(|e| format!("zip_read: cannot open '{}': {}", path, e))?;
     let mut z =
         zip::ZipArchive::new(f).map_err(|e| format!("zip_read: bad zip '{}': {}", path, e))?;
-    let mut entry = z
-        .by_name(name)
-        .map_err(|e| format!("zip_read: no entry '{}' in '{}': {}", name, path, e))?;
-    let mut out = Vec::new();
-    entry
-        .read_to_end(&mut out)
-        .map_err(|e| format!("zip_read: {}", e))?;
-    Ok(out)
+    zip_entry_limited(&mut z, name, MAX_DECOMPRESS).map_err(|e| format!("zip_read: {}", e))
 }
 
 /// Create (or overwrite) a zip with the given `(name, bytes)` entries.
 /// Returns the total number of bytes written to disk.
 pub fn zip_write(path: &str, entries: &[(String, Vec<u8>)]) -> Result<usize, String> {
+    crate::fs_scope::check(path)?;
     let f = std::fs::File::create(path)
         .map_err(|e| format!("zip_write: cannot create '{}': {}", path, e))?;
     let mut w = zip::ZipWriter::new(f);
@@ -201,6 +231,71 @@ mod tests {
         assert_eq!(zip_read(&path, "a.txt").unwrap(), b"hello".to_vec());
         assert_eq!(zip_read(&path, "b.bin").unwrap(), vec![0u8, 1, 2, 0xFF]);
         assert!(zip_read(&path, "nope").is_err());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A zip entry that inflates past the limit must be refused, not
+    /// allocated.
+    ///
+    /// `zip_read` and `zip_extract` used to be a bare `read_to_end`, so a
+    /// 250 KiB archive could expand to 256 MiB in one call. `SECURITY.md`
+    /// claimed a 100 MiB ceiling on `zip_extract` that was not there.
+    ///
+    /// The limit is tested through `zip_entry_limited` with a small bound
+    /// rather than through `MAX_DECOMPRESS`, because the point of the test is
+    /// the bound, not the constant -- and building a 100 MiB entry in a unit
+    /// test would cost more than the test is worth.
+    #[test]
+    fn a_zip_entry_that_expands_past_the_limit_is_refused() {
+        // 1 MiB of zeroes compresses to about a kilobyte, which is the shape
+        // of the attack: a small archive, a large allocation.
+        let payload = vec![0u8; 1024 * 1024];
+        let dir = std::env::temp_dir().join("rak_zip_bomb_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("bomb.zip").to_string_lossy().to_string();
+        let _ = std::fs::remove_file(&path);
+        zip_write(&path, &[("big.bin".to_string(), payload.clone())]).unwrap();
+
+        // Under the limit: fine.
+        let f = std::fs::File::open(&path).unwrap();
+        let mut z = zip::ZipArchive::new(f).unwrap();
+        let got = zip_entry_limited(&mut z, "big.bin", 4 * 1024 * 1024).unwrap();
+        assert_eq!(got.len(), payload.len());
+
+        // Over the limit: refused, with a message that names the reason.
+        let f = std::fs::File::open(&path).unwrap();
+        let mut z = zip::ZipArchive::new(f).unwrap();
+        let err = zip_entry_limited(&mut z, "big.bin", 64 * 1024).unwrap_err();
+        assert!(
+            err.contains("limit") && err.contains("bomb"),
+            "the error should say why: {}",
+            err
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// The same bound, applied to the in-memory path `zip_extract` uses.
+    #[test]
+    fn the_in_memory_zip_path_is_bounded_too() {
+        let payload = vec![0u8; 1024 * 1024];
+        let dir = std::env::temp_dir().join("rak_zip_bomb_test2");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("bomb.zip");
+        let _ = std::fs::remove_file(&path);
+        zip_write(
+            &path.to_string_lossy(),
+            &[("big.bin".to_string(), payload.clone())],
+        )
+        .unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        // The bounded helper refuses it at a small limit...
+        let mut z = zip::ZipArchive::new(std::io::Cursor::new(bytes.clone())).unwrap();
+        assert!(zip_entry_limited(&mut z, "big.bin", 64 * 1024).is_err());
+        // ...and the public entry point refuses it at MAX_DECOMPRESS, which
+        // the 1 MiB payload is under, so it succeeds.
+        let out = crate::stream_io::zip_extract(&bytes, "big.bin").unwrap();
+        assert_eq!(out.len(), payload.len());
         let _ = std::fs::remove_file(&path);
     }
 }

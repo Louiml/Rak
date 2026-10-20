@@ -142,10 +142,6 @@ pub fn to_byte(v: Option<&Value>) -> Result<u8, String> {
     }
 }
 
-fn s(v: &str) -> Value {
-    Value::String(Arc::from(v))
-}
-
 fn s_owned(v: String) -> Value {
     Value::String(Arc::from(v.as_str()))
 }
@@ -159,7 +155,7 @@ fn arr(v: Vec<Value>) -> Value {
 }
 
 fn strings(v: Vec<String>) -> Value {
-    arr(v.into_iter().map(|x| s_owned(x)).collect())
+    arr(v.into_iter().map(s_owned).collect())
 }
 
 fn str_map(v: HashMap<String, String>) -> Value {
@@ -177,7 +173,7 @@ fn opt_str(v: Option<String>) -> Value {
     }
 }
 
-fn arg<'a>(args: &'a Args, i: usize) -> Option<&'a Value> {
+fn arg(args: &Args, i: usize) -> Option<&Value> {
     args.get(i)
 }
 
@@ -491,7 +487,7 @@ fn vm_from_hex(args: &Args) -> R {
     // `0x{:X}` with no padding, so the VM has to size the field to the value's
     // natural width or the same program prints a different number on each
     // backend.
-    let nibbles = format!("{:X}", h).len();
+    let _nibbles = format!("{:X}", h).len();
     Ok(Value::Hex(h))
 }
 
@@ -593,7 +589,7 @@ fn vm_set_of(args: &Args) -> R {
     ))))
 }
 
-fn vm_set_add(args: &Args) -> R {
+fn vm_set_add(_args: &Args) -> R {
     // The set is behind an `Arc`, not an `Arc<Mutex<_>>`, so a mutating builtin
     // cannot be a plain `fn(&[Value])`: it needs to reach the VM to copy,
     // update and write back, exactly like the interpreter does. This one is
@@ -736,7 +732,7 @@ fn vm_zip_archive(args: &Args) -> R {
         Some(Value::Array(a)) => {
             for item in a.iter() {
                 if let Value::Tuple(t) = item {
-                    if let (Some(Value::String(name)), Some(bytes)) = (t.get(0), t.get(1)) {
+                    if let (Some(Value::String(name)), Some(bytes)) = (t.first(), t.get(1)) {
                         files.push((name.to_string(), to_bytes(Some(bytes))));
                     }
                 }
@@ -860,13 +856,13 @@ fn vm_json_stringify(args: &Args) -> R {
 
 fn vm_json_get(args: &Args) -> R {
     rak_stdlib::js::json_get(&to_str(args.first()), &to_str(args.get(1)))
-        .map(|x| s_owned(x))
+        .map(s_owned)
         .map_err(|e| e.to_string())
 }
 
 fn vm_json_path(args: &Args) -> R {
     rak_stdlib::js::json_path(&to_str(args.first()), &to_str(args.get(1)))
-        .map(|x| s_owned(x))
+        .map(s_owned)
         .map_err(|e| e.to_string())
 }
 
@@ -971,20 +967,24 @@ fn vm_html_headers(args: &Args) -> R {
 // ---------------------------------------------------------------------------
 
 fn vm_read(args: &Args) -> R {
-    std::fs::read_to_string(to_str(args.first()))
-        .map(|c| s_owned(c))
+    let path = to_str(args.first());
+    crate::caps::check_fs_root(&path)?;
+    std::fs::read_to_string(&path)
+        .map(s_owned)
         .map_err(|e| format!("Read error: {}", e))
 }
 
 fn vm_write(args: &Args) -> R {
-    std::fs::write(to_str(args.first()), to_str(args.get(1)))
+    let path = to_str(args.first());
+    crate::caps::check_fs_root(&path)?;
+    std::fs::write(&path, to_str(args.get(1)))
         .map(|_| Value::Bool(true))
         .map_err(|e| format!("Write error: {}", e))
 }
 
 fn vm_file_read(args: &Args) -> R {
     rak_stdlib::file::read(&to_str(args.first()))
-        .map(|c| s_owned(c))
+        .map(s_owned)
         .map_err(|e| e.to_string())
 }
 
@@ -1141,7 +1141,7 @@ fn vm_args(_args: &Args) -> R {
 fn vm_env_get(args: &Args) -> R {
     crate::caps::check_str("env_get")?;
     Ok(std::env::var(to_str(args.first()))
-        .map(|x| s_owned(x))
+        .map(s_owned)
         .unwrap_or(Value::Nil))
 }
 
@@ -1155,7 +1155,6 @@ fn vm_env_set(args: &Args) -> R {
 }
 
 fn vm_stdin_read_line(_args: &Args) -> R {
-    use std::io::Read;
     let mut line = String::new();
     match std::io::stdin().read_line(&mut line) {
         Ok(0) => Ok(Value::Nil),
@@ -1471,9 +1470,9 @@ fn vm_reverse_dns(args: &Args) -> R {
 }
 
 fn vm_subdomain_enum(args: &Args) -> R {
-    Ok(strings(rak_stdlib::recon::subdomain_enum(
-        &to_str(args.first()),
-    )))
+    Ok(strings(rak_stdlib::recon::subdomain_enum(&to_str(
+        args.first(),
+    ))))
 }
 
 /// `scan_ports(target, {range: [a, b], timeout: ms})` or `scan_ports(target, [a, b])`.
@@ -1495,11 +1494,9 @@ fn vm_scan_ports(args: &Args) -> R {
                 timeout_ms = v.as_u64().unwrap_or(1000);
             }
         }
-        Some(Value::Array(range)) => {
-            if range.len() >= 2 {
-                start_port = range[0].as_u64().unwrap_or(1) as u16;
-                end_port = range[1].as_u64().unwrap_or(1024) as u16;
-            }
+        Some(Value::Array(range)) if range.len() >= 2 => {
+            start_port = range[0].as_u64().unwrap_or(1) as u16;
+            end_port = range[1].as_u64().unwrap_or(1024) as u16;
         }
         _ => {}
     }
@@ -1586,9 +1583,7 @@ fn vm_stream_take(args: &Args) -> R {
 }
 
 fn vm_read_lines(args: &Args) -> R {
-    st::LinesStream::open(&to_str(args.first()))
-        .map(stream_value)
-        .map_err(|e| e)
+    st::LinesStream::open(&to_str(args.first())).map(stream_value)
 }
 
 fn vm_tcp_stream(args: &Args) -> R {
@@ -1608,7 +1603,7 @@ fn vm_stream_csv(args: &Args) -> R {
     let opts = to_str(args.get(1));
     let delim = if opts.contains(';') { ';' } else { ',' };
     let has_header = opts.contains("header");
-    let inner = st::LinesStream::open(&path).map_err(|e| e)?;
+    let inner = st::LinesStream::open(&path)?;
     Ok(stream_value(st::CsvStream::new(
         st::handle(inner),
         delim,
@@ -1617,7 +1612,7 @@ fn vm_stream_csv(args: &Args) -> R {
 }
 
 fn vm_stream_jsonl(args: &Args) -> R {
-    let inner = st::LinesStream::open(&to_str(args.first())).map_err(|e| e)?;
+    let inner = st::LinesStream::open(&to_str(args.first()))?;
     Ok(stream_value(st::JsonlStream::new(st::handle(inner))))
 }
 

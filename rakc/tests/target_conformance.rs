@@ -181,6 +181,39 @@ dump twice(double, 3)
 "#,
     ),
     (
+        "function-locals",
+        // A function with a local of its own. The C target used to emit a
+        // bare `v_x = ...` for a local -- an assignment to a variable it
+        // never declared -- so *every* function with a local produced C that
+        // the C compiler rejected. The corpus had no such case, which is why
+        // it went unnoticed.
+        r#"
+fn classify(n) {
+    let doubled = n * 2
+    let label = "big"
+    if doubled > 10 { return label }
+    return "small"
+}
+dump classify(3)
+dump classify(9)
+"#,
+    ),
+    (
+        "closure-captures-a-local",
+        // A closure reading a local of the function it was written in. The
+        // captured value lives in the closure's environment; the C target
+        // used to read the enclosing function's C variable, which does not
+        // exist by the time the closure runs.
+        r#"
+fn make_adder(n) {
+    let base = n
+    return fn(x) { return x + base }
+}
+let add5 = make_adder(5)
+dump add5(10)
+"#,
+    ),
+    (
         "comparisons",
         r#"
 dump 1 < 2

@@ -1,0 +1,28 @@
+[package]
+name = "rak-playground"
+version = "1.0.1"
+edition = "2021"
+authors = ["Louiml (Ryuzaki)"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Louiml/Rak"
+description = "Rak in the browser: the interpreter, compiled to WebAssembly, for the docs site playground"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+path = "src/lib.rs"
+
+[dependencies]
+# The real interpreter. The playground runs the same code the CLI runs, so a
+# program that works in the playground works in `rakc` and on both backends.
+#
+# `http` and `async` are off: the TLS stack the HTTP client needs cannot be
+# compiled to wasm, and there is no event loop in a page to drive Tokio's
+# multi-thread runtime. The builtins that need them are not registered there.
+rakc = { path = "../rakc", default-features = false }
+# `getrandom` needs a backend on wasm, and the browser's own entropy is the
+# only sensible source. The `custom` backend lets this crate supply it without
+# pulling in `wasm-bindgen` and a pile of generated glue: the module would
+# otherwise have to import a dozen `__wbindgen_*` functions and implement the
+# externref table by hand.
+getrandom = { version = "0.2", features = ["custom"] }

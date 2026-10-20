@@ -31,10 +31,13 @@ understood, not the order they arrive.
 
 | | |
 | --- | --- |
-| Capability sandbox | `--sandbox --allow <list>` restricts `net`, `fs_write`, `process`, `ffi`, `raw`, `gui`, `secrets`. Run untrusted code under `--sandbox` with the narrowest list that lets it work. |
+| Capability sandbox | `--sandbox --allow <list>` restricts `net`, `fs_read`, `fs_write`, `process`, `ffi`, `raw`, `gui`, `secrets` and `asm`. Run untrusted code under `--sandbox` with the narrowest list that lets it work. |
+| Filesystem scope | `--fs-root <dir>` confines the script to one directory. The check happens at the layer that opens files, so a builtin added tomorrow is scoped by construction rather than by remembering to call something. |
 | `ct_eq` / `ct_eq_hex` | Constant-time comparison, for anything derived from a credential. `==` leaks the common-prefix length through exit timing. |
 | `zeroize` | Non-optimizable memory wiping. The secrets store wipes its serialized buffer and shreds its backing file. |
-| Bounded decompression | `gunzip`, `inflate` and `zip_extract` refuse output over 100 MiB. A deflate stream can expand a thousandfold, so this bounds a remote denial of service. |
+| Bounded decompression | `gunzip`, `inflate`, `zip_extract` and `zip_read` refuse output over 100 MiB. A deflate stream can expand a thousandfold, so this bounds a remote denial of service. The bound is enforced *while* reading, because the allocation is what does the damage. |
+| Bounded parsing | The parser refuses expression nesting past 64 levels, block nesting past 64 levels, and pointer-type nesting past 64 levels. A pathological input is a diagnostic, not a stack overflow. |
+| SQL escaping is dialect-dependent | `sql_escape` is for ANSI SQL, PostgreSQL and SQLite, where a backslash is an ordinary character inside a literal. `sql_escape_mysql` is for MySQL's default `sql_mode`, where it is not. Using the wrong one does not fail loudly, so the lint rule names both rather than one. A parameterised query is better than either. |
 | Weak-crypto warning | `md5`, `sha1`, `rot13` and `xor` print a deprecation warning on stderr, once per primitive. Deprecated, not removed: analysing a legacy protocol means calling them on purpose. |
 
 ### Statically, by `rakc lint`
@@ -70,12 +73,30 @@ Read the `--audit` output before running anything with `unsafe` blocks in it. Th
 reason field is where a script says what it thinks it is exempt from, and reading it
 costs one command.
 
+For a package rather than a script, `oyvey run` sandboxes by default, granting
+`fs_read` and nothing else:
+
+```console
+oyvey run                       # sandboxed: fs_read only
+oyvey run --allow net           # add one capability
+oyvey run --no-sandbox          # opt out entirely
+```
+
+`--allow` replaces the list rather than adding to it, so `--allow net` means
+"net and nothing else", not "net on top of fs_read".
+
 ## Known gaps
 
 Stated plainly, because a security document that only lists strengths is not useful.
 
-* **`inline assembly` is not sandboxed.** The `asm` escape is interpreter-only by
-  design and is not mediated by the capability system.
+* **`asm` is a capability, and it is not an assembler.** It was previously
+  described here as an escape that the sandbox did not mediate. That is no
+  longer true: `asm` is gated by its own `--allow asm` capability, and it
+  reaches a fixed allow-list of read-only CPU queries (`cpuid_sse2`,
+  `cpuid_aes`, `cpuid_rdrand`, `rdtsc`, `rdtscp_aux`, `tsc_invariant_hz`).
+  There is no assembler behind it and no hand-written machine code, so there
+  is no arbitrary code execution to gate. It is interpreter-only by design,
+  so the VM has no `asm` surface at all.
 * **A module body can see a name it never declared.** A Rak module that references
   an undefined name may resolve it against the importer's globals on the VM, where
   the interpreter refuses. See `docs/V8-KNOWN-ISSUES.md`. One root cause: the
@@ -91,3 +112,22 @@ Stated plainly, because a security document that only lists strengths is not use
   the appearance of rotation while a long-lived handle keeps serving the old value.
 * **Parser size limits are not yet uniform.** `dns_query` and the PCAP reader have no
   per-message cap, and `binstruct` nesting is not depth-bounded.
+* **The package manager's lockfile is not yet an integrity anchor.** A dependency's
+  checksum in `oyvey.lock` is computed from the bytes that were just downloaded, so
+  it detects local tampering but not a compromised upstream. The lockfile also pins
+  a tag rather than a commit, so a force-moved tag changes the installed code
+  without changing the recorded source. Dependency URLs are checked against a
+  scheme allowlist before they reach `git`, so a manifest cannot smuggle a
+  command in through one, but the content a URL resolves to is still trusted on
+  the strength of TLS alone.
+* **The sandbox does not apply to compiled output.** `rakc run` and `rakc vm`
+  honour `--sandbox`; `rakc build --emit=exe` and the C target do not, because
+  the capability system is a runtime construct. A compiled artefact runs with
+  the full privileges of the account that built it.
+
+## Related
+
+`docs/SECURITY-AUDIT-2026-10.md` is a full assessment of this toolchain: what
+was found, what was fixed, and what is still open. It is the longer version of
+this document, and it is where the reasoning behind each of the entries above
+is written down.

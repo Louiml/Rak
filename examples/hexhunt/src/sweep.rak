@@ -1,12 +1,9 @@
 // scan.rak - the scanning engine.
 //
 // The interesting part is not the loop, it is that the same code runs on the
-// tree-walking interpreter and the bytecode VM. Contracts are the one place
-// where that is not currently true: `requires` works on both backends, but
-// `ensures` is a hard compile error on the VM (see V8-KNOWN-ISSUES.md), so the
-// `ensures` clauses that would be most valuable here are written up in the
-// comments rather than declared. The precondition that matters -- a non-empty
-// signature table -- is checked on both.
+// tree-walking interpreter and the bytecode VM. Contracts are checked on both
+// backends: `requires` before the body, `ensures` against the value the
+// caller receives.
 
 from "./model.rak" import Finding
 
@@ -34,9 +31,8 @@ pub fn match_at(data: bytes, pat: bytes, at: int) -> bool {
 /// Each match advances past the pattern it found, so overlapping occurrences of
 /// the same signature are reported once. Each finding consumes at least one
 /// byte, so the result can never be longer than the file: the postcondition
-/// `ensures len(result) <= len(data)` states that, but the VM cannot compile it
-/// today, and a comment that documents it is better than a contract that
-/// refuses to run at all.
+/// `ensures len(result) <= len(data)` states that, and it is checked on both
+/// backends.
 pub fn scan_file(data: bytes, signatures: array) -> array {
     let mut out = []
     for sig in signatures {
@@ -56,7 +52,7 @@ pub fn scan_file(data: bytes, signatures: array) -> array {
         }
     }
     return out
-} requires len(signatures) > 0
+} requires len(signatures) > 0 ensures len(result) <= len(data)
 
 /// Tally findings by kind, so the summary is a map rather than a loop.
 pub fn count_by_kind(findings: array) -> map {

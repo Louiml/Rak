@@ -1014,3 +1014,197 @@ html[data-theme="dark"] .badge-pill-warning { background: #2c2313; }
   }
   .device-mockup { max-width: 100%; }
 }
+
+/* ============================================================
+   Playground
+   The editor is a textarea with a highlighted layer behind it:
+   the same highlighter the docs use, so Rak code is coloured
+   while you type. The console is a dark code surface.
+   ============================================================ */
+
+.playground-page { background: var(--canvas); }
+
+.playground {
+  max-width: var(--content-w);
+  margin-inline: auto;
+  padding: var(--space-lg) var(--space-lg) var(--space-xxl);
+}
+
+.playground-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-base);
+  margin-bottom: var(--space-base);
+  flex-wrap: wrap;
+}
+
+.playground-bar-left,
+.playground-bar-right {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+}
+
+.playground-label {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.88px;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.playground-select {
+  height: 36px;
+  padding: 6px 12px;
+  font-size: 14px;
+  width: auto;
+  min-width: 200px;
+}
+
+.playground-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr);
+  gap: var(--space-base);
+  align-items: stretch;
+}
+
+.playground-editor,
+.playground-console {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  border: 1px solid var(--hairline-strong);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+  background: var(--surface-card);
+}
+
+.playground-editor-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-sm);
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--hairline);
+  background: var(--canvas-soft);
+}
+
+.playground-filename {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--body);
+}
+
+.playground-hint {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.playground-code {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  flex: 1;
+  min-height: 440px;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  line-height: 1.6;
+  background: var(--surface-dark);
+  color: var(--on-dark);
+}
+
+.playground-gutter {
+  padding: 14px 10px 14px 14px;
+  color: #4b5158;
+  text-align: right;
+  user-select: none;
+  white-space: pre;
+  overflow: hidden;
+}
+
+.playground-input {
+  position: relative;
+  min-width: 0;
+}
+
+.playground-highlight,
+.playground-textarea {
+  margin: 0;
+  padding: 14px 16px 14px 0;
+  font: 400 13px/1.6 var(--font-mono);
+  letter-spacing: 0;
+  white-space: pre;
+  overflow-wrap: normal;
+  tab-size: 4;
+  border: 0;
+}
+
+.playground-highlight {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  color: var(--on-dark);
+  overflow: hidden;
+}
+
+.playground-textarea {
+  position: relative;
+  display: block;
+  width: 100%;
+  min-height: 440px;
+  background: transparent;
+  color: transparent;
+  caret-color: var(--on-dark);
+  resize: vertical;
+  outline: none;
+  overflow: auto;
+}
+
+.playground-textarea::selection { background: rgba(120, 160, 255, 0.32); }
+
+.playground-console {
+  background: var(--surface-dark);
+  border-color: var(--surface-dark);
+}
+
+.playground-console .playground-editor-head {
+  background: var(--surface-dark-elevated);
+  border-bottom-color: rgba(255, 255, 255, 0.07);
+}
+
+.playground-console .playground-filename { color: var(--on-dark-soft); }
+
+.playground-output {
+  flex: 1;
+  margin: 0;
+  padding: 14px 16px;
+  min-height: 440px;
+  max-height: 560px;
+  overflow: auto;
+  background: var(--surface-dark);
+  color: var(--on-dark);
+  font: 400 13px/1.6 var(--font-mono);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.playground-output .pg-err { color: #ffabab; }
+.playground-output .pg-ok { color: #6ee7a8; }
+
+.playground-foot {
+  margin-top: var(--space-lg);
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--space-lg);
+}
+
+.playground-foot p {
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--body);
+}
+
+@media (max-width: 1024px) {
+  .playground-grid { grid-template-columns: 1fr; }
+  .playground-foot { grid-template-columns: 1fr; }
+}

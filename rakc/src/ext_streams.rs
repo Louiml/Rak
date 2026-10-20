@@ -69,6 +69,7 @@ pub struct LinesStream {
 impl LinesStream {
     pub fn open(path: &str) -> Result<Self, String> {
         use std::io::BufRead;
+        crate::caps::check_fs_root(path)?;
         let f = std::fs::File::open(path).map_err(|e| format!("read_lines: {}: {}", path, e))?;
         Ok(LinesStream {
             reader: Some(std::io::BufReader::new(f).lines()),
@@ -343,7 +344,7 @@ mod tests {
     #[test]
     fn take_is_lazy_over_a_large_source() {
         // The point of laziness: `take(1)` must not cost 100k allocations.
-        let big: Vec<Value> = (0..100_000).map(|i| Value::I64(i)).collect();
+        let big: Vec<Value> = (0..100_000).map(Value::I64).collect();
         let h = handle(TakeStream {
             inner: handle(ArrayStream::new(big)),
             remaining: 1,
